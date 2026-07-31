@@ -113,10 +113,23 @@ printContent() {
     local think_start=0
     local think_end=0
 
+    # 保存终端状态并进入原始模式
+    local stty_save=$(stty -g)
+    stty -echo
+
     # 切换到交替屏幕缓冲区（流式输出画在"临时画布"上，切回时自动销毁）
     tput smcup
-    # ★ 新增：进入副屏后立刻禁止鼠标事件
-    printf '\033[?1000l\033[?1003l\033[?1006l'
+
+        # 全面禁用鼠标和终端特殊处理
+        # printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l\033[?1016l'
+        # printf '\033[?1007l\033[?2026l'
+
+        # 清屏并定位光标到顶部
+        printf '\033[2J\033[H'
+
+        printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l'
+        printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
+        printf '\033[?2026l\033[?9001l'
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^data:\  ]]; then
@@ -167,6 +180,8 @@ printContent() {
 
     echo "$full_response" | glow -
     # echo "$messages"
+
+    stty "$stty_save"
 
     # 新增历史记录到massages中去
     add_message "$full_response" "assistant"
@@ -221,22 +236,28 @@ normal_line() {
     if [[ "$1" == 0 ]]; then
         prompt="..  "
     else
-        prompt="->（输入 ;;e 发送）:"
+        prompt="->（输入 ;;e 发送）: "
     fi
     while IFS= read -e -r -p "$prompt" line; do
         if [[ "$line" == ";;e" ]]; then
             break
         fi
-        if [[ "$line" == "//p" ]]; then
+        if [[ "$line" == "//p" || "${line: -3}" == "//p" ]]; then
             paste_line
             break
         fi
-        if [[ "$line" == "//f" ]]; then
+        if [[ "$line" == "//f" || "${line: -3}" == "//f" ]]; then
             read_file
             break
         fi
+        if [[ "${line: -3}" == ";;e" ]]; then
+            line="${line%;;e}"
+            input+="$line"$'\n'
+            prompt=".. "
+            break
+        fi
         input+="$line"$'\n'
-        prompt="..  "
+        prompt=".. "
     done
     input="${input%$'\n'}"
     # printf '%s\n' "$input"
