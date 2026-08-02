@@ -200,7 +200,7 @@ paste_line() {
     while IFS= read -r line; do
         # line="${line#$'\033[200~'}"
         # line="${line%$'\033[201~'}"
-        if [[ "$line" == "//e" ]]; then
+        if [[ "$line" == "#" ]]; then
             normal_line 0
             break
         fi
@@ -212,26 +212,10 @@ paste_line() {
 
 
 read_file() {
-
-    # while IFS= read -r -e line; do
-    #     local file_path="$line"
-    #     file_path="${file_path#\'}"
-    #     file_path="${file_path%\'}"
-    #     if [[ "$file_path" == "//e" ]]; then
-    #         normal_line 0
-    #         break
-    #     fi
-    #     if [[ -f "$file_path" ]]; then
-    #         file_content=$(<"$file_path")
-    #         input+="$file_content"$'\n'
-    #     else
-    #         echo "文件不存在: $file_path" >&2
-    #         exit 1
-    #     fi
-    # done
     filePath=""
     fileContent=""
     filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
+	echo "[文件] $filePath"
     if [[ -n "$filePath" && "$filePath" != "CANCELLED" ]]; then
         fileContent=$(<"$filePath")
         input+="$fileContent"$'\n'
@@ -263,7 +247,7 @@ normal_line() {
             read_file
             break
         fi
-        if [[ "${line: -3}" == "@" ]]; then
+        if [[ "${line: -1}" == "@" ]]; then
             line="${line%@}"
             input+="$line"$'\n'
             read_file
