@@ -27,7 +27,7 @@ model="deepseek-v4-flash"
 
 for ((i=1; i<=$#; i++)); do
     if [[ "${!i}" != "-"* ]]; then
-        content="${!i}"
+        content+="${!i}"
     fi
 done
 
@@ -46,7 +46,7 @@ for ((i=1; i<=$#; i++)); do
         else
                 content="${prectx}: $content"
         fi
-        break
+        continue
     fi
     if [[ "${!i}" == "-to" ]]; then
         prectx="请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
@@ -59,19 +59,26 @@ for ((i=1; i<=$#; i++)); do
         else
                 content="${prectx}: $content"
         fi
-        break
+        continue
     fi
+
+    # 单纯使用思考模式
+    if [[ "${!}" == "-t" ]]; then
+        thinking="enabled"
+        continue
+    fi
+
     # 关闭深入思考，使用pro模型
     if [[ "${!i}" == "-p" ]]; then
-        thinking="disabled"
         model="deepseek-v4-pro"
-        break
+        continue
     fi
+
     # 深入思考
     if [[ "${!i}" == "-dp" ]]; then
         thinking="enabled"
         model="deepseek-v4-pro"
-        break
+        continue
     fi
 
 done
@@ -120,16 +127,12 @@ printContent() {
     # 切换到交替屏幕缓冲区（流式输出画在"临时画布"上，切回时自动销毁）
     tput smcup
 
-        # 全面禁用鼠标和终端特殊处理
-        # printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l\033[?1005l\033[?1006l\033[?1015l\033[?1016l'
-        # printf '\033[?1007l\033[?2026l'
+    # 清屏并定位光标到顶部
+    printf '\033[2J\033[H'
 
-        # 清屏并定位光标到顶部
-        printf '\033[2J\033[H'
-
-        printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l'
-        printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
-        printf '\033[?2026l\033[?9001l'
+    printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l'
+    printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
+    printf '\033[?2026l\033[?9001l'
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^data:\  ]]; then
@@ -281,4 +284,4 @@ while true; do
 done
 
 
-# osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try'
+
