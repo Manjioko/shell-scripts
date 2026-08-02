@@ -250,16 +250,21 @@ normal_line() {
         prompt="->（输入 ;;e 发送）: "
     fi
     while IFS= read -e -r -p "$prompt" line; do
-        if [[ "$line" == "//p" || "${line: -3}" == "//p" ]]; then
+        if [[ "$line" == "#" ]]; then
             paste_line
             break
         fi
-        if [[ "$line" == "//f" ]]; then
+        if [[ "${line: -1}" == "#" ]]; then
+            line="${line%\#}"
+            input+="$line"$'\n'
+            paste_line
+        fi
+        if [[ "$line" == "@" ]]; then
             read_file
             break
         fi
-        if [[ "${line: -3}" == "//f" ]]; then
-            line="${line%//f}"
+        if [[ "${line: -3}" == "@" ]]; then
+            line="${line%@}"
             input+="$line"$'\n'
             read_file
         fi
