@@ -178,7 +178,10 @@ printContent() {
     # 切回主屏幕（交替屏幕上的流式输出自动丢弃，完美清除）
     tput rmcup
 
-    echo "$full_response" | glow -
+    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
+    # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
+    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
+    echo "$full_response" | sed 's/\\$/\\\\/' | glow -
     # echo "$messages"
 
     stty "$stty_save"
@@ -210,22 +213,30 @@ paste_line() {
 
 read_file() {
 
-    while IFS= read -r -e line; do
-        local file_path="$line"
-        file_path="${file_path#\'}"
-        file_path="${file_path%\'}"
-        if [[ "$file_path" == "//e" ]]; then
-            normal_line 0
-            break
-        fi
-        if [[ -f "$file_path" ]]; then
-            file_content=$(<"$file_path")
-            input+="$file_content"$'\n'
-        else
-            echo "文件不存在: $file_path" >&2
-            exit 1
-        fi
-    done
+    # while IFS= read -r -e line; do
+    #     local file_path="$line"
+    #     file_path="${file_path#\'}"
+    #     file_path="${file_path%\'}"
+    #     if [[ "$file_path" == "//e" ]]; then
+    #         normal_line 0
+    #         break
+    #     fi
+    #     if [[ -f "$file_path" ]]; then
+    #         file_content=$(<"$file_path")
+    #         input+="$file_content"$'\n'
+    #     else
+    #         echo "文件不存在: $file_path" >&2
+    #         exit 1
+    #     fi
+    # done
+    filePath=""
+    fileContent=""
+    filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
+    if [[ -n "$filePath" && "$filePath" != "CANCELLED" ]]; then
+        fileContent=$(<"$filePath")
+        input+="$fileContent"$'\n'
+    fi
+    normal_line 0
 }
 
 normal_line() {
@@ -239,25 +250,32 @@ normal_line() {
         prompt="->（输入 ;;e 发送）: "
     fi
     while IFS= read -e -r -p "$prompt" line; do
-        if [[ "$line" == ";;e" ]]; then
-            break
-        fi
         if [[ "$line" == "//p" || "${line: -3}" == "//p" ]]; then
             paste_line
             break
         fi
-        if [[ "$line" == "//f" || "${line: -3}" == "//f" ]]; then
+        if [[ "$line" == "//f" ]]; then
             read_file
             break
         fi
-        if [[ "${line: -3}" == ";;e" ]]; then
-            line="${line%;;e}"
+        if [[ "${line: -3}" == "//f" ]]; then
+            line="${line%//f}"
+            input+="$line"$'\n'
+            read_file
+        fi
+        if [[ "$line" == *\\ ]]; then
+            # 行尾有反斜杠 → 续行。只删掉最后一个字符（即那个反斜杠），
+            # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
+            # 避免不同 bash 版本对 pattern 中反斜杠转义的解析差异导致删多了。
+            line="${line%?}"
             input+="$line"$'\n'
             prompt=".. "
-            break
+            continue
         fi
         input+="$line"$'\n'
         prompt=".. "
+
+        break
     done
     input="${input%$'\n'}"
     # printf '%s\n' "$input"
@@ -272,3 +290,6 @@ while true; do
     [[ -z "$content" ]] && continue
     printContent
 done
+
+
+# osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try'
