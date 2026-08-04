@@ -16,6 +16,7 @@ content=""
 
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+save_file_name=""
 
 
 # 是否思考,默认关闭
@@ -96,10 +97,13 @@ add_message() {
     local addctx="$1"
     local role="$2"
     if [[ -n "$role" ]]; then
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]') 
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
     else
-        messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]') 
+        messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     fi
+
+    echo "$messages" > "./tmp.json"
+
 }
 
 printContent() {
@@ -229,7 +233,7 @@ read_file() {
 normal_line() {
     # local input=""
     local line
-    
+
     local prompt
     if [[ "$1" == 0 ]]; then
         prompt="..  "
