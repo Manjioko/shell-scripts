@@ -16,7 +16,6 @@ content=""
 
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
-save_file_name=""
 
 
 # 是否思考,默认关闭
@@ -101,9 +100,6 @@ add_message() {
     else
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     fi
-
-    echo "$messages" > "./tmp.json"
-
 }
 
 printContent() {
