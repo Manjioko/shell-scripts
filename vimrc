@@ -28,7 +28,10 @@
     " 命令模式退出
     cnoremap jj <Esc>
     " 可视模式退出
-    vnoremap jj <Esc>
+    vnoremap ;; <Esc>
+
+    " 插入模式退出（你缺少这一行！）
+    inoremap jj <Esc>
 
     " 自动安装 vim-plug
     let data_dir = has('nvim') ? stdpath('data') . '/site' : '~/.vim'
