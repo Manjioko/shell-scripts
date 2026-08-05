@@ -10,6 +10,20 @@ if [[ -z "$BREW_BASH_CHECKED" ]]; then
 fi
 
 DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
+chat_title=""
+
+handle_ctrl_c() {
+    # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
+    trap - INT
+    echo "ctl-ccccccccccccccccccccccccc"
+    [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
+    if [[ -n "$chat_title" ]]; then
+        touch "${HOME}/.ct/${chat_title}.json" && echo "$messages" > "${HOME}/.ct/${chat_title}.json"
+    fi
+    exit 130
+}
+
+trap handle_ctrl_c INT
 
 # 最新一次用户输入的内容
 content=""
@@ -63,7 +77,7 @@ for ((i=1; i<=$#; i++)); do
     fi
 
     # 单纯使用思考模式
-    if [[ "${!}" == "-t" ]]; then
+    if [[ "${!i}" == "-t" ]]; then
         thinking="enabled"
         continue
     fi
@@ -104,6 +118,7 @@ add_message() {
 
 printContent() {
     local full_response=""
+    local thinking_response=""
     add_message "$content"
 
     # 构建请求体
@@ -146,11 +161,11 @@ printContent() {
                 if [[ $think_start -eq 0 ]]; then
                     think_start=1
                     printf '\n\033[33m----------思考开始------------\033[0m\n'
-                    full_response+=$'\n\n----------思考开始------------\n\n\n'
+                    thinking_response+=$'\n\n----------思考开始------------\n\n\n'
                 fi
                 printf '%s' "$thinking_chunk"
             fi
-            [[ -n "$thinking_chunk" ]] && full_response+="$thinking_chunk"
+            [[ -n "$thinking_chunk" ]] && thinking_response+="$thinking_chunk"
 
 
             # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
@@ -161,7 +176,7 @@ printContent() {
                 if [[ -z "$thinking_chunk" && -n "$chunk" ]]; then
                     think_end=1
                     printf '\n\033[33m----------思考结束------------\033[0m\n'
-                    full_response+=$'\n\n----------思考结束----------\n\n\n'
+                    thinking_response+=$'\n\n----------思考结束----------\n\n\n'
                 fi
             fi
 
@@ -184,6 +199,7 @@ printContent() {
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
+    echo "$thinking_response" | sed 's/\\$/\\\\/' | glow -
     echo "$full_response" | sed 's/\\$/\\\\/' | glow -
     # echo "$messages"
 
@@ -197,9 +213,10 @@ printContent() {
 overview() {
 
     local chunk=""
+    local title=""
 
     # echo "记录是: $messages"
-    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题，输入格式如下: 标题：（标题内容写在这里）"}]')
+    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题，输入格式如下: title:标题内容写在这里。注意：除了按格式输出外，不可以有多余文字。"}]')
 
     local request_body=$(jq -n  --argjson msgs "$msg" '{
         model: "deepseek-v4-flash",
@@ -221,9 +238,8 @@ overview() {
             chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; echo x)"
             chunk="${chunk%x}"
 
-
             if [[ -n "$chunk" ]]; then
-                printf '%s' "$chunk"
+                title+="$chunk"
             fi
         fi
     done < <(
@@ -233,7 +249,9 @@ overview() {
             -d "$request_body"
     )
 
+    title="${title#title:}"
 
+    printf "%s" "$title"
 }
 
 
@@ -318,7 +336,8 @@ normal_line() {
 # 是否是第一次进入
 if [[ -n "$content" ]]; then
     printContent
-    # overview
+    chat_title=$(overview)
+    echo "ssssss: $chat_title"
 fi
 while true; do
     input=""
