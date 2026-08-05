@@ -25,6 +25,11 @@
     set backspace=indent,eol,start
     let mapleader = " "
 
+    " 命令模式退出
+    cnoremap jj <Esc>
+    " 可视模式退出
+    vnoremap jj <Esc>
+
     " 自动安装 vim-plug
     let data_dir = has('nvim') ? stdpath('data') . '/site' : '~/.vim'
     if empty(glob(data_dir . '/autoload/plug.vim'))

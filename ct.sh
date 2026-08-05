@@ -194,6 +194,48 @@ printContent() {
 
 }
 
+overview() {
+
+    local chunk=""
+
+    # echo "记录是: $messages"
+    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题，输入格式如下: 标题：（标题内容写在这里）"}]')
+
+    local request_body=$(jq -n  --argjson msgs "$msg" '{
+        model: "deepseek-v4-flash",
+        messages: $msgs,
+        thinking: {type: "disabled"},
+        reasoning_effort: "high",
+        stream: true
+    }')
+    # echo "$request_body"
+    local json=""
+    while IFS= read -r line; do
+        # echo "$line"
+        if [[ "$line" =~ ^data:\  ]]; then
+            json="${line#data: }"
+            [[ "$json" == "[DONE]" ]] && break
+
+            # echo "json是: $json"
+            # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
+            chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; echo x)"
+            chunk="${chunk%x}"
+
+
+            if [[ -n "$chunk" ]]; then
+                printf '%s' "$chunk"
+            fi
+        fi
+    done < <(
+        curl -sN https://api.deepseek.com/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -d "$request_body"
+    )
+
+
+}
+
 
 input=""
 
@@ -274,7 +316,10 @@ normal_line() {
 }
 # echo "请填写备注（支持多行，行末用 \\ 续行）："
 # 是否是第一次进入
-[[ -n "$content" ]] && printContent
+if [[ -n "$content" ]]; then
+    printContent
+    # overview
+fi
 while true; do
     input=""
     normal_line 1
