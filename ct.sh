@@ -15,7 +15,6 @@ chat_title=""
 handle_ctrl_c() {
     # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
     trap - INT
-    echo "ctl-ccccccccccccccccccccccccc"
     [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
     if [[ -n "$chat_title" ]]; then
         touch "${HOME}/.ct/${chat_title}.json" && echo "$messages" > "${HOME}/.ct/${chat_title}.json"
@@ -252,6 +251,17 @@ overview() {
     title="${title#title:}"
 
     printf "%s" "$title"
+}
+
+# 使用 load_history filePath
+load_history() {
+    jq -c '.[1:][]' $1 | while IFS= read -r line; do
+        role=$(jq -r '.role' <<< "$line")
+        content=$(jq -r '.content' <<< "$line")
+        echo "## $role" | glow -
+        echo "----------------------------------------------"
+        echo "$content" | glow -
+    done
 }
 
 
