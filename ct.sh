@@ -347,7 +347,6 @@ normal_line() {
 if [[ -n "$content" ]]; then
     printContent
     chat_title=$(overview)
-    echo "ssssss: $chat_title"
 fi
 while true; do
     input=""
