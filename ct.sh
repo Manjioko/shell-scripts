@@ -24,8 +24,8 @@ handle_ctrl_c() {
         name=$(echo "$name" | tr '[:space:]' '_')
         name=$(echo "$name" | tr -d '\\/:*?"<>|')
         if [[ -f ${HOME}/.ct/${chat_title} ]]; then
-            echo "存在文件 ${HOME}/.ct/${name}"
-            echo "$messages" > "${HOME}/.ct/${name}"
+            echo "存在文件 ${HOME}/.ct/${chat_title}"
+            echo "$messages" > "${HOME}/.ct/${chat_title}"
         else
             echo "不存在文件,创建 ${HOME}/.ct/${name}.json"
             touch "${HOME}/.ct/${name}.json" && echo "$messages" > "${HOME}/.ct/${name}.json"
@@ -357,10 +357,9 @@ normal_line() {
             echo "请从以下编号中选择你要加载的历史记录："
             tmpList=($(ls -t $HOME/.ct/*.json))
             for i in "${!tmpList[@]}"; do
-                echo "${tmpList[$i]}"
+                echo "$i. $(basename ${tmpList[$i]})"
                 history_list+=("$i. ${tmpList[$i]}")
             done
-            echo $history_list
             [[ $jumpAI == 0 ]] && jumpAI=1
             continue
         fi
@@ -389,7 +388,10 @@ while true; do
     normal_line 1
     content="$input"
     [[ -z "$content" ]] && continue
-    [[ $jumpAI == 1 ]] & continue
+    if [[ $jumpAI == 1 ]]; then
+        jumpAI=0
+        continue
+    fi
     printContent
 done
 
