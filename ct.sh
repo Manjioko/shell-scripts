@@ -13,11 +13,17 @@ DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
 chat_title=""
 
 handle_ctrl_c() {
+    local name=""
     # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
     trap - INT
     [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
     if [[ -n "$chat_title" ]]; then
-        touch "${HOME}/.ct/${chat_title}.json" && echo "$messages" > "${HOME}/.ct/${chat_title}.json"
+        # 替换斜杠
+        name=$(echo "$chat_title" | tr '/' '_')
+        # 替换其他危险字符（如空格、特殊符号）
+        name=$(echo "$name" | tr '[:space:]' '_')
+        name=$(echo "$name" | tr -d '\\/:*?"<>|')
+        touch "${HOME}/.ct/${name}.json" && echo "$messages" > "${HOME}/.ct/${name}.json"
     fi
     exit 130
 }
@@ -253,8 +259,13 @@ overview() {
     printf "%s" "$title"
 }
 
+history_list=()
 # 使用 load_history filePath
 load_history() {
+    [[ -z $1 ]] && return 0
+
+    chat_title=$(basename $1)
+    messages=$(jq '.' <<< $(<$1))
     jq -c '.[1:][]' $1 | while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
         content=$(jq -r '.content' <<< "$line")
@@ -304,7 +315,7 @@ normal_line() {
     if [[ "$1" == 0 ]]; then
         prompt="..  "
     else
-        prompt="->（输入 ;;e 发送）: "
+        prompt="> "
     fi
     while IFS= read -e -r -p "$prompt" line; do
         if [[ "$line" == "#" ]]; then
@@ -334,6 +345,15 @@ normal_line() {
             prompt=".. "
             continue
         fi
+        if [[ "$line" == "-l" ]]; then
+            echo "请从以下编号中选择你要加载的历史记录："
+            tmpList=($(ls -t $HOME/.ct/*.json))
+            for i in "${!history_list[@]}"; do
+                history_list+=("$i. ${tmpList[$i]}")
+            done
+            echo $history_list
+        fi
+
         input+="$line"$'\n'
         prompt=".. "
 
@@ -346,8 +366,13 @@ normal_line() {
 # 是否是第一次进入
 if [[ -n "$content" ]]; then
     printContent
-    chat_title=$(overview)
+
+    [[ -z "$chat_title"  ]] && chat_title=$(overview)
+else
+    filePath=$(ls -t  $HOME/.ct/*.json | head -1)
+    load_history $filePath
 fi
+
 while true; do
     input=""
     normal_line 1
