@@ -49,12 +49,69 @@ thinking="disabled"
 #模型，默认是 deepseek-v4-flash
 model="deepseek-v4-flash"
 
+# 是否跳过调用ai
+jumpAI=0
+
+# 历史记录集合
+history_list=()
+
+# 不要读写历史记录
+forget_history=0
 
 for ((i=1; i<=$#; i++)); do
     if [[ "${!i}" != "-"* ]]; then
         content+="${!i}"
     fi
 done
+
+
+history_handler() {
+    local tmpList=()
+    echo "请从以下编号中选择你要加载的历史记录："
+    tmpList=($(ls -t $HOME/.ct/*.json 2>/dev/null))
+    history_list=()
+    for i in "${!tmpList[@]}"; do
+        echo "$i. $(basename ${tmpList[$i]})"
+        history_list+=("$i. ${tmpList[$i]}")
+    done
+    [[ $jumpAI == 0 ]] && jumpAI=1
+
+}
+
+read_number() {
+    local filePath=""
+    local isSelect=0
+    IFS= read -r -p "_>" num
+    [[ -z "$num"  &&  "${history_list[0]}" ]] && load_history "${history_list[0]#0. }" && break
+    echo "选中的数字: $num"
+    for ((i = 0; i < "${#history_list[@]}"; i++)); do
+        if [[ ${history_list[i]} =~ ^${num} ]]; then
+            echo "切换到 ${history_list[i]#${i}. }"
+            filePath="${history_list[i]#${i}. }"
+            isSelect=1
+
+            [[ -n "$filePath " ]] && reset && load_history $filePath
+            break
+        else
+            isSelect=0
+        fi
+    done
+    [[ "$isSelect" == 0 ]] && echo "请选择正确的编号"
+}
+# 使用 load_history filePath
+load_history() {
+    [[ -z $1 ]] && return 0
+
+    chat_title=$(basename $1)
+    messages=$(jq '.' <<< $(<$1))
+    jq -c '.[1:][]' $1 | while IFS= read -r line; do
+        role=$(jq -r '.role' <<< "$line")
+        content=$(jq -r '.content' <<< "$line")
+        echo "## $role" | glow -
+        echo "----------------------------------------------"
+        echo "$content" | glow -
+    done
+}
 
 
 for ((i=1; i<=$#; i++)); do
@@ -105,6 +162,17 @@ for ((i=1; i<=$#; i++)); do
         model="deepseek-v4-pro"
         continue
     fi
+
+    if [[ "${!i}" == "-l" ]]; then
+        history_handler
+        read_number
+        break
+    fi
+     if [[ "${!i}" == "-f" ]]; then
+         forget_history=1
+        break
+    fi
+
 
 done
 
@@ -265,21 +333,7 @@ overview() {
     printf "%s" "$title"
 }
 
-history_list=()
-# 使用 load_history filePath
-load_history() {
-    [[ -z $1 ]] && return 0
 
-    chat_title=$(basename $1)
-    messages=$(jq '.' <<< $(<$1))
-    jq -c '.[1:][]' $1 | while IFS= read -r line; do
-        role=$(jq -r '.role' <<< "$line")
-        content=$(jq -r '.content' <<< "$line")
-        echo "## $role" | glow -
-        echo "----------------------------------------------"
-        echo "$content" | glow -
-    done
-}
 
 
 input=""
@@ -302,6 +356,9 @@ paste_line() {
 
 
 read_file() {
+
+    [[ "$forget_history" == 1 ]] && return 0
+
     filePath=""
     fileContent=""
     filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
@@ -313,7 +370,6 @@ read_file() {
     normal_line 0
 }
 
-jumpAI=0
 
 normal_line() {
     # local input=""
@@ -354,14 +410,8 @@ normal_line() {
             continue
         fi
         if [[ "$line" == "-l" ]]; then
-            echo "请从以下编号中选择你要加载的历史记录："
-            tmpList=($(ls -t $HOME/.ct/*.json))
-            for i in "${!tmpList[@]}"; do
-                echo "$i. $(basename ${tmpList[$i]})"
-                history_list+=("$i. ${tmpList[$i]}")
-            done
-            [[ $jumpAI == 0 ]] && jumpAI=1
-            continue
+            history_handler
+            break
         fi
 
         input+="$line"$'\n'
@@ -372,24 +422,24 @@ normal_line() {
     input="${input%$'\n'}"
     # printf '%s\n' "$input"
 }
+
 # echo "请填写备注（支持多行，行末用 \\ 续行）："
 # 是否是第一次进入
 if [[ -n "$content" ]]; then
     printContent
-
     [[ -z "$chat_title"  ]] && chat_title=$(overview)
-else
-    filePath=$(ls -t  $HOME/.ct/*.json | head -1)
-    load_history $filePath
 fi
 
 while true; do
     input=""
     normal_line 1
     content="$input"
-    [[ -z "$content" ]] && continue
+
+    [[ -z "$content" && "$jumpAI" == 0 ]] && continue
+
     if [[ $jumpAI == 1 ]]; then
         jumpAI=0
+        read_number
         continue
     fi
     printContent
