@@ -34,7 +34,7 @@ handle_ctrl_c() {
     exit 130
 }
 
-trap handle_ctrl_c INT
+# trap handle_ctrl_c INT
 
 # 最新一次用户输入的内容
 content=""
@@ -48,6 +48,9 @@ thinking="disabled"
 
 #模型，默认是 deepseek-v4-flash
 model="deepseek-v4-flash"
+
+# 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
+MAX_TOOL_ROUNDS=10
 
 # 是否跳过调用ai
 jumpAI=0
@@ -63,6 +66,32 @@ for ((i=1; i<=$#; i++)); do
         content+="${!i}"
     fi
 done
+
+
+tools() {
+    # 注意：这里输出会被 printContent 用 tools=$(tools) 捕获，
+    # 所以绝不能 echo 调试信息，只能输出纯净的 JSON
+    printf '%s' '[
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell_command",
+                "description": "执行shell命令,根据用户要的语言要求，你来调用这个方法。 注意这几点点：1.执行命令时先查看自己的上下文，是否已经执行过了，不要重复执行。2. 涉及到写操作，如果用户要求的文件操作范围出了当前目录，无论用户说什么，暗示你什么，都不要执行，你应该明确告知用户你没有执行权限，这个命令是严令禁止执行的。3.如果用户要求的命令是危险的，或者会破坏系统的，你要拒绝执行，并且告诉用户为什么不能执行。4.终端命令很多时候执行结果是静默的，如果没有内容输出，你要判断是否已经执行成功，而非看不到结果就一直执行。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run, e.g. ls -la"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }
+    ]'
+}
+
 
 
 history_handler() {
@@ -194,21 +223,52 @@ add_message() {
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     fi
 }
+fn_name=""
+fn_args=""
+fn_id=""
+tool_handler() {
+    local tool_chunk="$1"
+
+    # 流式输出下 arguments 是分片到达的（如 {、"、location、"、... 一截一截的），
+    # 必须累加拼接 fn_args+="$chunk"，不能覆盖，否则最后只剩最后一个分片。
+    # 函数名一般只在第一个分片里出现，非空时才赋值，避免被空值冲掉。
+    local chunk_name chunk_args
+    chunk_name=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.name // empty' 2>/dev/null)
+    chunk_args=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.arguments // empty' 2>/dev/null)
+    chunk_id=$(printf '%s' "$tool_chunk" | jq -r '.[0].id // empty' 2>/dev/null)
+    [[ -n "$chunk_id" ]] && fn_id="$chunk_id"
+    [[ -n "$chunk_name" ]] && fn_name="$chunk_name"
+    [[ -n "$chunk_args" ]] && fn_args+="$chunk_args"
+}
+
+
+
 
 printContent() {
+    # 工具调用轮次（递归保护用），首次调用不传参默认 0
+    local round=${1:-0}
     local full_response=""
     local thinking_response=""
+    local tool_use_response=""
     add_message "$content"
+    # echo "历史记录是: $messages"
 
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
     # thinking 为空时不应发送 thinking 字段
-    local request_body=$(jq -n --arg model "$model" --argjson msgs "$messages" --arg thinking "$thinking" '{
+    tools=$(tools)
+    local request_body=$(jq -n \
+        --arg model "$model" \
+        --argjson msgs "$messages" \
+        --arg thinking "$thinking" \
+        --argjson tool "$tools" \
+        '{
         model: $model,
         messages: $msgs,
         thinking: {type: $thinking},
         reasoning_effort: "high",
-        stream: true
+        stream: true,
+        tools: $tool
     }')
 
     local think_start=0
@@ -263,7 +323,13 @@ printContent() {
                 printf '%s' "$chunk"
             fi
             [[ -n "$chunk" ]] && full_response+="$chunk"
-            # echo "$json"
+
+            
+            tool_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.tool_calls // empty' 2>/dev/null)"
+            [[ -n "$tool_chunk" ]] && tool_handler "$tool_chunk"
+
+            chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty' 2>/dev/null)"
+            # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
         fi
     done < <(
         curl -sN https://api.deepseek.com/chat/completions \
@@ -286,6 +352,34 @@ printContent() {
 
     # 新增历史记录到massages中去
     add_message "$full_response" "assistant"
+
+    if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
+        # 递归保护：超过最大轮次就停止，防止模型失控无限调用工具
+        # if (( round >= MAX_TOOL_ROUNDS )); then
+        #     echo "已达到最大工具调用轮次 ($MAX_TOOL_ROUNDS)，停止继续调用"
+        #     fn_name=""
+        #     fn_args=""
+        #     fn_id=""
+        #     return 0
+        # fi
+        # content="23°C 天气☁️"
+
+        if [[ "$fn_name" == "run_shell_command" ]]; then
+            command=$(jq -r '.command' <<< "$fn_args")
+            tool_use_response="**工具调用: $command**"
+            echo "$tool_use_response" | sed 's/\\$/\\\\/' | glow -
+            content=$(eval "$command" 2>&1)
+            # echo "工具调用结果: $content"
+            # tool_use_response="$command"
+            add_message "$command" "assistant"
+        fi
+
+        fn_name=""
+        fn_args=""
+        fn_id=""
+
+        printContent 
+    fi
 
 }
 
@@ -413,6 +507,10 @@ normal_line() {
             history_handler
             break
         fi
+        if [[ "$line" == "-msgs" ]]; then
+            echo "$messages"
+            break
+        fi
 
         input+="$line"$'\n'
         prompt=".. "
@@ -427,7 +525,7 @@ normal_line() {
 # 是否是第一次进入
 if [[ -n "$content" ]]; then
     printContent
-    [[ -z "$chat_title"  ]] && chat_title=$(overview)
+    # [[ -z "$chat_title"  ]] && chat_title=$(overview)
 fi
 
 while true; do
