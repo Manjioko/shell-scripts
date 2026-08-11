@@ -34,7 +34,7 @@ handle_ctrl_c() {
     exit 130
 }
 
-# trap handle_ctrl_c INT
+trap handle_ctrl_c INT
 
 # 最新一次用户输入的内容
 content=""
