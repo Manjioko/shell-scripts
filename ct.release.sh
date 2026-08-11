@@ -552,7 +552,7 @@ normal_line() {
 # 是否是第一次进入
 if [[ -n "$content" ]]; then
     printContent
-    # [[ -z "$chat_title"  ]] && chat_title=$(overview)
+    [[ -z "$chat_title"  ]] && chat_title=$(overview)
 fi
 
 while true; do
