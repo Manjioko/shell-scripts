@@ -206,39 +206,43 @@ for ((i=1; i<=$#; i++)); do
 done
 
 
-#if [[ -z "$content" ]]; then
-#    echo "用法: $0 <问题>" >&2
-#    exit 1
-#fi
-
-
 
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 add_message() {
     local addctx="$1"
     local role="$2"
-    if [[ -n "$role" ]]; then
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
-    else
+    local tool_call_id="$3"
+    local tool_call_name="$4"
+    local tool_call_args="$5"
+    if [[ -z "$role" ]]; then
+        # 默认 user 消息
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
+    elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
+        # assistant 发起工具调用：必须记录 tool_calls（content 为 null），
+        # 否则后面的 tool 结果消息对不上号，模型就无法继续调用工具
+        messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
+            '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+    elif [[ -n "$tool_call_id" ]]; then
+        # tool 角色：工具执行结果，带 tool_call_id
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
+    else
+        # 普通角色（assistant 文本回复等）
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
     fi
 }
-fn_name=""
-fn_args=""
-fn_id=""
+
 tool_handler() {
     local tool_chunk="$1"
 
-    # 流式输出下 arguments 是分片到达的（如 {、"、location、"、... 一截一截的），
-    # 必须累加拼接 fn_args+="$chunk"，不能覆盖，否则最后只剩最后一个分片。
-    # 函数名一般只在第一个分片里出现，非空时才赋值，避免被空值冲掉。
-    local chunk_name chunk_args
+    local chunk_name chunk_args chunk_id
     chunk_name=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.name // empty' 2>/dev/null)
     chunk_args=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.arguments // empty' 2>/dev/null)
     chunk_id=$(printf '%s' "$tool_chunk" | jq -r '.[0].id // empty' 2>/dev/null)
-    [[ -n "$chunk_id" ]] && fn_id="$chunk_id"
-    [[ -n "$chunk_name" ]] && fn_name="$chunk_name"
-    [[ -n "$chunk_args" ]] && fn_args+="$chunk_args"
+
+    # 用 jq 构造 JSON，自动转义 fn_args 里的引号/反斜杠。
+    # 绝不能手工拼字符串：arguments 分片里到处是 "，会直接破坏 JSON 语法。
+    jq -n --arg name "$chunk_name" --arg args "$chunk_args" --arg id "$chunk_id" \
+        '{fn_name: $name, fn_args: $args, fn_id: $id}'
 }
 
 
@@ -246,11 +250,21 @@ tool_handler() {
 
 printContent() {
     # 工具调用轮次（递归保护用），首次调用不传参默认 0
-    local round=${1:-0}
+    local id="$1"
+    # local round=${1:-0}
     local full_response=""
     local thinking_response=""
     local tool_use_response=""
-    add_message "$content"
+
+    local fn_name=""
+    local fn_args=""
+    local fn_id=""
+    local fn_object=""
+    if [[ -n "$id" ]]; then
+        add_message "$content" "tool" "$id"
+    else
+        add_message "$content"
+    fi
     # echo "历史记录是: $messages"
 
     # 构建请求体
@@ -325,17 +339,30 @@ printContent() {
             [[ -n "$chunk" ]] && full_response+="$chunk"
 
             
-            tool_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.tool_calls // empty' 2>/dev/null)"
-            [[ -n "$tool_chunk" ]] && tool_handler "$tool_chunk"
+            tool_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.tool_calls // empty')"
+            if [[ -n "$tool_chunk" ]]; then
+                # echo "==: $tool_chunk"
+                fn_object=$(tool_handler "$tool_chunk")
+                # echo "工具调用更新==: $fn_object"
+                # 流式分片：函数名/id 只在首片出现，非空才赋值，避免被空分片冲掉；
+                # arguments 是分片到达的，必须累加 fn_args+="$chunk"，不能覆盖。
+                chunk_name=$(jq -r '.fn_name' <<< "$fn_object")
+                chunk_args=$(jq -r '.fn_args' <<< "$fn_object")
+                chunk_id=$(jq -r '.fn_id' <<< "$fn_object")
+                [[ -n "$chunk_name" ]] && fn_name="$chunk_name"
+                [[ -n "$chunk_args" ]] && fn_args+="$chunk_args"
+                [[ -n "$chunk_id" ]] && fn_id="$chunk_id"
+            fi
 
-            chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty' 2>/dev/null)"
+            chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
             # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
         fi
     done < <(
         curl -sN https://api.deepseek.com/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -d "$request_body"
+            -d "$request_body"\
+        2>&1
     )
 
     # 切回主屏幕（交替屏幕上的流式输出自动丢弃，完美清除）
@@ -350,35 +377,35 @@ printContent() {
 
     stty "$stty_save"
 
-    # 新增历史记录到massages中去
-    add_message "$full_response" "assistant"
+    # 记录 assistant 消息（每一轮都要记）：
+    #  - 本轮发起了工具调用 → 记录带 tool_calls 的 assistant 消息（content 为 null）
+    #  - 否则 → 记录普通文本回复
+    if [[ -n "$fn_id" ]]; then
+        add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
+    else
+        add_message "$full_response" "assistant"
+    fi
 
     if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
         # 递归保护：超过最大轮次就停止，防止模型失控无限调用工具
-        # if (( round >= MAX_TOOL_ROUNDS )); then
-        #     echo "已达到最大工具调用轮次 ($MAX_TOOL_ROUNDS)，停止继续调用"
-        #     fn_name=""
-        #     fn_args=""
-        #     fn_id=""
-        #     return 0
-        # fi
-        # content="23°C 天气☁️"
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
             command=$(jq -r '.command' <<< "$fn_args")
             tool_use_response="**工具调用: $command**"
             echo "$tool_use_response" | sed 's/\\$/\\\\/' | glow -
-            content=$(eval "$command" 2>&1)
-            # echo "工具调用结果: $content"
-            # tool_use_response="$command"
-            add_message "$command" "assistant"
+
+            printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
+            IFS= read -r answer
+            if [[ "$answer" == "y" ]]; then
+                content=$(eval "$command" 2>&1)
+            else
+                content="用户拒绝执行命令: $command"
+            fi
         fi
 
-        fn_name=""
-        fn_args=""
-        fn_id=""
+        id="$fn_id"
 
-        printContent 
+        printContent "$id"
     fi
 
 }
