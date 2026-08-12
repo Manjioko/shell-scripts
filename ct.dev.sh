@@ -383,7 +383,7 @@ printContent() {
     if [[ -n "$fn_id" ]]; then
         add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
     else
-        add_message "$full_response" "assistant"
+        [[ -n "$full_response" ]] && add_message "$full_response" "assistant"
     fi
 
     if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
