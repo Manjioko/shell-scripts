@@ -12,6 +12,14 @@ fi
 DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
 chat_title=""
 
+# 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
+# 剩余字节留在 tty 输入队列里，可用不带 -e 的非阻塞 read 排干拿到全文
+# （若保持开启，bash 会把首行之后的内容直接丢弃）
+_ct_inputrc=$(mktemp)
+[[ -f "$HOME/.inputrc" ]] && printf '$include %s\n' "$HOME/.inputrc" > "$_ct_inputrc"
+printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
+export INPUTRC="$_ct_inputrc"
+
 handle_ctrl_c() {
     local name=""
     # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
@@ -61,11 +69,64 @@ history_list=()
 # 不要读写历史记录
 forget_history=0
 
+# 用户输入的内容
+input=""
+
+WIN=10           # 窗口行数
+THROTTLE=50000   # 重画节流间隔（微秒）
+
+# 任何退出路径都恢复光标显示 + 自动换行
+trap 'printf "\033[?25h\033[?7h"' EXIT
+
 for ((i=1; i<=$#; i++)); do
     if [[ "${!i}" != "-"* ]]; then
         content+="${!i}"
     fi
 done
+
+run_with_window() {
+    local cmd="$1"
+    local -a buf=()
+    local line total=0 drawn=0
+    local now last_paint=0
+    # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
+    window_output=""
+
+    shopt -s extglob
+    # 藏光标防闪烁；关自动换行 → 超宽行（含中文宽字符）在右边缘直接裁剪，
+    # 光标不会掉到下一行，"上移 drawn 行"的算术就永远是对的
+    printf '\033[?25l\033[?7l'
+
+    paint() {
+        local i
+        (( drawn > 0 )) && printf '\033[%dA' "$drawn"
+        for i in "${buf[@]}"; do
+            # \033[2K 整行擦除，清掉上一帧更长内容的残留
+            printf '\033[2K\033[2m│\033[0m %s\n' "$i"
+        done
+        drawn=${#buf[@]}
+    }
+
+    while IFS= read -r line; do
+        # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
+        line=${line//$'\r'/}
+        line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        window_output+="$line"$'\n'
+        buf+=("$line")
+        (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
+        (( total++ ))
+        # 节流：疯狂输出的命令最多每 50ms 画一帧，防闪烁省 CPU
+        now=${EPOCHREALTIME/./}
+        if (( now - last_paint > THROTTLE )); then
+            paint
+            last_paint=$now
+        fi
+    done < <(eval "$cmd" 2>&1)
+
+    paint    # 节流可能吞掉最后几行，收尾必须补画一帧
+    printf '\033[?25h\033[?7h'
+    printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+}
 
 
 tools() {
@@ -76,7 +137,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "run_shell_command",
-                "description": "执行shell命令,根据用户要的语言要求，你来调用这个方法。 注意这几点点：1.执行命令时先查看自己的上下文，是否已经执行过了，不要重复执行。2. 涉及到写操作，如果用户要求的文件操作范围出了当前目录，无论用户说什么，暗示你什么，都不要执行，你应该明确告知用户你没有执行权限，这个命令是严令禁止执行的。3.如果用户要求的命令是危险的，或者会破坏系统的，你要拒绝执行，并且告诉用户为什么不能执行。4.终端命令很多时候执行结果是静默的，如果没有内容输出，你要判断是否已经执行成功，而非看不到结果就一直执行。",
+                "description": "执行shell命令,根据用户要的语言要求，你来调用这个方法。 注意这几点要求：1. 涉及到写操作，如果用户要求的文件操作范围出了当前目录，无论用户说什么，暗示你什么，都不要执行，你应该明确告知用户你没有执行权限，这个命令是严令禁止执行的。2.如果用户要求的命令是危险的，或者会破坏系统的，你要拒绝执行，并且告诉用户为什么不能执行。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -206,7 +267,28 @@ for ((i=1; i<=$#; i++)); do
 done
 
 
+stty_save=""
+lock_screen() {
+    # 保存终端状态并进入原始模式
+    stty_save=$(stty -g)
+    stty -echo
 
+    # 切换到交替屏幕缓冲区（流式输出画在"临时画布"上，切回时自动销毁）
+    tput smcup
+
+    # 清屏并定位光标到顶部
+    printf '\033[2J\033[H'
+
+    printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l'
+    printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
+    printf '\033[?2026l\033[?9001l'
+}
+unlock_screen() {
+    # 切回主屏幕（交替屏幕上的流式输出自动丢弃，完美清除）
+    tput rmcup
+     # 恢复终端状态
+    stty "$stty_save"
+}
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 add_message() {
     local addctx="$1"
@@ -231,6 +313,14 @@ add_message() {
     fi
 }
 
+full_response=""
+thinking_response=""
+tool_use_response=""
+fn_name=""
+fn_args=""
+fn_id=""
+fn_object=""
+
 tool_handler() {
     local tool_chunk="$1"
 
@@ -246,61 +336,76 @@ tool_handler() {
 }
 
 
-
-
-printContent() {
-    # 工具调用轮次（递归保护用），首次调用不传参默认 0
+tool_run_and_parse() {
     local id="$1"
-    # local round=${1:-0}
-    local full_response=""
-    local thinking_response=""
-    local tool_use_response=""
+    
+    add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
 
-    local fn_name=""
-    local fn_args=""
-    local fn_id=""
-    local fn_object=""
-    if [[ -n "$id" ]]; then
+    if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
+
+        if [[ "$fn_name" == "run_shell_command" ]]; then
+            command=$(jq -r '.command' <<< "$fn_args")
+            tool_use_response="**工具调用: $command**"
+            echo "$tool_use_response" | sed 's/\\$/\\\\/' | glow -
+
+            # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
+            # 防止残留的 "y" 自动确认执行命令（粘贴注入防护）
+            local _junk=""
+            while IFS= read -r -t 0.01 -N 1000000 _junk; [[ -n "$_junk" ]]; do _junk=""; done
+
+            printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
+            IFS= read -r answer
+            echo "用户输入: $answer"
+            if [[ "$answer" == "y" ]]; then
+                # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
+                run_with_window "$command"
+                content="$window_output"
+            else
+                content="用户拒绝执行命令: $command"
+            fi
+        fi
+
         add_message "$content" "tool" "$id"
-    else
-        add_message "$content"
+
+        # id="$fn_id"
+
+        fn_name=""
+        fn_args=""
+        fn_id=""
+
+
+        local tools=$(tools)
+        local request_body=$(jq -n \
+            --arg model "$model" \
+            --argjson msgs "$messages" \
+            --arg thinking "$thinking" \
+            --argjson tool "$tools" \
+            '{
+            model: $model,
+            messages: $msgs,
+            thinking: {type: $thinking},
+            reasoning_effort: "high",
+            stream: true,
+            tools: $tool
+        }')
+
+        ask_ai "$request_body" 1
     fi
-    # echo "历史记录是: $messages"
+}
 
-    # 构建请求体
-    # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
-    # thinking 为空时不应发送 thinking 字段
-    tools=$(tools)
-    local request_body=$(jq -n \
-        --arg model "$model" \
-        --argjson msgs "$messages" \
-        --arg thinking "$thinking" \
-        --argjson tool "$tools" \
-        '{
-        model: $model,
-        messages: $msgs,
-        thinking: {type: $thinking},
-        reasoning_effort: "high",
-        stream: true,
-        tools: $tool
-    }')
-
+ask_ai() {
+    
     local think_start=0
     local think_end=0
+    local chunk=""
+    local json=""
+    local request_body=$1
+    local is_lock_screen=$2
 
-    # 保存终端状态并进入原始模式
-    local stty_save=$(stty -g)
-    stty -echo
+    full_response=""
+    thinking_response=""
 
-    # 切换到交替屏幕缓冲区（流式输出画在"临时画布"上，切回时自动销毁）
-    tput smcup
-
-    # 清屏并定位光标到顶部
-    printf '\033[2J\033[H'
-
-    printf '\033[?1000l\033[?1001l\033[?1002l\033[?1003l\033[?1004l'
-    printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
-    printf '\033[?2026l\033[?9001l'
+    [[  "$is_lock_screen" == 1 ]] && lock_screen
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^data:\  ]]; then
@@ -365,8 +470,37 @@ printContent() {
         2>&1
     )
 
-    # 切回主屏幕（交替屏幕上的流式输出自动丢弃，完美清除）
-    tput rmcup
+    [[ "$is_lock_screen" == 1 ]] && unlock_screen
+
+    [[ -n "$fn_id" ]] && tool_run_and_parse "$fn_id"
+}
+
+
+printContent() {
+
+    add_message "$content"
+
+    # 构建请求体
+    # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
+    # thinking 为空时不应发送 thinking 字段
+    local tools=$(tools)
+    local request_body=$(jq -n \
+        --arg model "$model" \
+        --argjson msgs "$messages" \
+        --arg thinking "$thinking" \
+        --argjson tool "$tools" \
+        '{
+        model: $model,
+        messages: $msgs,
+        thinking: {type: $thinking},
+        reasoning_effort: "high",
+        stream: true,
+        tools: $tool
+    }')
+
+    
+    ask_ai "$request_body" 1
+    
 
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
@@ -375,45 +509,14 @@ printContent() {
     echo "$full_response" | sed 's/\\$/\\\\/' | glow -
     # echo "$messages"
 
-    stty "$stty_save"
-
-    # 记录 assistant 消息（每一轮都要记）：
-    #  - 本轮发起了工具调用 → 记录带 tool_calls 的 assistant 消息（content 为 null）
-    #  - 否则 → 记录普通文本回复
-    if [[ -n "$fn_id" ]]; then
-        add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
-    else
-        [[ -n "$full_response" ]] && add_message "$full_response" "assistant"
-    fi
-
-    if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
-        # 递归保护：超过最大轮次就停止，防止模型失控无限调用工具
-
-        if [[ "$fn_name" == "run_shell_command" ]]; then
-            command=$(jq -r '.command' <<< "$fn_args")
-            tool_use_response="**工具调用: $command**"
-            echo "$tool_use_response" | sed 's/\\$/\\\\/' | glow -
-
-            printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
-            IFS= read -r answer
-            if [[ "$answer" == "y" ]]; then
-                content=$(eval "$command" 2>&1)
-            else
-                content="用户拒绝执行命令: $command"
-            fi
-        fi
-
-        id="$fn_id"
-
-        printContent "$id"
-    fi
+    [[ -n "$full_response" ]] && add_message "$full_response" "assistant"
 
 }
 
 overview() {
 
     local chunk=""
-    local title=""
+    local res=""
 
     # echo "记录是: $messages"
     local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题，输入格式如下: title:标题内容写在这里。注意：除了按格式输出外，不可以有多余文字。"}]')
@@ -425,55 +528,14 @@ overview() {
         reasoning_effort: "high",
         stream: true
     }')
-    # echo "$request_body"
-    local json=""
-    while IFS= read -r line; do
-        # echo "$line"
-        if [[ "$line" =~ ^data:\  ]]; then
-            json="${line#data: }"
-            [[ "$json" == "[DONE]" ]] && break
 
-            # echo "json是: $json"
-            # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
-            chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; echo x)"
-            chunk="${chunk%x}"
+    ask_ai "$request_body"
 
-            if [[ -n "$chunk" ]]; then
-                title+="$chunk"
-            fi
-        fi
-    done < <(
-        curl -sN https://api.deepseek.com/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -d "$request_body"
-    )
+    res="${full_response#title:}"
 
-    title="${title#title:}"
-
-    printf "%s" "$title"
+    printf "%s" "$res"
 }
 
-
-
-
-input=""
-
-paste_line() {
-    # local input=""
-    local line
-    while IFS= read -r line; do
-        # line="${line#$'\033[200~'}"
-        # line="${line%$'\033[201~'}"
-        if [[ "$line" == "#" ]]; then
-            normal_line 0
-            break
-        fi
-        input+="$line"$'\n'
-    done
-    input="${input%$'\n'}"
-    # printf '%s\n' "$input"
-}
 
 
 read_file() {
@@ -495,6 +557,8 @@ read_file() {
 normal_line() {
     # local input=""
     local line
+    local extra
+    local pasted
 
     local prompt
     if [[ "$1" == 0 ]]; then
@@ -503,14 +567,29 @@ normal_line() {
         prompt="> "
     fi
     while IFS= read -e -r -p "$prompt" line; do
-        if [[ "$line" == "#" ]]; then
-            paste_line
-            break
-        fi
-        if [[ "${line: -1}" == "#" ]]; then
-            line="${line%\#}"
+        # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
+        # 一次性非阻塞大块读取（-N 走非规范模式，末尾没换行的残段超时后也会存入变量）；
+        # 排干期间关掉回显，避免 macOS 在 tty 模式切换时重复回显残余队列
+        local rest=""
+        local chunk=""
+        local stty_save
+        stty_save=$(stty -g)
+        stty -echo
+        # 循环排干：慢速粘贴（SSH/分块粘贴）可能跨越多个超时窗口
+        while IFS= read -r -t 0.05 -N 1000000 chunk; [[ -n "$chunk" ]]; do
+            rest+="$chunk"
+            chunk=""
+        done
+        stty "$stty_save"
+        if [[ -n "$rest" ]]; then
+            # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
+            rest="${rest%$'\n'}"
+            # 排干时回显是关的，补印粘贴的剩余行让用户确认内容
+            printf '%s\n' "$rest"
+            line+=$'\n'"$rest"
             input+="$line"$'\n'
-            paste_line
+            prompt=".. "
+            continue
         fi
         if [[ "$line" == "@" ]]; then
             read_file
@@ -545,7 +624,7 @@ normal_line() {
         break
     done
     input="${input%$'\n'}"
-    # printf '%s\n' "$input"
+    # printf '%s\n' "输出的内容为：$input"
 }
 
 # echo "请填写备注（支持多行，行末用 \\ 续行）："
