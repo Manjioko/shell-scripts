@@ -20,25 +20,71 @@ _ct_inputrc=$(mktemp)
 printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
 export INPUTRC="$_ct_inputrc"
 
+
+render_markdown() {
+    local text="$1"
+    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
+    # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
+    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
+    if command -v glow >/dev/null 2>&1; then
+        echo "$text" | sed 's/\\$/\\\\/' | glow -
+    elif command -v mdcat >/dev/null 2>&1; then
+        echo "$text" | sed 's/\\$/\\\\/' | mdcat -
+    else
+        echo "$text"
+    fi
+}
+
+save_history() {
+    [[ -z "$chat_title" ]] && return 0
+    [[ -z "$messages" ]] && return 0
+    [[ $forget_history == 1 ]] && return 0
+    local history
+
+    # 替换斜杠
+    # name=$(echo "${chat_title%.json}" | tr '/' '_')
+    # 替换其他危险字符（如空格、特殊符号）
+    # name=$(echo "$name" | tr '[:space:]' '_')
+    # name=$(echo "$name" | tr -d '\\/:*?"<>|')
+    name="${chat_title%.json}" 
+
+    [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
+    history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
+    '{
+        model: $model,
+        messages: $msgs,
+        thinking: {type: $thinking},
+        reasoning_effort: "high",
+        stream: true
+    }' 2>&1)
+
+    echo "保存记录 ${HOME}/.ct/${name}.json"
+
+    echo "$history" > "${HOME}/.ct/${name}.json"
+}
+
+get_history() {
+    [[ -z $1 ]] && return 0
+    local history
+    chat_title=$(basename "$1")
+    messages=$(jq '.messages' <<< "$(<"$1")")
+    thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
+    model=$(jq -r '.model' <<< "$(<"$1")")
+    jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
+        role=$(jq -r '.role' <<< "$line")
+        content=$(jq -r '.content' <<< "$line")
+        render_markdown "## $role"
+        echo "----------------------------------------------"
+        render_markdown "$content"
+    done
+}
+
 handle_ctrl_c() {
     local name=""
     # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
     trap - INT
     [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
-    if [[ -n "$chat_title" ]]; then
-        # 替换斜杠
-        name=$(echo "$chat_title" | tr '/' '_')
-        # 替换其他危险字符（如空格、特殊符号）
-        name=$(echo "$name" | tr '[:space:]' '_')
-        name=$(echo "$name" | tr -d '\\/:*?"<>|')
-        if [[ -f ${HOME}/.ct/${chat_title} ]]; then
-            echo "存在文件 ${HOME}/.ct/${chat_title}"
-            echo "$messages" > "${HOME}/.ct/${chat_title}"
-        else
-            echo "不存在文件,创建 ${HOME}/.ct/${name}.json"
-            touch "${HOME}/.ct/${name}.json" && echo "$messages" > "${HOME}/.ct/${name}.json"
-        fi
-    fi
+    save_history
     exit 130
 }
 
@@ -59,9 +105,6 @@ model="deepseek-v4-flash"
 
 # 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
 # MAX_TOOL_ROUNDS=10
-
-# 是否跳过调用ai
-jumpAI=0
 
 # 历史记录集合
 history_list=()
@@ -100,15 +143,11 @@ history_handler() {
         echo "$i. $(basename "${tmpList[$i]}")"
         history_list+=("$i. ${tmpList[$i]}")
     done
-    [[ $jumpAI == 0 ]] && jumpAI=1
-
-}
-
-read_number() {
     local filePath=""
     local isSelect=0
     IFS= read -r -p "_>" num
-    [[ -z "$num"  &&  "${history_list[0]}" ]] && load_history "${history_list[0]#0. }" && return 0
+    # echo "xxxxxxxxx$num"
+    [[ -z "$num"  &&  "${history_list[0]}" ]] && get_history "${history_list[0]#0. }" && return 0
     [[ -z "$num" ]] && echo "请输入编号" && return 1
     [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
     [[ "$num" -lt 0 || "$num" -ge "${#history_list[@]}" ]] && echo "请选择正确的编号" && return 1
@@ -119,14 +158,16 @@ read_number() {
             filePath="${history_list[i]#${i}. }"
             isSelect=1
 
-            [[ -n "$filePath" ]] && reset && load_history "$filePath"
+            [[ -n "$filePath" ]] && reset && get_history "$filePath"
             break
         else
             isSelect=0
         fi
     done
     [[ "$isSelect" == 0 ]] && echo "请选择正确的编号"
+
 }
+
 
 help_user() {
     echo "使用方法: ct [选项] [内容]"
@@ -197,7 +238,6 @@ for ((i=1; i<=$#; i++)); do
 
     if [[ "${!i}" == "-l" ]]; then
         history_handler
-        read_number
         break
     fi
     if [[ "${!i}" == "-f" ]]; then
@@ -213,27 +253,12 @@ for ((i=1; i<=$#; i++)); do
 done
 
 
-
-
-render_markdown() {
-    local text="$1"
-    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
-    # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
-    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
-    if command -v glow >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | glow -
-    elif command -v mdcat >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | mdcat -
-    else
-        echo "$text"
-    fi
-}
-
 run_with_window() {
     local cmd="$1"
     local -a buf=()
-    local line total=0 drawn=0
-    local now last_paint=0
+    local total=0 drawn=0
+    local now last_paint=0 dirty=0
+    local chunk rc line pending="" partial=""
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -242,33 +267,73 @@ run_with_window() {
     # 光标不会掉到下一行，"上移 drawn 行"的算术就永远是对的
     printf '\033[?25l\033[?7l'
 
+    # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
+    clean_line() {
+        line=${line//$'\r'/}
+        line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+    }
+
+    # drawn = 已画的完整行数；光标始终停在窗口底行（partial 行）上
     paint() {
         local i
+        printf '\r'
         (( drawn > 0 )) && printf '\033[%dA' "$drawn"
         for i in "${buf[@]}"; do
             # \033[2K 整行擦除，清掉上一帧更长内容的残留
             printf '\033[2K\033[2m│\033[0m %s\n' "$i"
         done
+        # 底行：交互提示等无换行输出画在这里，光标停在其末尾方便用户应答
+        printf '\033[2K'
+        if [[ -n "$partial" ]]; then
+            printf '\033[2m│\033[0m \033[33m%s\033[0m\033[?25h' "$partial"
+        else
+            printf '\033[?25l'
+        fi
         drawn=${#buf[@]}
     }
 
-    while IFS= read -r line; do
-        # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
-        line=${line//$'\r'/}
-        line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
-        window_output+="$line"$'\n'
-        buf+=("$line")
-        (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
-        (( total++ ))
-        # 节流：疯狂输出的命令最多每 50ms 画一帧，防闪烁省 CPU
+    while :; do
+        chunk=""
+        # 按块读而非按行读：交互提示通常不带换行，按行 read 永远等不到 \n，
+        # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
+        IFS= read -r -t 0.1 -N 65536 chunk
+        rc=$?
+        if [[ -n "$chunk" ]]; then
+            pending+="$chunk"
+            while [[ "$pending" == *$'\n'* ]]; do
+                line="${pending%%$'\n'*}"
+                pending="${pending#*$'\n'}"
+                clean_line
+                window_output+="$line"$'\n'
+                buf+=("$line")
+                (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
+                (( total++ ))
+            done
+            line="$pending"; clean_line; partial="$line"
+            dirty=1
+        fi
+        # 超时退出码 >128（继续等）；1~128 是 EOF（命令结束）
+        (( rc > 0 && rc <= 128 )) && break
         now=${EPOCHREALTIME/./}
-        if (( now - last_paint > THROTTLE )); then
+        if (( dirty && now - last_paint > THROTTLE )); then
             paint
             last_paint=$now
+            dirty=0
         fi
     done < <(eval "$cmd" 2>&1)
 
-    paint    # 节流可能吞掉最后几行，收尾必须补画一帧
+    # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
+    if [[ -n "$pending" ]]; then
+        line="$pending"; clean_line
+        if [[ -n "$line" ]]; then
+            window_output+="$line"$'\n'
+            buf+=("$line")
+            (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
+            (( total++ ))
+        fi
+    fi
+    partial=""
+    paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
     printf '\033[?25h\033[?7h'
     printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
 }
@@ -298,20 +363,6 @@ tools() {
     ]'
 }
 
-# 使用 load_history filePath
-load_history() {
-    [[ -z $1 ]] && return 0
-
-    chat_title=$(basename "$1")
-    messages=$(jq '.' <<< $(<"$1"))
-    jq -c '.[1:][]' "$1" | while IFS= read -r line; do
-        role=$(jq -r '.role' <<< "$line")
-        content=$(jq -r '.content' <<< "$line")
-        render_markdown "## $role"
-        echo "----------------------------------------------"
-        render_markdown "$content"
-    done
-}
 
 lock_screen() {
     # 保存终端状态并进入原始模式
@@ -407,6 +458,7 @@ tool_run_and_parse() {
                 # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
                 run_with_window "$command"
                 content="$window_output"
+                sleep 2
             else
                 content="用户拒绝执行命令: $command"
             fi
@@ -612,6 +664,7 @@ wsl_choose_file() {
     fi
 
     # 退回 Windows 原生对话框（不依赖图形环境/发行版内软件）
+    # shellcheck disable=SC2016
     winpath=$(powershell.exe -NoProfile -NonInteractive -Command '
         [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
         Add-Type -AssemblyName System.Windows.Forms
@@ -678,10 +731,7 @@ read_file() {
 
 
 normal_line() {
-    # local input=""
     local line
-    local extra
-    local pasted
 
     local prompt
     if [[ "$1" == 0 ]]; then
@@ -751,7 +801,6 @@ normal_line() {
         break
     done
     input="${input%$'\n'}"
-    # printf '%s\n' "输出的内容为：$input"
 }
 
 # 是否是第一次进入
@@ -766,14 +815,10 @@ while true; do
     normal_line 1
     content="$input"
 
-    [[ -z "$content" && "$jumpAI" == 0 ]] && continue
+    [[ -z "$content" ]] && continue
 
-    if [[ $jumpAI == 1 ]]; then
-        jumpAI=0
-        read_number
-        continue
-    fi
     printContent
+
     if [[ -z "$chat_title" && "$first_time" -eq 1 ]]; then
         chat_title=$(overview) && first_time=0
     fi
