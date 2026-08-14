@@ -398,10 +398,15 @@ add_message() {
         # 默认 user 消息
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
-        # assistant 发起工具调用：必须记录 tool_calls（content 为 null），
-        # 否则后面的 tool 结果消息对不上号，模型就无法继续调用工具
-        messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
-            '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
+        # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
+        if [[ -z "$addctx" ]]; then
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
+                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        else
+            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
+                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
@@ -431,7 +436,7 @@ tool_run_and_parse() {
     local tools
     local request_body
     
-    add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
+    add_message "$full_response" "assistant" "$fn_id" "$fn_name" "$fn_args"
 
     if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
 
