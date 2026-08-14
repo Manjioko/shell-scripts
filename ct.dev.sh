@@ -56,6 +56,11 @@ _ct_inputrc=$(mktemp)
 printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
 export INPUTRC="$_ct_inputrc"
 
+trap handle_ctrl_c INT
+
+# 任何退出路径都恢复光标显示 + 自动换行
+trap 'printf "\033[?25h\033[?7h"' EXIT
+
 
 render_markdown() {
     local text="$1"
@@ -124,18 +129,6 @@ handle_ctrl_c() {
     exit 130
 }
 
-trap handle_ctrl_c INT
-
-# 任何退出路径都恢复光标显示 + 自动换行
-trap 'printf "\033[?25h\033[?7h"' EXIT
-
-for ((i=1; i<=$#; i++)); do
-    if [[ "${!i}" != "-"* ]]; then
-        content+="${!i}"
-    fi
-done
-
-
 
 history_handler() {
     local tmpList=()
@@ -150,7 +143,6 @@ history_handler() {
     local filePath=""
     local isSelect=0
     IFS= read -r -p "_>" num
-    # echo "xxxxxxxxx$num"
     [[ -z "$num"  &&  "${history_list[0]}" ]] && get_history "${history_list[0]#0. }" && return 0
     [[ -z "$num" ]] && echo "请输入编号" && return 1
     [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
@@ -191,70 +183,75 @@ help_user() {
     echo "  -h    显示帮助信息"
 }
 
-for ((i=1; i<=$#; i++)); do
-    if [[ "${!i}" == "-tr" ]]; then
-        prectx="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
-        原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
-        译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
-        语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
-        总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
-
-        以上是格式，需要翻译的文本如下 "
-        if [[ -z "$content" ]]; then
-                content="${prectx}: $(pbpaste)"
-        else
-                content="${prectx}: $content"
+parse_options() {
+    for ((i=1; i<=$#; i++)); do
+        if [[ "${!i}" != "-"* ]]; then
+            content+="${!i}"
         fi
-        continue
-    fi
-    if [[ "${!i}" == "-to" ]]; then
-        prectx="**注意：翻译任务不需要调用任何工具**。请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
-        词源词根：（在此处解释该词的词源词根）\
-        延伸意思：（在此处解释由该词源词根延伸出来的意思）\
-        常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
-        以上是格式，需要解释的词如下"
-        if [[ -z "$content" ]]; then
-                content="${prectx}: $(pbpaste)"
-        else
-                content="${prectx}: $content"
+        if [[ "${!i}" == "-tr" ]]; then
+            prectx="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
+            原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
+            译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
+            语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
+            总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
+
+            以上是格式，需要翻译的文本如下 "
+            if [[ -z "$content" ]]; then
+                    content="${prectx}: $(pbpaste)"
+            else
+                    content="${prectx}: $content"
+            fi
+            continue
         fi
-        continue
-    fi
+        if [[ "${!i}" == "-to" ]]; then
+            prectx="**注意：翻译任务不需要调用任何工具**。请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
+            词源词根：（在此处解释该词的词源词根）\
+            延伸意思：（在此处解释由该词源词根延伸出来的意思）\
+            常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
+            以上是格式，需要解释的词如下"
+            if [[ -z "$content" ]]; then
+                    content="${prectx}: $(pbpaste)"
+            else
+                    content="${prectx}: $content"
+            fi
+            continue
+        fi
 
-    # 单纯使用思考模式
-    if [[ "${!i}" == "-t" ]]; then
-        thinking="enabled"
-        continue
-    fi
+        # 单纯使用思考模式
+        if [[ "${!i}" == "-t" ]]; then
+            thinking="enabled"
+            continue
+        fi
 
-    # 关闭深入思考，使用pro模型
-    if [[ "${!i}" == "-p" ]]; then
-        model="deepseek-v4-pro"
-        continue
-    fi
+        # 关闭深入思考，使用pro模型
+        if [[ "${!i}" == "-p" ]]; then
+            model="deepseek-v4-pro"
+            continue
+        fi
 
-    # 深入思考
-    if [[ "${!i}" == "-dp" ]]; then
-        thinking="enabled"
-        model="deepseek-v4-pro"
-        continue
-    fi
+        # 深入思考
+        if [[ "${!i}" == "-dp" ]]; then
+            thinking="enabled"
+            model="deepseek-v4-pro"
+            continue
+        fi
 
-    if [[ "${!i}" == "-l" ]]; then
-        history_handler
-        break
-    fi
-    if [[ "${!i}" == "-f" ]]; then
-         forget_history=1
-        break
-    fi
+        if [[ "${!i}" == "-l" ]]; then
+            history_handler
+            break
+        fi
+        if [[ "${!i}" == "-f" ]]; then
+            forget_history=1
+            break
+        fi
 
-    if [[ "${!i}" == "-h" ]]; then
-        help_user
-        break
-    fi
+        if [[ "${!i}" == "-h" ]]; then
+            help_user
+            break
+        fi
 
-done
+    done
+}
 
 # 窗口模式运行命令
 run_with_window() {
@@ -557,7 +554,7 @@ ask_ai() {
                 [[ -n "$chunk_id" ]] && fn_id="$chunk_id"
             fi
 
-            chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
+            # chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
             # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
         fi
     done < <(
@@ -800,6 +797,11 @@ normal_line() {
     input="${input%$'\n'}"
 }
 
+
+
+
+# 解析命令行参数
+parse_options "$@"
 # 是否是第一次进入
 first_time=1
 if [[ -n "$content" ]]; then
