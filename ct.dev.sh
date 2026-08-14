@@ -1,4 +1,42 @@
 #!/bin/bash
+
+# api key
+DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
+# 保存当前对话的标题，默认空字符串，首次保存时由模型生成
+chat_title=""
+
+# 最新一次用户输入的内容
+content=""
+
+# 记录所有的对话内容，包含用户和助手的消息
+messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+
+
+# 是否思考,默认关闭
+thinking="disabled"
+
+#模型，默认是 deepseek-v4-flash
+model="deepseek-v4-flash"
+
+# 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
+# MAX_TOOL_ROUNDS=10
+
+# 历史记录集合
+history_list=()
+
+# 不要读写历史记录
+forget_history=0
+
+# 用户输入的内容
+input=""
+# 保存当前终端设置
+stty_save=""
+
+# 窗口行数
+WIN=10
+# 重画节流间隔（微秒）
+THROTTLE=50000
+
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
     for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
@@ -9,8 +47,6 @@ if [[ -z "$BREW_BASH_CHECKED" ]]; then
     done
 fi
 
-DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
-chat_title=""
 
 # 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
 # 剩余字节留在 tty 输入队列里，可用不带 -e 的非阻塞 read 排干拿到全文
@@ -89,38 +125,6 @@ handle_ctrl_c() {
 }
 
 trap handle_ctrl_c INT
-
-# 最新一次用户输入的内容
-content=""
-
-# 记录所有的对话内容，包含用户和助手的消息
-messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
-
-
-# 是否思考,默认关闭
-thinking="disabled"
-
-#模型，默认是 deepseek-v4-flash
-model="deepseek-v4-flash"
-
-# 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
-# MAX_TOOL_ROUNDS=10
-
-# 历史记录集合
-history_list=()
-
-# 不要读写历史记录
-forget_history=0
-
-# 用户输入的内容
-input=""
-# 保存当前终端设置
-stty_save=""
-
-# 窗口行数
-WIN=10
-# 重画节流间隔（微秒）
-THROTTLE=50000
 
 # 任何退出路径都恢复光标显示 + 自动换行
 trap 'printf "\033[?25h\033[?7h"' EXIT
@@ -252,7 +256,7 @@ for ((i=1; i<=$#; i++)); do
 
 done
 
-
+# 窗口模式运行命令
 run_with_window() {
     local cmd="$1"
     local -a buf=()
@@ -338,7 +342,7 @@ run_with_window() {
     printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
 }
 
-
+# 工具 skill
 tools() {
     # 注意：这里输出会被 printContent 用 tools=$(tools) 捕获，
     # 所以绝不能 echo 调试信息，只能输出纯净的 JSON
@@ -363,7 +367,7 @@ tools() {
     ]'
 }
 
-
+# 锁定屏幕，进入原始模式，隐藏光标，切换到交替屏幕缓冲区
 lock_screen() {
     # 保存终端状态并进入原始模式
     stty_save=$(stty -g)
@@ -379,6 +383,7 @@ lock_screen() {
     printf '\033[?1005l\033[?1006l\033[?1007l\033[?1015l\033[?1016l'
     printf '\033[?2026l\033[?9001l'
 }
+# 解开屏幕，恢复终端状态，切回主屏幕
 unlock_screen() {
     # 切回主屏幕（交替屏幕上的流式输出自动丢弃，完美清除）
     tput rmcup
@@ -409,14 +414,7 @@ add_message() {
     fi
 }
 
-full_response=""
-thinking_response=""
-tool_use_response=""
-fn_name=""
-fn_args=""
-fn_id=""
-fn_object=""
-
+# 工具调用处理器：解析流式分片的工具调用 JSON，输出标准化的 fn_name/fn_args/fn_id
 tool_handler() {
     local tool_chunk="$1"
 
@@ -430,8 +428,7 @@ tool_handler() {
     jq -n --arg name "$chunk_name" --arg args "$chunk_args" --arg id "$chunk_id" \
         '{fn_name: $name, fn_args: $args, fn_id: $id}'
 }
-
-
+# 工具调用执行器：根据 fn_name/fn_args/fn_id 执行工具，并把结果喂给模型继续推理
 tool_run_and_parse() {
     local id="$1"
     local tools
@@ -491,7 +488,7 @@ tool_run_and_parse() {
         ask_ai "$request_body" 1
     fi
 }
-
+# 核心函数：向模型发起请求，流式接收输出，处理工具调用
 ask_ai() {
     
     [[ "$content" =~ ^\-.* ]] && echo "请不要以 - 开头输入内容，否则会被当作命令行参数解析" && content="" && return 0
@@ -576,7 +573,7 @@ ask_ai() {
     [[ -n "$fn_id" ]] && tool_run_and_parse "$fn_id"
 }
 
-
+# 打印内容函数
 printContent() {
 
     add_message "$content"
@@ -614,15 +611,18 @@ printContent() {
 
 }
 
+# 根据聊天记录生成标题
 overview() {
 
     local chunk=""
-    local res=""
+    # local res=""
+    local msg
+    local request_body
 
     # echo "记录是: $messages"
-    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
+    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
 
-    local request_body=$(jq -n  --argjson msgs "$msg" '{
+    request_body=$(jq -n  --argjson msgs "$msg" '{
         model: "deepseek-v4-flash",
         messages: $msgs,
         thinking: {type: "disabled"},
@@ -632,12 +632,8 @@ overview() {
 
     ask_ai "$request_body"
 
-    # res="${full_response#title:}"
-
     printf "%s" "$full_response"
 }
-
-
 
 # 检测当前运行环境：macos / wsl / linux
 detect_os() {
@@ -701,6 +697,7 @@ linux_choose_file() {
     echo "$pick"
 }
 
+# 读取文件内容并追加到输入中
 read_file() {
 
     [[ "$forget_history" == 1 ]] && return 0
@@ -729,7 +726,7 @@ read_file() {
     normal_line 0
 }
 
-
+# 读取用户输入的多行内容，支持续行、粘贴、文件导入等
 normal_line() {
     local line
 
@@ -810,6 +807,7 @@ if [[ -n "$content" ]]; then
     [[ -z "$chat_title"  ]] && chat_title=$(overview) && first_time=0
 fi
 
+# 交互式输入循环
 while true; do
     input=""
     normal_line 1
