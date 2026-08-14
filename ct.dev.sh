@@ -58,7 +58,7 @@ thinking="disabled"
 model="deepseek-v4-flash"
 
 # 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
-MAX_TOOL_ROUNDS=10
+# MAX_TOOL_ROUNDS=10
 
 # 是否跳过调用ai
 jumpAI=0
@@ -71,9 +71,13 @@ forget_history=0
 
 # 用户输入的内容
 input=""
+# 保存当前终端设置
+stty_save=""
 
-WIN=10           # 窗口行数
-THROTTLE=50000   # 重画节流间隔（微秒）
+# 窗口行数
+WIN=10
+# 重画节流间隔（微秒）
+THROTTLE=50000
 
 # 任何退出路径都恢复光标显示 + 自动换行
 trap 'printf "\033[?25h\033[?7h"' EXIT
@@ -83,6 +87,147 @@ for ((i=1; i<=$#; i++)); do
         content+="${!i}"
     fi
 done
+
+
+
+history_handler() {
+    local tmpList=()
+    echo "请从以下编号中选择你要加载的历史记录："
+    # shellcheck disable=SC2207
+    tmpList=($(ls -t "$HOME"/.ct/*.json 2>/dev/null))
+    history_list=()
+    for i in "${!tmpList[@]}"; do
+        echo "$i. $(basename "${tmpList[$i]}")"
+        history_list+=("$i. ${tmpList[$i]}")
+    done
+    [[ $jumpAI == 0 ]] && jumpAI=1
+
+}
+
+read_number() {
+    local filePath=""
+    local isSelect=0
+    IFS= read -r -p "_>" num
+    [[ -z "$num"  &&  "${history_list[0]}" ]] && load_history "${history_list[0]#0. }" && return 0
+    [[ -z "$num" ]] && echo "请输入编号" && return 1
+    [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
+    [[ "$num" -lt 0 || "$num" -ge "${#history_list[@]}" ]] && echo "请选择正确的编号" && return 1
+    echo "选中的数字: $num"
+    for ((i = 0; i < "${#history_list[@]}"; i++)); do
+        if [[ ${history_list[i]} =~ ^${num} ]]; then
+            echo "切换到 ${history_list[i]#${i}. }"
+            filePath="${history_list[i]#${i}. }"
+            isSelect=1
+
+            [[ -n "$filePath" ]] && reset && load_history "$filePath"
+            break
+        else
+            isSelect=0
+        fi
+    done
+    [[ "$isSelect" == 0 ]] && echo "请选择正确的编号"
+}
+
+help_user() {
+    echo "使用方法: ct [选项] [内容]"
+    echo "选项:"
+    echo "  -t    启用思考模式"
+    echo "  -p    使用 deepseek-v4-pro 模型"
+    echo "  -dp   启用思考模式并使用 deepseek-v4-pro 模型"
+    echo "  -l    查看历史记录并选择加载"
+    echo "  -f    忽略历史记录"
+    echo "  -tr   翻译任务"
+    echo "  -to   词源词根解释任务"
+    echo "  -h    显示帮助信息"
+    echo
+    echo "内容交互时，也可使用以下选项:"
+    echo "  -msgs 显示当前消息记录"
+    echo "  -l    查看历史记录并选择加载"
+    echo "  -h    显示帮助信息"
+}
+
+for ((i=1; i<=$#; i++)); do
+    if [[ "${!i}" == "-tr" ]]; then
+        prectx="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
+        原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
+        译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
+        语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
+        总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
+
+        以上是格式，需要翻译的文本如下 "
+        if [[ -z "$content" ]]; then
+                content="${prectx}: $(pbpaste)"
+        else
+                content="${prectx}: $content"
+        fi
+        continue
+    fi
+    if [[ "${!i}" == "-to" ]]; then
+        prectx="**注意：翻译任务不需要调用任何工具**。请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
+        词源词根：（在此处解释该词的词源词根）\
+        延伸意思：（在此处解释由该词源词根延伸出来的意思）\
+        常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
+        以上是格式，需要解释的词如下"
+        if [[ -z "$content" ]]; then
+                content="${prectx}: $(pbpaste)"
+        else
+                content="${prectx}: $content"
+        fi
+        continue
+    fi
+
+    # 单纯使用思考模式
+    if [[ "${!i}" == "-t" ]]; then
+        thinking="enabled"
+        continue
+    fi
+
+    # 关闭深入思考，使用pro模型
+    if [[ "${!i}" == "-p" ]]; then
+        model="deepseek-v4-pro"
+        continue
+    fi
+
+    # 深入思考
+    if [[ "${!i}" == "-dp" ]]; then
+        thinking="enabled"
+        model="deepseek-v4-pro"
+        continue
+    fi
+
+    if [[ "${!i}" == "-l" ]]; then
+        history_handler
+        read_number
+        break
+    fi
+    if [[ "${!i}" == "-f" ]]; then
+         forget_history=1
+        break
+    fi
+
+    if [[ "${!i}" == "-h" ]]; then
+        help_user
+        break
+    fi
+
+done
+
+
+
+
+render_markdown() {
+    local text="$1"
+    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
+    # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
+    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
+    if command -v glow >/dev/null 2>&1; then
+        echo "$text" | sed 's/\\$/\\\\/' | glow -
+    elif command -v mdcat >/dev/null 2>&1; then
+        echo "$text" | sed 's/\\$/\\\\/' | mdcat -
+    else
+        echo "$text"
+    fi
+}
 
 run_with_window() {
     local cmd="$1"
@@ -153,121 +298,21 @@ tools() {
     ]'
 }
 
-
-
-history_handler() {
-    local tmpList=()
-    echo "请从以下编号中选择你要加载的历史记录："
-    tmpList=($(ls -t $HOME/.ct/*.json 2>/dev/null))
-    history_list=()
-    for i in "${!tmpList[@]}"; do
-        echo "$i. $(basename ${tmpList[$i]})"
-        history_list+=("$i. ${tmpList[$i]}")
-    done
-    [[ $jumpAI == 0 ]] && jumpAI=1
-
-}
-
-read_number() {
-    local filePath=""
-    local isSelect=0
-    IFS= read -r -p "_>" num
-    [[ -z "$num"  &&  "${history_list[0]}" ]] && load_history "${history_list[0]#0. }" && break
-    echo "选中的数字: $num"
-    for ((i = 0; i < "${#history_list[@]}"; i++)); do
-        if [[ ${history_list[i]} =~ ^${num} ]]; then
-            echo "切换到 ${history_list[i]#${i}. }"
-            filePath="${history_list[i]#${i}. }"
-            isSelect=1
-
-            [[ -n "$filePath " ]] && reset && load_history $filePath
-            break
-        else
-            isSelect=0
-        fi
-    done
-    [[ "$isSelect" == 0 ]] && echo "请选择正确的编号"
-}
 # 使用 load_history filePath
 load_history() {
     [[ -z $1 ]] && return 0
 
-    chat_title=$(basename $1)
-    messages=$(jq '.' <<< $(<$1))
-    jq -c '.[1:][]' $1 | while IFS= read -r line; do
+    chat_title=$(basename "$1")
+    messages=$(jq '.' <<< $(<"$1"))
+    jq -c '.[1:][]' "$1" | while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
         content=$(jq -r '.content' <<< "$line")
-        echo "## $role" | glow -
+        render_markdown "## $role"
         echo "----------------------------------------------"
-        echo "$content" | glow -
+        render_markdown "$content"
     done
 }
 
-
-for ((i=1; i<=$#; i++)); do
-    if [[ "${!i}" == "-tr" ]]; then
-        prectx="请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
-        原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
-        译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
-        语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
-        总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
-
-        以上是格式，需要翻译的文本如下 "
-        if [[ -z "$content" ]]; then
-                content="${prectx}: $(pbpaste)"
-        else
-                content="${prectx}: $content"
-        fi
-        continue
-    fi
-    if [[ "${!i}" == "-to" ]]; then
-        prectx="请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
-        词源词根：（在此处解释该词的词源词根）\
-        延伸意思：（在此处解释由该词源词根延伸出来的意思）\
-        常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
-        以上是格式，需要解释的词如下"
-        if [[ -z "$content" ]]; then
-                content="${prectx}: $(pbpaste)"
-        else
-                content="${prectx}: $content"
-        fi
-        continue
-    fi
-
-    # 单纯使用思考模式
-    if [[ "${!i}" == "-t" ]]; then
-        thinking="enabled"
-        continue
-    fi
-
-    # 关闭深入思考，使用pro模型
-    if [[ "${!i}" == "-p" ]]; then
-        model="deepseek-v4-pro"
-        continue
-    fi
-
-    # 深入思考
-    if [[ "${!i}" == "-dp" ]]; then
-        thinking="enabled"
-        model="deepseek-v4-pro"
-        continue
-    fi
-
-    if [[ "${!i}" == "-l" ]]; then
-        history_handler
-        read_number
-        break
-    fi
-     if [[ "${!i}" == "-f" ]]; then
-         forget_history=1
-        break
-    fi
-
-
-done
-
-
-stty_save=""
 lock_screen() {
     # 保存终端状态并进入原始模式
     stty_save=$(stty -g)
@@ -338,6 +383,8 @@ tool_handler() {
 
 tool_run_and_parse() {
     local id="$1"
+    local tools
+    local request_body
     
     add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
 
@@ -346,7 +393,7 @@ tool_run_and_parse() {
         if [[ "$fn_name" == "run_shell_command" ]]; then
             command=$(jq -r '.command' <<< "$fn_args")
             tool_use_response="**工具调用: $command**"
-            echo "$tool_use_response" | sed 's/\\$/\\\\/' | glow -
+            render_markdown "$tool_use_response"
 
             # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
             # 防止残留的 "y" 自动确认执行命令（粘贴注入防护）
@@ -355,7 +402,7 @@ tool_run_and_parse() {
 
             printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
             IFS= read -r answer
-            echo "用户输入: $answer"
+            # echo "用户输入: $answer"
             if [[ "$answer" == "y" ]]; then
                 # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
                 run_with_window "$command"
@@ -374,8 +421,8 @@ tool_run_and_parse() {
         fn_id=""
 
 
-        local tools=$(tools)
-        local request_body=$(jq -n \
+        tools=$(tools)
+        request_body=$(jq -n \
             --arg model "$model" \
             --argjson msgs "$messages" \
             --arg thinking "$thinking" \
@@ -395,6 +442,8 @@ tool_run_and_parse() {
 
 ask_ai() {
     
+    [[ "$content" =~ ^\-.* ]] && echo "请不要以 - 开头输入内容，否则会被当作命令行参数解析" && content="" && return 0
+
     local think_start=0
     local think_end=0
     local chunk=""
@@ -505,8 +554,8 @@ printContent() {
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
-    echo "$thinking_response" | sed 's/\\$/\\\\/' | glow -
-    echo "$full_response" | sed 's/\\$/\\\\/' | glow -
+    render_markdown "$thinking_response"
+    render_markdown "$full_response"
     # echo "$messages"
 
     [[ -n "$full_response" ]] && add_message "$full_response" "assistant"
@@ -519,7 +568,7 @@ overview() {
     local res=""
 
     # echo "记录是: $messages"
-    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题，输入格式如下: title:标题内容写在这里。注意：除了按格式输出外，不可以有多余文字。"}]')
+    local msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
 
     local request_body=$(jq -n  --argjson msgs "$msg" '{
         model: "deepseek-v4-flash",
@@ -531,12 +580,73 @@ overview() {
 
     ask_ai "$request_body"
 
-    res="${full_response#title:}"
+    # res="${full_response#title:}"
 
-    printf "%s" "$res"
+    printf "%s" "$full_response"
 }
 
 
+
+# 检测当前运行环境：macos / wsl / linux
+detect_os() {
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        echo "macos"
+    elif [[ -n "$WSL_DISTRO_NAME" ]] || grep -qi microsoft /proc/version 2>/dev/null; then
+        echo "wsl"
+    else
+        echo "linux"
+    fi
+}
+
+# WSL 下选择文件：优先 WSLg 的 zenity，否则用 Windows 原生对话框（PowerShell + WinForms），
+# 返回的 Windows 路径用 wslpath 转回 Linux 路径
+wsl_choose_file() {
+    local winpath=""
+
+    # 有 WSLg 图形环境时直接用 Linux GUI 选择器
+    if [[ -n "$DISPLAY" ]] && command -v zenity >/dev/null 2>&1; then
+        local pick
+        pick=$(zenity --file-selection --title="选择文件" 2>/dev/null) || { echo "CANCELLED"; return 0; }
+        echo "$pick"
+        return 0
+    fi
+
+    # 退回 Windows 原生对话框（不依赖图形环境/发行版内软件）
+    winpath=$(powershell.exe -NoProfile -NonInteractive -Command '
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        Add-Type -AssemblyName System.Windows.Forms
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Title = "选择文件"
+        $dlg.Multiselect = $false
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            Write-Output $dlg.FileName
+        }
+    ' 2>/dev/null | tr -d '\r')
+
+    if [[ -n "$winpath" ]]; then
+        wslpath -u "$winpath" 2>/dev/null
+    else
+        echo "CANCELLED"
+    fi
+}
+
+# Linux 下选择文件：依次尝试 zenity / kdialog / yad，都没有则退回 fzf
+linux_choose_file() {
+    local pick=""
+    if command -v zenity >/dev/null 2>&1; then
+        pick=$(zenity --file-selection --title="选择文件" 2>/dev/null)
+    elif command -v kdialog >/dev/null 2>&1; then
+        pick=$(kdialog --getopenfilename 2>/dev/null)
+    elif command -v yad >/dev/null 2>&1; then
+        pick=$(yad --file-selection --title="选择文件" 2>/dev/null)
+    elif command -v fzf >/dev/null 2>&1; then
+        pick=$(fzf --prompt="选择文件> ")
+    else
+        echo "未找到可用的文件选择器，请安装 zenity / kdialog / yad 或 fzf" >&2
+    fi
+    [[ -z "$pick" ]] && pick="CANCELLED"
+    echo "$pick"
+}
 
 read_file() {
 
@@ -544,11 +654,24 @@ read_file() {
 
     filePath=""
     fileContent=""
-    filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
+    case "$(detect_os)" in
+        macos)
+            filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
+            ;;
+        wsl)
+            filePath=$(wsl_choose_file)
+            ;;
+        linux)
+            filePath=$(linux_choose_file)
+            ;;
+    esac
 	echo "[文件] $filePath"
-    if [[ -n "$filePath" && "$filePath" != "CANCELLED" ]]; then
+    if [[ -n "$filePath" && "$filePath" != "CANCELLED" && -f "$filePath" ]]; then
         fileContent=$(<"$filePath")
         input+="$fileContent"$'\n'
+    elif [[ "$filePath" == "CANCELLED" ]]; then
+        # 取消选择时静默返回（错误提示已由各选择器打印）
+        :
     fi
     normal_line 0
 }
@@ -617,6 +740,10 @@ normal_line() {
             echo "$messages"
             break
         fi
+        if [[ "$line" == "-h" ]]; then
+            help_user
+            break
+        fi
 
         input+="$line"$'\n'
         prompt=".. "
@@ -627,11 +754,11 @@ normal_line() {
     # printf '%s\n' "输出的内容为：$input"
 }
 
-# echo "请填写备注（支持多行，行末用 \\ 续行）："
 # 是否是第一次进入
+first_time=1
 if [[ -n "$content" ]]; then
     printContent
-    [[ -z "$chat_title"  ]] && chat_title=$(overview)
+    [[ -z "$chat_title"  ]] && chat_title=$(overview) && first_time=0
 fi
 
 while true; do
@@ -647,6 +774,9 @@ while true; do
         continue
     fi
     printContent
+    if [[ -z "$chat_title" && "$first_time" -eq 1 ]]; then
+        chat_title=$(overview) && first_time=0
+    fi
 done
 
 
