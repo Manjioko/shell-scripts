@@ -11,6 +11,10 @@ content=""
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
 
+#辅助权限判断助手消息
+# 
+auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。"}]')
+
 
 # 是否思考,默认关闭
 thinking="disabled"
@@ -27,6 +31,45 @@ history_list=()
 # 不要读写历史记录
 forget_history=0
 
+# ---------- 上下文自动压缩(compaction)配置 ----------
+# 最近一次请求返回的真实 prompt_tokens(来自 usage)。每次请求都把全量 messages
+# 发给 API,所以 prompt_tokens 就是"当前上下文总 token 数",无需估算或累计。
+# 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
+last_prompt_tokens=0
+
+# 触发自动压缩的阈值。业界实践(Claude Code/Aider)多在接近窗口上限才压,
+# 这里按"控制每轮成本与首字延迟"主动提前到 10 万 token(约占 1M 窗口的 10%)。
+TOKEN_THRESHOLD=100000
+
+# 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
+# + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
+KEEP_MSGS=16
+
+# 摘要消息的前缀标记:让用户在 -msgs / 历史渲染时能一眼认出"这是压缩过的历史"
+SUMMARY_PREFIX="【历史对话摘要】"
+
+# 工具输出(tool 角色消息)是上下文里最肥的部分:超长命令输出保留头尾,
+# 中间只留行数标记(开头=表头/摘要,结尾=报错/结果,中间多为重复日志)
+TOOL_OUTPUT_MAX_LINES=400
+TOOL_OUTPUT_MAX_COL=2000
+
+# ---------- 文件类工具(read_file/write_file/edit_file/list_dir/grep)配置 ----------
+# 工具可访问的根目录(物理路径,启动时锁定)。所有文件类工具的路径
+# 必须解析后落在此目录内,越界直接拒绝——权限在代码层强制,不靠提示词。
+WORK_ROOT=$(pwd -P)
+
+# read_file 单次返回的字符上限:超过则截断并提示用 offset/limit 分段读。
+# 按行粒度截断(awk 逐行累计),不会把多字节字符切两半。
+# 代码必须完整,所以阈值给得比 shell 输出(400 行)宽得多,且由 AI 自主分段。
+READ_MAX_CHARS=30000
+
+# grep 单次最多返回的匹配行数,超出只保留前 N 条并提示
+GREP_MAX_MATCHES=200
+
+# grep 结果单行截断宽度,防止命中 minified 长行污染上下文
+GREP_MAX_COL=500
+# ----------------------------------------------------
+
 # 用户输入的内容
 input=""
 # 保存当前终端设置
@@ -37,6 +80,13 @@ WIN=10
 # 重画节流间隔（微秒）
 THROTTLE=50000
 
+# run_with_window 兜底:命令主体已退出,但输出管道(FIFO 写端)仍被其后台子进程
+# 握着(AI 在命令里误用 & 启动服务),EOF 永远不来。主进程已死且静默超过该时长
+# 就提前收尾,防止窗口永久挂死。仅当主进程已退出才计时,不影响正常慢命令。
+BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
+
+options_list=("-l" "-msgs" "-h" "-c" "-u")
+
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
     for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
@@ -46,6 +96,14 @@ if [[ -z "$BREW_BASH_CHECKED" ]]; then
         fi
     done
 fi
+
+# 并行工具调用收集区:DeepSeek 一次响应可返回多个 tool_calls(按 index 区分)。
+# 按 index 存入关联数组,arguments 分片按 index 各自累加。
+# 历史 bug:旧实现只取 .[0] 且把所有 index 的 arguments 无区分拼接,
+# 导致多个调用的 JSON 参数粘在一起,jq 解析出 null → eval "null" 报错。
+# 注意:declare -A 是 bash 4+ 语法,必须放在上面的 exec 切换 bash 5 之后,
+# 否则 macOS 自带 bash 3.2 会报 "declare: -A: invalid option" 并退出。
+declare -A tool_ids=() tool_names=() tool_args=()
 
 
 # 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
@@ -85,9 +143,9 @@ save_history() {
     # 替换斜杠
     # name=$(echo "${chat_title%.json}" | tr '/' '_')
     # 替换其他危险字符（如空格、特殊符号）
-    # name=$(echo "$name" | tr '[:space:]' '_')
-    # name=$(echo "$name" | tr -d '\\/:*?"<>|')
-    name="${chat_title%.json}" 
+    name=$(echo "$chat_title" | tr '[:space:]' '_')
+    name=$(echo "$name" | tr -d '\\/:*?"<>|')
+    name="${name%.json}" 
 
     [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
     history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
@@ -109,6 +167,23 @@ get_history() {
     local history
     chat_title=$(basename "$1")
     messages=$(jq '.messages' <<< "$(<"$1")")
+    # 防御性清理:旧版本压缩可能把截断点切在工具链中间,产生"孤儿" tool
+    # 消息(前一条不是含其 tool_call_id 的 assistant)。这种消息会让 API 400
+    # 且无任何输出。加载时自动剔除,保证历史文件永远可继续对话。
+    # 注意:reduce 本身产出数组,外面不能再包一层 []。
+    local orphan
+    orphan=$(echo "$messages" | jq '
+        reduce .[] as $m ([];
+            if $m.role == "tool" then
+                if (.[-1].role == "assistant" and (.[-1].tool_calls // [] | any(.id == $m.tool_call_id)))
+                then . + [$m]
+                else .
+                end
+            else . + [$m]
+            end)')
+    messages=$orphan
+    # 加载的是新对话:旧的 token 计数作废,等下一次请求由 usage 刷新精确值
+    last_prompt_tokens=0
     thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
     model=$(jq -r '.model' <<< "$(<"$1")")
     jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
@@ -175,11 +250,15 @@ help_user() {
     echo "  -f    忽略历史记录"
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
+    echo "  -c    手动压缩对话历史"
+    echo "  -u    查看当前上下文 token 用量"
     echo "  -h    显示帮助信息"
     echo
     echo "内容交互时，也可使用以下选项:"
     echo "  -msgs 显示当前消息记录"
     echo "  -l    查看历史记录并选择加载"
+    echo "  -c    手动压缩对话历史"
+    echo "  -u    查看当前上下文 token 用量"
     echo "  -h    显示帮助信息"
 }
 
@@ -245,12 +324,32 @@ parse_options() {
             break
         fi
 
+        if [[ "${!i}" == "-c" ]]; then
+            compact_messages
+            break
+        fi
+
+        if [[ "${!i}" == "-u" ]]; then
+            print_usage
+            break
+        fi
+
         if [[ "${!i}" == "-h" ]]; then
             help_user
             break
         fi
 
     done
+}
+
+# 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
+# 任何一个后代还攥着管道写端，read 就永远等不到 EOF，循环退不出去
+kill_tree() {
+    local pid=$1 child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null
 }
 
 # 窗口模式运行命令
@@ -260,6 +359,8 @@ run_with_window() {
     local total=0 drawn=0
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
+    local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
+    local cmd_stat="" last_data=0 bg_leak=0
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -293,11 +394,31 @@ run_with_window() {
         drawn=${#buf[@]}
     }
 
+    # 用 FIFO + 后台任务代替进程替换 <(...)：$! 能拿到子 shell PID，
+    # 卡死时 Ctrl+C 可精准杀掉子命令。
+    # 不用 coproc 的原因：coproc 一结束 bash 会 unset 其数组并关掉读端 fd，
+    # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
+    win_tmpdir=$(mktemp -d)
+    mkfifo "$win_tmpdir/fifo" || return 1
+    eval "$cmd" > "$win_tmpdir/fifo" 2>&1 &
+    cmd_pid=$!
+    exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
+
+    # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成"只杀子命令"：
+    # - 第一次 Ctrl+C：kill_tree 用 TERM 杀掉整个子进程树（子命令忽略 SIGINT，
+    #   直接发 INT 没用），管道写端全部关闭 → read 收到 EOF → 窗口正常收尾，主脚本继续；
+    # - 第二次 Ctrl+C：兜底恢复原 trap 并重新触发，走 handle_ctrl_c 整体退出。
+    # trap 能在 0.1s 内执行的前提是下面 read 的 -t 轮询超时；无限阻塞的 read 会
+    # 把 trap 推迟到 read 完成才执行（死锁），这里不存在。
+    old_trap=$(trap -p INT)
+    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; kill_tree "$cmd_pid"; fi' INT
+
+    last_data=${EPOCHREALTIME/./}
     while :; do
         chunk=""
         # 按块读而非按行读：交互提示通常不带换行，按行 read 永远等不到 \n，
         # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
-        IFS= read -r -t 0.1 -N 65536 chunk
+        IFS= read -r -t 0.1 -N 65536 -u "$win_fd" chunk
         rc=$?
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
@@ -312,16 +433,34 @@ run_with_window() {
             done
             line="$pending"; clean_line; partial="$line"
             dirty=1
+            last_data=${EPOCHREALTIME/./}
         fi
         # 超时退出码 >128（继续等）；1~128 是 EOF（命令结束）
         (( rc > 0 && rc <= 128 )) && break
         now=${EPOCHREALTIME/./}
+        # 兜底:命令主体已退出(变僵尸/被回收)但 FIFO 写端仍被其后台子进程
+        # 握着(AI 在命令里用 & 启动服务),EOF 永远不会来。静默超时提前收尾,
+        # 防止窗口永久挂死。正常慢命令的进程还活着,不会触发。
+        if [[ -n "$cmd_pid" ]]; then
+            cmd_stat=$(ps -o stat= -p "$cmd_pid" 2>/dev/null | tr -d ' ')
+            if [[ -z "$cmd_stat" || "$cmd_stat" == Z* ]]; then
+                if (( now - last_data > BG_SILENT_TIMEOUT )); then
+                    bg_leak=1
+                    break
+                fi
+            fi
+        fi
         if (( dirty && now - last_paint > THROTTLE )); then
             paint
             last_paint=$now
             dirty=0
         fi
-    done < <(eval "$cmd" 2>&1)
+    done
+
+    # 恢复原 INT trap，关闭读端并清理临时 FIFO
+    [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
+    eval "exec $win_fd<&-"
+    rm -rf "$win_tmpdir"
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
     if [[ -n "$pending" ]]; then
@@ -336,25 +475,121 @@ run_with_window() {
     partial=""
     paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
     printf '\033[?25h\033[?7h'
-    printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+    if (( bg_leak )); then
+        printf '\033[2m└─ 命令主体已结束,但输出管道仍被后台进程占用,已停止等待 ─┘\033[0m\n'
+        # 告诉模型:疑似用 & 启动了长驻服务,应改用 run_in_background=true
+        window_output+=$'\n(检测到命令使用了 & 后台符号,输出管道被后台进程占用。若为长驻服务,请改用 run_in_background=true 参数重新启动。)'
+    elif (( interrupted )); then
+        printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n' "$total"
+        # 告诉模型命令是被用户中断的，而不是自然跑完
+        window_output+=$'\n(命令已被用户中断)'
+    else
+        printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+    fi
 }
 
 # 工具 skill
 tools() {
     # 注意：这里输出会被 printContent 用 tools=$(tools) 捕获，
-    # 所以绝不能 echo 调试信息，只能输出纯净的 JSON
+    # 所以绝不能 echo 调试信息，只能输出纯净的 JSON。
+    # 工具分工(业界标准,同 Claude Code):
+    #   读代码/写代码/改代码 → read_file / write_file / edit_file(不要用 shell 技巧)
+    #   找文件/找符号 → list_dir / grep
+    #   编译/测试/安装/git → run_shell_command
+    # 所有文件类工具的路径都强制限制在启动目录(WORK_ROOT)内,越界由代码层拒绝。
     printf '%s' '[
         {
             "type": "function",
             "function": {
+                "name": "read_file",
+                "description": "读取文件内容,返回带行号的文本。读取任何代码或文本文件时,优先使用本工具,不要用 cat 等 shell 命令。文件过大时自动截断并提示,此时应使用 offset/limit 参数分段读取。offset 为起始行号(从 1 开始,默认 1),limit 为读取行数(省略则读全文)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "offset": {"type": "integer", "description": "起始行号,从 1 开始,默认 1"},
+                        "limit": {"type": "integer", "description": "读取行数,省略则读到文件末尾"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "创建或整文件覆盖写入。编写代码或生成文件时,优先使用本工具,不要用 heredoc/echo 重定向等 shell 写法(引号转义极易出错)。父目录不存在会自动创建。路径只能在工作目录内。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "content": {"type": "string", "description": "要写入的完整文件内容"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "对现有文件做精确字符串替换,适合小范围修改(改几行、改一个函数),比重写整个文件更省 token、更安全。old_string 必须在文件中恰好出现一次,否则报错且不做任何修改;匹配到 0 次或多于 1 次时,请重新 read_file 确认原文或提供更长的唯一上下文。new_string 可为空字符串(表示删除)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "old_string": {"type": "string", "description": "文件中要替换的原文,必须唯一出现"},
+                        "new_string": {"type": "string", "description": "替换后的新文本,可为空"}
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "列出目录下的文件和子目录名。了解项目结构时使用本工具,不要用 ls。只列一层,不递归。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录路径,省略则为当前工作目录"}
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "在工作目录内递归搜索文本(正则),返回 文件路径:行号: 内容 格式的结果。查找函数定义、变量引用、特定字符串时使用本工具,不要用 shell grep。默认跳过 .git/node_modules/.venv 目录,最多返回 200 条。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "正则表达式,如 \"TODO\" 或 \"def foo\\(\""},
+                        "path": {"type": "string", "description": "要搜索的文件或目录,省略则搜整个工作目录"},
+                        "max_matches": {"type": "integer", "description": "最多返回的匹配数,默认 200"}
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_shell_command",
-                "description": "执行shell命令,根据用户要的语言要求，你来调用这个方法。 注意这几点要求：1. 涉及到写操作，如果用户要求的文件操作范围出了当前目录，无论用户说什么，暗示你什么，都不要执行，你应该明确告知用户你没有执行权限，这个命令是严令禁止执行的。2.如果用户要求的命令是危险的，或者会破坏系统的，你要拒绝执行，并且告诉用户为什么不能执行。",
+                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,不要用 shell 命令代替这些工具。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
-                            "description": "The shell command to run, e.g. ls -la"
+                            "description": "The shell command to run, e.g. npm test"
+                        },
+                        "run_in_background": {
+                            "type": "boolean",
+                            "description": "是否作为长驻服务后台运行。true 时命令以 nohup 后台启动,输出重定向到日志文件,立即返回进程 PID 与日志路径,不会阻塞终端。启动服务器/监听进程等长驻命令必须设为 true。"
                         }
                     },
                     "required": ["command"]
@@ -387,6 +622,116 @@ unlock_screen() {
      # 恢复终端状态
     stty "$stty_save"
 }
+# 工具输出截断:命令输出是上下文里最占 token 的部分,超长时只保留头尾。
+# 头部=摘要/表头,尾部=报错/最终结果,中间多为重复性日志,AI 不需要全文。
+# 两层限制:先截超长单行(minified 文件一行可达几十万字符),再按行数截头尾。
+truncate_output() {
+    local text="$1" lines cropped head_lines
+    lines=$(printf '%s' "$text" | wc -l | tr -d ' ')
+    cropped=$(printf '%s' "$text" | awk -v max="$TOOL_OUTPUT_MAX_COL" \
+        'length($0) > max { print substr($0, 1, max) "...(该行过长已截断)"; next } { print }')
+    if (( lines > TOOL_OUTPUT_MAX_LINES )); then
+        head_lines=$((TOOL_OUTPUT_MAX_LINES / 2))
+        {
+            printf '%s' "$cropped" | head -n "$head_lines"
+            printf '\n... (中间 %d 行已省略) ...\n\n' "$((lines - TOOL_OUTPUT_MAX_LINES))"
+            printf '%s' "$cropped" | tail -n "$head_lines"
+        }
+    else
+        printf '%s' "$cropped"
+    fi
+}
+
+# 自动压缩(compaction):把超出保留范围的旧消息浓缩成一条摘要消息,
+# 结构重组为 system + [摘要] + 最近 KEEP_MSGS 条原文。
+# 业界标准做法(Claude Code / Aider):
+#   - 压缩请求用便宜的 flash 模型、stream:false 静默一次拿完,不渲染;
+#   - 摘要作为普通 user 消息插入,历史可被递归再压缩;
+#   - 压缩失败时兜底硬截断(保留 system + 最近原文),绝不让脚本卡死;
+#   - 只在"完整一轮的边界"调用(printContent 开头),工具调用链中途调用会
+#     破坏 tool_call_id 配对,API 会直接报错。
+compact_messages() {
+    local total cut system_msg tail_msgs to_compact summary request_body
+    total=$(echo "$messages" | jq 'length')
+    (( total <= KEEP_MSGS )) && echo "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
+
+    cut=$((total - KEEP_MSGS))
+    # 切点对齐工具链边界:tail 第一条绝不能是 tool 消息。否则它对应的
+    # assistant(tool_calls) 被摘要替代后,这条 tool 变成"孤儿"(前面没有
+    # 含其 tool_call_id 的 assistant 消息),DeepSeek API 直接 400 拒绝请求,
+    # 表现为"发消息无任何输出"。把 cut 向前移,直到 tail 首条不是 tool。
+    while (( cut > 1 )); do
+        first_role=$(echo "$messages" | jq -r --argjson cut "$cut" '.[$cut].role // empty' 2>/dev/null)
+        [[ "$first_role" != "tool" ]] && break
+        cut=$((cut - 1))
+    done
+    # 极端情况:整个对话几乎全是未闭合的工具链,再压没有意义,放弃本次压缩
+    (( cut <= 1 )) && echo "工具链过长,跳过本次压缩" && return 0
+
+    system_msg=$(echo "$messages" | jq '.[0]')
+    tail_msgs=$(echo "$messages" | jq --argjson cut "$cut" '.[$cut:]')
+
+    # 中间段转成 "[role] content" 可读文本,减少压缩请求的输入 token;
+    # assistant 带 tool_calls 的消息 content 为 null,单独转成一行描述,
+    # 保证"模型调用了哪个工具、什么参数"这一关键信息不丢
+    to_compact=$(echo "$messages" | jq -r --argjson cut "$cut" '
+        .[1:$cut][] |
+        if .tool_calls != null then
+            "[assistant → 工具调用] " + (.tool_calls | tostring)
+        else
+            "[" + .role + "] " + (.content // "")
+        end')
+
+    if (( last_prompt_tokens > TOKEN_THRESHOLD )); then
+        printf '📦 上下文 %s tokens 已超阈值 %s,正在自动压缩历史…\n' "$last_prompt_tokens" "$TOKEN_THRESHOLD"
+    else
+        printf '📦 正在压缩历史…(当前 %s tokens,阈值 %s)\n' "${last_prompt_tokens:-0}" "$TOKEN_THRESHOLD"
+    fi
+
+    request_body=$(jq -n --arg compact_text "$to_compact" '{
+        model: "deepseek-v4-flash",
+        messages: [
+            {role: "system", content: "你是对话历史压缩助手。任务:把用户提供的旧对话记录压缩成一段精炼的摘要,替代原始记录用于后续继续对话。要求:1. 保留用户的整体目标与意图、关键决策与结论、已执行的命令及其重要结果、出现的错误与最终修复方式、涉及的重要文件路径、用户的个人偏好与约束;2. 丢弃客套话、重复内容与冗长的命令输出;3. 用中文输出,不超过 500 字,只输出摘要正文,不要任何前缀或解释。"},
+            {role: "user", content: $compact_text}
+        ],
+        thinking: {type: "disabled"},
+        reasoning_effort: "high",
+        stream: false
+    }')
+
+    # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支
+    summary=$(curl -s --max-time 120 https://api.deepseek.com/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -d "$request_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+
+    if [[ -z "$summary" ]]; then
+        messages=$(echo "$messages" | jq --argjson cut "$cut" '.[0:1] + .[$cut:]')
+        printf '⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 %s 条原文\n' "$KEEP_MSGS"
+    else
+        messages=$(jq -n --argjson sys "$system_msg" --arg prefix "$SUMMARY_PREFIX" \
+            --arg summary "$summary" --argjson tail "$tail_msgs" \
+            '[ $sys, {role: "user", content: ($prefix + "\n" + $summary)}, $tail[] ]')
+        printf '✅ 压缩完成:%s 条消息 → 1 条摘要 + %s 条原文\n' "$total" "$KEEP_MSGS"
+    fi
+    # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
+    last_prompt_tokens=0
+}
+
+# 查看当前上下文用量
+print_usage() {
+    local est pct
+    est=$(printf '%s' "$messages" | wc -c | tr -d ' ')
+    est=$((est * 2 / 5))
+    echo "消息条数: $(echo "$messages" | jq length)"
+    if (( last_prompt_tokens > 0 )); then
+        pct=$((last_prompt_tokens * 100 / TOKEN_THRESHOLD))
+        echo "上下文用量: ${last_prompt_tokens} tokens / 阈值 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
+    else
+        echo "上下文用量: 约 ${est} tokens(字节粗算;精确值在下次请求后显示,阈值 ${TOKEN_THRESHOLD})"
+    fi
+}
+
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 add_message() {
     local addctx="$1"
@@ -398,10 +743,15 @@ add_message() {
         # 默认 user 消息
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
-        # assistant 发起工具调用：必须记录 tool_calls（content 为 null），
-        # 否则后面的 tool 结果消息对不上号，模型就无法继续调用工具
-        messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
-            '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
+        # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
+        if [[ -z "$addctx" ]]; then
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
+                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        else
+            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
+                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+        fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
@@ -410,102 +760,358 @@ add_message() {
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
     fi
 }
-
-# 工具调用处理器：解析流式分片的工具调用 JSON，输出标准化的 fn_name/fn_args/fn_id
-tool_handler() {
-    local tool_chunk="$1"
-
-    local chunk_name chunk_args chunk_id
-    chunk_name=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.name // empty' 2>/dev/null)
-    chunk_args=$(printf '%s' "$tool_chunk" | jq -r '.[0].function.arguments // empty' 2>/dev/null)
-    chunk_id=$(printf '%s' "$tool_chunk" | jq -r '.[0].id // empty' 2>/dev/null)
-
-    # 用 jq 构造 JSON，自动转义 fn_args 里的引号/反斜杠。
-    # 绝不能手工拼字符串：arguments 分片里到处是 "，会直接破坏 JSON 语法。
-    jq -n --arg name "$chunk_name" --arg args "$chunk_args" --arg id "$chunk_id" \
-        '{fn_name: $name, fn_args: $args, fn_id: $id}'
+auth_add_message() {
+    local addctx="$1"
+    local role="${2:-user}"
+    # 基于 auth_message 自身拼接（原实现误用了 $messages，会丢掉对话历史）
+    auth_message=$(echo "$auth_message" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
 }
-# 工具调用执行器：根据 fn_name/fn_args/fn_id 执行工具，并把结果喂给模型继续推理
-tool_run_and_parse() {
-    local id="$1"
-    local tools
-    local request_body
-    
-    add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
 
-    if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
+# 工具调用处理器已删除:并行调用按 index 解析已内联进 ask_ai 的流式循环,
+# 这里不再需要单工具解析(旧实现只取 .[0],会把并行调用的参数粘合导致 null 错误)。
+
+auth_think() {
+    local cmd=$1
+    local request_body
+    auth_add_message "$cmd"
+    request_body=$(jq -n \
+            --argjson msgs "$auth_message" \
+            '{
+            model: "deepseek-v4-flash",
+            messages: $msgs,
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: true,
+            stream_options: {include_usage: true}
+        }')
+    # 结果通过全局 full_response 传回（ask_ai 会重置它），这里不再 printf。
+    # 本函数绝不能放进 $(...) 里调用：ask_ai 的流式输出会塞满命令替换的
+    # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
+    # 第三个参数 0:auth 消息极小,不把它的 usage 记入 last_prompt_tokens
+    ask_ai "$request_body" 0 0
+
+    sleep 0.5
+
+    auth_add_message "$full_response" "assistant"
+}
+# 路径沙箱:解析工具传入的路径为物理绝对路径,并强制落在 WORK_ROOT 内。
+# 相对路径基于工作目录;.. 逃逸、绝对路径指向外部、symlink 指向外部都会被拒绝。
+# 写文件时父目录可能尚未存在:向上找最近的已存在祖先做物理规范化,
+# 缺失的段原样拼回(必须都是新目录名,任何一段为 .. 直接拒绝)。
+# 成功输出解析后的绝对路径,失败返回非零。
+resolve_path() {
+    local p="$1" dir base canon missing seg
+    [[ -z "$p" ]] && return 1
+    [[ "$p" != /* ]] && p="$WORK_ROOT/$p"
+    dir=$(dirname "$p")
+    base=$(basename "$p")
+
+    missing=""
+    while [[ ! -d "$dir" ]]; do
+        [[ "$dir" == "/" ]] && return 1
+        missing="${dir##*/}/$missing"
+        dir=$(dirname "$dir")
+    done
+    # 缺失段必须逐个是普通目录名,含 .. 的拒绝(此时无法安全规范化)
+    for seg in ${missing//\// }; do
+        [[ "$seg" == ".." ]] && return 1
+    done
+
+    canon=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    # 必须等于工作根目录,或以 工作根目录/ 开头
+    [[ "$canon" == "$WORK_ROOT" || "$canon" == "$WORK_ROOT"/* ]] || return 1
+    printf '%s/%s%s' "$canon" "$missing" "$base"
+}
+
+# 文件类工具的实现约定:结果写入全局变量 content(与 shell 工具一致),
+# 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
+
+tool_read_file() {
+    local path offset limit resolved out total_lines total_chars
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    offset=$(jq -r '.offset // empty' <<< "$fn_args")
+    limit=$(jq -r '.limit // empty' <<< "$fn_args")
+    [[ -z "$offset" || "$offset" == "null" ]] && offset=1
+    [[ -z "$limit" || "$limit" == "null" ]] && limit=0
+
+    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+
+    total_lines=$(wc -l < "$resolved" | tr -d ' ')
+    total_chars=$(wc -m < "$resolved" | tr -d ' ')
+
+    # 带行号输出:行号供 edit_file 的 old_string 定位和后续沟通引用
+    if (( limit > 0 )); then
+        out=$(sed -n "${offset},$((offset + limit - 1))p" "$resolved" | \
+            awk -v s="$offset" '{printf "%6d│ %s\n", s + NR - 1, $0}')
+        content="📄 $path · 第 ${offset}-$((offset + limit - 1)) 行(共 ${total_lines} 行):\n\n$out"
+    elif (( total_chars > READ_MAX_CHARS )); then
+        # 按行粒度截断:awk 逐行累计字符数,超阈值即停,不会切断多字节字符
+        out=$(awk -v max="$READ_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; printf "%6d│ %s\n", NR, $0}' "$resolved")
+        content="📄 $path · 共 ${total_lines} 行 / ${total_chars} 字符,文件过大仅返回前半部分。请用 offset/limit 参数继续分段读取:\n\n$out"
+    else
+        out=$(awk '{printf "%6d│ %s\n", NR, $0}' "$resolved")
+        content="📄 $path · 共 ${total_lines} 行:\n\n$out"
+    fi
+    printf ' 已读取 %s(%s 行)\n' "$path" "$total_lines"
+}
+
+tool_write_file() {
+    local path resolved
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+
+    mkdir -p "$(dirname "$resolved")" 2>/dev/null || { content="错误:无法创建目录: $path"; return 0; }
+    # 内容直接由 jq 流式写入文件,不经过命令替换(命令替换会剥掉末尾换行)
+    jq -r '.content' <<< "$fn_args" > "$resolved"
+    content="✅ 已写入 $path($(wc -l < "$resolved" | tr -d ' ') 行)"
+    printf ' 已写入 %s\n' "$path"
+}
+
+# 纯 bash 精确替换引擎:
+#   出现次数 = (原文长度 - 删掉 old 后长度) / old 长度,多行字符串同样成立
+tool_edit_file() {
+    local path old_str new_str resolved data tmp count
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    old_str=$(jq -r '.old_string // empty' <<< "$fn_args")
+    new_str=$(jq -r '.new_string // empty' <<< "$fn_args")
+
+    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+    [[ -z "$old_str" ]] && { content="错误:old_string 不能为空"; return 0; }
+
+    data=$(<"$resolved")
+    tmp=${data//"$old_str"/}
+    count=$(( (${#data} - ${#tmp}) / ${#old_str} ))
+
+    if (( count == 0 )); then
+        content="错误:在 $path 中未找到指定内容,未做任何修改。请用 read_file 重新确认原文。"
+        printf ' ⚠️  未找到待替换内容,文件未修改\n'
+    elif (( count > 1 )); then
+        content="错误:指定内容在 $path 中出现 ${count} 次,不唯一,未做任何修改。请提供更长的上下文使其唯一。"
+        printf ' ⚠️  待替换内容出现 %s 次,不唯一,文件未修改\n' "$count"
+    else
+        data=${data//"$old_str"/"$new_str"}
+        printf '%s' "$data" > "$resolved"
+        content="✅ 已修改 $path(替换 1 处)"
+        printf ' 已修改 %s\n' "$path"
+    fi
+}
+
+tool_list_dir() {
+    local path resolved files dirs
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    [[ -z "$path" || "$path" == "null" ]] && path="."
+    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    [[ -d "$resolved" ]] || { content="错误:目录不存在: $path"; return 0; }
+
+    files=$(find "$resolved" -maxdepth 1 -type f -exec basename {} \; | sort)
+    dirs=$(find "$resolved" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; | sort)
+    content="目录 $path:\n[文件]\n${files:-"(空)"}\n\n[子目录]\n${dirs:-"(空)"}"
+    printf ' 已列出 %s\n' "$path"
+}
+
+tool_grep() {
+    local pattern path max_matches resolved out
+    pattern=$(jq -r '.pattern // empty' <<< "$fn_args")
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    max_matches=$(jq -r '.max_matches // empty' <<< "$fn_args")
+    [[ -z "$pattern" ]] && { content="错误:pattern 不能为空"; return 0; }
+    [[ -z "$max_matches" || "$max_matches" == "null" ]] && max_matches=$GREP_MAX_MATCHES
+
+    if [[ -n "$path" && "$path" != "null" ]]; then
+        resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    else
+        resolved="$WORK_ROOT"
+    fi
+    [[ -e "$resolved" ]] || { content="错误:路径不存在: $path"; return 0; }
+
+    # -E 正则 -r 递归 -n 行号 -I 跳过二进制;结果单行截宽,防 minified 长行污染上下文
+    out=$(grep -rnIE --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
+        -e "$pattern" "$resolved" 2>/dev/null | head -n "$max_matches" | \
+        awk -v max="$GREP_MAX_COL" 'length($0) > max { $0 = substr($0, 1, max) "…(过长已截断)" } { print }')
+
+    if [[ -z "$out" ]]; then
+        content="未找到匹配 \"$pattern\" 的内容。"
+    else
+        content="搜索 \"$pattern\" 的结果:\n$out"
+    fi
+    printf ' 已搜索:%s\n' "$pattern"
+}
+
+# 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
+# tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
+# 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
+tool_run_and_parse() {
+    local tools request_body args_preview
+    local -a ids_arr names_arr args_arr
+    local first_call=1 i
+
+    # 快照收集区并按 index 升序,然后立即清空全局数组。
+    # 立即清空是重入防护关键:shell 分支里 auth_think 会重入 ask_ai,
+    # 若收集区仍残留,重入的 ask_ai 结束时又会误触发本函数(递归执行工具)。
+    while IFS= read -r i; do
+        [[ -z "$i" ]] && continue
+        ids_arr+=("${tool_ids[$i]}")
+        names_arr+=("${tool_names[$i]}")
+        args_arr+=("${tool_args[$i]}")
+    done < <(printf '%s\n' "${!tool_ids[@]}" | sort -n)
+    tool_ids=()
+    tool_names=()
+    tool_args=()
+    [[ ${#ids_arr[@]} -eq 0 ]] && return 0
+
+    # AI 在调用工具前输出的正文(如"我先看看这个文件"),只放进第一条 assistant 消息
+    [[ -n "$full_response" ]] && render_markdown "$full_response"
+
+    for i in "${!ids_arr[@]}"; do
+        fn_id="${ids_arr[$i]}"
+        fn_name="${names_arr[$i]}"
+        fn_args="${args_arr[$i]}"
+        [[ -z "$fn_name" || -z "$fn_id" ]] && continue
+
+        # assistant 的 tool_calls 消息:第一条带正文,其余 content 为 null
+        if (( first_call )); then
+            add_message "$full_response" "assistant" "$fn_id" "$fn_name" "$fn_args"
+            first_call=0
+        else
+            add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
+        fi
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
-            command=$(jq -r '.command' <<< "$fn_args")
-            tool_use_response="**工具调用: $command**"
-            render_markdown "$tool_use_response"
+            # // empty 兜底:参数缺字段时输出空,而不是字面 "null"(eval null 会报错)
+            command=$(jq -r '.command // empty' <<< "$fn_args")
+            run_in_bg=$(jq -r '.run_in_background // false' <<< "$fn_args")
+            if [[ -z "$command" ]]; then
+                content="错误:命令参数为空,工具调用参数解析失败: ${fn_args:-"(空)"}"
+                add_message "$content" "tool" "$fn_id"
+                continue
+            fi
+            printf " \033[43;30;1m  工具调用：${command}  \033[0m"
+            echo $'\n\n'
 
             # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
             # 防止残留的 "y" 自动确认执行命令（粘贴注入防护）
             local _junk=""
             while IFS= read -r -t 0.01 -N 1000000 _junk; [[ -n "$_junk" ]]; do _junk=""; done
 
-            printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
-            IFS= read -r answer
+            # 不能写 ai_auth=$(auth_think ...)：命令替换会捕获 auth_think 的
+            # 全部 stdout，流式输出一旦超过管道缓冲就死锁。改为直接调用，
+            # 结果从全局变量 full_response 取。
+            # 重入安全:收集区已在函数开头清空,auth 内部 ask_ai 结束不会误触发本函数。
+            auth_think "$command"
+            ai_auth=$(echo -e "$full_response")
+
+            if [[ "$ai_auth" == "N" ]]; then
+                printf '\033[2K\033[1;41;37m是否执行该命令？(y/n): \033[0m'
+                IFS= read -r answer
+
+            fi
             # echo "用户输入: $answer"
-            if [[ "$answer" == "y" ]]; then
-                # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
-                run_with_window "$command"
-                content="$window_output"
-                sleep 2
+            if [[ "$ai_auth" == "Y" || "$answer" == "y" ]]; then
+                if [[ "$run_in_bg" == "true" ]]; then
+                    # 后台启动长驻服务:输出重定向到日志、stdin 断开终端、立即返回。
+                    # 绝不能走 run_with_window:服务器进程继承 FIFO 写端,
+                    # 窗口循环永远等不到 EOF,主 shell 会被永久卡死。
+                    # 注意 BSD mktemp 要求 XXXXXX 在模板末尾,不能加 .log 后缀
+                    bg_log=$(mktemp "${TMPDIR:-/tmp}/ct_bg_XXXXXX")
+                    nohup bash -c "$command" </dev/null >"$bg_log" 2>&1 &
+                    bg_pid=$!
+                    content="✅ 服务已在后台启动:PID ${bg_pid}"$'\n'"日志: ${bg_log}"$'\n'"查看输出: 用 shell 工具执行 tail -f ${bg_log}"$'\n'"停止服务: kill ${bg_pid}(若有残留子进程,先 pkill -P ${bg_pid} 再 kill ${bg_pid})"
+                    printf ' 后台启动 PID %s · 日志 %s\n' "$bg_pid" "$bg_log"
+                else
+                    # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
+                    # 先截断:超长输出保留头尾,砍掉重复性日志,控制上下文体积
+                    run_with_window "$command"
+                    content=$(truncate_output "$window_output")
+                    sleep 2
+                fi
             else
                 content="用户拒绝执行命令: $command"
             fi
+        else
+            # 文件类工具:打印一行参数预览后直接执行。
+            # 只读工具无需确认;写工具已由 resolve_path 强制限制在工作目录内,
+            # git 可回滚,不再逐次询问(业界做法,Claude Code 同样不确认)。
+            # 分发用白名单,防止未知函数名被动态执行。
+            args_preview=$(jq -c '.' <<< "$fn_args" 2>/dev/null)
+            [[ "$args_preview" == "null" ]] && args_preview="(参数为空)"
+            (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
+            printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
+            case "$fn_name" in
+                read_file|write_file|edit_file|list_dir|grep) "tool_$fn_name" ;;
+                *) content="错误:未知工具 $fn_name" ;;
+            esac
         fi
 
-        add_message "$content" "tool" "$id"
+        add_message "$content" "tool" "$fn_id"
+    done
 
-        # id="$fn_id"
+    fn_name=""
+    fn_args=""
+    fn_id=""
 
-        fn_name=""
-        fn_args=""
-        fn_id=""
+    tools=$(tools)
+    request_body=$(jq -n \
+        --arg model "$model" \
+        --argjson msgs "$messages" \
+        --arg thinking "$thinking" \
+        --argjson tool "$tools" \
+        '{
+        model: $model,
+        messages: $msgs,
+        thinking: {type: $thinking},
+        reasoning_effort: "high",
+        stream: true,
+        tools: $tool,
+        stream_options: {include_usage: true}
+    }')
 
+    ask_ai "$request_body" 1
 
-        tools=$(tools)
-        request_body=$(jq -n \
-            --arg model "$model" \
-            --argjson msgs "$messages" \
-            --arg thinking "$thinking" \
-            --argjson tool "$tools" \
-            '{
-            model: $model,
-            messages: $msgs,
-            thinking: {type: $thinking},
-            reasoning_effort: "high",
-            stream: true,
-            tools: $tool
-        }')
-
-        ask_ai "$request_body" 1
-    fi
+    # render_markdown "$thinking_response"
+    # render_markdown "$full_response"
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
+# 参数:$1 请求体  $2 是否锁屏  $3 是否记录 usage(默认 1;auth 等旁路请求传 0,
+#      避免把小请求的 prompt_tokens 误记为上下文真实大小)
 ask_ai() {
     
-    [[ "$content" =~ ^\-.* ]] && echo "请不要以 - 开头输入内容，否则会被当作命令行参数解析" && content="" && return 0
+    # 拦截以选项开头的内容（如 "-l xxx"），避免被当成普通提问发给模型
+    for option in "${options_list[@]}"; do
+        [[ "$content" == "$option" || "$content" == "$option "* ]] && content="" && return 0
+    done
 
     local think_start=0
     local think_end=0
     local chunk=""
     local json=""
+    local usage_pt=""
+    local t_idx="" t_name="" t_args="" t_id="" tpiece=""
+    local api_error="" err_msg=""
     local request_body=$1
     local is_lock_screen=$2
+    local is_record_usage=${3:-1}
 
     full_response=""
     thinking_response=""
+    # 每次请求开始清空工具调用收集区,防止上一轮残留导致误触发
+    tool_ids=()
+    tool_names=()
+    tool_args=()
 
     [[  "$is_lock_screen" == 1 ]] && lock_screen
 
     while IFS= read -r line; do
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
-            [[ "$json" == "[DONE]" ]] && break
+            [[ "$json" == "[DONE]" ]] && break            # stream_options.include_usage:流式最后一个 chunk 的 choices 为空、
+            # 只带 usage。prompt_tokens = 本次请求发送的全量 messages 的 token 数,
+            # 即"当前上下文大小"的精确值,直接覆盖旧值,无需累计
+            if (( is_record_usage )); then
+                usage_pt=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens // empty' 2>/dev/null)
+                [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
+            fi
 
             # 思考部分的输出也要显示出来
             thinking_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; echo x)"
@@ -541,21 +1147,27 @@ ask_ai() {
             
             tool_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.tool_calls // empty')"
             if [[ -n "$tool_chunk" ]]; then
-                # echo "==: $tool_chunk"
-                fn_object=$(tool_handler "$tool_chunk")
-                # echo "工具调用更新==: $fn_object"
-                # 流式分片：函数名/id 只在首片出现，非空才赋值，避免被空分片冲掉；
-                # arguments 是分片到达的，必须累加 fn_args+="$chunk"，不能覆盖。
-                chunk_name=$(jq -r '.fn_name' <<< "$fn_object")
-                chunk_args=$(jq -r '.fn_args' <<< "$fn_object")
-                chunk_id=$(jq -r '.fn_id' <<< "$fn_object")
-                [[ -n "$chunk_name" ]] && fn_name="$chunk_name"
-                [[ -n "$chunk_args" ]] && fn_args+="$chunk_args"
-                [[ -n "$chunk_id" ]] && fn_id="$chunk_id"
+                # 并行调用:一次响应可含多个 tool_calls(index 区分)。每个调用
+                # 的 name/id 只在其首片出现,arguments 分片按 index 各自累加。
+                # 绝不能把不同 index 的参数拼在一起(历史 bug:参数粘合后
+                # jq 解析出 null,shell 工具执行 eval "null" 报 command not found)。
+                while IFS= read -r tpiece; do
+                    t_idx=$(printf '%s' "$tpiece" | jq -r '.index // 0' 2>/dev/null)
+                    t_name=$(printf '%s' "$tpiece" | jq -r '.function.name // empty' 2>/dev/null)
+                    t_args=$(printf '%s' "$tpiece" | jq -r '.function.arguments // empty' 2>/dev/null)
+                    t_id=$(printf '%s' "$tpiece" | jq -r '.id // empty' 2>/dev/null)
+                    [[ -n "$t_name" ]] && tool_names[$t_idx]="$t_name"
+                    [[ -n "$t_args" ]] && tool_args[$t_idx]+="$t_args"
+                    [[ -n "$t_id" ]] && tool_ids[$t_idx]="$t_id"
+                done < <(printf '%s' "$tool_chunk" | jq -c '.[]' 2>/dev/null)
             fi
 
             # chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
             # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
+        else
+            # 非 SSE 行:API 报错(如 400 结构非法)时 curl 输出整段 JSON 而非
+            # data: 流。记录之,循环结束后显示,避免"发消息毫无输出"的静默失败。
+            [[ "$line" == \{* || "$line" == \[* ]] && api_error+="$line"$'\n'
         fi
     done < <(
         curl -sN https://api.deepseek.com/chat/completions \
@@ -567,13 +1179,26 @@ ask_ai() {
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
 
-    [[ -n "$fn_id" ]] && tool_run_and_parse "$fn_id"
+    # API 请求失败(非流式错误响应):显示错误并写入 full_response,
+    # 让错误可见且能进入 messages,模型下一轮可以看到失败原因
+    if [[ -z "$full_response" && -z "$thinking_response" && -n "$api_error" ]]; then
+        err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
+        [[ -z "$err_msg" ]] && err_msg=$api_error
+        full_response="⚠️ API 请求失败: $err_msg"
+        printf '\033[31m%s\033[0m\n' "$full_response"
+    fi
+
+    (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
 }
 
 # 打印内容函数
 printContent() {
 
     add_message "$content"
+
+    # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
+    # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
+    (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
 
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
@@ -590,7 +1215,8 @@ printContent() {
         thinking: {type: $thinking},
         reasoning_effort: "high",
         stream: true,
-        tools: $tool
+        tools: $tool,
+        stream_options: {include_usage: true}
     }')
 
     
@@ -624,7 +1250,8 @@ overview() {
         messages: $msgs,
         thinking: {type: "disabled"},
         reasoning_effort: "high",
-        stream: true
+        stream: true,
+        stream_options: {include_usage: true}
     }')
 
     ask_ai "$request_body"
@@ -782,6 +1409,14 @@ normal_line() {
         fi
         if [[ "$line" == "-msgs" ]]; then
             echo "$messages"
+            break
+        fi
+        if [[ "$line" == "-c" ]]; then
+            compact_messages
+            break
+        fi
+        if [[ "$line" == "-u" ]]; then
+            print_usage
             break
         fi
         if [[ "$line" == "-h" ]]; then
