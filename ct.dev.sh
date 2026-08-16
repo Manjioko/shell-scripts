@@ -11,6 +11,10 @@ content=""
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
 
+#辅助权限判断助手消息
+# 
+auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。"}]')
+
 
 # 是否思考,默认关闭
 thinking="disabled"
@@ -36,6 +40,8 @@ stty_save=""
 WIN=10
 # 重画节流间隔（微秒）
 THROTTLE=50000
+
+options_list=("-l" "-msgs" "-h")
 
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
@@ -85,9 +91,9 @@ save_history() {
     # 替换斜杠
     # name=$(echo "${chat_title%.json}" | tr '/' '_')
     # 替换其他危险字符（如空格、特殊符号）
-    # name=$(echo "$name" | tr '[:space:]' '_')
-    # name=$(echo "$name" | tr -d '\\/:*?"<>|')
-    name="${chat_title%.json}" 
+    name=$(echo "$chat_title" | tr '[:space:]' '_')
+    name=$(echo "$name" | tr -d '\\/:*?"<>|')
+    name="${name%.json}" 
 
     [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
     history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
@@ -253,6 +259,16 @@ parse_options() {
     done
 }
 
+# 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
+# 任何一个后代还攥着管道写端，read 就永远等不到 EOF，循环退不出去
+kill_tree() {
+    local pid=$1 child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_tree "$child"
+    done
+    kill "$pid" 2>/dev/null
+}
+
 # 窗口模式运行命令
 run_with_window() {
     local cmd="$1"
@@ -260,6 +276,7 @@ run_with_window() {
     local total=0 drawn=0
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
+    local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -293,11 +310,30 @@ run_with_window() {
         drawn=${#buf[@]}
     }
 
+    # 用 FIFO + 后台任务代替进程替换 <(...)：$! 能拿到子 shell PID，
+    # 卡死时 Ctrl+C 可精准杀掉子命令。
+    # 不用 coproc 的原因：coproc 一结束 bash 会 unset 其数组并关掉读端 fd，
+    # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
+    win_tmpdir=$(mktemp -d)
+    mkfifo "$win_tmpdir/fifo" || return 1
+    eval "$cmd" > "$win_tmpdir/fifo" 2>&1 &
+    cmd_pid=$!
+    exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
+
+    # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成"只杀子命令"：
+    # - 第一次 Ctrl+C：kill_tree 用 TERM 杀掉整个子进程树（子命令忽略 SIGINT，
+    #   直接发 INT 没用），管道写端全部关闭 → read 收到 EOF → 窗口正常收尾，主脚本继续；
+    # - 第二次 Ctrl+C：兜底恢复原 trap 并重新触发，走 handle_ctrl_c 整体退出。
+    # trap 能在 0.1s 内执行的前提是下面 read 的 -t 轮询超时；无限阻塞的 read 会
+    # 把 trap 推迟到 read 完成才执行（死锁），这里不存在。
+    old_trap=$(trap -p INT)
+    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; kill_tree "$cmd_pid"; fi' INT
+
     while :; do
         chunk=""
         # 按块读而非按行读：交互提示通常不带换行，按行 read 永远等不到 \n，
         # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
-        IFS= read -r -t 0.1 -N 65536 chunk
+        IFS= read -r -t 0.1 -N 65536 -u "$win_fd" chunk
         rc=$?
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
@@ -321,7 +357,12 @@ run_with_window() {
             last_paint=$now
             dirty=0
         fi
-    done < <(eval "$cmd" 2>&1)
+    done
+
+    # 恢复原 INT trap，关闭读端并清理临时 FIFO
+    [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
+    eval "exec $win_fd<&-"
+    rm -rf "$win_tmpdir"
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
     if [[ -n "$pending" ]]; then
@@ -336,13 +377,20 @@ run_with_window() {
     partial=""
     paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
     printf '\033[?25h\033[?7h'
-    printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+    if (( interrupted )); then
+        printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n' "$total"
+        # 告诉模型命令是被用户中断的，而不是自然跑完
+        window_output+=$'\n(命令已被用户中断)'
+    else
+        printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+    fi
 }
 
 # 工具 skill
 tools() {
     # 注意：这里输出会被 printContent 用 tools=$(tools) 捕获，
     # 所以绝不能 echo 调试信息，只能输出纯净的 JSON
+    # 3. 执行阻塞性的命令时，比如运行网站服务器等阻塞性任务时，应该采用后台运行的方式，不要阻塞当前终端命令正常结束，并且记录好其后台运行id,方便你实时查阅运行状态
     printf '%s' '[
         {
             "type": "function",
@@ -415,6 +463,12 @@ add_message() {
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
     fi
 }
+auth_add_message() {
+    local addctx="$1"
+    local role="${2:-user}"
+    # 基于 auth_message 自身拼接（原实现误用了 $messages，会丢掉对话历史）
+    auth_message=$(echo "$auth_message" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
+}
 
 # 工具调用处理器：解析流式分片的工具调用 JSON，输出标准化的 fn_name/fn_args/fn_id
 tool_handler() {
@@ -430,6 +484,29 @@ tool_handler() {
     jq -n --arg name "$chunk_name" --arg args "$chunk_args" --arg id "$chunk_id" \
         '{fn_name: $name, fn_args: $args, fn_id: $id}'
 }
+
+auth_think() {
+    local cmd=$1
+    local request_body
+    auth_add_message "$cmd"
+    request_body=$(jq -n \
+            --argjson msgs "$auth_message" \
+            '{
+            model: "deepseek-v4-flash",
+            messages: $msgs,
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: true
+        }')
+    # 结果通过全局 full_response 传回（ask_ai 会重置它），这里不再 printf。
+    # 本函数绝不能放进 $(...) 里调用：ask_ai 的流式输出会塞满命令替换的
+    # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
+    ask_ai "$request_body"
+
+    sleep 0.5
+
+    auth_add_message "$full_response" "assistant"
+}
 # 工具调用执行器：根据 fn_name/fn_args/fn_id 执行工具，并把结果喂给模型继续推理
 tool_run_and_parse() {
     local id="$1"
@@ -441,19 +518,37 @@ tool_run_and_parse() {
     if [[ -n "$fn_name" && -n "$fn_args" && -n "$fn_id" ]]; then
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
+            render_markdown "$full_response"
             command=$(jq -r '.command' <<< "$fn_args")
-            tool_use_response="**工具调用: $command**"
-            render_markdown "$tool_use_response"
+            # tool_use_response="**工具调用: $command**"
+            # render_markdown "$tool_use_response"
+            printf " \033[43;30;1m  工具调用：${command}  \033[0m"
+            echo $'\n\n'
 
             # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
             # 防止残留的 "y" 自动确认执行命令（粘贴注入防护）
             local _junk=""
             while IFS= read -r -t 0.01 -N 1000000 _junk; [[ -n "$_junk" ]]; do _junk=""; done
 
-            printf '\033[1;41;37m是否执行该命令？(y/n): \033[0m'
-            IFS= read -r answer
+
+            fn_name=""
+            fn_args=""
+            fn_id=""
+
+            # echo "审判开始；；；；"
+            # 不能写 ai_auth=$(auth_think ...)：命令替换会捕获 auth_think 的
+            # 全部 stdout，流式输出一旦超过管道缓冲就死锁。改为直接调用，
+            # 结果从全局变量 full_response 取。
+            auth_think "$command"
+            ai_auth=$(echo -e "$full_response")
+            
+            if [[ "$ai_auth" == "N" ]]; then
+                printf '\033[2K\033[1;41;37m是否执行该命令？(y/n): \033[0m'
+                IFS= read -r answer
+
+            fi
             # echo "用户输入: $answer"
-            if [[ "$answer" == "y" ]]; then
+            if [[ "$ai_auth" == "Y" || "$answer" == "y" ]]; then
                 # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
                 run_with_window "$command"
                 content="$window_output"
@@ -471,7 +566,6 @@ tool_run_and_parse() {
         fn_args=""
         fn_id=""
 
-
         tools=$(tools)
         request_body=$(jq -n \
             --arg model "$model" \
@@ -488,12 +582,18 @@ tool_run_and_parse() {
         }')
 
         ask_ai "$request_body" 1
+
+        # render_markdown "$thinking_response"
+        # render_markdown "$full_response"
     fi
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
 ask_ai() {
     
-    [[ "$content" =~ ^\-.* ]] && echo "请不要以 - 开头输入内容，否则会被当作命令行参数解析" && content="" && return 0
+    # 拦截以选项开头的内容（如 "-l xxx"），避免被当成普通提问发给模型
+    for option in "${options_list[@]}"; do
+        [[ "$content" == "$option" || "$content" == "$option "* ]] && content="" && return 0
+    done
 
     local think_start=0
     local think_end=0
