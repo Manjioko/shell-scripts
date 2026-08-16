@@ -31,6 +31,29 @@ history_list=()
 # 不要读写历史记录
 forget_history=0
 
+# ---------- 上下文自动压缩(compaction)配置 ----------
+# 最近一次请求返回的真实 prompt_tokens(来自 usage)。每次请求都把全量 messages
+# 发给 API,所以 prompt_tokens 就是"当前上下文总 token 数",无需估算或累计。
+# 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
+last_prompt_tokens=0
+
+# 触发自动压缩的阈值。业界实践(Claude Code/Aider)多在接近窗口上限才压,
+# 这里按"控制每轮成本与首字延迟"主动提前到 10 万 token(约占 1M 窗口的 10%)。
+TOKEN_THRESHOLD=100000
+
+# 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
+# + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
+KEEP_MSGS=16
+
+# 摘要消息的前缀标记:让用户在 -msgs / 历史渲染时能一眼认出"这是压缩过的历史"
+SUMMARY_PREFIX="【历史对话摘要】"
+
+# 工具输出(tool 角色消息)是上下文里最肥的部分:超长命令输出保留头尾,
+# 中间只留行数标记(开头=表头/摘要,结尾=报错/结果,中间多为重复日志)
+TOOL_OUTPUT_MAX_LINES=400
+TOOL_OUTPUT_MAX_COL=2000
+# ----------------------------------------------------
+
 # 用户输入的内容
 input=""
 # 保存当前终端设置
@@ -41,7 +64,7 @@ WIN=10
 # 重画节流间隔（微秒）
 THROTTLE=50000
 
-options_list=("-l" "-msgs" "-h")
+options_list=("-l" "-msgs" "-h" "-c" "-u")
 
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
@@ -115,6 +138,8 @@ get_history() {
     local history
     chat_title=$(basename "$1")
     messages=$(jq '.messages' <<< "$(<"$1")")
+    # 加载的是新对话:旧的 token 计数作废,等下一次请求由 usage 刷新精确值
+    last_prompt_tokens=0
     thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
     model=$(jq -r '.model' <<< "$(<"$1")")
     jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
@@ -181,11 +206,15 @@ help_user() {
     echo "  -f    忽略历史记录"
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
+    echo "  -c    手动压缩对话历史"
+    echo "  -u    查看当前上下文 token 用量"
     echo "  -h    显示帮助信息"
     echo
     echo "内容交互时，也可使用以下选项:"
     echo "  -msgs 显示当前消息记录"
     echo "  -l    查看历史记录并选择加载"
+    echo "  -c    手动压缩对话历史"
+    echo "  -u    查看当前上下文 token 用量"
     echo "  -h    显示帮助信息"
 }
 
@@ -248,6 +277,16 @@ parse_options() {
         fi
         if [[ "${!i}" == "-f" ]]; then
             forget_history=1
+            break
+        fi
+
+        if [[ "${!i}" == "-c" ]]; then
+            compact_messages
+            break
+        fi
+
+        if [[ "${!i}" == "-u" ]]; then
+            print_usage
             break
         fi
 
@@ -435,6 +474,104 @@ unlock_screen() {
      # 恢复终端状态
     stty "$stty_save"
 }
+# 工具输出截断:命令输出是上下文里最占 token 的部分,超长时只保留头尾。
+# 头部=摘要/表头,尾部=报错/最终结果,中间多为重复性日志,AI 不需要全文。
+# 两层限制:先截超长单行(minified 文件一行可达几十万字符),再按行数截头尾。
+truncate_output() {
+    local text="$1" lines cropped head_lines
+    lines=$(printf '%s' "$text" | wc -l | tr -d ' ')
+    cropped=$(printf '%s' "$text" | awk -v max="$TOOL_OUTPUT_MAX_COL" \
+        'length($0) > max { print substr($0, 1, max) "...(该行过长已截断)"; next } { print }')
+    if (( lines > TOOL_OUTPUT_MAX_LINES )); then
+        head_lines=$((TOOL_OUTPUT_MAX_LINES / 2))
+        {
+            printf '%s' "$cropped" | head -n "$head_lines"
+            printf '\n... (中间 %d 行已省略) ...\n\n' "$((lines - TOOL_OUTPUT_MAX_LINES))"
+            printf '%s' "$cropped" | tail -n "$head_lines"
+        }
+    else
+        printf '%s' "$cropped"
+    fi
+}
+
+# 自动压缩(compaction):把超出保留范围的旧消息浓缩成一条摘要消息,
+# 结构重组为 system + [摘要] + 最近 KEEP_MSGS 条原文。
+# 业界标准做法(Claude Code / Aider):
+#   - 压缩请求用便宜的 flash 模型、stream:false 静默一次拿完,不渲染;
+#   - 摘要作为普通 user 消息插入,历史可被递归再压缩;
+#   - 压缩失败时兜底硬截断(保留 system + 最近原文),绝不让脚本卡死;
+#   - 只在"完整一轮的边界"调用(printContent 开头),工具调用链中途调用会
+#     破坏 tool_call_id 配对,API 会直接报错。
+compact_messages() {
+    local total cut system_msg tail_msgs to_compact summary request_body
+    total=$(echo "$messages" | jq 'length')
+    (( total <= KEEP_MSGS )) && echo "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
+
+    cut=$((total - KEEP_MSGS))
+    system_msg=$(echo "$messages" | jq '.[0]')
+    tail_msgs=$(echo "$messages" | jq --argjson cut "$cut" '.[$cut:]')
+
+    # 中间段转成 "[role] content" 可读文本,减少压缩请求的输入 token;
+    # assistant 带 tool_calls 的消息 content 为 null,单独转成一行描述,
+    # 保证"模型调用了哪个工具、什么参数"这一关键信息不丢
+    to_compact=$(echo "$messages" | jq -r --argjson cut "$cut" '
+        .[1:$cut][] |
+        if .tool_calls != null then
+            "[assistant → 工具调用] " + (.tool_calls | tostring)
+        else
+            "[" + .role + "] " + (.content // "")
+        end')
+
+    if (( last_prompt_tokens > 0 )); then
+        printf '📦 上下文 %s tokens 已超阈值 %s,正在压缩历史…\n' "$last_prompt_tokens" "$TOKEN_THRESHOLD"
+    else
+        printf '📦 正在压缩历史…\n'
+    fi
+
+    request_body=$(jq -n --arg compact_text "$to_compact" '{
+        model: "deepseek-v4-flash",
+        messages: [
+            {role: "system", content: "你是对话历史压缩助手。任务:把用户提供的旧对话记录压缩成一段精炼的摘要,替代原始记录用于后续继续对话。要求:1. 保留用户的整体目标与意图、关键决策与结论、已执行的命令及其重要结果、出现的错误与最终修复方式、涉及的重要文件路径、用户的个人偏好与约束;2. 丢弃客套话、重复内容与冗长的命令输出;3. 用中文输出,不超过 500 字,只输出摘要正文,不要任何前缀或解释。"},
+            {role: "user", content: $compact_text}
+        ],
+        thinking: {type: "disabled"},
+        reasoning_effort: "high",
+        stream: false
+    }')
+
+    # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支
+    summary=$(curl -s --max-time 120 https://api.deepseek.com/chat/completions \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -d "$request_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+
+    if [[ -z "$summary" ]]; then
+        messages=$(echo "$messages" | jq --argjson cut "$cut" '.[0:1] + .[$cut:]')
+        printf '⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 %s 条原文\n' "$KEEP_MSGS"
+    else
+        messages=$(jq -n --argjson sys "$system_msg" --arg prefix "$SUMMARY_PREFIX" \
+            --arg summary "$summary" --argjson tail "$tail_msgs" \
+            '[ $sys, {role: "user", content: ($prefix + "\n" + $summary)}, $tail[] ]')
+        printf '✅ 压缩完成:%s 条消息 → 1 条摘要 + %s 条原文\n' "$total" "$KEEP_MSGS"
+    fi
+    # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
+    last_prompt_tokens=0
+}
+
+# 查看当前上下文用量
+print_usage() {
+    local est pct
+    est=$(printf '%s' "$messages" | wc -c | tr -d ' ')
+    est=$((est * 2 / 5))
+    echo "消息条数: $(echo "$messages" | jq length)"
+    if (( last_prompt_tokens > 0 )); then
+        pct=$((last_prompt_tokens * 100 / TOKEN_THRESHOLD))
+        echo "上下文用量: ${last_prompt_tokens} tokens / 阈值 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
+    else
+        echo "上下文用量: 约 ${est} tokens(字节粗算;精确值在下次请求后显示,阈值 ${TOKEN_THRESHOLD})"
+    fi
+}
+
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 add_message() {
     local addctx="$1"
@@ -496,12 +633,14 @@ auth_think() {
             messages: $msgs,
             thinking: {type: "disabled"},
             reasoning_effort: "high",
-            stream: true
+            stream: true,
+            stream_options: {include_usage: true}
         }')
     # 结果通过全局 full_response 传回（ask_ai 会重置它），这里不再 printf。
     # 本函数绝不能放进 $(...) 里调用：ask_ai 的流式输出会塞满命令替换的
     # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
-    ask_ai "$request_body"
+    # 第三个参数 0:auth 消息极小,不把它的 usage 记入 last_prompt_tokens
+    ask_ai "$request_body" 0 0
 
     sleep 0.5
 
@@ -550,8 +689,9 @@ tool_run_and_parse() {
             # echo "用户输入: $answer"
             if [[ "$ai_auth" == "Y" || "$answer" == "y" ]]; then
                 # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
+                # 先截断:超长输出保留头尾,砍掉重复性日志,控制上下文体积
                 run_with_window "$command"
-                content="$window_output"
+                content=$(truncate_output "$window_output")
                 sleep 2
             else
                 content="用户拒绝执行命令: $command"
@@ -578,7 +718,8 @@ tool_run_and_parse() {
             thinking: {type: $thinking},
             reasoning_effort: "high",
             stream: true,
-            tools: $tool
+            tools: $tool,
+            stream_options: {include_usage: true}
         }')
 
         ask_ai "$request_body" 1
@@ -588,6 +729,8 @@ tool_run_and_parse() {
     fi
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
+# 参数:$1 请求体  $2 是否锁屏  $3 是否记录 usage(默认 1;auth 等旁路请求传 0,
+#      避免把小请求的 prompt_tokens 误记为上下文真实大小)
 ask_ai() {
     
     # 拦截以选项开头的内容（如 "-l xxx"），避免被当成普通提问发给模型
@@ -599,8 +742,10 @@ ask_ai() {
     local think_end=0
     local chunk=""
     local json=""
+    local usage_pt=""
     local request_body=$1
     local is_lock_screen=$2
+    local is_record_usage=${3:-1}
 
     full_response=""
     thinking_response=""
@@ -611,6 +756,14 @@ ask_ai() {
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && break
+
+            # stream_options.include_usage:流式最后一个 chunk 的 choices 为空、
+            # 只带 usage。prompt_tokens = 本次请求发送的全量 messages 的 token 数,
+            # 即"当前上下文大小"的精确值,直接覆盖旧值,无需累计
+            if (( is_record_usage )); then
+                usage_pt=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens // empty' 2>/dev/null)
+                [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
+            fi
 
             # 思考部分的输出也要显示出来
             thinking_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; echo x)"
@@ -680,6 +833,10 @@ printContent() {
 
     add_message "$content"
 
+    # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
+    # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
+    (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
+
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
     # thinking 为空时不应发送 thinking 字段
@@ -695,7 +852,8 @@ printContent() {
         thinking: {type: $thinking},
         reasoning_effort: "high",
         stream: true,
-        tools: $tool
+        tools: $tool,
+        stream_options: {include_usage: true}
     }')
 
     
@@ -729,7 +887,8 @@ overview() {
         messages: $msgs,
         thinking: {type: "disabled"},
         reasoning_effort: "high",
-        stream: true
+        stream: true,
+        stream_options: {include_usage: true}
     }')
 
     ask_ai "$request_body"
@@ -887,6 +1046,14 @@ normal_line() {
         fi
         if [[ "$line" == "-msgs" ]]; then
             echo "$messages"
+            break
+        fi
+        if [[ "$line" == "-c" ]]; then
+            compact_messages
+            break
+        fi
+        if [[ "$line" == "-u" ]]; then
+            print_usage
             break
         fi
         if [[ "$line" == "-h" ]]; then
