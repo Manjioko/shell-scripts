@@ -13,7 +13,7 @@ messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
 
 #辅助权限判断助手消息
 # 
-auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。"}]')
+auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。同时存在白名单机制:【1. /tmp/*】-> 遇到读写白名单内的目录/文件，应该放行(回复Y)。"}]')
 
 
 # 是否思考,默认关闭
@@ -811,20 +811,23 @@ add_message() {
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
         # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
         # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
-        # thinking 模式下同时回传 reasoning_content(API 硬性要求)。
+        # thinking 模式下必须回传 reasoning_content(API 硬性要求),哪怕本轮
+        # 模型没有输出思考(flash 模型 -t 下偶发只返回工具调用)也要带空串
+        # 字段:省略字段会让下一轮请求 400(真实 API 实测复现)。
         if [[ -z "$addctx" ]]; then
-            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
-                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         else
-            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
-                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
     else
-        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" '. + [{role: $role, content: $content} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content,
+        # 无思考时同样带空串字段(原因同上:省略字段会让下一轮请求 400)
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" --arg thinking "$thinking" '. + [{role: $role, content: $content} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
     fi
 }
 auth_add_message() {
@@ -1213,8 +1216,7 @@ ask_ai() {
         [[ "$content" == "$option" || "$content" == "$option "* ]] && content="" && return 0
     done
 
-    local think_start=0
-    local think_end=0
+    local think_start think_end
     local chunk=""
     local json=""
     local usage_pt=""
@@ -1223,6 +1225,8 @@ ask_ai() {
     local request_body=$1
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
+    # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
+    local attempt max_attempts=3 think_save_len
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -1238,9 +1242,33 @@ ask_ai() {
     tool_names=()
     tool_args=()
 
+    # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
+    # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
+    think_save_len=${#thinking_response}
     [[  "$is_lock_screen" == 1 ]] && lock_screen
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        # 每轮尝试前复位单轮产物,上一尝试的残留会干扰"是否有产出"的判断
+        full_response=""
+        raw_reasoning=""
+        api_error=""
+        tool_ids=()
+        tool_names=()
+        tool_args=()
+        think_start=0
+        think_end=0
+        if (( attempt > 1 )); then
+            # 上一尝试零产出:回滚其思考残留、清掉交替屏幕残影、退避后重发
+            # 同一请求体(零产出的请求无副作用,重发安全)
+            thinking_response="${thinking_response:0:think_save_len}"
+            printf '\033[2J\033[H'
+            sleep "$attempt"
+        fi
 
-    while IFS= read -r line; do
+        # read 只对"以换行结尾的完整行"返回 0。DeepSeek 的整段 JSON 错误响应
+        # (400 等)末尾没有换行符:若只写 while read,EOF 残段让 read 返回非零,
+        # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
+        # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
+        while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && break
@@ -1312,16 +1340,21 @@ ask_ai() {
             # data: 流。记录之,循环结束后显示,避免"发消息毫无输出"的静默失败。
             [[ "$line" == \{* || "$line" == \[* ]] && api_error+="$line"$'\n'
         fi
-    done < <(
-        # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
-        # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
-        curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
-            https://api.deepseek.com/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -d "$request_body"\
-        2>&1
-    )
+        done < <(
+            # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
+            # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
+            curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
+                https://api.deepseek.com/chat/completions \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+                -d "$request_body"\
+            2>&1
+        )
+        # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
+        # 完全零产出才进入下一尝试(退避重发)
+        [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
+        (( ${#tool_ids[@]} > 0 )) && break
+    done
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
 
@@ -1333,7 +1366,8 @@ ask_ai() {
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
         full_response="⚠️ API 请求失败: $err_msg"
-        printf '\033[31m%s\033[0m\n' "$full_response"
+        # 不在这里直接打印:printContent 会把 full_response 渲染到主屏幕,
+        # 这里再打印会出现双份(历史问题:⚠️ 消息显示两次)
     fi
 
     # 无任何产出(内容/思考/工具/错误全空):网络中断或模型空回复。
@@ -1343,7 +1377,7 @@ ask_ai() {
     if [[ -z "$full_response" && -z "$raw_reasoning" && -z "$api_error" ]] \
         && (( ${#tool_ids[@]} == 0 )); then
         full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
-        printf '\033[33m%s\033[0m\n' "$full_response"
+        # 不直接打印,理由同上(防双份显示)
     fi
 
     (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
