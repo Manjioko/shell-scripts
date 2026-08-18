@@ -126,6 +126,25 @@ fi
 declare -A tool_ids=() tool_names=() tool_args=()
 
 
+# pty 包装探测(启动时一次):裸 FIFO 会让子命令的 stdio 切到全缓冲,
+# python/node/编译器等程序的输出会憋到进程退出才一次性涌出,窗口失去实时性。
+# 套一层伪终端(pty)让子命令以为自己面对终端,恢复行缓冲。
+# script 几乎是所有 Unix 标配,但有两个语法家族:
+#   util-linux(Linux): script -qec "cmd" /dev/null,支持 --version
+#   BSD(macOS/FreeBSD): script -q /dev/null cmd...,不支持 --version(借此区分)
+# 都没有时用 python3 的 pty 模块兜底;再没有退回裸 FIFO(仅损失实时性,功能不变)
+if command -v script >/dev/null 2>&1; then
+    if script --version 2>/dev/null | grep -qi util-linux; then
+        PTY_STYLE="util-linux"
+    else
+        PTY_STYLE="bsd"
+    fi
+elif command -v python3 >/dev/null 2>&1; then
+    PTY_STYLE="python"
+else
+    PTY_STYLE="none"
+fi
+
 # 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
 # 剩余字节留在 tty 输入队列里，可用不带 -e 的非阻塞 read 排干拿到全文
 # （若保持开启，bash 会把首行之后的内容直接丢弃）
@@ -136,8 +155,8 @@ export INPUTRC="$_ct_inputrc"
 
 trap handle_ctrl_c INT
 
-# 任何退出路径都恢复光标显示 + 自动换行
-trap 'printf "\033[?25h\033[?7h"' EXIT
+# 任何退出路径都恢复光标显示 + 自动换行 + 回显(窗口期间两次 Ctrl+C 会直接退出)
+trap 'printf "\033[?25h\033[?7h"; stty echo 2>/dev/null' EXIT
 
 
 render_markdown() {
@@ -390,6 +409,7 @@ run_with_window() {
     local chunk rc line pending="" partial=""
     local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
     local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
+    local in_fd="" key="" tty_save="" tty_cols="" tty_rows="" wrapped_cmd=""
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -408,6 +428,10 @@ run_with_window() {
     clean_line() {
         line=${line//$'\r'/}
         line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        # BSD script 在 stdin EOF 时向 pty 回显的 "^D" + 退格残留;
+        # 先剥定向残留再剥散落的退格(窗口无法正确渲染 \b)
+        line=${line//'^D'$'\b\b'/}
+        line=${line//$'\b'/}
     }
 
     # drawn = 已画的完整行数；光标始终停在窗口底行（partial 行）上
@@ -435,7 +459,62 @@ run_with_window() {
     # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
     win_tmpdir=$(mktemp -d)
     mkfifo "$win_tmpdir/fifo" || return 1
-    eval "$cmd" > "$win_tmpdir/fifo" 2>&1 &
+    # 输入 FIFO:子命令的 stdin 从这里读,由主 shell 代读 tty 后转发进来。
+    # 后台进程组自己读 tty 会被 SIGTTIN 整树停住(npm create vite 实测
+    # bash/npm/node 全部 T 状态挂死);主 shell 是前台进程组,读 tty 合法。
+    # <> 打开:读写两端同时就位永不阻塞,且窗口存活期间写端常开,
+    # 子命令的交互式提示会等待输入而非读到 EOF 直接返回。
+    mkfifo "$win_tmpdir/in" || return 1
+    exec {in_fd}<>"$win_tmpdir/in"
+    # pty 的窗口尺寸默认 0×0(stdin 非 tty 时 script 无从继承):clack 等 UI 库
+    # 会按宽度 0 折行,每字符一行。命令前注入 stty 把真实终端尺寸写进 pty slave
+    tty_cols=$(tput cols 2>/dev/null); tty_rows=$(tput lines 2>/dev/null)
+    wrapped_cmd="stty cols ${tty_cols:-120} rows ${tty_rows:-40} 2>/dev/null; $cmd"
+    # 套 pty 启动(按启动时探测的语法家族分发):子命令把 stdout 当终端 →
+    # 行缓冲,输出实时进 FIFO(实测:裸 FIFO 下 python 等程序憋到退出才吐)。
+    case "$PTY_STYLE" in
+        bsd)
+            # stdin 经 cat 中转成匿名管道:macOS 的 FIFO 基于 socket 实现,
+            # BSD script 对其 tcgetattr 会致命报错(管道只报 ENOTTY,被容忍)
+            cat "$win_tmpdir/in" | script -q /dev/null "$BASH" -c "$wrapped_cmd" > "$win_tmpdir/fifo" 2>&1 & ;;
+        util-linux)
+            # util-linux script 用 $SHELL 跑命令,强制指到当前 bash;-e 透传退出码
+            SHELL="$BASH" script -qec "$wrapped_cmd" /dev/null <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+        python)
+            # 不用 pty.spawn:macOS 上子进程退出后它会挂在 master 读取,EOF 不来。
+            # pty.fork + select 双向转发:master→stdout 及 stdin→master,
+            # 读到 EOF/EIO(Linux 子进程退出报 EIO)都干净退出
+            python3 -c '
+import os, pty, select, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[1], [sys.argv[1], "-c", sys.argv[2]])
+stdin_open = True
+while True:
+    rfds = [fd] + ([0] if stdin_open else [])
+    try:
+        r, _, _ = select.select(rfds, [], [])
+    except OSError:
+        break
+    if fd in r:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        os.write(1, data)
+    if 0 in r:
+        d = os.read(0, 65536)
+        if d:
+            os.write(fd, d)
+        else:
+            stdin_open = False
+os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+        *)
+            # 无 pty 可用的兜底:丢实时性,但 stdin 同样接 FIFO,交互转发仍可用
+            eval "$cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+    esac
     cmd_pid=$!
     exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
 
@@ -448,6 +527,10 @@ run_with_window() {
     old_trap=$(trap -p INT)
     trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
 
+    # 关本地回显:用户按键由子命令的 pty 回显(行提示原样回、菜单 UI 重画)
+    # 后经输出 FIFO 画到窗口,避免 tty 与 pty 双重回显;ISIG 仍开,Ctrl+C 不受影响
+    if [[ -t 0 ]]; then tty_save=$(stty -g); stty -echo; fi
+
     last_data=${EPOCHREALTIME/./}
     while :; do
         chunk=""
@@ -455,6 +538,18 @@ run_with_window() {
         # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
         IFS= read -r -t 0.1 -N 65536 -u "$win_fd" chunk
         rc=$?
+        # 代读 tty:把用户按键(含方向键等转义序列)转发进子命令 stdin。
+        # read -N 临时切非规范模式,无换行的字节也能立即取到
+        if [[ -n "$tty_save" ]]; then
+            key=""
+            IFS= read -r -t 0.01 -N 4096 key
+            if [[ -n "$key" ]]; then
+                # 真实终端的 Enter 发 \r,本 tty 的 ICRNL 已转成 \n;raw 模式 UI
+                # (vite/clack 等)只认 \r,还原后发送(规范模式侧 pty 会再转回 \n)
+                key=${key//$'\n'/$'\r'}
+                printf '%s' "$key" >&"$in_fd"
+            fi
+        fi
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
             while [[ "$pending" == *$'\n'* ]]; do
@@ -503,9 +598,11 @@ run_with_window() {
         fi
     done
 
-    # 恢复原 INT trap，关闭读端并清理临时 FIFO
+    # 恢复回显与原 INT trap，关闭两个 FIFO 端并清理临时目录
+    [[ -n "$tty_save" ]] && stty "$tty_save"
     [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
     eval "exec $win_fd<&-"
+    eval "exec $in_fd<&-"
     rm -rf "$win_tmpdir"
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）

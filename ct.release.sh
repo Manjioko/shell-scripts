@@ -68,6 +68,9 @@ GREP_MAX_MATCHES=200
 
 # grep 结果单行截断宽度,防止命中 minified 长行污染上下文
 GREP_MAX_COL=500
+
+# web_fetch 单次返回网页纯文本的字符上限,超出按行截断并提示
+WEB_MAX_CHARS=20000
 # ----------------------------------------------------
 
 # 用户输入的内容
@@ -75,15 +78,32 @@ input=""
 # 保存当前终端设置
 stty_save=""
 
+# thinking_response 已渲染到主屏幕的字符位置。思考随流只画在交替屏幕上,
+# 解锁即被丢弃;工具链每轮结束后由 flush_thinking 把"增量思考"渲染到
+# 主屏幕(工具横幅之前),主屏幕时间线才与真实流程一致:
+#   思考1 → 工具1 → 思考2 → 工具2 → ... → 正文
+thinking_rendered_len=0
+
 # 窗口行数
 WIN=10
 # 重画节流间隔（微秒）
 THROTTLE=50000
 
+# 显示层裁剪宽度:minified CSS/JS 一行可达数 MB。若超长行全量进显示缓冲和
+# 底行 partial,每轮循环都要对不断增长的 pending 做全量字符串清洗+复制(O(n)
+# 且越积越大),bash 卡在字符串操作中不检查信号,Ctrl+C 被无限推迟。
+# 显示层只保留可视宽度;完整内容照旧进 window_output(喂给 AI,由截断兜底)。
+DISP_COL=300
+
 # run_with_window 兜底:命令主体已退出,但输出管道(FIFO 写端)仍被其后台子进程
 # 握着(AI 在命令里误用 & 启动服务),EOF 永远不来。主进程已死且静默超过该时长
 # 就提前收尾,防止窗口永久挂死。仅当主进程已退出才计时,不影响正常慢命令。
 BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
+
+# 用户按下 Ctrl+C 后的强制收尾时限:第一次 INT 触发杀组后,若 EOF 仍不来
+# (杀组失败/孤儿写端等极端情况),静默超过该时长直接强制收尾。
+# 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
+INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 
 options_list=("-l" "-msgs" "-h" "-c" "-u")
 
@@ -182,6 +202,15 @@ get_history() {
             else . + [$m]
             end)')
     messages=$orphan
+    # thinking 模式下,DeepSeek 要求回传上一轮 assistant 的 reasoning_content。
+    # 旧历史(无 reasoning_content 字段)直接续聊会 400,加载时自动降级为不思考
+    if [[ "$(jq -r '.thinking.type // empty' <<< "$(<"$1")")" == "enabled" ]]; then
+        has_reasoning=$(echo "$messages" | jq '[.[] | select(.role == "assistant")] | last | has("reasoning_content")')
+        if [[ "$has_reasoning" != "true" ]]; then
+            thinking="disabled"
+            echo "⚠️ 该历史缺少思考内容,已自动关闭思考模式(thinking 要求回传 reasoning_content)"
+        fi
+    fi
     # 加载的是新对话:旧的 token 计数作废,等下一次请求由 usage 刷新精确值
     last_prompt_tokens=0
     thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
@@ -360,9 +389,15 @@ run_with_window() {
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
     local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
-    local cmd_stat="" last_data=0 bg_leak=0
+    local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
+
+    # 开启 job control:让 & 启动的子命令(尤其管道)进入独立进程组。
+    # bash 5 对异步管道的实现中,管道成员不再是 $! 的后代(pgrep -P 父链断裂,
+    # kill_tree 找不到孩子,只剩孤儿攥着 FIFO 写端,EOF 永远不来,Ctrl+C 杀不掉)。
+    # 按进程组杀是业界标准做法(Claude Code 同款)。
+    set -m
 
     shopt -s extglob
     # 藏光标防闪烁；关自动换行 → 超宽行（含中文宽字符）在右边缘直接裁剪，
@@ -405,13 +440,13 @@ run_with_window() {
     exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
 
     # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成"只杀子命令"：
-    # - 第一次 Ctrl+C：kill_tree 用 TERM 杀掉整个子进程树（子命令忽略 SIGINT，
-    #   直接发 INT 没用），管道写端全部关闭 → read 收到 EOF → 窗口正常收尾，主脚本继续；
+    # - 第一次 Ctrl+C：先按进程组整组 TERM(job control 下子命令在独立进程组),
+    #   再用 kill_tree 递归兜底(杀不在组内的散兵),写端全部关闭 → EOF → 窗口正常收尾;
     # - 第二次 Ctrl+C：兜底恢复原 trap 并重新触发，走 handle_ctrl_c 整体退出。
     # trap 能在 0.1s 内执行的前提是下面 read 的 -t 轮询超时；无限阻塞的 read 会
     # 把 trap 推迟到 read 完成才执行（死锁），这里不存在。
     old_trap=$(trap -p INT)
-    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; kill_tree "$cmd_pid"; fi' INT
+    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
 
     last_data=${EPOCHREALTIME/./}
     while :; do
@@ -427,17 +462,28 @@ run_with_window() {
                 pending="${pending#*$'\n'}"
                 clean_line
                 window_output+="$line"$'\n'
-                buf+=("$line")
+                # 显示缓冲只存可视宽度:超长行若全量进 buf,paint 每帧向终端喷数 MB
+                buf+=("${line:0:$DISP_COL}")
                 (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
                 (( total++ ))
             done
-            line="$pending"; clean_line; partial="$line"
+            # 底行 partial 同样只清洗/显示可视宽度,保证每轮循环 O(1),
+            # 信号能在命令边界及时处理
+            line="${pending:0:$DISP_COL}"; clean_line; partial="$line"
             dirty=1
             last_data=${EPOCHREALTIME/./}
         fi
         # 超时退出码 >128（继续等）；1~128 是 EOF（命令结束）
         (( rc > 0 && rc <= 128 )) && break
         now=${EPOCHREALTIME/./}
+        # 硬承诺:用户已按 Ctrl+C(杀组已执行)后,若 EOF 仍未到来,静默超时强制
+        # 收尾。无论杀组是否成功、写端是否被孤儿攥着,最多再卡 INT_FORCE_TIMEOUT。
+        if (( interrupted )); then
+            if (( now - last_data > INT_FORCE_TIMEOUT )); then
+                forced=1
+                break
+            fi
+        fi
         # 兜底:命令主体已退出(变僵尸/被回收)但 FIFO 写端仍被其后台子进程
         # 握着(AI 在命令里用 & 启动服务),EOF 永远不会来。静默超时提前收尾,
         # 防止窗口永久挂死。正常慢命令的进程还活着,不会触发。
@@ -467,7 +513,7 @@ run_with_window() {
         line="$pending"; clean_line
         if [[ -n "$line" ]]; then
             window_output+="$line"$'\n'
-            buf+=("$line")
+            buf+=("${line:0:$DISP_COL}")
             (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
             (( total++ ))
         fi
@@ -475,7 +521,11 @@ run_with_window() {
     partial=""
     paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
     printf '\033[?25h\033[?7h'
-    if (( bg_leak )); then
+    if (( forced )); then
+        printf '\033[2m└─ 已强制停止(输出管道未关闭,停止等待) · 共 %d 行 ─┘\033[0m\n' "$total"
+        # 告诉模型:命令被用户中断,且部分后台进程可能仍在运行
+        window_output+=$'\n(命令已被用户中断。若后台仍有残留进程,可用 ps 查询并清理。)'
+    elif (( bg_leak )); then
         printf '\033[2m└─ 命令主体已结束,但输出管道仍被后台进程占用,已停止等待 ─┘\033[0m\n'
         # 告诉模型:疑似用 & 启动了长驻服务,应改用 run_in_background=true
         window_output+=$'\n(检测到命令使用了 & 后台符号,输出管道被后台进程占用。若为长驻服务,请改用 run_in_background=true 参数重新启动。)'
@@ -578,8 +628,22 @@ tools() {
         {
             "type": "function",
             "function": {
+                "name": "web_fetch",
+                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。浏览网页、宽泛的网页搜索(把搜索引擎结果页 URL 传给本工具)时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "完整网页地址,必须以 http:// 或 https:// 开头,如 https://www.google.com/search?q=xxx"}
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_shell_command",
-                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,不要用 shell 命令代替这些工具。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
+                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_fetch。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -733,31 +797,34 @@ print_usage() {
 }
 
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
+# 第 6 个参数 reasoning:thinking 模式下 assistant 消息必须回传 reasoning_content
 add_message() {
     local addctx="$1"
     local role="$2"
     local tool_call_id="$3"
     local tool_call_name="$4"
     local tool_call_args="$5"
+    local reasoning="$6"
     if [[ -z "$role" ]]; then
         # 默认 user 消息
         messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
         # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
         # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
+        # thinking 模式下同时回传 reasoning_content(API 硬性要求)。
         if [[ -z "$addctx" ]]; then
-            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
-                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
+                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
         else
-            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" \
-                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]}]')
+            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
+                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
         fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
     else
-        # 普通角色（assistant 文本回复等）
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
+        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" '. + [{role: $role, content: $content} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
     fi
 }
 auth_add_message() {
@@ -939,6 +1006,64 @@ tool_grep() {
     printf ' 已搜索:%s\n' "$pattern"
 }
 
+# 网页抓取:获取 URL 并渲染为纯文本。渲染器优先级 w3m > lynx > textutil(macOS)
+# > sed 去标签兜底。仅抓 http(s) 地址;超长内容按行截断,与 read_file 同策略。
+# 不在此处自动安装 w3m:安装是写操作,应走 shell 工具的用户确认流程。
+tool_web_fetch() {
+    local url html rendered renderer http_code resp
+    url=$(jq -r '.url // empty' <<< "$fn_args")
+    [[ "$url" == http://* || "$url" == https://* ]] || { content="错误:url 必须以 http:// 或 https:// 开头: $url"; printf ' ⛔ 非法 url\n'; return 0; }
+
+    # -L 跟随重定向 -A 浏览器 UA(部分站点拒绝默认 UA) --max-time 兜底防卡死;
+    # -w 追加 HTTP 状态码,让模型能区分"网络不可达"与"被站点拒绝"。
+    resp=$(curl -sL -w $'\n%{http_code}' -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36" \
+        --max-time 30 "$url" 2>/dev/null)
+    http_code="${resp##*$'\n'}"
+    html="${resp%$'\n'*}"
+
+    if [[ -z "$html" ]]; then
+        # 按状态码细分失败原因,让模型正确归因:这是网络/站点问题,
+        # 换用 shell 命令(w3m/curl)不会得到不同结果,应换站点或告知用户
+        case "$http_code" in
+            000) content="错误:无法连接 $url(HTTP 000:网络不可达或超时。换用 shell 命令不会改善,请更换站点或搜索引擎,或向用户说明网络限制)" ;;
+            403|429) content="错误:$url 返回 HTTP ${http_code}(被站点拒绝/限流,可能是反爬。换用 shell 命令不会改善,请更换站点)" ;;
+            4*|5*) content="错误:$url 返回 HTTP ${http_code}(站点拒绝或服务器错误,请更换站点)" ;;
+            *) content="错误:无法获取 $url(HTTP ${http_code},空响应)" ;;
+        esac
+        printf ' ⛔ 抓取失败:%s(HTTP %s)\n' "$url" "$http_code"
+        return 0
+    fi
+
+    if command -v w3m >/dev/null 2>&1; then
+        rendered=$(printf '%s' "$html" | w3m -dump -T text/html 2>/dev/null); renderer="w3m"
+    elif command -v lynx >/dev/null 2>&1; then
+        rendered=$(printf '%s' "$html" | lynx -dump -stdin -nolist 2>/dev/null); renderer="lynx"
+    elif command -v textutil >/dev/null 2>&1; then
+        # macOS 自带,HTML→纯文本质量不错,无需安装任何东西
+        rendered=$(printf '%s' "$html" | textutil -convert txt -format html -stdin -stdout 2>/dev/null); renderer="textutil"
+    else
+        # 兜底:粗暴去标签(只保底可用,不追求完美;实体只解最常见的几个)
+        rendered=$(printf '%s' "$html" | sed \
+            -e 's/<script[^>]*>[^<]*<\/script>//g' \
+            -e 's/<style[^>]*>[^<]*<\/style>//g' \
+            -e 's/<[^>]*>//g' \
+            -e 's/&nbsp;/ /g' -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g' -e 's/&quot;/"/g' 2>/dev/null)
+        renderer="sed"
+    fi
+    [[ -z "$rendered" ]] && rendered="(渲染器 $renderer 未产出文本,原始 HTML 开头: ${html:0:500})"
+
+    # 超长按行截断(awk 逐行累计,不会切断多字节字符)
+    local total_chars out
+    total_chars=$(printf '%s' "$rendered" | wc -m | tr -d ' ')
+    if (( total_chars > WEB_MAX_CHARS )); then
+        out=$(printf '%s' "$rendered" | awk -v max="$WEB_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; print}')
+        content="🌐 $url · HTTP ${http_code:-?} · 渲染器 $renderer · 内容过长仅返回前 ${WEB_MAX_CHARS} 字符:\n\n$out"
+    else
+        content="🌐 $url · HTTP ${http_code:-?} · 渲染器 $renderer · ${total_chars} 字符:\n\n$rendered"
+    fi
+    printf ' 已抓取 %s(%s)\n' "$url" "$renderer"
+}
+
 # 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
@@ -961,6 +1086,11 @@ tool_run_and_parse() {
     tool_args=()
     [[ ${#ids_arr[@]} -eq 0 ]] && return 0
 
+    # 时间线渲染:本轮思考此前只画在交替屏幕上,解锁后被丢弃。在打印
+    # 工具横幅之前把它渲染到主屏幕,主屏幕顺序才与真实流程一致:
+    #   思考1 → 工具1 → 思考2 → 工具2 → ... → 正文
+    flush_thinking
+
     # AI 在调用工具前输出的正文(如"我先看看这个文件"),只放进第一条 assistant 消息
     [[ -n "$full_response" ]] && render_markdown "$full_response"
 
@@ -970,12 +1100,14 @@ tool_run_and_parse() {
         fn_args="${args_arr[$i]}"
         [[ -z "$fn_name" || -z "$fn_id" ]] && continue
 
-        # assistant 的 tool_calls 消息:第一条带正文,其余 content 为 null
+        # assistant 的 tool_calls 消息:并行调用拆成多条 assistant 消息时,
+        # DeepSeek 要求每一条都回传 reasoning_content(实测缺一即 400),
+        # 所以每条都带同一轮的思考原文;正文只在第一条。
         if (( first_call )); then
-            add_message "$full_response" "assistant" "$fn_id" "$fn_name" "$fn_args"
+            add_message "$full_response" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
             first_call=0
         else
-            add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args"
+            add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
         fi
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
@@ -987,8 +1119,10 @@ tool_run_and_parse() {
                 add_message "$content" "tool" "$fn_id"
                 continue
             fi
-            printf " \033[43;30;1m  工具调用：${command}  \033[0m"
-            echo $'\n\n'
+            # 命令只作为 %s 参数传入,绝不能拼进 format:命令里含 % 时
+            # (如 curl -w "%{http_code}"),printf 会把 %{ 当格式符报错
+            printf ' \033[43;30;1m  工具调用：%s  \033[0m\n' "$command"
+            echo
 
             # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
             # 防止残留的 "y" 自动确认执行命令（粘贴注入防护）
@@ -1039,7 +1173,7 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
         fi
@@ -1068,9 +1202,6 @@ tool_run_and_parse() {
     }')
 
     ask_ai "$request_body" 1
-
-    # render_markdown "$thinking_response"
-    # render_markdown "$full_response"
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
 # 参数:$1 请求体  $2 是否锁屏  $3 是否记录 usage(默认 1;auth 等旁路请求传 0,
@@ -1088,13 +1219,20 @@ ask_ai() {
     local json=""
     local usage_pt=""
     local t_idx="" t_name="" t_args="" t_id="" tpiece=""
-    local api_error="" err_msg=""
+    local api_error="" err_msg="" chunk_err=""
     local request_body=$1
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
 
     full_response=""
-    thinking_response=""
+    # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
+    # 由 flush_thinking 按时间线渲染增量(工具横幅之前),printContent 渲染最后
+    # 一段并统一清空。若在这里重置,前几轮思考会被下一轮覆盖。
+    # thinking_response=""
+    # 本轮模型的思考原文(无装饰)。thinking 模式下 DeepSeek 要求把
+    # reasoning_content 回传进下轮请求的 assistant 消息,丢失则 400:
+    # "The reasoning_content in the thinking mode must be passed back"
+    raw_reasoning=""
     # 每次请求开始清空工具调用收集区,防止上一轮残留导致误触发
     tool_ids=()
     tool_names=()
@@ -1105,7 +1243,12 @@ ask_ai() {
     while IFS= read -r line; do
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
-            [[ "$json" == "[DONE]" ]] && break            # stream_options.include_usage:流式最后一个 chunk 的 choices 为空、
+            [[ "$json" == "[DONE]" ]] && break
+
+            # SSE 内嵌错误:部分错误(如 thinking 模式限制/限流)不是整段 JSON,
+            # 而是包在 data: chunk 里。必须在此检查,否则表现为"空流/无响应"。
+            chunk_err=$(printf '%s' "$json" | jq -r '.error.message // .error // empty' 2>/dev/null)
+            [[ -n "$chunk_err" ]] && api_error="$chunk_err"            # stream_options.include_usage:流式最后一个 chunk 的 choices 为空、
             # 只带 usage。prompt_tokens = 本次请求发送的全量 messages 的 token 数,
             # 即"当前上下文大小"的精确值,直接覆盖旧值,无需累计
             if (( is_record_usage )); then
@@ -1124,7 +1267,7 @@ ask_ai() {
                 fi
                 printf '%s' "$thinking_chunk"
             fi
-            [[ -n "$thinking_chunk" ]] && thinking_response+="$thinking_chunk"
+            [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; }
 
 
             # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
@@ -1170,7 +1313,10 @@ ask_ai() {
             [[ "$line" == \{* || "$line" == \[* ]] && api_error+="$line"$'\n'
         fi
     done < <(
-        curl -sN https://api.deepseek.com/chat/completions \
+        # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
+        # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
+        curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
+            https://api.deepseek.com/chat/completions \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             -d "$request_body"\
@@ -1180,15 +1326,40 @@ ask_ai() {
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
 
     # API 请求失败(非流式错误响应):显示错误并写入 full_response,
-    # 让错误可见且能进入 messages,模型下一轮可以看到失败原因
-    if [[ -z "$full_response" && -z "$thinking_response" && -n "$api_error" ]]; then
+    # 让错误可见且能进入 messages,模型下一轮可以看到失败原因。
+    # 判断用 raw_reasoning(仅本轮)而非 thinking_response(跨轮累积):
+    # 后者从第二轮起恒非空,会把链中间的 API 错误误判为"已有输出"而静默。
+    if [[ -z "$full_response" && -z "$raw_reasoning" && -n "$api_error" ]]; then
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
         full_response="⚠️ API 请求失败: $err_msg"
         printf '\033[31m%s\033[0m\n' "$full_response"
     fi
 
+    # 无任何产出(内容/思考/工具/错误全空):网络中断或模型空回复。
+    # 必须给可见反馈并写入 messages,否则表现为"回复突然中断"的静默失败。
+    # 同样用 raw_reasoning 判断"本轮是否已有产出":跨轮累积的 thinking_response
+    # 恒非空,会把链中间的网络中断误判为正常,导致静默。
+    if [[ -z "$full_response" && -z "$raw_reasoning" && -z "$api_error" ]] \
+        && (( ${#tool_ids[@]} == 0 )); then
+        full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
+        printf '\033[33m%s\033[0m\n' "$full_response"
+    fi
+
     (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
+}
+
+# 把尚未渲染到主屏幕的思考增量渲染出来。思考随流只画在交替屏幕上,
+# 解锁即被丢弃;调用点都在主屏幕活跃时:
+#   - tool_run_and_parse 开头:把本轮思考渲染在工具横幅之前
+#   - printContent:渲染最后一段思考,随后渲染最终正文
+# thinking_rendered_len 记录已渲染到的字符位置,渲染后推进,
+# 保证每段思考只渲染一次、且严格按时间线插入,不会一次性倾倒。
+flush_thinking() {
+    local delta="${thinking_response:thinking_rendered_len}"
+    [[ -z "$delta" ]] && return 0
+    render_markdown "$delta"
+    thinking_rendered_len=${#thinking_response}
 }
 
 # 打印内容函数
@@ -1226,11 +1397,18 @@ printContent() {
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
-    render_markdown "$thinking_response"
+    # 时间线渲染:先渲染最后一段思考的增量,再渲染最终正文。
+    # 工具链中间的思考已由 flush_thinking 渲染在对应工具横幅之前。
+    flush_thinking
     render_markdown "$full_response"
     # echo "$messages"
 
-    [[ -n "$full_response" ]] && add_message "$full_response" "assistant"
+    # 思考内容已渲染到主屏幕,清空防止下一轮用户输入时累积旧思考
+    thinking_response=""
+    thinking_rendered_len=0
+
+    # thinking 模式下回传本轮思考内容,否则下一轮 API 400
+    [[ -n "$full_response" ]] && add_message "$full_response" "assistant" "" "" "" "$raw_reasoning"
 
 }
 
