@@ -95,7 +95,7 @@ THROTTLE=50000
 # 显示层只保留可视宽度;完整内容照旧进 window_output(喂给 AI,由截断兜底)。
 DISP_COL=300
 
-# run_with_window 兜底:命令主体已退出,但输出管道(FIFO 写端)仍被其后台子进程
+# run_with_window 兜底:命令主体已退出,但输出管道(FIFO/PTY 写端)仍被其后台子进程
 # 握着(AI 在命令里误用 & 启动服务),EOF 永远不来。主进程已死且静默超过该时长
 # 就提前收尾,防止窗口永久挂死。仅当主进程已退出才计时,不影响正常慢命令。
 BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
@@ -104,6 +104,10 @@ BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
 # (杀组失败/孤儿写端等极端情况),静默超过该时长直接强制收尾。
 # 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
 INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
+
+# script(1) 后端能力缓存：linux=util-linux，bsd=macOS/BSD；has_e 是否支持 -e
+SCRIPT_KIND=""
+SCRIPT_HAS_E=1
 
 options_list=("-l" "-msgs" "-h" "-c" "-u")
 
@@ -371,55 +375,93 @@ parse_options() {
     done
 }
 
-# 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
-# 任何一个后代还攥着管道写端，read 就永远等不到 EOF，循环退不出去
+# 递归杀掉一个进程及其全部后代。默认 TERM；第二参数可传 KILL 等信号。
+# 任何一个后代还攥着输出管道/PTY 写端，read 就永远等不到 EOF，循环退不出去
 kill_tree() {
-    local pid=$1 child
+    local pid=$1 sig=${2:-TERM} child
     for child in $(pgrep -P "$pid" 2>/dev/null); do
-        kill_tree "$child"
+        kill_tree "$child" "$sig"
     done
-    kill "$pid" 2>/dev/null
+    kill -"$sig" "$pid" 2>/dev/null
 }
 
 # 窗口模式运行命令
+# PTY 版:用系统 script(1) 分配伪终端运行命令,并把 transcript 写到带实时
+# flush 的 FIFO 中。主 shell 从 FIFO 边读边画窗口、边累积 window_output,
+# 同时保留对子进程状态/静默超时/Ctrl+C 的监控。
+#   macOS/BSD:        script -q -F -e <file> /bin/bash -c <cmd>
+#   Linux util-linux: env SHELL=/bin/bash script -q -f -e -c <cmd> <file>
+# script 后台运行但 stdin 显式接 /dev/tty;不开 job control,避免后台进程
+# 读终端时收到 SIGTTIN。script 自己的 stdout/stderr 丢弃,避免和窗口重画重复。
 run_with_window() {
     local cmd="$1"
     local -a buf=()
     local total=0 drawn=0
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
-    local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
-    local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
+    local script_pid="" mon_pid="" child_pid="" mon_stat="" script_stat=""
+    local interrupted=0 old_trap="" win_fd="" win_tmpdir=""
+    local last_data=0 bg_leak=0 forced=0
+    local eof=0 script_rc=0 run_rc=0 probe_rc=0
+    local tty_fd="" old_stty="" wrapper="" status_file="" trap_code="" script_err=""
+    local self_pgid="" child_pgid=""
+    local -a script_cmd=()
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
-    # 开启 job control:让 & 启动的子命令(尤其管道)进入独立进程组。
-    # bash 5 对异步管道的实现中,管道成员不再是 $! 的后代(pgrep -P 父链断裂,
-    # kill_tree 找不到孩子,只剩孤儿攥着 FIFO 写端,EOF 永远不来,Ctrl+C 杀不掉)。
-    # 按进程组杀是业界标准做法(Claude Code 同款)。
-    set -m
+    if ! command -v script >/dev/null 2>&1; then
+        printf '\033[1;41;37m错误:当前系统缺少 script(1),无法以 PTY 方式执行交互命令\033[0m\r\n' >&2
+        window_output="错误:系统缺少 script(1),无法以 PTY 方式执行命令: $cmd"
+        return 1
+    fi
+
+    # 首次运行时探测 script 方言和能力，之后缓存
+    if [[ -z "$SCRIPT_KIND" ]]; then
+        if script -q -c 'true' /dev/null </dev/null >/dev/null 2>&1; then
+            SCRIPT_KIND=linux
+            script -q -e -c 'exit 7' /dev/null </dev/null >/dev/null 2>&1
+            probe_rc=$?
+        else
+            SCRIPT_KIND=bsd
+            script -q -e /dev/null /bin/sh -c 'exit 7' </dev/null >/dev/null 2>&1
+            probe_rc=$?
+        fi
+        if (( probe_rc == 7 )); then
+            SCRIPT_HAS_E=1
+        else
+            SCRIPT_HAS_E=0
+        fi
+    fi
+
+    old_stty=$(stty -g 2>/dev/null)
 
     shopt -s extglob
-    # 藏光标防闪烁；关自动换行 → 超宽行（含中文宽字符）在右边缘直接裁剪，
-    # 光标不会掉到下一行，"上移 drawn 行"的算术就永远是对的
+    # 藏光标防闪烁；关自动换行 → 超宽行在右边缘直接裁剪，窗口坐标才不会错位
     printf '\033[?25l\033[?7l'
 
-    # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
+    # 剥掉 \r、退格和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
     clean_line() {
+        local before after
         line=${line//$'\r'/}
         line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        # 退格按终端语义擦掉前一字符(交互输入回显、script 启动残迹都会用到)
+        while [[ "$line" == *$'\b'* ]]; do
+            before="${line%%$'\b'*}"
+            after="${line#*$'\b'}"
+            [[ -n "$before" ]] && before="${before%?}"
+            line="$before$after"
+        done
     }
 
-    # drawn = 已画的完整行数；光标始终停在窗口底行（partial 行）上
+    # drawn = 已画完整行数；光标停在窗口底行(partial)。显式 \r\n:
+    # script 运行期间可能把外层终端切到 raw/OPOST-off,\n 不再自动补 \r
     paint() {
         local i
         printf '\r'
         (( drawn > 0 )) && printf '\033[%dA' "$drawn"
         for i in "${buf[@]}"; do
-            # \033[2K 整行擦除，清掉上一帧更长内容的残留
-            printf '\033[2K\033[2m│\033[0m %s\n' "$i"
+            printf '\033[2K\033[2m│\033[0m %s\r\n' "$i"
         done
-        # 底行：交互提示等无换行输出画在这里，光标停在其末尾方便用户应答
         printf '\033[2K'
         if [[ -n "$partial" ]]; then
             printf '\033[2m│\033[0m \033[33m%s\033[0m\033[?25h' "$partial"
@@ -429,30 +471,111 @@ run_with_window() {
         drawn=${#buf[@]}
     }
 
-    # 用 FIFO + 后台任务代替进程替换 <(...)：$! 能拿到子 shell PID，
-    # 卡死时 Ctrl+C 可精准杀掉子命令。
-    # 不用 coproc 的原因：coproc 一结束 bash 会 unset 其数组并关掉读端 fd，
-    # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
-    win_tmpdir=$(mktemp -d)
-    mkfifo "$win_tmpdir/fifo" || return 1
-    eval "$cmd" > "$win_tmpdir/fifo" 2>&1 &
-    cmd_pid=$!
-    exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
+    win_tmpdir=$(mktemp -d) || {
+        [[ -n "$old_stty" ]] && stty "$old_stty" 2>/dev/null
+        printf '\033[?25h\033[?7h'
+        return 1
+    }
+    mkfifo "$win_tmpdir/ts" || {
+        rm -rf "$win_tmpdir"
+        [[ -n "$old_stty" ]] && stty "$old_stty" 2>/dev/null
+        printf '\033[?25h\033[?7h'
+        return 1
+    }
 
-    # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成"只杀子命令"：
-    # - 第一次 Ctrl+C：先按进程组整组 TERM(job control 下子命令在独立进程组),
-    #   再用 kill_tree 递归兜底(杀不在组内的散兵),写端全部关闭 → EOF → 窗口正常收尾;
-    # - 第二次 Ctrl+C：兜底恢复原 trap 并重新触发，走 handle_ctrl_c 整体退出。
-    # trap 能在 0.1s 内执行的前提是下面 read 的 -t 轮询超时；无限阻塞的 read 会
-    # 把 trap 推迟到 read 完成才执行（死锁），这里不存在。
+    # 父 shell 先打开真实终端 fd。script 从该 fd 读用户输入并转发给 PTY 子进程;
+    # 显式重定向同时覆盖"非交互 shell 中异步命令 stdin 默认 /dev/null"的行为。
+    if exec {tty_fd}<>/dev/tty 2>/dev/null; then
+        :
+    else
+        tty_fd=""
+    fi
+
+    # 老式 script 没有 -e 时,用包装脚本在退出时写状态文件,保证拿到真实退出码
+    if (( ! SCRIPT_HAS_E )); then
+        wrapper="$win_tmpdir/run.sh"
+        status_file="$win_tmpdir/status"
+        trap_code="trap 'rc=\$?; printf \"%s\" \"\$rc\" > \"\$RUN_STATUS_FILE\"; exit \"\$rc\"' EXIT"
+        {
+            printf '#!/bin/bash\n'
+            printf 'RUN_STATUS_FILE=%s\n' "$(printf '%q' "$status_file")"
+            printf '%s\n' "$trap_code"
+            printf '%s\n' "$cmd"
+        } > "$wrapper"
+        chmod +x "$wrapper"
+    fi
+
+    if [[ "$SCRIPT_KIND" == linux ]]; then
+        script_cmd=(env SHELL=/bin/bash script -q -f)
+        (( SCRIPT_HAS_E )) && script_cmd+=(-e)
+        if (( SCRIPT_HAS_E )); then
+            script_cmd+=(-c "$cmd")
+        else
+            script_cmd+=(-c "/bin/bash $(printf '%q' "$wrapper")")
+        fi
+        script_cmd+=("$win_tmpdir/ts")
+    else
+        script_cmd=(script -q -F)
+        (( SCRIPT_HAS_E )) && script_cmd+=(-e)
+        script_cmd+=("$win_tmpdir/ts")
+        if (( SCRIPT_HAS_E )); then
+            script_cmd+=(/bin/bash -c "$cmd")
+        else
+            script_cmd+=(/bin/bash "$wrapper")
+        fi
+    fi
+
+    # 关键:不开 job control。script 后台运行但与主 shell 同进程组,
+    # 读 /dev/tty 不会被 SIGTTIN 停住。script 自身输出丢弃,窗口只画 FIFO 内容。
+    set +m
+    if [[ -n "$tty_fd" ]]; then
+        "${script_cmd[@]}" <&"$tty_fd" >/dev/null 2>"$win_tmpdir/script.err" &
+    else
+        "${script_cmd[@]}" </dev/null >/dev/null 2>"$win_tmpdir/script.err" &
+    fi
+    script_pid=$!
+    [[ -n "$tty_fd" ]] && eval "exec $tty_fd>&-"
+
+    # script 若启动即失败,不会打开 FIFO 写端,下面 open read 会永久阻塞。
+    # 用 ps 状态确认它还活着且不是僵尸;已死/僵尸则回收并直接报错。
+    script_stat=$(ps -o stat= -p "$script_pid" 2>/dev/null | tr -d ' ')
+    if [[ -z "$script_stat" || "$script_stat" == Z* ]]; then
+        wait "$script_pid" 2>/dev/null
+        script_rc=$?
+        script_err=$(cat "$win_tmpdir/script.err" 2>/dev/null)
+        rm -rf "$win_tmpdir"
+        [[ -n "$old_stty" ]] && stty "$old_stty" 2>/dev/null
+        printf '\033[?25h\033[?7h'
+        printf '\033[2m└─ script(1) 启动失败(状态 %d) ─┘\033[0m\r\n' "$script_rc"
+        window_output="错误:script(1) 启动失败(状态 $script_rc)"
+        [[ -n "$script_err" ]] && window_output+=$'\n'"$script_err"
+        return 1
+    fi
+
+    exec {win_fd}<"$win_tmpdir/ts"   # 与 script 的 FIFO 写端 rendezvous
+
+    # 找 script 的直接子进程(真正的命令)用于状态监控;找不到就监控 script 自身
+    child_pid=""
+    for _ in {1..20}; do
+        child_pid=$(pgrep -P "$script_pid" 2>/dev/null | head -n1)
+        [[ -n "$child_pid" ]] && break
+        sleep 0.05
+    done
+    if [[ -n "$child_pid" ]]; then
+        mon_pid=$child_pid
+    else
+        mon_pid=$script_pid
+    fi
+
+    # 备份原 INT trap。第一次 Ctrl+C:优先杀 script 子进程组,再递归杀树,
+    # 写端全部关闭 → FIFO EOF → 窗口正常收尾;第二次 Ctrl+C 退出主脚本。
     old_trap=$(trap -p INT)
-    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
+    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; child_pgid=$(ps -o pgid= -p "$child_pid" 2>/dev/null | tr -d " "); self_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); if [[ -n "$child_pgid" && "$child_pgid" != "$self_pgid" ]]; then kill -TERM -- "-$child_pgid" 2>/dev/null; fi; kill_tree "$script_pid"; kill_tree "$child_pid"; fi' INT
 
     last_data=${EPOCHREALTIME/./}
     while :; do
         chunk=""
-        # 按块读而非按行读：交互提示通常不带换行，按行 read 永远等不到 \n，
-        # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
+        # 按块读而非按行读:交互提示通常不带换行,按行 read 永远等不到 \n
         IFS= read -r -t 0.1 -N 65536 -u "$win_fd" chunk
         rc=$?
         if [[ -n "$chunk" ]]; then
@@ -462,34 +585,28 @@ run_with_window() {
                 pending="${pending#*$'\n'}"
                 clean_line
                 window_output+="$line"$'\n'
-                # 显示缓冲只存可视宽度:超长行若全量进 buf,paint 每帧向终端喷数 MB
                 buf+=("${line:0:$DISP_COL}")
                 (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
                 (( total++ ))
             done
-            # 底行 partial 同样只清洗/显示可视宽度,保证每轮循环 O(1),
-            # 信号能在命令边界及时处理
             line="${pending:0:$DISP_COL}"; clean_line; partial="$line"
             dirty=1
             last_data=${EPOCHREALTIME/./}
         fi
-        # 超时退出码 >128（继续等）；1~128 是 EOF（命令结束）
-        (( rc > 0 && rc <= 128 )) && break
+        # read 超时退出码 >128(继续等);1~128 是 EOF(命令结束)
+        (( rc > 0 && rc <= 128 )) && { eof=1; break; }
         now=${EPOCHREALTIME/./}
-        # 硬承诺:用户已按 Ctrl+C(杀组已执行)后,若 EOF 仍未到来,静默超时强制
-        # 收尾。无论杀组是否成功、写端是否被孤儿攥着,最多再卡 INT_FORCE_TIMEOUT。
+        # 用户按 Ctrl+C 后若 EOF 仍不来,静默超时强制收尾
         if (( interrupted )); then
             if (( now - last_data > INT_FORCE_TIMEOUT )); then
                 forced=1
                 break
             fi
         fi
-        # 兜底:命令主体已退出(变僵尸/被回收)但 FIFO 写端仍被其后台子进程
-        # 握着(AI 在命令里用 & 启动服务),EOF 永远不会来。静默超时提前收尾,
-        # 防止窗口永久挂死。正常慢命令的进程还活着,不会触发。
-        if [[ -n "$cmd_pid" ]]; then
-            cmd_stat=$(ps -o stat= -p "$cmd_pid" 2>/dev/null | tr -d ' ')
-            if [[ -z "$cmd_stat" || "$cmd_stat" == Z* ]]; then
+        # 命令主体已退出但 PTY/FIFO 仍被后台子进程占用时,静默超时收尾
+        if [[ -n "$mon_pid" ]]; then
+            mon_stat=$(ps -o stat= -p "$mon_pid" 2>/dev/null | tr -d ' ')
+            if [[ -z "$mon_stat" || "$mon_stat" == Z* ]]; then
                 if (( now - last_data > BG_SILENT_TIMEOUT )); then
                     bg_leak=1
                     break
@@ -503,12 +620,63 @@ run_with_window() {
         fi
     done
 
-    # 恢复原 INT trap，关闭读端并清理临时 FIFO
+    # 恢复原 INT trap,关闭 FIFO 读端
     [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
     eval "exec $win_fd<&-"
+
+    # 等 script 退出并回收。正常 EOF 后 script 通常已退出;但某些实现/异常
+    # 路径可能关闭 FIFO 后仍存活,继续在后台读 /dev/tty,把 normal_line 的
+    # 键盘输入全部吞掉。这里最多等 2 秒,超时直接 KILL 整棵树,绝不放任。
+    script_rc=0
+    if [[ -n "$script_pid" ]]; then
+        if (( ! eof )); then
+            kill_tree "$script_pid" KILL 2>/dev/null
+            kill_tree "$child_pid" KILL 2>/dev/null
+        fi
+        for _ in {1..40}; do
+            kill -0 "$script_pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        if kill -0 "$script_pid" 2>/dev/null; then
+            kill_tree "$script_pid" KILL 2>/dev/null
+            kill_tree "$child_pid" KILL 2>/dev/null
+            sleep 0.1
+        fi
+        if kill -0 "$script_pid" 2>/dev/null; then
+            script_stat=$(ps -o stat= -p "$script_pid" 2>/dev/null | tr -d ' ')
+            if [[ "$script_stat" == Z* ]]; then
+                # 僵尸进程:wait 立即回收,不会挂住
+                wait "$script_pid" 2>/dev/null
+                script_rc=$?
+            else
+                # 极少数不可中断状态,不要 wait 卡死主流程
+                script_rc=137
+            fi
+        else
+            wait "$script_pid" 2>/dev/null
+            script_rc=$?
+        fi
+    fi
+
+    # 没有 -e 的老 script:优先读包装脚本写出的真实状态
+    run_rc=$script_rc
+    if (( ! SCRIPT_HAS_E )) && [[ -n "$status_file" && -s "$status_file" ]]; then
+        run_rc=$(cat "$status_file" 2>/dev/null)
+        [[ "$run_rc" =~ ^[0-9]+$ ]] || run_rc=$script_rc
+    fi
+    rc=$run_rc
+
+    # 先恢复终端模式,再画收尾帧。script 可能在退出/被 KILL 前把外层终端
+    # 改成 raw/noecho,必须先恢复,否则 normal_line 的提示/回显都会异常。
+    if [[ -n "$old_stty" ]]; then
+        stty "$old_stty" 2>/dev/null
+    elif [[ -n "$stty_save" ]]; then
+        stty "$stty_save" 2>/dev/null
+    fi
+
     rm -rf "$win_tmpdir"
 
-    # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
+    # 无换行残段按一行落盘(清洗后为空的不算,如退出时打的转义序列)
     if [[ -n "$pending" ]]; then
         line="$pending"; clean_line
         if [[ -n "$line" ]]; then
@@ -519,25 +687,28 @@ run_with_window() {
         fi
     fi
     partial=""
-    paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
+    paint    # 节流可能吞掉最后的内容,收尾必须补画一帧
     printf '\033[?25h\033[?7h'
+
     if (( forced )); then
-        printf '\033[2m└─ 已强制停止(输出管道未关闭,停止等待) · 共 %d 行 ─┘\033[0m\n' "$total"
-        # 告诉模型:命令被用户中断,且部分后台进程可能仍在运行
+        printf '\033[2m└─ 已强制停止(PTY 输出未关闭,停止等待) · 共 %d 行 ─┘\033[0m\r\n' "$total"
         window_output+=$'\n(命令已被用户中断。若后台仍有残留进程,可用 ps 查询并清理。)'
     elif (( bg_leak )); then
-        printf '\033[2m└─ 命令主体已结束,但输出管道仍被后台进程占用,已停止等待 ─┘\033[0m\n'
-        # 告诉模型:疑似用 & 启动了长驻服务,应改用 run_in_background=true
-        window_output+=$'\n(检测到命令使用了 & 后台符号,输出管道被后台进程占用。若为长驻服务,请改用 run_in_background=true 参数重新启动。)'
+        printf '\033[2m└─ 命令主体已结束,但 PTY 仍被后台进程占用,已停止等待 ─┘\033[0m\r\n'
+        window_output+=$'\n(检测到命令使用了 & 后台符号,PTY 被后台进程占用。若为长驻服务,请改用 run_in_background=true 参数重新启动。)'
     elif (( interrupted )); then
-        printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n' "$total"
-        # 告诉模型命令是被用户中断的，而不是自然跑完
+        printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\r\n' "$total"
         window_output+=$'\n(命令已被用户中断)'
+    elif (( rc == 130 )); then
+        printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\r\n' "$total"
+        window_output+=$'\n(命令已被用户中断)'
+    elif (( rc != 0 )); then
+        printf '\033[2m└─ 退出(状态 %d) · 共 %d 行 ─┘\033[0m\r\n' "$rc" "$total"
     else
-        printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n' "$total"
+        printf '\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\r\n' "$total"
     fi
+    return "$rc"
 }
-
 # 工具 skill
 tools() {
     # 注意：这里输出会被 printContent 用 tools=$(tools) 捕获，
@@ -1148,8 +1319,8 @@ tool_run_and_parse() {
             if [[ "$ai_auth" == "Y" || "$answer" == "y" ]]; then
                 if [[ "$run_in_bg" == "true" ]]; then
                     # 后台启动长驻服务:输出重定向到日志、stdin 断开终端、立即返回。
-                    # 绝不能走 run_with_window:服务器进程继承 FIFO 写端,
-                    # 窗口循环永远等不到 EOF,主 shell 会被永久卡死。
+                    # 绝不能走 run_with_window:服务器进程会占用 PTY/FIFO,
+                    # 窗口循环可能永远等不到 EOF,主 shell 会被永久卡死。
                     # 注意 BSD mktemp 要求 XXXXXX 在模板末尾,不能加 .log 后缀
                     bg_log=$(mktemp "${TMPDIR:-/tmp}/ct_bg_XXXXXX")
                     nohup bash -c "$command" </dev/null >"$bg_log" 2>&1 &
@@ -1160,6 +1331,11 @@ tool_run_and_parse() {
                     # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
                     # 先截断:超长输出保留头尾,砍掉重复性日志,控制上下文体积
                     run_with_window "$command"
+                    # run_with_window 内部已恢复 stty,这里再按 ask_ai 保存的
+                    # 正常状态兜底一次,防止 script 异常退出时把回显/行编辑
+                    # 留在 raw/noecho,导致下一轮 normal_line 吞键盘。
+                    [[ -n "$stty_save" ]] && stty "$stty_save" 2>/dev/null
+                    printf '\033[?25h\033[?7h'
                     content=$(truncate_output "$window_output")
                     sleep 2
                 fi
