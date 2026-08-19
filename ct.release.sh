@@ -1,7 +1,19 @@
 #!/bin/bash
 
+# 该脚本支持mimo-2.5/deepseek-v4
+# ================切换模型需要改这里👇👇=======================
+#deepseek
+# https://api.deepseek.com/chat/completions
+BASE_URL="https://api.xiaomimimo.com/v1/chat/completions"
 # api key
-DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
+DEEPSEEK_API_KEY="sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai"
+#"deepseek-v4-flash"
+#"deepseek-v4-pro"
+flash_model="mimo-v2.5"
+pro_model="mimo-v2.5-pro"
+# ===============================👆👆========================
+
+
 # 保存当前对话的标题，默认空字符串，首次保存时由模型生成
 chat_title=""
 
@@ -13,14 +25,14 @@ messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
 
 #辅助权限判断助手消息
 # 
-auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。"}]')
+auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。同时存在白名单机制:【1. /tmp/*】-> 遇到读写白名单内的目录/文件，应该放行(回复Y)。"}]')
 
 
 # 是否思考,默认关闭
 thinking="disabled"
 
 #模型，默认是 deepseek-v4-flash
-model="deepseek-v4-flash"
+model="$flash_model"
 
 # 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
 # MAX_TOOL_ROUNDS=10
@@ -126,6 +138,25 @@ fi
 declare -A tool_ids=() tool_names=() tool_args=()
 
 
+# pty 包装探测(启动时一次):裸 FIFO 会让子命令的 stdio 切到全缓冲,
+# python/node/编译器等程序的输出会憋到进程退出才一次性涌出,窗口失去实时性。
+# 套一层伪终端(pty)让子命令以为自己面对终端,恢复行缓冲。
+# script 几乎是所有 Unix 标配,但有两个语法家族:
+#   util-linux(Linux): script -qec "cmd" /dev/null,支持 --version
+#   BSD(macOS/FreeBSD): script -q /dev/null cmd...,不支持 --version(借此区分)
+# 都没有时用 python3 的 pty 模块兜底;再没有退回裸 FIFO(仅损失实时性,功能不变)
+if command -v script >/dev/null 2>&1; then
+    if script --version 2>/dev/null | grep -qi util-linux; then
+        PTY_STYLE="util-linux"
+    else
+        PTY_STYLE="bsd"
+    fi
+elif command -v python3 >/dev/null 2>&1; then
+    PTY_STYLE="python"
+else
+    PTY_STYLE="none"
+fi
+
 # 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
 # 剩余字节留在 tty 输入队列里，可用不带 -e 的非阻塞 read 排干拿到全文
 # （若保持开启，bash 会把首行之后的内容直接丢弃）
@@ -136,8 +167,8 @@ export INPUTRC="$_ct_inputrc"
 
 trap handle_ctrl_c INT
 
-# 任何退出路径都恢复光标显示 + 自动换行
-trap 'printf "\033[?25h\033[?7h"' EXIT
+# 任何退出路径都恢复光标显示 + 自动换行 + 回显(窗口期间两次 Ctrl+C 会直接退出)
+trap 'printf "\033[?25h\033[?7h"; stty echo 2>/dev/null' EXIT
 
 
 render_markdown() {
@@ -333,14 +364,14 @@ parse_options() {
 
         # 关闭深入思考，使用pro模型
         if [[ "${!i}" == "-p" ]]; then
-            model="deepseek-v4-pro"
+            model="$pro_model"
             continue
         fi
 
         # 深入思考
         if [[ "${!i}" == "-dp" ]]; then
             thinking="enabled"
-            model="deepseek-v4-pro"
+            model="$pro_model"
             continue
         fi
 
@@ -390,6 +421,7 @@ run_with_window() {
     local chunk rc line pending="" partial=""
     local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
     local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
+    local in_fd="" key="" tty_save="" tty_cols="" tty_rows="" wrapped_cmd=""
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -408,6 +440,10 @@ run_with_window() {
     clean_line() {
         line=${line//$'\r'/}
         line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        # BSD script 在 stdin EOF 时向 pty 回显的 "^D" + 退格残留;
+        # 先剥定向残留再剥散落的退格(窗口无法正确渲染 \b)
+        line=${line//'^D'$'\b\b'/}
+        line=${line//$'\b'/}
     }
 
     # drawn = 已画的完整行数；光标始终停在窗口底行（partial 行）上
@@ -435,7 +471,62 @@ run_with_window() {
     # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
     win_tmpdir=$(mktemp -d)
     mkfifo "$win_tmpdir/fifo" || return 1
-    eval "$cmd" > "$win_tmpdir/fifo" 2>&1 &
+    # 输入 FIFO:子命令的 stdin 从这里读,由主 shell 代读 tty 后转发进来。
+    # 后台进程组自己读 tty 会被 SIGTTIN 整树停住(npm create vite 实测
+    # bash/npm/node 全部 T 状态挂死);主 shell 是前台进程组,读 tty 合法。
+    # <> 打开:读写两端同时就位永不阻塞,且窗口存活期间写端常开,
+    # 子命令的交互式提示会等待输入而非读到 EOF 直接返回。
+    mkfifo "$win_tmpdir/in" || return 1
+    exec {in_fd}<>"$win_tmpdir/in"
+    # pty 的窗口尺寸默认 0×0(stdin 非 tty 时 script 无从继承):clack 等 UI 库
+    # 会按宽度 0 折行,每字符一行。命令前注入 stty 把真实终端尺寸写进 pty slave
+    tty_cols=$(tput cols 2>/dev/null); tty_rows=$(tput lines 2>/dev/null)
+    wrapped_cmd="stty cols ${tty_cols:-120} rows ${tty_rows:-40} 2>/dev/null; $cmd"
+    # 套 pty 启动(按启动时探测的语法家族分发):子命令把 stdout 当终端 →
+    # 行缓冲,输出实时进 FIFO(实测:裸 FIFO 下 python 等程序憋到退出才吐)。
+    case "$PTY_STYLE" in
+        bsd)
+            # stdin 经 cat 中转成匿名管道:macOS 的 FIFO 基于 socket 实现,
+            # BSD script 对其 tcgetattr 会致命报错(管道只报 ENOTTY,被容忍)
+            cat "$win_tmpdir/in" | script -q /dev/null "$BASH" -c "$wrapped_cmd" > "$win_tmpdir/fifo" 2>&1 & ;;
+        util-linux)
+            # util-linux script 用 $SHELL 跑命令,强制指到当前 bash;-e 透传退出码
+            SHELL="$BASH" script -qec "$wrapped_cmd" /dev/null <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+        python)
+            # 不用 pty.spawn:macOS 上子进程退出后它会挂在 master 读取,EOF 不来。
+            # pty.fork + select 双向转发:master→stdout 及 stdin→master,
+            # 读到 EOF/EIO(Linux 子进程退出报 EIO)都干净退出
+            python3 -c '
+import os, pty, select, sys
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(sys.argv[1], [sys.argv[1], "-c", sys.argv[2]])
+stdin_open = True
+while True:
+    rfds = [fd] + ([0] if stdin_open else [])
+    try:
+        r, _, _ = select.select(rfds, [], [])
+    except OSError:
+        break
+    if fd in r:
+        try:
+            data = os.read(fd, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        os.write(1, data)
+    if 0 in r:
+        d = os.read(0, 65536)
+        if d:
+            os.write(fd, d)
+        else:
+            stdin_open = False
+os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+        *)
+            # 无 pty 可用的兜底:丢实时性,但 stdin 同样接 FIFO,交互转发仍可用
+            eval "$cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo" 2>&1 & ;;
+    esac
     cmd_pid=$!
     exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
 
@@ -448,6 +539,10 @@ run_with_window() {
     old_trap=$(trap -p INT)
     trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
 
+    # 关本地回显:用户按键由子命令的 pty 回显(行提示原样回、菜单 UI 重画)
+    # 后经输出 FIFO 画到窗口,避免 tty 与 pty 双重回显;ISIG 仍开,Ctrl+C 不受影响
+    if [[ -t 0 ]]; then tty_save=$(stty -g); stty -echo; fi
+
     last_data=${EPOCHREALTIME/./}
     while :; do
         chunk=""
@@ -455,6 +550,18 @@ run_with_window() {
         # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
         IFS= read -r -t 0.1 -N 65536 -u "$win_fd" chunk
         rc=$?
+        # 代读 tty:把用户按键(含方向键等转义序列)转发进子命令 stdin。
+        # read -N 临时切非规范模式,无换行的字节也能立即取到
+        if [[ -n "$tty_save" ]]; then
+            key=""
+            IFS= read -r -t 0.01 -N 4096 key
+            if [[ -n "$key" ]]; then
+                # 真实终端的 Enter 发 \r,本 tty 的 ICRNL 已转成 \n;raw 模式 UI
+                # (vite/clack 等)只认 \r,还原后发送(规范模式侧 pty 会再转回 \n)
+                key=${key//$'\n'/$'\r'}
+                printf '%s' "$key" >&"$in_fd"
+            fi
+        fi
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
             while [[ "$pending" == *$'\n'* ]]; do
@@ -503,9 +610,11 @@ run_with_window() {
         fi
     done
 
-    # 恢复原 INT trap，关闭读端并清理临时 FIFO
+    # 恢复回显与原 INT trap，关闭两个 FIFO 端并清理临时目录
+    [[ -n "$tty_save" ]] && stty "$tty_save"
     [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
     eval "exec $win_fd<&-"
+    eval "exec $in_fd<&-"
     rm -rf "$win_tmpdir"
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
@@ -752,8 +861,8 @@ compact_messages() {
         printf '📦 正在压缩历史…(当前 %s tokens,阈值 %s)\n' "${last_prompt_tokens:-0}" "$TOKEN_THRESHOLD"
     fi
 
-    request_body=$(jq -n --arg compact_text "$to_compact" '{
-        model: "deepseek-v4-flash",
+    request_body=$(jq -n --arg compact_text "$to_compact" --arg model "$flash_model" '{
+        model: $model,
         messages: [
             {role: "system", content: "你是对话历史压缩助手。任务:把用户提供的旧对话记录压缩成一段精炼的摘要,替代原始记录用于后续继续对话。要求:1. 保留用户的整体目标与意图、关键决策与结论、已执行的命令及其重要结果、出现的错误与最终修复方式、涉及的重要文件路径、用户的个人偏好与约束;2. 丢弃客套话、重复内容与冗长的命令输出;3. 用中文输出,不超过 500 字,只输出摘要正文,不要任何前缀或解释。"},
             {role: "user", content: $compact_text}
@@ -764,9 +873,10 @@ compact_messages() {
     }')
 
     # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支
-    summary=$(curl -s --max-time 120 https://api.deepseek.com/chat/completions \
+    summary=$(curl -s --max-time 120 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
         -d "$request_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
     if [[ -z "$summary" ]]; then
@@ -811,20 +921,23 @@ add_message() {
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
         # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
         # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
-        # thinking 模式下同时回传 reasoning_content(API 硬性要求)。
+        # thinking 模式下必须回传 reasoning_content(API 硬性要求),哪怕本轮
+        # 模型没有输出思考(flash 模型 -t 下偶发只返回工具调用)也要带空串
+        # 字段:省略字段会让下一轮请求 400(真实 API 实测复现)。
         if [[ -z "$addctx" ]]; then
-            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
-                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         else
-            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" \
-                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
         messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
     else
-        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" '. + [{role: $role, content: $content} + (if $reasoning != "" then {reasoning_content: $reasoning} else {} end)]')
+        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content,
+        # 无思考时同样带空串字段(原因同上:省略字段会让下一轮请求 400)
+        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" --arg thinking "$thinking" '. + [{role: $role, content: $content} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
     fi
 }
 auth_add_message() {
@@ -843,8 +956,9 @@ auth_think() {
     auth_add_message "$cmd"
     request_body=$(jq -n \
             --argjson msgs "$auth_message" \
+            --arg model "$flash_model" \
             '{
-            model: "deepseek-v4-flash",
+            model: $model,
             messages: $msgs,
             thinking: {type: "disabled"},
             reasoning_effort: "high",
@@ -1213,8 +1327,7 @@ ask_ai() {
         [[ "$content" == "$option" || "$content" == "$option "* ]] && content="" && return 0
     done
 
-    local think_start=0
-    local think_end=0
+    local think_start think_end
     local chunk=""
     local json=""
     local usage_pt=""
@@ -1223,6 +1336,8 @@ ask_ai() {
     local request_body=$1
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
+    # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
+    local attempt max_attempts=3 think_save_len
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -1238,9 +1353,33 @@ ask_ai() {
     tool_names=()
     tool_args=()
 
+    # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
+    # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
+    think_save_len=${#thinking_response}
     [[  "$is_lock_screen" == 1 ]] && lock_screen
+    for ((attempt=1; attempt<=max_attempts; attempt++)); do
+        # 每轮尝试前复位单轮产物,上一尝试的残留会干扰"是否有产出"的判断
+        full_response=""
+        raw_reasoning=""
+        api_error=""
+        tool_ids=()
+        tool_names=()
+        tool_args=()
+        think_start=0
+        think_end=0
+        if (( attempt > 1 )); then
+            # 上一尝试零产出:回滚其思考残留、清掉交替屏幕残影、退避后重发
+            # 同一请求体(零产出的请求无副作用,重发安全)
+            thinking_response="${thinking_response:0:think_save_len}"
+            printf '\033[2J\033[H'
+            sleep "$attempt"
+        fi
 
-    while IFS= read -r line; do
+        # read 只对"以换行结尾的完整行"返回 0。DeepSeek 的整段 JSON 错误响应
+        # (400 等)末尾没有换行符:若只写 while read,EOF 残段让 read 返回非零,
+        # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
+        # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
+        while IFS= read -r line || [[ -n "$line" ]]; do
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && break
@@ -1312,16 +1451,22 @@ ask_ai() {
             # data: 流。记录之,循环结束后显示,避免"发消息毫无输出"的静默失败。
             [[ "$line" == \{* || "$line" == \[* ]] && api_error+="$line"$'\n'
         fi
-    done < <(
-        # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
-        # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
-        curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
-            https://api.deepseek.com/chat/completions \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -d "$request_body"\
-        2>&1
-    )
+        done < <(
+            # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
+            # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
+            curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
+                "$BASE_URL" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+                -H "api-key: $DEEPSEEK_API_KEY" \
+                -d "$request_body"\
+            2>&1
+        )
+        # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
+        # 完全零产出才进入下一尝试(退避重发)
+        [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
+        (( ${#tool_ids[@]} > 0 )) && break
+    done
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
 
@@ -1333,7 +1478,8 @@ ask_ai() {
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
         full_response="⚠️ API 请求失败: $err_msg"
-        printf '\033[31m%s\033[0m\n' "$full_response"
+        # 不在这里直接打印:printContent 会把 full_response 渲染到主屏幕,
+        # 这里再打印会出现双份(历史问题:⚠️ 消息显示两次)
     fi
 
     # 无任何产出(内容/思考/工具/错误全空):网络中断或模型空回复。
@@ -1343,7 +1489,7 @@ ask_ai() {
     if [[ -z "$full_response" && -z "$raw_reasoning" && -z "$api_error" ]] \
         && (( ${#tool_ids[@]} == 0 )); then
         full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
-        printf '\033[33m%s\033[0m\n' "$full_response"
+        # 不直接打印,理由同上(防双份显示)
     fi
 
     (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
@@ -1366,6 +1512,8 @@ flush_thinking() {
 printContent() {
 
     add_message "$content"
+    local tools
+    local request_body
 
     # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
     # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
@@ -1374,8 +1522,8 @@ printContent() {
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
     # thinking 为空时不应发送 thinking 字段
-    local tools=$(tools)
-    local request_body=$(jq -n \
+    tools=$(tools)
+    request_body=$(jq -n \
         --arg model "$model" \
         --argjson msgs "$messages" \
         --arg thinking "$thinking" \
@@ -1423,8 +1571,8 @@ overview() {
     # echo "记录是: $messages"
     msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
 
-    request_body=$(jq -n  --argjson msgs "$msg" '{
-        model: "deepseek-v4-flash",
+    request_body=$(jq -n  --argjson msgs "$msg" --arg model "$flash_model" '{
+        model: $model,
         messages: $msgs,
         thinking: {type: "disabled"},
         reasoning_effort: "high",
