@@ -1,7 +1,19 @@
 #!/bin/bash
 
+# 该脚本支持mimo-2.5/deepseek-v4
+# ================切换模型需要改这里👇👇=======================
+#deepseek
+# https://api.deepseek.com/chat/completions
+BASE_URL="https://api.xiaomimimo.com/v1/chat/completions"
 # api key
-DEEPSEEK_API_KEY="sk-43c796fe3c924743a38e9c5aec6c077a"
+DEEPSEEK_API_KEY="sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai"
+#"deepseek-v4-flash"
+#"deepseek-v4-pro"
+flash_model="mimo-v2.5"
+pro_model="mimo-v2.5-pro"
+# ===============================👆👆========================
+
+
 # 保存当前对话的标题，默认空字符串，首次保存时由模型生成
 chat_title=""
 
@@ -20,7 +32,7 @@ auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断�
 thinking="disabled"
 
 #模型，默认是 deepseek-v4-flash
-model="deepseek-v4-flash"
+model="$flash_model"
 
 # 最大工具调用轮次：防止模型失控时无限递归调用工具（每轮 = 一次真实 API 请求）
 # MAX_TOOL_ROUNDS=10
@@ -352,14 +364,14 @@ parse_options() {
 
         # 关闭深入思考，使用pro模型
         if [[ "${!i}" == "-p" ]]; then
-            model="deepseek-v4-pro"
+            model="$pro_model"
             continue
         fi
 
         # 深入思考
         if [[ "${!i}" == "-dp" ]]; then
             thinking="enabled"
-            model="deepseek-v4-pro"
+            model="$pro_model"
             continue
         fi
 
@@ -849,8 +861,8 @@ compact_messages() {
         printf '📦 正在压缩历史…(当前 %s tokens,阈值 %s)\n' "${last_prompt_tokens:-0}" "$TOKEN_THRESHOLD"
     fi
 
-    request_body=$(jq -n --arg compact_text "$to_compact" '{
-        model: "deepseek-v4-flash",
+    request_body=$(jq -n --arg compact_text "$to_compact" --arg model "$flash_model" '{
+        model: $model,
         messages: [
             {role: "system", content: "你是对话历史压缩助手。任务:把用户提供的旧对话记录压缩成一段精炼的摘要,替代原始记录用于后续继续对话。要求:1. 保留用户的整体目标与意图、关键决策与结论、已执行的命令及其重要结果、出现的错误与最终修复方式、涉及的重要文件路径、用户的个人偏好与约束;2. 丢弃客套话、重复内容与冗长的命令输出;3. 用中文输出,不超过 500 字,只输出摘要正文,不要任何前缀或解释。"},
             {role: "user", content: $compact_text}
@@ -861,9 +873,10 @@ compact_messages() {
     }')
 
     # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支
-    summary=$(curl -s --max-time 120 https://api.deepseek.com/chat/completions \
+    summary=$(curl -s --max-time 120 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
         -d "$request_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
 
     if [[ -z "$summary" ]]; then
@@ -943,8 +956,9 @@ auth_think() {
     auth_add_message "$cmd"
     request_body=$(jq -n \
             --argjson msgs "$auth_message" \
+            --arg model "$flash_model" \
             '{
-            model: "deepseek-v4-flash",
+            model: $model,
             messages: $msgs,
             thinking: {type: "disabled"},
             reasoning_effort: "high",
@@ -1441,9 +1455,10 @@ ask_ai() {
             # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
             # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
             curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
-                https://api.deepseek.com/chat/completions \
+                "$BASE_URL" \
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+                -H "api-key: $DEEPSEEK_API_KEY" \
                 -d "$request_body"\
             2>&1
         )
@@ -1497,6 +1512,8 @@ flush_thinking() {
 printContent() {
 
     add_message "$content"
+    local tools
+    local request_body
 
     # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
     # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
@@ -1505,8 +1522,8 @@ printContent() {
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
     # thinking 为空时不应发送 thinking 字段
-    local tools=$(tools)
-    local request_body=$(jq -n \
+    tools=$(tools)
+    request_body=$(jq -n \
         --arg model "$model" \
         --argjson msgs "$messages" \
         --arg thinking "$thinking" \
@@ -1554,8 +1571,8 @@ overview() {
     # echo "记录是: $messages"
     msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
 
-    request_body=$(jq -n  --argjson msgs "$msg" '{
-        model: "deepseek-v4-flash",
+    request_body=$(jq -n  --argjson msgs "$msg" --arg model "$flash_model" '{
+        model: $model,
         messages: $msgs,
         thinking: {type: "disabled"},
         reasoning_effort: "high",
