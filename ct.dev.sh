@@ -49,9 +49,11 @@ forget_history=0
 # 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
 last_prompt_tokens=0
 
-# 触发自动压缩的阈值。业界实践(Claude Code/Aider)多在接近窗口上限才压,
-# 这里按"控制每轮成本与首字延迟"主动提前到 10 万 token(约占 1M 窗口的 10%)。
-TOKEN_THRESHOLD=100000
+# 触发自动压缩的阈值。注意:本脚本默认跑 mimo-v2.5(小米)接口,实际窗口
+# 远小于 deepseek 的 1M——实测约 4 万 token 就会越界断连。按 32K 窗口的
+# 75% 取 24000,留出安全余量;换更大窗口的模型时再按比例调高。
+# 如果是deepseek-v4,可改成 100000
+TOKEN_THRESHOLD=24000
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
 # + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
@@ -191,12 +193,16 @@ save_history() {
     [[ $forget_history == 1 ]] && return 0
     local history
 
-    # 替换斜杠
-    # name=$(echo "${chat_title%.json}" | tr '/' '_')
-    # 替换其他危险字符（如空格、特殊符号）
-    name=$(echo "$chat_title" | tr '[:space:]' '_')
-    name=$(echo "$name" | tr -d '\\/:*?"<>|')
-    name="${name%.json}" 
+    # 清洗标题为合法文件名。注意两点历史 bug:
+    # 1. 用 printf '%s' 而非 echo——echo 会自动追加换行,该换行又被 tr 转成
+    #    '_',导致每个文件名末尾都多一个下划线;
+    # 2. 先 trim 首尾空白(模型生成的标题末尾常带换行),避免末尾残留 '_'。
+    name=$(printf '%s' "$chat_title" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    name=$(printf '%s' "$name" | tr '[:space:]' '_')
+    name=$(printf '%s' "$name" | tr -d '\\/:*?"<>|')
+    name="${name%.json}"
+    # 清洗后无有效字符(如全空白标题)时给兜底名,避免保存成 ".json"
+    [[ -z "$name" ]] && name="chat"
 
     [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
     history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
@@ -892,6 +898,50 @@ compact_messages() {
     last_prompt_tokens=0
 }
 
+# 失败自愈:请求失败(无响应/传输层断连/上下文越界)时,若本地字节粗算已超阈值,
+# 说明是上下文越界而非纯网络抖动——主动压缩历史后重发一次,打破
+# "越界→请求失败→拿不到 usage→last_prompt_tokens 不更新→压缩永不触发"的死循环。
+# 参数:$1 是否锁屏  $2 是否记录 usage(原样透传给重发的 ask_ai)。
+# 返回 0 = 已压缩并重发(调用方应直接 return);返回 1 = 未处理(交给原兜底逻辑)。
+retry_after_compact() {
+    local is_lock=$1 is_record=$2
+    local est_bytes est_tokens before_count after_count tools_json request_body
+    # auth 旁路请求(is_record=0)用的是 auth_message,不是主对话 messages,
+    # 不参与上下文自愈(否则会误用主对话 messages 重建请求体)
+    (( is_record == 0 )) && return 1
+    est_bytes=$(printf '%s' "$messages" | wc -c | tr -d ' ')
+    est_tokens=$((est_bytes * 2 / 5))
+    # 本地估算低于阈值 → 不是上下文问题(纯网络抖动),交给原重试/兜底逻辑
+    (( est_tokens <= TOKEN_THRESHOLD )) && return 1
+
+    printf '⚠️ 请求失败且本地估算 %s tokens 已超阈值 %s,自动压缩历史后重发…\n' "$est_tokens" "$TOKEN_THRESHOLD"
+    before_count=$(echo "$messages" | jq 'length')
+    compact_messages
+    after_count=$(echo "$messages" | jq 'length')
+    # 压缩未生效(消息条数没减,如单条超大消息/工具链过长):重发必然再失败,不再递归
+    if (( after_count >= before_count )); then
+        printf '⚠️ 自动压缩未减少消息量,请手动 -c 压缩或重开对话\n'
+        return 1
+    fi
+    tools_json=$(tools)
+    request_body=$(jq -n \
+        --arg model "$model" \
+        --argjson msgs "$messages" \
+        --arg thinking "$thinking" \
+        --argjson tool "$tools_json" \
+        '{
+        model: $model,
+        messages: $msgs,
+        thinking: {type: $thinking},
+        reasoning_effort: "high",
+        stream: true,
+        tools: $tool,
+        stream_options: {include_usage: true}
+    }')
+    ask_ai "$request_body" "$is_lock" "$is_record"
+    return 0
+}
+
 # 查看当前上下文用量
 print_usage() {
     local est pct
@@ -1447,14 +1497,20 @@ ask_ai() {
             # chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
             # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
         else
-            # 非 SSE 行:API 报错(如 400 结构非法)时 curl 输出整段 JSON 而非
-            # data: 流。记录之,循环结束后显示,避免"发消息毫无输出"的静默失败。
-            [[ "$line" == \{* || "$line" == \[* ]] && api_error+="$line"$'\n'
+            # 非 SSE 行两类:1. API 报错(如 400 结构非法)时 curl 输出整段 JSON;
+            # 2. curl 传输层错误(如 "curl: (52) Empty reply from server"、
+            #    连接被断/超时)。都记录进 api_error,循环结束后显示,
+            # 避免"发消息毫无输出"的静默失败。
+            if [[ "$line" == \{* || "$line" == \[* || "$line" == curl:* ]]; then
+                api_error+="$line"$'\n'
+            fi
         fi
         done < <(
             # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
             # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
-            curl -sN --connect-timeout 15 --retry 2 --retry-connrefused \
+            # -sS:静默进度条但保留错误输出(传输层断连时报 "curl: (52)..." 等),
+            # 由上方 else 分支记录进 api_error,否则错误被吞、误报成"无响应"。
+            curl -sSN --connect-timeout 15 --retry 2 --retry-connrefused \
                 "$BASE_URL" \
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
@@ -1477,6 +1533,10 @@ ask_ai() {
     if [[ -z "$full_response" && -z "$raw_reasoning" && -n "$api_error" ]]; then
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
+        # 上下文越界(400 context/token/length exceeded):主动压缩后重发一次
+        if [[ "$err_msg" == *[Cc]ontext* || "$err_msg" == *[Tt]oken* || "$err_msg" == *[Ll]ength* || "$err_msg" == *exceed* ]]; then
+            retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
+        fi
         full_response="⚠️ API 请求失败: $err_msg"
         # 不在这里直接打印:printContent 会把 full_response 渲染到主屏幕,
         # 这里再打印会出现双份(历史问题:⚠️ 消息显示两次)
@@ -1488,6 +1548,9 @@ ask_ai() {
     # 恒非空,会把链中间的网络中断误判为正常,导致静默。
     if [[ -z "$full_response" && -z "$raw_reasoning" && -z "$api_error" ]] \
         && (( ${#tool_ids[@]} == 0 )); then
+        # 先尝试失败自愈:本地估算超限则压缩后重发一次(打破越界死循环);
+        # 未超限才归为普通网络中断,给出兜底提示
+        retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
         full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
         # 不直接打印,理由同上(防双份显示)
     fi
@@ -1580,7 +1643,11 @@ overview() {
         stream_options: {include_usage: true}
     }')
 
-    ask_ai "$request_body"
+    # ask_ai 会把流式正文直接 printf 到 stdout(主屏幕显示),而这里末尾又
+    # printf 一次 full_response。若两者都进 stdout,chat_title=$(overview)
+    # 会捕获两份标题,导致历史文件名重叠(历史 bug:标题重复两遍)。
+    # 把 ask_ai 的 stdout 丢弃,只保留末尾这一次 printf 作为函数返回值。
+    ask_ai "$request_body" >/dev/null
 
     printf "%s" "$full_response"
 }
