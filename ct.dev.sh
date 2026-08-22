@@ -89,6 +89,15 @@ WEB_MAX_CHARS=20000
 
 # 用户输入的内容
 input=""
+# Ctrl+C 状态标志(配合 handle_ctrl_c):
+#   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
+#   ai_active=0     主屏幕(输入行的 Ctrl+C 由 readline 清行;普通 read 被打断
+#                   时置 input_aborted),任何情况都不退出
+#   round_aborted   本轮 AI 输出是否被 Ctrl+C 打断(printContent 置位,主循环据此跳过标题生成)
+ai_active=0
+ai_abort=0
+input_aborted=0
+round_aborted=0
 # 保存当前终端设置
 stty_save=""
 
@@ -167,10 +176,19 @@ _ct_inputrc=$(mktemp)
 printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
 export INPUTRC="$_ct_inputrc"
 
+# 主屏输入行(read -e)按 Ctrl+C 立即清空当前行:readline 读取期间会强制打开
+# ISIG,所以单靠 trap 拦不住——SIGINT 打断不了 readline 的 read,旧内容会留在
+# 缓冲区里"复活"。做法:normal_line 在每次 read 前临时 stty intr undef(驱动层
+# 解除 Ctrl+C→SIGINT 映射),0x03 变成普通按键交给 readline 分派,这里绑定为
+# unix-line-discard(等价 C-u,清到行首),行被即时清空、提示符保留,继续输入
+# 不受影响;读完后 normal_line 立即恢复映射,其余阶段(AI 输出/工具窗口/历史
+# 选择)的 Ctrl+C 仍走 SIGINT 打断流程。
+bind '"\C-c": unix-line-discard' 2>/dev/null
+
 trap handle_ctrl_c INT
 
-# 任何退出路径都恢复光标显示 + 自动换行 + 回显(窗口期间两次 Ctrl+C 会直接退出)
-trap 'printf "\033[?25h\033[?7h"; stty echo 2>/dev/null' EXIT
+# 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
+trap 'printf "\033[?25h\033[?7h"; stty echo isig 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
 
 
 render_markdown() {
@@ -254,20 +272,57 @@ get_history() {
     model=$(jq -r '.model' <<< "$(<"$1")")
     jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
-        content=$(jq -r '.content' <<< "$line")
+        content=$(jq -r '.content // empty' <<< "$line")
+        reasoning=$(jq -r '.reasoning_content // empty' <<< "$line")
+        # 思考内容单独渲染:thinking 模式下 assistant 消息的 reasoning_content
+        # 是历史正文的一部分,旧版只渲染 content,思考内容完全丢失
+        if [[ -n "$reasoning" ]]; then
+            render_markdown "### 💭 思考"
+            echo "----------------------------------------------"
+            render_markdown "$reasoning"
+        fi
         render_markdown "## $role"
         echo "----------------------------------------------"
-        render_markdown "$content"
+        if [[ "$role" == "tool" ]]; then
+            # 工具输出渲染上限:超过 5 行只显示前 5 行并提示省略,避免
+            # 长输出干扰主要信息阅读(仅影响显示,messages 保持完整)。
+            # 历史数据有三个坑,朴素按真实换行统计会失灵:
+            # 1. 工具函数用双引号拼接 \n,bash 不解析,历史里存的是字面
+            #    "反斜杠+n"——先还原成真实换行,否则逻辑上多行被当成一行,
+            #    明明超过 5 行却不省略;
+            # 2. 内容可能以 BOM/空行开头——前导空白行会吃掉 5 行的预算,
+            #    出现"什么都没看到就被省略"。先剔除 BOM 和空行/纯空白行;
+            # 3. 每行限宽 200 字符,防 minified 长行刷屏(仅显示层截断)。
+            disp=${content//"\\n"/$'\n'}
+            disp=${disp/#$'\xef\xbb\xbf'/}
+            disp=$(printf '%s' "$disp" | grep -vE '^[[:space:]]*$')
+            nlines=$(printf '%s' "$disp" | awk 'END{print NR}')
+            shown=$(printf '%s' "$disp" | awk -v w=200 'NR<=5 { if (length($0)>w) print substr($0,1,w) "…(该行过长已截断)"; else print }')
+            if (( nlines > 5 )); then
+                render_markdown "$shown"$'\n'"…(其余 $((nlines - 5)) 行已省略)"
+            else
+                render_markdown "$shown"
+            fi
+        else
+            # assistant 的 tool_calls 消息 content 为 null,不再渲染出字面 "null"
+            [[ -n "$content" ]] && render_markdown "$content"
+        fi
     done
 }
 
+# Ctrl+C 不再退出程序:
+# - AI 输出阶段(ask_ai 流式期间,副屏):置 ai_abort,由 ask_ai 打断流、
+#   丢弃本轮输出、返回主屏幕继续对话;
+# - 主屏幕:输入行(read -e)的 Ctrl+C 已在 readline 层直接清行(见 bind 配置),
+#   不会走到本函数;历史选择/命令确认等普通 read 被打断时置 input_aborted,
+#   由调用处清空输入后重新提示。
+# 唯一退出方式是明确输入 -q(命令行参数或交互输入)。
 handle_ctrl_c() {
-    local name=""
-    # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
-    trap - INT
-    [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
-    save_history
-    exit 130
+    if (( ai_active )); then
+        ai_abort=1
+    else
+        input_aborted=1
+    fi
 }
 
 
@@ -281,9 +336,28 @@ history_handler() {
         echo "$i. $(basename "${tmpList[$i]}")"
         history_list+=("$i. ${tmpList[$i]}")
     done
-    local filePath=""
+    local filePath="" rc
     local isSelect=0
-    IFS= read -r -p "_>" num
+    # 普通 read 在 trap 存在时不会被 SIGINT 打断(实测:trap 执行后 read 继续
+    # 等输入,只是驱动缓冲区被 VINTR 清空,屏幕残留已输入字符)。改成短超时
+    # 轮询:检测到 input_aborted 立即退出选择器。读取期间关 ECHOCTL 避免 ^C
+    # 回显;数字输入的正常回显不受影响。
+    stty -echoctl 2>/dev/null
+    printf '_>'
+    num=""
+    while :; do
+        IFS= read -r -t 0.2 num
+        rc=$?
+        (( input_aborted )) && break
+        (( rc <= 128 )) && break
+    done
+    stty echoctl 2>/dev/null
+    # Ctrl+C 打断编号输入:擦掉屏幕残留行,不把空编号误判成"默认加载最新历史"
+    if (( input_aborted )); then
+        input_aborted=0
+        printf '\r\033[2K\n'
+        return 0
+    fi
     [[ -z "$num"  &&  "${history_list[0]}" ]] && get_history "${history_list[0]#0. }" && return 0
     [[ -z "$num" ]] && echo "请输入编号" && return 1
     [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
@@ -318,6 +392,7 @@ help_user() {
     echo "  -to   词源词根解释任务"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
+    echo "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
     echo "  -h    显示帮助信息"
     echo
     echo "内容交互时，也可使用以下选项:"
@@ -325,6 +400,7 @@ help_user() {
     echo "  -l    查看历史记录并选择加载"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
+    echo "  -q    退出程序"
     echo "  -h    显示帮助信息"
 }
 
@@ -398,6 +474,12 @@ parse_options() {
         if [[ "${!i}" == "-u" ]]; then
             print_usage
             break
+        fi
+
+        if [[ "${!i}" == "-q" ]]; then
+            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
+            save_history
+            exit 0
         fi
 
         if [[ "${!i}" == "-h" ]]; then
@@ -938,8 +1020,9 @@ retry_after_compact() {
         tools: $tool,
         stream_options: {include_usage: true}
     }')
+    # 透传 ask_ai 的返回码:130(Ctrl+C 打断)需要继续向上传播
     ask_ai "$request_body" "$is_lock" "$is_record"
-    return 0
+    return $?
 }
 
 # 查看当前上下文用量
@@ -1002,7 +1085,7 @@ auth_add_message() {
 
 auth_think() {
     local cmd=$1
-    local request_body
+    local request_body rc
     auth_add_message "$cmd"
     request_body=$(jq -n \
             --argjson msgs "$auth_message" \
@@ -1020,6 +1103,9 @@ auth_think() {
     # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
     # 第三个参数 0:auth 消息极小,不把它的 usage 记入 last_prompt_tokens
     ask_ai "$request_body" 0 0
+    rc=$?
+    # Ctrl+C 打断 auth 判断流:直接向上传播 130,不写空 assistant 消息
+    (( rc == 130 )) && return 130
 
     sleep 0.5
 
@@ -1232,7 +1318,7 @@ tool_web_fetch() {
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
 tool_run_and_parse() {
-    local tools request_body args_preview
+    local tools request_body args_preview rc msgs_before_call
     local -a ids_arr names_arr args_arr
     local first_call=1 i
 
@@ -1264,6 +1350,10 @@ tool_run_and_parse() {
         fn_args="${args_arr[$i]}"
         [[ -z "$fn_name" || -z "$fn_id" ]] && continue
 
+        # 快照本条调用写入前的 messages:若用户在权限确认(auth)流式期间
+        # Ctrl+C 打断,已写入的 assistant(tool_calls) 尚无配对的 tool 结果,
+        # 必须回滚,否则下一轮请求会因孤儿 tool_calls 报 400
+        msgs_before_call=$messages
         # assistant 的 tool_calls 消息:并行调用拆成多条 assistant 消息时,
         # DeepSeek 要求每一条都回传 reasoning_content(实测缺一即 400),
         # 所以每条都带同一轮的思考原文;正文只在第一条。
@@ -1298,11 +1388,32 @@ tool_run_and_parse() {
             # 结果从全局变量 full_response 取。
             # 重入安全:收集区已在函数开头清空,auth 内部 ask_ai 结束不会误触发本函数。
             auth_think "$command"
+            rc=$?
+            if (( rc == 130 )); then
+                # 用户在权限判断流中被 Ctrl+C 打断:回滚本条未配对的
+                # assistant(tool_calls),不执行该命令,向上传播 130
+                messages=$msgs_before_call
+                return 130
+            fi
             ai_auth=$(echo -e "$full_response")
 
             if [[ "$ai_auth" == "N" ]]; then
                 printf '\033[2K\033[1;41;37m是否执行该命令？(y/n): \033[0m'
-                IFS= read -r answer
+                # 与历史选择的编号读取同策略:普通 read 不会被 SIGINT 打断,
+                # 用短超时轮询检测 input_aborted,Ctrl+C 立即当作"拒绝执行"
+                stty -echoctl 2>/dev/null
+                answer=""
+                while :; do
+                    IFS= read -r -t 0.2 answer
+                    rc=$?
+                    (( input_aborted )) && break
+                    (( rc <= 128 )) && break
+                done
+                stty echoctl 2>/dev/null
+                if (( input_aborted )); then
+                    input_aborted=0
+                    printf '\r\033[2K\n'
+                fi
 
             fi
             # echo "用户输入: $answer"
@@ -1387,7 +1498,7 @@ ask_ai() {
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
     # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
-    local attempt max_attempts=3 think_save_len
+    local attempt max_attempts=3 think_save_len rc
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -1402,6 +1513,11 @@ ask_ai() {
     tool_ids=()
     tool_names=()
     tool_args=()
+
+    # 进入"AI 输出阶段":期间 Ctrl+C 语义为打断本轮输出;同时清掉上一轮
+    # 残留的打断标志。主屏幕输入阶段的 Ctrl+C 只置 input_aborted。
+    ai_active=1
+    ai_abort=0
 
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
@@ -1430,6 +1546,9 @@ ask_ai() {
         # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
         # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
         while IFS= read -r line || [[ -n "$line" ]]; do
+        # Ctrl+C 打断:立即退出读循环(curl 同进程组一并收到 SIGINT 会自行
+        # 终止;此检查兜底 read 被中断后仍带着残留行进入循环体的情况)
+        (( ai_abort )) && break
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && break
@@ -1519,12 +1638,28 @@ ask_ai() {
             2>&1
         )
         # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
-        # 完全零产出才进入下一尝试(退避重发)
+        # 完全零产出才进入下一尝试(退避重发);被 Ctrl+C 打断也绝不重试
         [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
         (( ${#tool_ids[@]} > 0 )) && break
+        (( ai_abort )) && break
     done
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
+    ai_active=0
+
+    # Ctrl+C 打断:丢弃本轮全部产出(正文/思考/工具调用),回滚本请求期间
+    # 累积进 thinking_response 的思考(此前已渲染部分保留),返回 130 供
+    # 上层识别"被打断";不进入 messages、不重试
+    if (( ai_abort )); then
+        ai_abort=0
+        full_response=""
+        raw_reasoning=""
+        tool_ids=()
+        tool_names=()
+        tool_args=()
+        thinking_response="${thinking_response:0:think_save_len}"
+        return 130
+    fi
 
     # API 请求失败(非流式错误响应):显示错误并写入 full_response,
     # 让错误可见且能进入 messages,模型下一轮可以看到失败原因。
@@ -1535,7 +1670,9 @@ ask_ai() {
         [[ -z "$err_msg" ]] && err_msg=$api_error
         # 上下文越界(400 context/token/length exceeded):主动压缩后重发一次
         if [[ "$err_msg" == *[Cc]ontext* || "$err_msg" == *[Tt]oken* || "$err_msg" == *[Ll]ength* || "$err_msg" == *exceed* ]]; then
-            retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
+            retry_after_compact "$is_lock_screen" "$is_record_usage"
+            rc=$?
+            (( rc == 0 || rc == 130 )) && return "$rc"
         fi
         full_response="⚠️ API 请求失败: $err_msg"
         # 不在这里直接打印:printContent 会把 full_response 渲染到主屏幕,
@@ -1550,12 +1687,18 @@ ask_ai() {
         && (( ${#tool_ids[@]} == 0 )); then
         # 先尝试失败自愈:本地估算超限则压缩后重发一次(打破越界死循环);
         # 未超限才归为普通网络中断,给出兜底提示
-        retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
+        retry_after_compact "$is_lock_screen" "$is_record_usage"
+        rc=$?
+        (( rc == 0 || rc == 130 )) && return "$rc"
         full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
         # 不直接打印,理由同上(防双份显示)
     fi
 
-    (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
+    if (( ${#tool_ids[@]} > 0 )); then
+        tool_run_and_parse
+        return $?
+    fi
+    return 0
 }
 
 # 把尚未渲染到主屏幕的思考增量渲染出来。思考随流只画在交替屏幕上,
@@ -1573,10 +1716,11 @@ flush_thinking() {
 
 # 打印内容函数
 printContent() {
+    round_aborted=0
 
     add_message "$content"
     local tools
-    local request_body
+    local request_body rc
 
     # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
     # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
@@ -1604,6 +1748,16 @@ printContent() {
     
     ask_ai "$request_body" 1
     
+
+    rc=$?
+    if (( rc == 130 )); then
+        # 被 Ctrl+C 打断:本轮 AI 输出已在 ask_ai 内丢弃,这里不渲染、不把
+        # assistant 消息写入 messages(用户消息已在上方保留),回到主屏幕,
+        # 用户可继续补充信息再次对话
+        round_aborted=1
+        printf '\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n'
+        return 0
+    fi
 
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
@@ -1745,7 +1899,7 @@ read_file() {
 
 # 读取用户输入的多行内容，支持续行、粘贴、文件导入等
 normal_line() {
-    local line
+    local line rc
 
     local prompt
     if [[ "$1" == 0 ]]; then
@@ -1753,7 +1907,18 @@ normal_line() {
     else
         prompt="> "
     fi
-    while IFS= read -e -r -p "$prompt" line; do
+    # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
+    input_aborted=0
+    while true; do
+        # 读取期间临时解除 Ctrl+C→SIGINT 的驱动层映射(readline 会强制打开
+        # ISIG,只有 intr undef 才能让 0x03 作为按键到达 readline),配合上方
+        # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
+        # 的 Ctrl+C 仍走 SIGINT 打断流程
+        stty -isig intr undef 2>/dev/null
+        IFS= read -e -r -p "$prompt" line
+        rc=$?
+        stty isig intr '^C' 2>/dev/null
+        (( rc != 0 )) && break
         # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
         # 一次性非阻塞大块读取（-N 走非规范模式，末尾没换行的残段超时后也会存入变量）；
         # 排干期间关掉回显，避免 macOS 在 tty 模式切换时重复回显残余队列
@@ -1796,6 +1961,11 @@ normal_line() {
             prompt=".. "
             continue
         fi
+        if [[ "$line" == "-q" ]]; then
+            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
+            save_history
+            exit 0
+        fi
         if [[ "$line" == "-l" ]]; then
             history_handler
             break
@@ -1822,6 +1992,15 @@ normal_line() {
 
         break
     done
+    # 兜底:kill -INT 等外部 SIGINT 打断 read -e 时(readline 的 read 不会提前
+    # 返回,回车后才走到这里),按惯例清空本次累计的全部输入,换行后返回,
+    # 由主循环重新提示,程序不退出
+    if (( input_aborted )); then
+        input_aborted=0
+        input=""
+        printf '\n'
+        return 0
+    fi
     input="${input%$'\n'}"
 }
 
@@ -1834,7 +2013,12 @@ parse_options "$@"
 first_time=1
 if [[ -n "$content" ]]; then
     printContent
-    [[ -z "$chat_title"  ]] && chat_title=$(overview) && first_time=0
+    # 本轮被打断时跳过标题生成,保留 first_time,下一轮成功后再生成
+    if (( round_aborted )); then
+        round_aborted=0
+    else
+        [[ -z "$chat_title" ]] && chat_title=$(overview) && first_time=0
+    fi
 fi
 
 # 交互式输入循环
@@ -1847,6 +2031,10 @@ while true; do
 
     printContent
 
+    if (( round_aborted )); then
+        round_aborted=0
+        continue
+    fi
     if [[ -z "$chat_title" && "$first_time" -eq 1 ]]; then
         chat_title=$(overview) && first_time=0
     fi
