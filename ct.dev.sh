@@ -594,8 +594,12 @@ parse_options() {
             break
         fi
         if [[ "${!i}" == "-f" ]]; then
+            # -f 是标志型参数(只置 forget_history),必须 continue 继续解析
+            # 后续参数。历史 bug:这里写的是 break,导致 "ct -f -dp 问题" 在
+            # -f 处提前退出循环,-dp 与问题文本全丢,content 为空直接进交互
+            # 循环,表现为"组合参数后不答题"。
             forget_history=1
-            break
+            continue
         fi
 
         if [[ "${!i}" == "-c" ]]; then
