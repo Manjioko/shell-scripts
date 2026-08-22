@@ -20,8 +20,77 @@ chat_title=""
 # 最新一次用户输入的内容
 content=""
 
+# ---------- Skill 自我进化(Agent Skills,渐进式披露)配置 ----------
+# 技能 = 目录 + SKILL.md(frontmatter: name/description + markdown 正文)。
+# 业界做法(Claude Code Agent Skills):启动时只把全部技能的 name+description
+# 注入 system,模型匹配到某技能后,再经 read_skill 工具读全文。
+CT_HOME="${HOME}/.ct"
+HISTORY_DIR="${CT_HOME}/history"
+SKILLS_DIR="${CT_HOME}/skills"
+# 注入段固定标记:save_history 存盘前按它剥离,加载历史后重新注入
+SKILLS_MARK="## 可用技能(Skills)"
+# description 注入截断长度(检索词,够用即可)
+SKILL_DESC_MAX=200
+# 最多注入的技能数量(按最近修改排序),防技能膨胀挤占上下文
+SKILL_MAX_INJECT=30
+
+mkdir -p "$HISTORY_DIR" "$SKILLS_DIR"
+# 历史文件迁移(幂等):旧版本把历史 JSON 直接放在 ~/.ct/ 根目录,统一迁入
+# history/ 子目录,与 skills/ 分开,目录结构更清晰
+for _ct_old in "$CT_HOME"/*.json; do
+    [[ -f "$_ct_old" ]] && mv -f "$_ct_old" "$HISTORY_DIR/" 2>/dev/null
+done
+
+# 扫描技能目录,解析每个 SKILL.md 的 frontmatter(name/description),
+# 输出"技能名: 描述"列表供注入。按 mtime 排序,只取前 SKILL_MAX_INJECT 个。
+scan_skills() {
+    local f name desc line in_front in_desc skills_text=""
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        name=""; desc=""; in_front=0; in_desc=0
+        while IFS= read -r line; do
+            if (( in_front == 0 )); then
+                [[ "$line" == "---" ]] && in_front=1
+                continue
+            fi
+            [[ "$line" == "---" ]] && break
+            if [[ "$line" == name:* ]]; then
+                name="${line#name:}"
+                in_desc=0
+            elif [[ "$line" == description:* ]]; then
+                desc="${line#description:}"
+                in_desc=1
+            elif (( in_desc )) && [[ "$line" == [[:space:]]* ]]; then
+                desc="$desc $line"
+            else
+                in_desc=0
+            fi
+        done < "$f"
+        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        desc=$(printf '%s' "$desc" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        # name 缺失用目录名兜底;description 缺失(没有检索价值)跳过注入
+        [[ -z "$name" ]] && name=$(basename "$(dirname "$f")")
+        [[ -z "$desc" ]] && continue
+        desc=$(printf '%s' "$desc" | awk -v n="$SKILL_DESC_MAX" '{ if (length($0) > n) print substr($0, 1, n) "…"; else print }')
+        skills_text+="- ${name}: ${desc}"$'\n'
+    done < <(ls -t "$SKILLS_DIR"/*/SKILL.md 2>/dev/null | head -n "$SKILL_MAX_INJECT")
+    printf '%s' "$skills_text"
+}
+
+# 把技能列表注入 messages 第 0 条(system)。先剥离旧的注入段再追加,保证
+# get_history/skill_save 后重复注入不会叠加。compaction 保留 .[0],
+# 技能列表不会被压缩掉。
+inject_skills() {
+    local skills_text
+    skills_text=$(scan_skills)
+    [[ -z "$skills_text" ]] && return 0
+    messages=$(echo "$messages" | jq --arg mark "$SKILLS_MARK" --arg list "$skills_text" \
+        '.[0].content = ((.[0].content | split($mark)[0]) + "\n\n" + $mark + "\n" + $list)')
+}
+
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+inject_skills
 
 #辅助权限判断助手消息
 # 
@@ -52,6 +121,7 @@ last_prompt_tokens=0
 # 触发自动压缩的阈值。注意:本脚本默认跑 mimo-v2.5(小米)接口,实际窗口
 # 远小于 deepseek 的 1M——实测约 4 万 token 就会越界断连。按 32K 窗口的
 # 75% 取 24000,留出安全余量;换更大窗口的模型时再按比例调高。
+# 如果是deepseek-v4,可改成 100000
 TOKEN_THRESHOLD=24000
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
@@ -84,10 +154,53 @@ GREP_MAX_COL=500
 
 # web_fetch 单次返回网页纯文本的字符上限,超出按行截断并提示
 WEB_MAX_CHARS=20000
+
+# ---------- 图片理解(多模态,转述架构)配置 ----------
+# 设计原则:用户发图(@/-img)与 AI 读图(read_image)都不把图片放进 messages——
+# 本地 base64 后单独调一次视觉接口(mimo-v2.5,当前唯一支持图片的模型),
+# 只把文字转述作为普通文本写入上下文。好处:messages/历史不膨胀、
+# 压缩不因图片频繁触发、图片 token 每张只付一次(转述请求本身)。
+# 图片文件超过该体积(字节)时触发自动压缩。15MB → base64 约 20MB,
+# 文档单张上限 50MB,留 2.5 倍余量。
+IMG_MAX_BYTES=15728640
+
+# 压缩目标:最长边像素。2048 → 约 4M 像素 ≈ 4k token,清晰度与费用的平衡点
+IMG_MAX_SIDE=2048
+
+# 一次转述请求最多合并的图片张数
+IMG_MAX_BATCH=4
+
+# 一次转述请求所有图片字节合计上限(约 35MB → base64 约 47MB,逼近文档上限)
+IMG_BATCH_MAX_BYTES=36700160
+
+# 支持的图片扩展名(按扩展名识别,不做内容嗅探——为便利牺牲准确性)
+IMG_EXTS="png jpg jpeg gif webp bmp"
+
+# jq ≥ 1.6 才支持 --rawfile(大体积 base64 不能经 --arg 传参,会撞 ARG_MAX)
+JQ_HAS_RAWFILE=1
+jq --help 2>/dev/null | grep -q -- '--rawfile' || JQ_HAS_RAWFILE=0
+
+# 图片转述提示词模板(行业通用视觉描述范式):{N} 在调用时替换为图片张数
+IMG_DESC_PROMPT='以下 {N} 张图片依次编号为图片1至图片{N},请逐张转述为文字。要求:1. 客观、详尽地描述画面内容:主体对象、场景、布局、颜色、状态与关键细节;2. 图中出现的所有文字(标题、按钮、菜单、代码、报错、数据等)必须完整逐字转录,不得省略或改写;3. 若为截图或图表,说明界面类型、视觉层级与关键数据;4. 每张图片独立成段,以「图片N:」开头;5. 只输出转述内容本身,不要任何开场白、解释或总结。'
 # ----------------------------------------------------
 
 # 用户输入的内容
 input=""
+# 用户通过 @ 选图 / -img 参数加入的待转述图片路径。提交(printContent)时
+# 统一转述为文字再进 messages,原图不进上下文(转述架构,见上方图片配置)。
+input_images=()
+# 用户通过 @ 显式选择的文件路径(只读授权):AI 的 read_file/read_image 工具
+# 除 WORK_ROOT 沙箱外,还可读取这些用户亲手选中的文件。写入工具不受影响。
+granted_files=()
+# Ctrl+C 状态标志(配合 handle_ctrl_c):
+#   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
+#   ai_active=0     主屏幕(输入行的 Ctrl+C 由 readline 清行;普通 read 被打断
+#                   时置 input_aborted),任何情况都不退出
+#   round_aborted   本轮 AI 输出是否被 Ctrl+C 打断(printContent 置位,主循环据此跳过标题生成)
+ai_active=0
+ai_abort=0
+input_aborted=0
+round_aborted=0
 # 保存当前终端设置
 stty_save=""
 
@@ -118,7 +231,7 @@ BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
 # 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
 INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 
-options_list=("-l" "-msgs" "-h" "-c" "-u")
+options_list=("-l" "-msgs" "-h" "-c" "-u" "-img" "-skill")
 
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
@@ -166,10 +279,19 @@ _ct_inputrc=$(mktemp)
 printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
 export INPUTRC="$_ct_inputrc"
 
+# 主屏输入行(read -e)按 Ctrl+C 立即清空当前行:readline 读取期间会强制打开
+# ISIG,所以单靠 trap 拦不住——SIGINT 打断不了 readline 的 read,旧内容会留在
+# 缓冲区里"复活"。做法:normal_line 在每次 read 前临时 stty intr undef(驱动层
+# 解除 Ctrl+C→SIGINT 映射),0x03 变成普通按键交给 readline 分派,这里绑定为
+# unix-line-discard(等价 C-u,清到行首),行被即时清空、提示符保留,继续输入
+# 不受影响;读完后 normal_line 立即恢复映射,其余阶段(AI 输出/工具窗口/历史
+# 选择)的 Ctrl+C 仍走 SIGINT 打断流程。
+bind '"\C-c": unix-line-discard' 2>/dev/null
+
 trap handle_ctrl_c INT
 
-# 任何退出路径都恢复光标显示 + 自动换行 + 回显(窗口期间两次 Ctrl+C 会直接退出)
-trap 'printf "\033[?25h\033[?7h"; stty echo 2>/dev/null' EXIT
+# 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
+trap 'printf "\033[?25h\033[?7h"; stty echo isig 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
 
 
 render_markdown() {
@@ -203,19 +325,21 @@ save_history() {
     # 清洗后无有效字符(如全空白标题)时给兜底名,避免保存成 ".json"
     [[ -z "$name" ]] && name="chat"
 
-    [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
-    history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
-    '{
+    [ -f "${HISTORY_DIR}/${name}.json" ] || touch "${HISTORY_DIR}/${name}.json"
+    # 存盘前剥离 skill 注入段:技能列表不随历史存档,加载时重新注入最新列表
+    history=$(echo "$messages" | jq --arg mark "$SKILLS_MARK" --arg model "$model" --arg thinking "$thinking" \
+    '.[0].content = (.[0].content | split($mark)[0]) |
+    {
         model: $model,
-        messages: $msgs,
+        messages: .,
         thinking: {type: $thinking},
         reasoning_effort: "high",
         stream: true
     }' 2>&1)
 
-    echo "保存记录 ${HOME}/.ct/${name}.json"
+    echo "保存记录 ${HISTORY_DIR}/${name}.json"
 
-    echo "$history" > "${HOME}/.ct/${name}.json"
+    echo "$history" > "${HISTORY_DIR}/${name}.json"
 }
 
 get_history() {
@@ -253,20 +377,60 @@ get_history() {
     model=$(jq -r '.model' <<< "$(<"$1")")
     jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
-        content=$(jq -r '.content' <<< "$line")
+        content=$(jq -r '.content // empty' <<< "$line")
+        reasoning=$(jq -r '.reasoning_content // empty' <<< "$line")
+        # 思考内容单独渲染:thinking 模式下 assistant 消息的 reasoning_content
+        # 是历史正文的一部分,旧版只渲染 content,思考内容完全丢失
+        if [[ -n "$reasoning" ]]; then
+            render_markdown "### 💭 思考"
+            echo "----------------------------------------------"
+            render_markdown "$reasoning"
+        fi
         render_markdown "## $role"
         echo "----------------------------------------------"
-        render_markdown "$content"
+        if [[ "$role" == "tool" ]]; then
+            # 工具输出渲染上限:超过 5 行只显示前 5 行并提示省略,避免
+            # 长输出干扰主要信息阅读(仅影响显示,messages 保持完整)。
+            # 历史数据有三个坑,朴素按真实换行统计会失灵:
+            # 1. 工具函数用双引号拼接 \n,bash 不解析,历史里存的是字面
+            #    "反斜杠+n"——先还原成真实换行,否则逻辑上多行被当成一行,
+            #    明明超过 5 行却不省略;
+            # 2. 内容可能以 BOM/空行开头——前导空白行会吃掉 5 行的预算,
+            #    出现"什么都没看到就被省略"。先剔除 BOM 和空行/纯空白行;
+            # 3. 每行限宽 200 字符,防 minified 长行刷屏(仅显示层截断)。
+            disp=${content//"\\n"/$'\n'}
+            disp=${disp/#$'\xef\xbb\xbf'/}
+            disp=$(printf '%s' "$disp" | grep -vE '^[[:space:]]*$')
+            nlines=$(printf '%s' "$disp" | awk 'END{print NR}')
+            shown=$(printf '%s' "$disp" | awk -v w=200 'NR<=5 { if (length($0)>w) print substr($0,1,w) "…(该行过长已截断)"; else print }')
+            if (( nlines > 5 )); then
+                render_markdown "$shown"$'\n'"…(其余 $((nlines - 5)) 行已省略)"
+            else
+                render_markdown "$shown"
+            fi
+        else
+            # assistant 的 tool_calls 消息 content 为 null,不再渲染出字面 "null"
+            [[ -n "$content" ]] && render_markdown "$content"
+        fi
     done
+    # 重新注入最新技能列表:历史里的 system 是旧的(不含 skills),旧历史若
+    # 有旧注入段,split($mark)[0] 也会先剥离,不会叠加
+    inject_skills
 }
 
+# Ctrl+C 不再退出程序:
+# - AI 输出阶段(ask_ai 流式期间,副屏):置 ai_abort,由 ask_ai 打断流、
+#   丢弃本轮输出、返回主屏幕继续对话;
+# - 主屏幕:输入行(read -e)的 Ctrl+C 已在 readline 层直接清行(见 bind 配置),
+#   不会走到本函数;历史选择/命令确认等普通 read 被打断时置 input_aborted,
+#   由调用处清空输入后重新提示。
+# 唯一退出方式是明确输入 -q(命令行参数或交互输入)。
 handle_ctrl_c() {
-    local name=""
-    # 恢复默认 SIGINT，防止 overview 卡住时无法强制退出
-    trap - INT
-    [ -d "${HOME}/.ct" ] || mkdir "${HOME}/.ct"
-    save_history
-    exit 130
+    if (( ai_active )); then
+        ai_abort=1
+    else
+        input_aborted=1
+    fi
 }
 
 
@@ -274,15 +438,34 @@ history_handler() {
     local tmpList=()
     echo "请从以下编号中选择你要加载的历史记录："
     # shellcheck disable=SC2207
-    tmpList=($(ls -t "$HOME"/.ct/*.json 2>/dev/null))
+    tmpList=($(ls -t "$HISTORY_DIR"/*.json 2>/dev/null))
     history_list=()
     for i in "${!tmpList[@]}"; do
         echo "$i. $(basename "${tmpList[$i]}")"
         history_list+=("$i. ${tmpList[$i]}")
     done
-    local filePath=""
+    local filePath="" rc
     local isSelect=0
-    IFS= read -r -p "_>" num
+    # 普通 read 在 trap 存在时不会被 SIGINT 打断(实测:trap 执行后 read 继续
+    # 等输入,只是驱动缓冲区被 VINTR 清空,屏幕残留已输入字符)。改成短超时
+    # 轮询:检测到 input_aborted 立即退出选择器。读取期间关 ECHOCTL 避免 ^C
+    # 回显;数字输入的正常回显不受影响。
+    stty -echoctl 2>/dev/null
+    printf '_>'
+    num=""
+    while :; do
+        IFS= read -r -t 0.2 num
+        rc=$?
+        (( input_aborted )) && break
+        (( rc <= 128 )) && break
+    done
+    stty echoctl 2>/dev/null
+    # Ctrl+C 打断编号输入:擦掉屏幕残留行,不把空编号误判成"默认加载最新历史"
+    if (( input_aborted )); then
+        input_aborted=0
+        printf '\r\033[2K\n'
+        return 0
+    fi
     [[ -z "$num"  &&  "${history_list[0]}" ]] && get_history "${history_list[0]#0. }" && return 0
     [[ -z "$num" ]] && echo "请输入编号" && return 1
     [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
@@ -315,15 +498,22 @@ help_user() {
     echo "  -f    忽略历史记录"
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
+    echo "  -img  发送图片(后接图片路径,自动转述为文字)"
+    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
+    echo "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
     echo "  -h    显示帮助信息"
     echo
     echo "内容交互时，也可使用以下选项:"
     echo "  -msgs 显示当前消息记录"
     echo "  -l    查看历史记录并选择加载"
+    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
+    echo "  -img <路径> 发送图片(自动转述为文字)"
+    echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
+    echo "  -q    退出程序"
     echo "  -h    显示帮助信息"
 }
 
@@ -361,6 +551,25 @@ parse_options() {
             continue
         fi
 
+        if [[ "${!i}" == "-img" ]]; then
+            local nxt=$((i + 1))
+            local img_path="${!nxt}"
+            # 展开 ~ 波浪号
+            img_path="${img_path/#\~/$HOME}"
+            if [[ -n "$img_path" && -f "$img_path" ]] && is_image "$img_path"; then
+                input_images+=("$img_path")
+                echo "[图片] $img_path"
+            elif [[ -n "$img_path" && -f "$img_path" ]]; then
+                echo "⚠️  -img 只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+            elif [[ -n "$img_path" ]]; then
+                echo "⚠️  -img 文件不存在: $img_path"
+            else
+                echo "⚠️  -img 需要图片路径"
+            fi
+            ((i++))
+            continue
+        fi
+
         # 单纯使用思考模式
         if [[ "${!i}" == "-t" ]]; then
             thinking="enabled"
@@ -394,9 +603,20 @@ parse_options() {
             break
         fi
 
+        if [[ "${!i}" == "-skill" ]]; then
+            skill_save
+            break
+        fi
+
         if [[ "${!i}" == "-u" ]]; then
             print_usage
             break
+        fi
+
+        if [[ "${!i}" == "-q" ]]; then
+            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
+            save_history
+            exit 0
         fi
 
         if [[ "${!i}" == "-h" ]]; then
@@ -756,6 +976,34 @@ tools() {
         {
             "type": "function",
             "function": {
+                "name": "read_image",
+                "description": "读取本地图片并返回其内容的文字转述(含图中所有文字的完整转录)。需要查看截图、图表、照片内容时使用本工具;它返回的是文字描述,不是原图。路径只能在工作目录内。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "图片文件路径,相对路径基于当前工作目录"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_skill",
+                "description": "读取技能(Skill)的完整内容。当任务与系统提示中「可用技能列表」的某个技能描述匹配时,先用本工具读该技能全文,再按其步骤执行。参数 name 为技能名(即列表中括号前的名字)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "技能名,如 git-commit-style"}
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_shell_command",
                 "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_fetch。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
                 "parameters": {
@@ -937,8 +1185,9 @@ retry_after_compact() {
         tools: $tool,
         stream_options: {include_usage: true}
     }')
+    # 透传 ask_ai 的返回码:130(Ctrl+C 打断)需要继续向上传播
     ask_ai "$request_body" "$is_lock" "$is_record"
-    return 0
+    return $?
 }
 
 # 查看当前上下文用量
@@ -1001,7 +1250,7 @@ auth_add_message() {
 
 auth_think() {
     local cmd=$1
-    local request_body
+    local request_body rc
     auth_add_message "$cmd"
     request_body=$(jq -n \
             --argjson msgs "$auth_message" \
@@ -1019,6 +1268,9 @@ auth_think() {
     # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
     # 第三个参数 0:auth 消息极小,不把它的 usage 记入 last_prompt_tokens
     ask_ai "$request_body" 0 0
+    rc=$?
+    # Ctrl+C 打断 auth 判断流:直接向上传播 130,不写空 assistant 消息
+    (( rc == 130 )) && return 130
 
     sleep 0.5
 
@@ -1053,6 +1305,33 @@ resolve_path() {
     printf '%s/%s%s' "$canon" "$missing" "$base"
 }
 
+# 只读授权:用户通过 @ 亲手选择的文件(可能在工作目录之外)加入白名单,
+# read_file/read_image 工具在沙箱拒绝时再查此名单——用户手势即同意读取。
+# 写入类工具绝不查询该名单,沙箱约束保持不变。
+grant_file() {
+    local p="$1" canon
+    granted_files+=("$p")
+    # 同时存物理规范化形式,模型用别名/符号链接拼法也能命中
+    if [[ -d "$(dirname "$p")" ]]; then
+        canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 0
+        granted_files+=("$canon/$(basename "$p")")
+    fi
+}
+is_granted() {
+    local p="$1" canon g
+    for g in "${granted_files[@]}"; do
+        [[ "$g" == "$p" ]] && return 0
+    done
+    # 物理规范化后比对(符号链接等)
+    if [[ -d "$(dirname "$p")" ]]; then
+        canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+        for g in "${granted_files[@]}"; do
+            [[ "$g" == "$canon/$(basename "$p")" ]] && return 0
+        done
+    fi
+    return 1
+}
+
 # 文件类工具的实现约定:结果写入全局变量 content(与 shell 工具一致),
 # 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
 
@@ -1064,7 +1343,16 @@ tool_read_file() {
     [[ -z "$offset" || "$offset" == "null" ]] && offset=1
     [[ -z "$limit" || "$limit" == "null" ]] && limit=0
 
-    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    if ! resolved=$(resolve_path "$path"); then
+        # 沙箱拒绝:查用户 @ 显式授权名单(只读;写入工具无此通道)
+        if is_granted "$path"; then
+            resolved="$path"
+        else
+            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
+            printf ' ⛔ 路径越界:%s\n' "$path"
+            return 0
+        fi
+    fi
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
 
     total_lines=$(wc -l < "$resolved" | tr -d ' ')
@@ -1227,11 +1515,408 @@ tool_web_fetch() {
     printf ' 已抓取 %s(%s)\n' "$url" "$renderer"
 }
 
+# ========== 图片理解(多模态,转述架构) ==========
+# 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
+# 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉接口
+# (mimo-v2.5,当前唯一支持图片的模型),只把文字转述作为普通文本写入上下文,
+# 避免消息/历史膨胀、压缩频繁触发与图片 token 每轮重复计费。
+
+# 扩展名 → MIME 类型。按扩展名识别,不做内容嗅探(为便利牺牲准确性)。
+img_mime() {
+    local ext
+    ext=$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')
+    case "$ext" in
+        png)  printf 'image/png' ;;
+        jpg|jpeg) printf 'image/jpeg' ;;
+        gif)  printf 'image/gif' ;;
+        webp) printf 'image/webp' ;;
+        bmp)  printf 'image/bmp' ;;
+        *)    printf '' ;;
+    esac
+}
+
+# 判断路径是否命中图片扩展名白名单
+is_image() {
+    local ext
+    ext=$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')
+    [[ -n "$ext" && " $IMG_EXTS " == *" $ext "* ]]
+}
+
+# 判断文件是否为文本(file 命令看 MIME;无 file 时用 grep -I 兜底)。
+# 二进制文件(如 .psd)绝不能读进 bash 变量再传 jq --arg:
+# NUL 字节会触发 "ignored null byte" 警告,超大内容直接撞 ARG_MAX。
+# file 认不出时放行(仅影响是否提示"已跳过",内容本身不会再拼进输入)。
+is_text_file() {
+    local mime=""
+    [[ ! -s "$1" ]] && return 0    # 空文件按文本处理(导入空内容无副作用)
+    if command -v file >/dev/null 2>&1; then
+        # --mime-type 在新版 BSD(macOS)与 GNU(Linux) 都支持;老系统回退 -bI/-bi
+        # (macOS 的 -i 是小写无效选项,会输出 "regular file" 假阳性)
+        mime=$(file -b --mime-type "$1" 2>/dev/null) \
+            || mime=$(file -bI "$1" 2>/dev/null) \
+            || mime=$(file -bi "$1" 2>/dev/null)
+        mime="${mime%%;*}"   # 去掉 "; charset=..." 尾巴
+        [[ -z "$mime" || "$mime" == "regular file" ]] && return 0
+    else
+        # 兜底:grep -I 遇到二进制按"无匹配"处理(退出 1)
+        grep -Iq . "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    case "$mime" in
+        text/*|application/json|application/xml|application/javascript|application/csv|application/rtf|application/x-empty|inode/x-empty) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 图片体积检查/压缩:$1 原图路径,输出最终可用路径(原图或压缩后的临时文件)。
+# 超 IMG_MAX_BYTES 时依次尝试 sips(macOS 自带) → ffmpeg → python3(PIL),
+# 统一压缩为最长边 ≤ IMG_MAX_SIDE 的 JPEG。原文件永不改写;
+# 压缩产物由调用方负责清理。失败返回 1,进度提示走 stderr 不污染 stdout。
+prepare_image() {
+    local in="$1" out size
+    size=$(wc -c < "$in" | tr -d ' ')
+    if (( size <= IMG_MAX_BYTES )); then
+        printf '%s\n' "$in"
+        return 0
+    fi
+    printf ' ⚠️  图片 %sMB 超限,尝试自动压缩(最长边 %s px)…\n' "$((size / 1024 / 1024))" "$IMG_MAX_SIDE" >&2
+    out=$(mktemp "${TMPDIR:-/tmp}/ct_shrink_XXXXXX")
+    # 依次尝试 sips → ffmpeg → python3(PIL),任一成功即停(前一工具失败
+    # 留空文件时由下一工具覆盖写兜底)。全部失败返回 1。
+    if command -v sips >/dev/null 2>&1; then
+        # macOS 自带:sips -Z 按最长边等比缩放;formatOptions 80 控制 JPEG 质量
+        sips -Z "$IMG_MAX_SIDE" -s format jpeg -s formatOptions 80 "$in" --out "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    if command -v ffmpeg >/dev/null 2>&1; then
+        # -f image2 -c:v mjpeg 显式指定封装/编码,不依赖临时文件扩展名
+        ffmpeg -y -loglevel error -i "$in" \
+            -vf "scale='min(${IMG_MAX_SIDE},iw)':'min(${IMG_MAX_SIDE},ih)':force_original_aspect_ratio=decrease" \
+            -f image2 -c:v mjpeg -q:v 4 "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    if python3 -c 'import PIL' >/dev/null 2>&1; then
+        IMG_SIDE="$IMG_MAX_SIDE" python3 -c 'import os, sys
+from PIL import Image
+side = int(os.environ["IMG_SIDE"])
+im = Image.open(sys.argv[1])
+im.thumbnail((side, side))
+im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    rm -f "$out"
+    return 1
+}
+
+# 图片转述核心:批量图片路径 → 一次视觉 API 请求 → 文字转述。
+# 结果写全局 describe_result,失败置 describe_failed=1(不阻塞对话)。
+# 关键实现点:
+#   - 图片 base64 可能达数十 MB,绝不能走 jq --arg / curl -d 传参
+#     (exec 参数受 ARG_MAX 限制,macOS 仅约 1MB):parts 经 jq --rawfile
+#     从临时文件读入,请求体用 curl --data-binary @file 发送;
+#   - base64 字符集只有 [A-Za-z0-9+/=],手拼 JSON 字符串无需转义;
+#   - 转述请求固定 flash 模型(唯一支持图片的模型),与主对话模型无关。
+describe_images() {
+    local -a files=("$@") cleanup=()
+    local i n path new_path ext mime b64 parts sep tmpdir req_file resp err
+    local size total_size=0 prompt
+
+    describe_result=""
+    describe_failed=0
+    n=${#files[@]}
+    (( n == 0 )) && return 0
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/ct_img_XXXXXX")
+
+    _img_cleanup() {
+        rm -rf "$tmpdir"
+        (( ${#cleanup[@]} > 0 )) && rm -f "${cleanup[@]}"
+    }
+
+    (( n > IMG_MAX_BATCH )) && {
+        describe_failed=1
+        describe_result="一次最多转述 ${IMG_MAX_BATCH} 张图片,当前 ${n} 张,请分批发"
+        _img_cleanup
+        return 0
+    }
+
+    printf ' 📷 正在识别图片(%s 张)…\n' "$n"
+    parts=""
+    sep=""
+    for ((i = 0; i < n; i++)); do
+        path="${files[$i]}"
+        [[ -f "$path" ]] || {
+            describe_failed=1
+            describe_result="图片文件不存在: $path"
+            _img_cleanup
+            return 0
+        }
+        is_image "$path" || {
+            describe_failed=1
+            describe_result="不支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"
+            _img_cleanup
+            return 0
+        }
+        # 超体积自动压缩;成功时可能返回新的临时文件路径,记入清理列表
+        new_path=$(prepare_image "$path") || {
+            describe_failed=1
+            describe_result="图片超体积且本机无 sips/ffmpeg/python3(PIL) 可自动压缩: $path"
+            _img_cleanup
+            return 0
+        }
+        [[ "$new_path" != "$path" ]] && cleanup+=("$new_path")
+        path="$new_path"
+
+        size=$(wc -c < "$path" | tr -d ' ')
+        total_size=$((total_size + size))
+        # 合并请求总体积防护:总 base64(≈体积×4/3)逼近文档 50MB 上限即拒绝
+        if (( total_size > IMG_BATCH_MAX_BYTES )); then
+            describe_failed=1
+            describe_result="图片合计体积过大(${total_size} 字节,超过单次请求上限),请分批发"
+            _img_cleanup
+            return 0
+        fi
+
+        ext=$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')
+        mime=$(img_mime "$ext")
+        [[ -z "$mime" ]] && mime="image/jpeg"
+        b64=$(base64 < "$path" | tr -d '\n')   # BSD/Linux 通用;去掉 base64 自带换行
+        parts+="${sep}{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:${mime};base64,${b64}\"}}"
+        sep=","
+    done
+
+    prompt=${IMG_DESC_PROMPT//"{N}"/"$n"}
+
+    (( JQ_HAS_RAWFILE )) || {
+        describe_failed=1
+        describe_result="图片转述需要 jq 1.6+ 的 --rawfile 支持,请升级 jq"
+        _img_cleanup
+        return 0
+    }
+
+    # parts 可能达数十 MB:--arg 会撞 ARG_MAX,--rawfile 从文件读入规避。
+    # parts 是逗号拼接的若干对象,这里补上数组括号,fromjson 才能得到数组
+    printf '[%s]' "$parts" > "$tmpdir/parts.json"
+    request_body=$(jq -nc \
+        --rawfile parts "$tmpdir/parts.json" \
+        --arg model "$flash_model" \
+        --arg prompt "$prompt" \
+        '{
+            model: $model,
+            messages: [
+                {role: "system", content: "你是图片内容转述助手。任务:把用户提供的图片转述为详尽、忠实的文字描述,只描述图片本身呈现的内容,不添加图片之外的信息或推测。"},
+                {role: "user", content: (($parts | fromjson) + [{type: "text", text: $prompt}])}
+            ],
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: false
+        }') || {
+        describe_failed=1
+        describe_result="转述请求体构建失败(jq 异常)"
+        _img_cleanup
+        return 0
+    }
+
+    req_file="$tmpdir/req.json"
+    printf '%s' "$request_body" > "$req_file"
+    # --data-binary @file:请求体从文件读,绕开命令行参数长度限制
+    resp=$(curl -s --connect-timeout 15 --max-time 180 "$BASE_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
+        --data-binary @"$req_file" 2>/dev/null)
+
+    describe_result=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    if [[ -z "$describe_result" ]]; then
+        describe_failed=1
+        err=$(printf '%s' "$resp" | jq -r '.error.message // empty' 2>/dev/null)
+        describe_result="转述接口无响应或报错: ${err:-未知错误}"
+    fi
+    _img_cleanup
+    return 0
+}
+
+# AI 工具:读取工作目录内的图片。与用户发图共用转述管线——返回给模型的
+# 是文字转述而非图片本身(OpenAI 协议中 tool 消息 content 只能是字符串,
+# 无法携带 image_url,转述是唯一协议合规的"看图"方式)。
+# 沙箱与 read_file 一致:路径必须解析后落在 WORK_ROOT 内。
+tool_read_image() {
+    local path resolved
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    if ! resolved=$(resolve_path "$path"); then
+        # 沙箱拒绝:查用户 @ 显式授权名单(只读)
+        if is_granted "$path"; then
+            resolved="$path"
+        else
+            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
+            printf ' ⛔ 路径越界:%s\n' "$path"
+            return 0
+        fi
+    fi
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+    is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
+
+    describe_images "$resolved"
+    if (( describe_failed )); then
+        content="图片识别失败: $describe_result"
+    else
+        content="图片 $path 的内容转述(本工具返回文字描述,非原图):"$'\n\n'"$describe_result"
+    fi
+    printf ' 已识别图片 %s\n' "$path"
+}
+
+# read_skill 工具:读取技能全文。技能目录(~/.ct/skills)在工作目录之外,
+# 不走 resolve_path 沙箱,而是白名单式定位:name 只能是单个目录名,
+# 拒绝 / 与 .. 路径穿越,只读 SKILLS_DIR/<name>/SKILL.md 一个文件。
+tool_read_skill() {
+    local name path total_chars out
+    name=$(jq -r '.name // empty' <<< "$fn_args")
+    [[ -z "$name" ]] && { content="错误:技能名(name)不能为空"; return 0; }
+    [[ "$name" == *"/"* || "$name" == *".."* ]] && { content="错误:非法技能名: $name"; printf ' ⛔ 非法技能名:%s\n' "$name"; return 0; }
+    path="$SKILLS_DIR/$name/SKILL.md"
+    [[ -f "$path" ]] || { content="错误:技能不存在: $name。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
+    total_chars=$(wc -m < "$path" | tr -d ' ')
+    if (( total_chars > READ_MAX_CHARS )); then
+        out=$(awk -v max="$READ_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; print}' "$path")
+        content="📖 技能 $name(SKILL.md,共 ${total_chars} 字符,过长已截断):\n\n$out"
+    else
+        out=$(cat "$path")
+        content="📖 技能 $name(SKILL.md)全文:\n\n$out"
+    fi
+    printf ' 已读取技能 %s\n' "$name"
+}
+
+# Skill 沉淀:把当前对话提炼为一个可复用技能(Agent Skills 格式)。
+# 流程:flash 模型总结出草稿(name/description/body JSON)→ 屏幕展示 →
+# 用户 y/n 确认 → 写入 ~/.ct/skills/<name>/SKILL.md → 重新注入列表。
+# 草稿必须经用户确认才落盘,防止模型把劣质经验沉淀成长期误导。
+skill_save() {
+    local to_summarize request_body resp raw name description body
+    local file_dir answer rc attempt sys_text user_text prev_text fail_text
+
+    (( $(echo "$messages" | jq 'length') <= 1 )) && { echo "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
+
+    # 对话转可读文本(与压缩同款格式),发给 flash 提炼
+    to_summarize=$(echo "$messages" | jq -r '.[1:][] |
+        if .tool_calls != null then
+            "[assistant → 工具调用] " + (.tool_calls | tostring)
+        else
+            "[" + .role + "] " + (.content // "")
+        end')
+    printf '📦 正在从当前对话提炼技能…\n'
+    # 用 function calling 拿结构化草稿:tool_calls 的 arguments 由 API 层保证
+    # 是合法 JSON,比"提示词要求只输出 JSON"可靠得多(实测 flash 模型对
+    # JSON 指令屡教不改,直接吐 markdown)。最多尝试两次:第一次正常要求
+    # 调用工具;失败时把模型的原始输出附上做一次自纠(reflexion 式修复)。
+    raw=""
+    for attempt in 1 2; do
+        if (( attempt == 1 )); then
+            sys_text="你是技能提炼助手。根据用户提供的对话记录,提炼一个可复用的技能(Skill),并调用 save_skill 工具提交草稿。要求:1. name: 简短英文小写标识,连字符分隔,如 git-commit-style,不超过 30 字符;2. description: 1-2 句话说明什么场景下应该使用这个技能(这是检索词,要具体);3. body: 技能正文,用 markdown,包含操作步骤、常用命令、注意事项、用户偏好,不超过 800 字。"
+            user_text="$to_summarize"
+        else
+            sys_text="你上次没有调用工具提交技能草稿。请现在立即调用 save_skill 工具,只允许调用工具,禁止输出任何文字或代码围栏。"
+            user_text="$to_summarize"$'\n\n(你上次的输出不符合要求,原文如下,请改为调用 save_skill 工具,把内容填进工具参数:)'$'\n'"${prev_text:0:500}"
+        fi
+        request_body=$(jq -n --arg text "$user_text" --arg model "$flash_model" --arg sys "$sys_text" '{
+            model: $model,
+            messages: [
+                {role: "system", content: $sys},
+                {role: "user", content: $text}
+            ],
+            tools: [{
+                type: "function",
+                function: {
+                    name: "save_skill",
+                    description: "保存从对话中提炼出的技能草稿",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            name: {type: "string", description: "技能名:简短英文小写标识,连字符分隔,不超过 30 字符"},
+                            description: {type: "string", description: "1-2 句话说明什么场景下使用该技能(检索词,要具体)"},
+                            body: {type: "string", description: "技能正文,markdown 格式,包含操作步骤/常用命令/注意事项/用户偏好,不超过 800 字"}
+                        },
+                        required: ["name", "description", "body"]
+                    }
+                }
+            }],
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: false
+        }')
+        resp=$(curl -s --connect-timeout 15 --max-time 120 "$BASE_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -H "api-key: $DEEPSEEK_API_KEY" \
+            -d "$request_body" 2>/dev/null)
+        # 优先取工具调用参数(API 保证合法 JSON);没调工具则记下模型文本,
+        # 作为下一轮自纠的素材。必须用 fromjson 在同一次 jq 里转成对象:
+        # arguments 的值是 JSON 字符串,若先 -r 取出再二次解析,-r 会把值里
+        # 的 \n 转义解码成真实换行,得到的"JSON 文本"反而非法(实测踩坑)。
+        raw=$(printf '%s' "$resp" | jq -c '.choices[0].message.tool_calls[0].function.arguments | fromjson // empty' 2>/dev/null)
+        [[ -n "$raw" ]] && break
+        prev_text=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        [[ -z "$prev_text" ]] && break
+    done
+
+    if [[ -z "$raw" ]]; then
+        fail_text=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // .error.message // empty' 2>/dev/null)
+        [[ -z "$fail_text" ]] && fail_text="(接口无响应)"
+        echo "⚠️  技能提炼失败(模型未按工具协议返回草稿),请重试。模型返回:"
+        printf '%s\n' "${fail_text:0:300}"
+        return 0
+    fi
+    name=$(printf '%s' "$raw" | jq -r '.name // empty' 2>/dev/null)
+    description=$(printf '%s' "$raw" | jq -r '.description // empty' 2>/dev/null)
+    body=$(printf '%s' "$raw" | jq -r '.body // empty' 2>/dev/null)
+    if [[ -z "$name" || -z "$description" || -z "$body" ]]; then
+        echo "⚠️  技能草稿字段缺失(name/description/body),请重试。草稿参数:"
+        printf '%s\n' "${raw:0:300}"
+        return 0
+    fi
+
+    # name 清洗成安全目录名(小写字母/数字/连字符/点/下划线);description 压成单行
+    name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')
+    [[ -z "$name" ]] && name="skill"
+    description=$(printf '%s' "$description" | tr '\n' ' ' | tr -s ' ')
+
+    printf -- '──────── 技能草稿 ────────\n'
+    printf 'name: %s\n' "$name"
+    printf 'description: %s\n' "$description"
+    printf -- '──────── 正文 ────────\n'
+    printf '%s\n' "$body"
+    printf -- '────────────────────────\n'
+    printf '是否保存该技能?(y/n): '
+    # 与历史选择同款轮询读取:Ctrl+C 当作拒绝,不会执行写入
+    stty -echoctl 2>/dev/null
+    answer=""
+    while :; do
+        IFS= read -r -t 0.2 answer
+        rc=$?
+        (( input_aborted )) && break
+        (( rc <= 128 )) && break
+    done
+    stty echoctl 2>/dev/null
+    if (( input_aborted )); then
+        input_aborted=0
+        printf '\r\033[2K\n'
+    fi
+    if [[ "$answer" != "y" ]]; then
+        echo "已取消,未保存"
+        return 0
+    fi
+
+    file_dir="$SKILLS_DIR/$name"
+    mkdir -p "$file_dir" || { echo "⚠️  创建技能目录失败: $file_dir"; return 0; }
+    printf -- '---\nname: %s\ndescription: %s\n---\n\n%s\n' "$name" "$description" "$body" > "$file_dir/SKILL.md"
+    echo "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
+    # 立即生效:重新注入最新技能列表
+    inject_skills
+}
+
 # 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
 tool_run_and_parse() {
-    local tools request_body args_preview
+    local tools request_body args_preview rc msgs_before_call
     local -a ids_arr names_arr args_arr
     local first_call=1 i
 
@@ -1263,6 +1948,10 @@ tool_run_and_parse() {
         fn_args="${args_arr[$i]}"
         [[ -z "$fn_name" || -z "$fn_id" ]] && continue
 
+        # 快照本条调用写入前的 messages:若用户在权限确认(auth)流式期间
+        # Ctrl+C 打断,已写入的 assistant(tool_calls) 尚无配对的 tool 结果,
+        # 必须回滚,否则下一轮请求会因孤儿 tool_calls 报 400
+        msgs_before_call=$messages
         # assistant 的 tool_calls 消息:并行调用拆成多条 assistant 消息时,
         # DeepSeek 要求每一条都回传 reasoning_content(实测缺一即 400),
         # 所以每条都带同一轮的思考原文;正文只在第一条。
@@ -1271,6 +1960,14 @@ tool_run_and_parse() {
             first_call=0
         else
             add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
+        fi
+
+        # 执行前再查一次:Ctrl+C 可能在工具横幅/上一条工具执行期间到来,
+        # 此时立即回滚并结束本轮,不再执行后续工具
+        if (( input_aborted )); then
+            input_aborted=0
+            messages=$msgs_before_call
+            return 130
         fi
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
@@ -1297,11 +1994,32 @@ tool_run_and_parse() {
             # 结果从全局变量 full_response 取。
             # 重入安全:收集区已在函数开头清空,auth 内部 ask_ai 结束不会误触发本函数。
             auth_think "$command"
+            rc=$?
+            if (( rc == 130 )); then
+                # 用户在权限判断流中被 Ctrl+C 打断:回滚本条未配对的
+                # assistant(tool_calls),不执行该命令,向上传播 130
+                messages=$msgs_before_call
+                return 130
+            fi
             ai_auth=$(echo -e "$full_response")
 
             if [[ "$ai_auth" == "N" ]]; then
                 printf '\033[2K\033[1;41;37m是否执行该命令？(y/n): \033[0m'
-                IFS= read -r answer
+                # 与历史选择的编号读取同策略:普通 read 不会被 SIGINT 打断,
+                # 用短超时轮询检测 input_aborted,Ctrl+C 立即当作"拒绝执行"
+                stty -echoctl 2>/dev/null
+                answer=""
+                while :; do
+                    IFS= read -r -t 0.2 answer
+                    rc=$?
+                    (( input_aborted )) && break
+                    (( rc <= 128 )) && break
+                done
+                stty echoctl 2>/dev/null
+                if (( input_aborted )); then
+                    input_aborted=0
+                    printf '\r\033[2K\n'
+                fi
 
             fi
             # echo "用户输入: $answer"
@@ -1336,9 +2054,18 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep|web_fetch) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
+        fi
+
+        # 工具执行期间 Ctrl+C(如 read_image/web_fetch 的同步转述/抓取被 SIGINT
+        # 打断):回滚本条未配对的 assistant(tool_calls),向上传播 130 结束本轮,
+        # 与 shell 工具的 auth 打断处理同策略
+        if (( input_aborted )); then
+            input_aborted=0
+            messages=$msgs_before_call
+            return 130
         fi
 
         add_message "$content" "tool" "$fn_id"
@@ -1386,7 +2113,7 @@ ask_ai() {
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
     # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
-    local attempt max_attempts=3 think_save_len
+    local attempt max_attempts=3 think_save_len rc
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -1401,6 +2128,11 @@ ask_ai() {
     tool_ids=()
     tool_names=()
     tool_args=()
+
+    # 进入"AI 输出阶段":期间 Ctrl+C 语义为打断本轮输出;同时清掉上一轮
+    # 残留的打断标志。主屏幕输入阶段的 Ctrl+C 只置 input_aborted。
+    ai_active=1
+    ai_abort=0
 
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
@@ -1429,6 +2161,9 @@ ask_ai() {
         # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
         # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
         while IFS= read -r line || [[ -n "$line" ]]; do
+        # Ctrl+C 打断:立即退出读循环(curl 同进程组一并收到 SIGINT 会自行
+        # 终止;此检查兜底 read 被中断后仍带着残留行进入循环体的情况)
+        (( ai_abort )) && break
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
             [[ "$json" == "[DONE]" ]] && break
@@ -1518,12 +2253,28 @@ ask_ai() {
             2>&1
         )
         # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
-        # 完全零产出才进入下一尝试(退避重发)
+        # 完全零产出才进入下一尝试(退避重发);被 Ctrl+C 打断也绝不重试
         [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
         (( ${#tool_ids[@]} > 0 )) && break
+        (( ai_abort )) && break
     done
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
+    ai_active=0
+
+    # Ctrl+C 打断:丢弃本轮全部产出(正文/思考/工具调用),回滚本请求期间
+    # 累积进 thinking_response 的思考(此前已渲染部分保留),返回 130 供
+    # 上层识别"被打断";不进入 messages、不重试
+    if (( ai_abort )); then
+        ai_abort=0
+        full_response=""
+        raw_reasoning=""
+        tool_ids=()
+        tool_names=()
+        tool_args=()
+        thinking_response="${thinking_response:0:think_save_len}"
+        return 130
+    fi
 
     # API 请求失败(非流式错误响应):显示错误并写入 full_response,
     # 让错误可见且能进入 messages,模型下一轮可以看到失败原因。
@@ -1534,7 +2285,9 @@ ask_ai() {
         [[ -z "$err_msg" ]] && err_msg=$api_error
         # 上下文越界(400 context/token/length exceeded):主动压缩后重发一次
         if [[ "$err_msg" == *[Cc]ontext* || "$err_msg" == *[Tt]oken* || "$err_msg" == *[Ll]ength* || "$err_msg" == *exceed* ]]; then
-            retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
+            retry_after_compact "$is_lock_screen" "$is_record_usage"
+            rc=$?
+            (( rc == 0 || rc == 130 )) && return "$rc"
         fi
         full_response="⚠️ API 请求失败: $err_msg"
         # 不在这里直接打印:printContent 会把 full_response 渲染到主屏幕,
@@ -1549,12 +2302,18 @@ ask_ai() {
         && (( ${#tool_ids[@]} == 0 )); then
         # 先尝试失败自愈:本地估算超限则压缩后重发一次(打破越界死循环);
         # 未超限才归为普通网络中断,给出兜底提示
-        retry_after_compact "$is_lock_screen" "$is_record_usage" && return 0
+        retry_after_compact "$is_lock_screen" "$is_record_usage"
+        rc=$?
+        (( rc == 0 || rc == 130 )) && return "$rc"
         full_response="⚠️ 本轮请求无响应(网络中断或空回复),请重试。"
         # 不直接打印,理由同上(防双份显示)
     fi
 
-    (( ${#tool_ids[@]} > 0 )) && tool_run_and_parse
+    if (( ${#tool_ids[@]} > 0 )); then
+        tool_run_and_parse
+        return $?
+    fi
+    return 0
 }
 
 # 把尚未渲染到主屏幕的思考增量渲染出来。思考随流只画在交替屏幕上,
@@ -1572,10 +2331,38 @@ flush_thinking() {
 
 # 打印内容函数
 printContent() {
+    round_aborted=0
+
+    # 图片转述:本轮 @/-img 选的图片在此统一转述(独立视觉请求,转述文本
+    # 进 messages,原图不进上下文)。纯图片无文字时,描述即消息内容。
+    if (( ${#input_images[@]} > 0 )); then
+        local img_n=${#input_images[@]} img_desc=""
+        describe_images "${input_images[@]}"
+        # 转述(同步 curl)期间 Ctrl+C:trap 置 input_aborted,curl 同进程组被
+        # SIGINT 杀掉、resp 为空。视为本轮取消:不写入任何消息,直接回到输入
+        if (( input_aborted )); then
+            input_aborted=0
+            input_images=()
+            round_aborted=1
+            printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n'
+            return 0
+        fi
+        input_images=()
+        if (( describe_failed )); then
+            img_desc=$'\n[图片识别失败: '"$describe_result"']'
+        else
+            img_desc=$'\n(用户发送了 '"$img_n"' 张图片,以下是图片内容的文字转述)\n'"$describe_result"
+        fi
+        if [[ -n "$content" ]]; then
+            content+="$img_desc"
+        else
+            content="$img_desc"
+        fi
+    fi
 
     add_message "$content"
     local tools
-    local request_body
+    local request_body rc
 
     # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
     # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
@@ -1604,6 +2391,16 @@ printContent() {
     ask_ai "$request_body" 1
     
 
+    rc=$?
+    if (( rc == 130 )); then
+        # 被 Ctrl+C 打断:本轮 AI 输出已在 ask_ai 内丢弃,这里不渲染、不把
+        # assistant 消息写入 messages(用户消息已在上方保留),回到主屏幕,
+        # 用户可继续补充信息再次对话
+        round_aborted=1
+        printf '\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n'
+        return 0
+    fi
+
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
@@ -1623,32 +2420,60 @@ printContent() {
 }
 
 # 根据聊天记录生成标题
+# 用 function calling 协议拿标题:tool_calls 的 arguments 由 API 保证合法
+# JSON,杜绝模型"画蛇添足"输出多余文本(历史问题:模型偶尔不守提示词,
+# 输出"标题是:xxx/我建议..."等垃圾,原样进了文件名)。
+# 模型没调工具时兜底:取其文本输出做清洗(去前缀/去引号/取首行/截断);
+# 接口失败或清洗后为空则给通用名。标题失败属静默降级,不打扰用户。
 overview() {
+    local msg request_body resp title
 
-    local chunk=""
-    # local res=""
-    local msg
-    local request_body
+    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]')
 
-    # echo "记录是: $messages"
-    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
-
-    request_body=$(jq -n  --argjson msgs "$msg" --arg model "$flash_model" '{
+    request_body=$(jq -n --argjson msgs "$msg" --arg model "$flash_model" '{
         model: $model,
         messages: $msgs,
+        tools: [{
+            type: "function",
+            function: {
+                name: "set_title",
+                description: "提交为本次对话总结的标题",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        title: {type: "string", description: "对话标题,简短精炼,不超过 30 字,不含特殊字符与换行"}
+                    },
+                    required: ["title"]
+                }
+            }
+        }],
         thinking: {type: "disabled"},
         reasoning_effort: "high",
-        stream: true,
-        stream_options: {include_usage: true}
+        stream: false
     }')
+    # 同步一次拿完(标题失败只影响历史文件名,无需走 ask_ai 的重试链路)
+    resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
+        -d "$request_body" 2>/dev/null)
+    title=$(printf '%s' "$resp" | jq -r '.choices[0].message.tool_calls[0].function.arguments | fromjson | .title // empty' 2>/dev/null)
 
-    # ask_ai 会把流式正文直接 printf 到 stdout(主屏幕显示),而这里末尾又
-    # printf 一次 full_response。若两者都进 stdout,chat_title=$(overview)
-    # 会捕获两份标题,导致历史文件名重叠(历史 bug:标题重复两遍)。
-    # 把 ask_ai 的 stdout 丢弃,只保留末尾这一次 printf 作为函数返回值。
-    ask_ai "$request_body" >/dev/null
+    if [[ -z "$title" ]]; then
+        # 兜底 1:模型没调工具,直接输出文本——清洗后取用:取首行、
+        # 去"标题是/标题为"等前缀与成对引号、去首尾空白与尾部标点
+        title=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        title=$(printf '%s' "$title" | head -n 1 \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^.*标题[是为如]//' -e 's/^[:：]//' \
+                  -e 's/^[「『"“]//' -e 's/[」』"”。！!，,。、]*$//')
+        # 超长截断(后续 save_history 还会再做文件名特殊字符清洗)
+        (( ${#title} > 40 )) && title="${title:0:40}"
+    fi
+    # 兜底 2:接口失败/清洗后为空——通用名
+    [[ -z "$title" ]] && title="未命名对话"
 
-    printf "%s" "$full_response"
+    printf "%s" "$title"
 }
 
 # 检测当前运行环境：macos / wsl / linux
@@ -1713,7 +2538,8 @@ linux_choose_file() {
     echo "$pick"
 }
 
-# 读取文件内容并追加到输入中
+# 交互式文件选择(@):图片记入 input_images 待转述;文本只把路径放进输入
+# 并加入只读授权(内容由 AI 用 read_file 工具按需读取);其他文件跳过。
 read_file() {
 
     [[ "$forget_history" == 1 ]] && return 0
@@ -1731,10 +2557,25 @@ read_file() {
             filePath=$(linux_choose_file)
             ;;
     esac
-	echo "[文件] $filePath"
     if [[ -n "$filePath" && "$filePath" != "CANCELLED" && -f "$filePath" ]]; then
-        fileContent=$(<"$filePath")
-        input+="$fileContent"$'\n'
+        # 图片按扩展名分流:只记路径进 input_images,提交时统一转述;
+        # 文本文件不再把内容拼进 input——只把路径放进消息并加入只读授权,
+        # 由 AI 按需用 read_file 工具(带行号/offset/limit/截断)自行读取,
+        # 避免大文件撑爆 user 消息与上下文。
+        if is_image "$filePath"; then
+            echo "[图片] $filePath"
+            input_images+=("$filePath")
+        elif is_text_file "$filePath"; then
+            echo "[文件] $filePath"
+            grant_file "$filePath"
+            # 坑:brew bash 5 里 $var 后紧跟多字节字符(如句号「。」)会吃掉
+            # 变量展开并破坏后续字符(实测 $filePath。 → 空),必须用 ${var} 花括号
+            input+="(用户通过 @ 选择了文件: ${filePath}。该文件已获只读授权,如需查看内容,请先调用 read_file 工具读取,再回答用户问题。)"$'\n'
+        else
+            echo "⚠️  不是文本/图片文件,已跳过(仅支持文本与图片): $filePath"
+            # 跳过也要告知 AI,否则它不知道发生了什么,会自己去翻目录乱找
+            input+="(用户尝试选择文件: ${filePath},但该文件不是文本/图片格式,已被跳过。请勿尝试读取;如需处理请告知用户先转换格式。)"$'\n'
+        fi
     elif [[ "$filePath" == "CANCELLED" ]]; then
         # 取消选择时静默返回（错误提示已由各选择器打印）
         :
@@ -1744,7 +2585,7 @@ read_file() {
 
 # 读取用户输入的多行内容，支持续行、粘贴、文件导入等
 normal_line() {
-    local line
+    local line rc
 
     local prompt
     if [[ "$1" == 0 ]]; then
@@ -1752,7 +2593,18 @@ normal_line() {
     else
         prompt="> "
     fi
-    while IFS= read -e -r -p "$prompt" line; do
+    # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
+    input_aborted=0
+    while true; do
+        # 读取期间临时解除 Ctrl+C→SIGINT 的驱动层映射(readline 会强制打开
+        # ISIG,只有 intr undef 才能让 0x03 作为按键到达 readline),配合上方
+        # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
+        # 的 Ctrl+C 仍走 SIGINT 打断流程
+        stty -isig intr undef 2>/dev/null
+        IFS= read -e -r -p "$prompt" line
+        rc=$?
+        stty isig intr '^C' 2>/dev/null
+        (( rc != 0 )) && break
         # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
         # 一次性非阻塞大块读取（-N 走非规范模式，末尾没换行的残段超时后也会存入变量）；
         # 排干期间关掉回显，避免 macOS 在 tty 模式切换时重复回显残余队列
@@ -1785,6 +2637,9 @@ normal_line() {
             line="${line%@}"
             input+="$line"$'\n'
             read_file
+            # 必须 break:read_file 内已递归 normal_line 0 收集后续输入,
+            # 不 break 会继续往下走,把 $line 再次拼进 input(历史 bug:输入重复)
+            break
         fi
         if [[ "$line" == *\\ ]]; then
             # 行尾有反斜杠 → 续行。只删掉最后一个字符（即那个反斜杠），
@@ -1794,6 +2649,11 @@ normal_line() {
             input+="$line"$'\n'
             prompt=".. "
             continue
+        fi
+        if [[ "$line" == "-q" ]]; then
+            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
+            save_history
+            exit 0
         fi
         if [[ "$line" == "-l" ]]; then
             history_handler
@@ -1807,6 +2667,10 @@ normal_line() {
             compact_messages
             break
         fi
+        if [[ "$line" == "-skill" ]]; then
+            skill_save
+            break
+        fi
         if [[ "$line" == "-u" ]]; then
             print_usage
             break
@@ -1815,12 +2679,40 @@ normal_line() {
             help_user
             break
         fi
+        if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
+            local img_path="${line#-img}"
+            img_path="${img_path# }"
+            if [[ -z "$img_path" ]]; then
+                echo "用法: -img <图片路径>"
+                break
+            fi
+            # 展开 ~ 波浪号
+            img_path="${img_path/#\~/$HOME}"
+            if [[ -f "$img_path" ]] && is_image "$img_path"; then
+                input_images+=("$img_path")
+                echo "[图片] $img_path"
+            elif [[ -f "$img_path" ]]; then
+                echo "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+            else
+                echo "⚠️  文件不存在: $img_path"
+            fi
+            break
+        fi
 
         input+="$line"$'\n'
         prompt=".. "
 
         break
     done
+    # 兜底:kill -INT 等外部 SIGINT 打断 read -e 时(readline 的 read 不会提前
+    # 返回,回车后才走到这里),按惯例清空本次累计的全部输入,换行后返回,
+    # 由主循环重新提示,程序不退出
+    if (( input_aborted )); then
+        input_aborted=0
+        input=""
+        printf '\n'
+        return 0
+    fi
     input="${input%$'\n'}"
 }
 
@@ -1831,9 +2723,14 @@ normal_line() {
 parse_options "$@"
 # 是否是第一次进入
 first_time=1
-if [[ -n "$content" ]]; then
+if [[ -n "$content" || ${#input_images[@]} -gt 0 ]]; then
     printContent
-    [[ -z "$chat_title"  ]] && chat_title=$(overview) && first_time=0
+    # 本轮被打断时跳过标题生成,保留 first_time,下一轮成功后再生成
+    if (( round_aborted )); then
+        round_aborted=0
+    else
+        [[ -z "$chat_title" ]] && chat_title=$(overview) && first_time=0
+    fi
 fi
 
 # 交互式输入循环
@@ -1842,10 +2739,15 @@ while true; do
     normal_line 1
     content="$input"
 
-    [[ -z "$content" ]] && continue
+    # 纯图片无文字时也允许提交(转述文本即消息内容)
+    [[ -z "$content" && ${#input_images[@]} -eq 0 ]] && continue
 
     printContent
 
+    if (( round_aborted )); then
+        round_aborted=0
+        continue
+    fi
     if [[ -z "$chat_title" && "$first_time" -eq 1 ]]; then
         chat_title=$(overview) && first_time=0
     fi
