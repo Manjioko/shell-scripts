@@ -20,8 +20,77 @@ chat_title=""
 # 最新一次用户输入的内容
 content=""
 
+# ---------- Skill 自我进化(Agent Skills,渐进式披露)配置 ----------
+# 技能 = 目录 + SKILL.md(frontmatter: name/description + markdown 正文)。
+# 业界做法(Claude Code Agent Skills):启动时只把全部技能的 name+description
+# 注入 system,模型匹配到某技能后,再经 read_skill 工具读全文。
+CT_HOME="${HOME}/.ct"
+HISTORY_DIR="${CT_HOME}/history"
+SKILLS_DIR="${CT_HOME}/skills"
+# 注入段固定标记:save_history 存盘前按它剥离,加载历史后重新注入
+SKILLS_MARK="## 可用技能(Skills)"
+# description 注入截断长度(检索词,够用即可)
+SKILL_DESC_MAX=200
+# 最多注入的技能数量(按最近修改排序),防技能膨胀挤占上下文
+SKILL_MAX_INJECT=30
+
+mkdir -p "$HISTORY_DIR" "$SKILLS_DIR"
+# 历史文件迁移(幂等):旧版本把历史 JSON 直接放在 ~/.ct/ 根目录,统一迁入
+# history/ 子目录,与 skills/ 分开,目录结构更清晰
+for _ct_old in "$CT_HOME"/*.json; do
+    [[ -f "$_ct_old" ]] && mv -f "$_ct_old" "$HISTORY_DIR/" 2>/dev/null
+done
+
+# 扫描技能目录,解析每个 SKILL.md 的 frontmatter(name/description),
+# 输出"技能名: 描述"列表供注入。按 mtime 排序,只取前 SKILL_MAX_INJECT 个。
+scan_skills() {
+    local f name desc line in_front in_desc skills_text=""
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        name=""; desc=""; in_front=0; in_desc=0
+        while IFS= read -r line; do
+            if (( in_front == 0 )); then
+                [[ "$line" == "---" ]] && in_front=1
+                continue
+            fi
+            [[ "$line" == "---" ]] && break
+            if [[ "$line" == name:* ]]; then
+                name="${line#name:}"
+                in_desc=0
+            elif [[ "$line" == description:* ]]; then
+                desc="${line#description:}"
+                in_desc=1
+            elif (( in_desc )) && [[ "$line" == [[:space:]]* ]]; then
+                desc="$desc $line"
+            else
+                in_desc=0
+            fi
+        done < "$f"
+        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        desc=$(printf '%s' "$desc" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+        # name 缺失用目录名兜底;description 缺失(没有检索价值)跳过注入
+        [[ -z "$name" ]] && name=$(basename "$(dirname "$f")")
+        [[ -z "$desc" ]] && continue
+        desc=$(printf '%s' "$desc" | awk -v n="$SKILL_DESC_MAX" '{ if (length($0) > n) print substr($0, 1, n) "…"; else print }')
+        skills_text+="- ${name}: ${desc}"$'\n'
+    done < <(ls -t "$SKILLS_DIR"/*/SKILL.md 2>/dev/null | head -n "$SKILL_MAX_INJECT")
+    printf '%s' "$skills_text"
+}
+
+# 把技能列表注入 messages 第 0 条(system)。先剥离旧的注入段再追加,保证
+# get_history/skill_save 后重复注入不会叠加。compaction 保留 .[0],
+# 技能列表不会被压缩掉。
+inject_skills() {
+    local skills_text
+    skills_text=$(scan_skills)
+    [[ -z "$skills_text" ]] && return 0
+    messages=$(echo "$messages" | jq --arg mark "$SKILLS_MARK" --arg list "$skills_text" \
+        '.[0].content = ((.[0].content | split($mark)[0]) + "\n\n" + $mark + "\n" + $list)')
+}
+
 # 记录所有的对话内容，包含用户和助手的消息
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+inject_skills
 
 #辅助权限判断助手消息
 # 
@@ -162,7 +231,7 @@ BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
 # 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
 INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 
-options_list=("-l" "-msgs" "-h" "-c" "-u" "-img")
+options_list=("-l" "-msgs" "-h" "-c" "-u" "-img" "-skill")
 
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
@@ -256,19 +325,21 @@ save_history() {
     # 清洗后无有效字符(如全空白标题)时给兜底名,避免保存成 ".json"
     [[ -z "$name" ]] && name="chat"
 
-    [ -f "${HOME}/.ct/${name}.json" ] || touch "${HOME}/.ct/${name}.json"
-    history=$(jq -n --argjson msgs "$messages" --arg model "$model" --arg thinking "$thinking" \
-    '{
+    [ -f "${HISTORY_DIR}/${name}.json" ] || touch "${HISTORY_DIR}/${name}.json"
+    # 存盘前剥离 skill 注入段:技能列表不随历史存档,加载时重新注入最新列表
+    history=$(echo "$messages" | jq --arg mark "$SKILLS_MARK" --arg model "$model" --arg thinking "$thinking" \
+    '.[0].content = (.[0].content | split($mark)[0]) |
+    {
         model: $model,
-        messages: $msgs,
+        messages: .,
         thinking: {type: $thinking},
         reasoning_effort: "high",
         stream: true
     }' 2>&1)
 
-    echo "保存记录 ${HOME}/.ct/${name}.json"
+    echo "保存记录 ${HISTORY_DIR}/${name}.json"
 
-    echo "$history" > "${HOME}/.ct/${name}.json"
+    echo "$history" > "${HISTORY_DIR}/${name}.json"
 }
 
 get_history() {
@@ -342,6 +413,9 @@ get_history() {
             [[ -n "$content" ]] && render_markdown "$content"
         fi
     done
+    # 重新注入最新技能列表:历史里的 system 是旧的(不含 skills),旧历史若
+    # 有旧注入段,split($mark)[0] 也会先剥离,不会叠加
+    inject_skills
 }
 
 # Ctrl+C 不再退出程序:
@@ -364,7 +438,7 @@ history_handler() {
     local tmpList=()
     echo "请从以下编号中选择你要加载的历史记录："
     # shellcheck disable=SC2207
-    tmpList=($(ls -t "$HOME"/.ct/*.json 2>/dev/null))
+    tmpList=($(ls -t "$HISTORY_DIR"/*.json 2>/dev/null))
     history_list=()
     for i in "${!tmpList[@]}"; do
         echo "$i. $(basename "${tmpList[$i]}")"
@@ -425,6 +499,7 @@ help_user() {
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
     echo "  -img  发送图片(后接图片路径,自动转述为文字)"
+    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
     echo "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
@@ -433,6 +508,7 @@ help_user() {
     echo "内容交互时，也可使用以下选项:"
     echo "  -msgs 显示当前消息记录"
     echo "  -l    查看历史记录并选择加载"
+    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
     echo "  -img <路径> 发送图片(自动转述为文字)"
@@ -524,6 +600,11 @@ parse_options() {
 
         if [[ "${!i}" == "-c" ]]; then
             compact_messages
+            break
+        fi
+
+        if [[ "${!i}" == "-skill" ]]; then
+            skill_save
             break
         fi
 
@@ -903,6 +984,20 @@ tools() {
                         "path": {"type": "string", "description": "图片文件路径,相对路径基于当前工作目录"}
                     },
                     "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_skill",
+                "description": "读取技能(Skill)的完整内容。当任务与系统提示中「可用技能列表」的某个技能描述匹配时,先用本工具读该技能全文,再按其步骤执行。参数 name 为技能名(即列表中括号前的名字)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "技能名,如 git-commit-style"}
+                    },
+                    "required": ["name"]
                 }
             }
         },
@@ -1669,6 +1764,154 @@ tool_read_image() {
     printf ' 已识别图片 %s\n' "$path"
 }
 
+# read_skill 工具:读取技能全文。技能目录(~/.ct/skills)在工作目录之外,
+# 不走 resolve_path 沙箱,而是白名单式定位:name 只能是单个目录名,
+# 拒绝 / 与 .. 路径穿越,只读 SKILLS_DIR/<name>/SKILL.md 一个文件。
+tool_read_skill() {
+    local name path total_chars out
+    name=$(jq -r '.name // empty' <<< "$fn_args")
+    [[ -z "$name" ]] && { content="错误:技能名(name)不能为空"; return 0; }
+    [[ "$name" == *"/"* || "$name" == *".."* ]] && { content="错误:非法技能名: $name"; printf ' ⛔ 非法技能名:%s\n' "$name"; return 0; }
+    path="$SKILLS_DIR/$name/SKILL.md"
+    [[ -f "$path" ]] || { content="错误:技能不存在: $name。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
+    total_chars=$(wc -m < "$path" | tr -d ' ')
+    if (( total_chars > READ_MAX_CHARS )); then
+        out=$(awk -v max="$READ_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; print}' "$path")
+        content="📖 技能 $name(SKILL.md,共 ${total_chars} 字符,过长已截断):\n\n$out"
+    else
+        out=$(cat "$path")
+        content="📖 技能 $name(SKILL.md)全文:\n\n$out"
+    fi
+    printf ' 已读取技能 %s\n' "$name"
+}
+
+# Skill 沉淀:把当前对话提炼为一个可复用技能(Agent Skills 格式)。
+# 流程:flash 模型总结出草稿(name/description/body JSON)→ 屏幕展示 →
+# 用户 y/n 确认 → 写入 ~/.ct/skills/<name>/SKILL.md → 重新注入列表。
+# 草稿必须经用户确认才落盘,防止模型把劣质经验沉淀成长期误导。
+skill_save() {
+    local to_summarize request_body resp raw name description body
+    local file_dir answer rc attempt sys_text user_text prev_text fail_text
+
+    (( $(echo "$messages" | jq 'length') <= 1 )) && { echo "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
+
+    # 对话转可读文本(与压缩同款格式),发给 flash 提炼
+    to_summarize=$(echo "$messages" | jq -r '.[1:][] |
+        if .tool_calls != null then
+            "[assistant → 工具调用] " + (.tool_calls | tostring)
+        else
+            "[" + .role + "] " + (.content // "")
+        end')
+    printf '📦 正在从当前对话提炼技能…\n'
+    # 用 function calling 拿结构化草稿:tool_calls 的 arguments 由 API 层保证
+    # 是合法 JSON,比"提示词要求只输出 JSON"可靠得多(实测 flash 模型对
+    # JSON 指令屡教不改,直接吐 markdown)。最多尝试两次:第一次正常要求
+    # 调用工具;失败时把模型的原始输出附上做一次自纠(reflexion 式修复)。
+    raw=""
+    for attempt in 1 2; do
+        if (( attempt == 1 )); then
+            sys_text="你是技能提炼助手。根据用户提供的对话记录,提炼一个可复用的技能(Skill),并调用 save_skill 工具提交草稿。要求:1. name: 简短英文小写标识,连字符分隔,如 git-commit-style,不超过 30 字符;2. description: 1-2 句话说明什么场景下应该使用这个技能(这是检索词,要具体);3. body: 技能正文,用 markdown,包含操作步骤、常用命令、注意事项、用户偏好,不超过 800 字。"
+            user_text="$to_summarize"
+        else
+            sys_text="你上次没有调用工具提交技能草稿。请现在立即调用 save_skill 工具,只允许调用工具,禁止输出任何文字或代码围栏。"
+            user_text="$to_summarize"$'\n\n(你上次的输出不符合要求,原文如下,请改为调用 save_skill 工具,把内容填进工具参数:)'$'\n'"${prev_text:0:500}"
+        fi
+        request_body=$(jq -n --arg text "$user_text" --arg model "$flash_model" --arg sys "$sys_text" '{
+            model: $model,
+            messages: [
+                {role: "system", content: $sys},
+                {role: "user", content: $text}
+            ],
+            tools: [{
+                type: "function",
+                function: {
+                    name: "save_skill",
+                    description: "保存从对话中提炼出的技能草稿",
+                    parameters: {
+                        type: "object",
+                        properties: {
+                            name: {type: "string", description: "技能名:简短英文小写标识,连字符分隔,不超过 30 字符"},
+                            description: {type: "string", description: "1-2 句话说明什么场景下使用该技能(检索词,要具体)"},
+                            body: {type: "string", description: "技能正文,markdown 格式,包含操作步骤/常用命令/注意事项/用户偏好,不超过 800 字"}
+                        },
+                        required: ["name", "description", "body"]
+                    }
+                }
+            }],
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: false
+        }')
+        resp=$(curl -s --connect-timeout 15 --max-time 120 "$BASE_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -H "api-key: $DEEPSEEK_API_KEY" \
+            -d "$request_body" 2>/dev/null)
+        # 优先取工具调用参数(API 保证合法 JSON);没调工具则记下模型文本,
+        # 作为下一轮自纠的素材。必须用 fromjson 在同一次 jq 里转成对象:
+        # arguments 的值是 JSON 字符串,若先 -r 取出再二次解析,-r 会把值里
+        # 的 \n 转义解码成真实换行,得到的"JSON 文本"反而非法(实测踩坑)。
+        raw=$(printf '%s' "$resp" | jq -c '.choices[0].message.tool_calls[0].function.arguments | fromjson // empty' 2>/dev/null)
+        [[ -n "$raw" ]] && break
+        prev_text=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        [[ -z "$prev_text" ]] && break
+    done
+
+    if [[ -z "$raw" ]]; then
+        fail_text=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // .error.message // empty' 2>/dev/null)
+        [[ -z "$fail_text" ]] && fail_text="(接口无响应)"
+        echo "⚠️  技能提炼失败(模型未按工具协议返回草稿),请重试。模型返回:"
+        printf '%s\n' "${fail_text:0:300}"
+        return 0
+    fi
+    name=$(printf '%s' "$raw" | jq -r '.name // empty' 2>/dev/null)
+    description=$(printf '%s' "$raw" | jq -r '.description // empty' 2>/dev/null)
+    body=$(printf '%s' "$raw" | jq -r '.body // empty' 2>/dev/null)
+    if [[ -z "$name" || -z "$description" || -z "$body" ]]; then
+        echo "⚠️  技能草稿字段缺失(name/description/body),请重试。草稿参数:"
+        printf '%s\n' "${raw:0:300}"
+        return 0
+    fi
+
+    # name 清洗成安全目录名(小写字母/数字/连字符/点/下划线);description 压成单行
+    name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')
+    [[ -z "$name" ]] && name="skill"
+    description=$(printf '%s' "$description" | tr '\n' ' ' | tr -s ' ')
+
+    printf -- '──────── 技能草稿 ────────\n'
+    printf 'name: %s\n' "$name"
+    printf 'description: %s\n' "$description"
+    printf -- '──────── 正文 ────────\n'
+    printf '%s\n' "$body"
+    printf -- '────────────────────────\n'
+    printf '是否保存该技能?(y/n): '
+    # 与历史选择同款轮询读取:Ctrl+C 当作拒绝,不会执行写入
+    stty -echoctl 2>/dev/null
+    answer=""
+    while :; do
+        IFS= read -r -t 0.2 answer
+        rc=$?
+        (( input_aborted )) && break
+        (( rc <= 128 )) && break
+    done
+    stty echoctl 2>/dev/null
+    if (( input_aborted )); then
+        input_aborted=0
+        printf '\r\033[2K\n'
+    fi
+    if [[ "$answer" != "y" ]]; then
+        echo "已取消,未保存"
+        return 0
+    fi
+
+    file_dir="$SKILLS_DIR/$name"
+    mkdir -p "$file_dir" || { echo "⚠️  创建技能目录失败: $file_dir"; return 0; }
+    printf -- '---\nname: %s\ndescription: %s\n---\n\n%s\n' "$name" "$description" "$body" > "$file_dir/SKILL.md"
+    echo "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
+    # 立即生效:重新注入最新技能列表
+    inject_skills
+}
+
 # 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
@@ -1811,7 +2054,7 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
         fi
@@ -2177,32 +2420,60 @@ printContent() {
 }
 
 # 根据聊天记录生成标题
+# 用 function calling 协议拿标题:tool_calls 的 arguments 由 API 保证合法
+# JSON,杜绝模型"画蛇添足"输出多余文本(历史问题:模型偶尔不守提示词,
+# 输出"标题是:xxx/我建议..."等垃圾,原样进了文件名)。
+# 模型没调工具时兜底:取其文本输出做清洗(去前缀/去引号/取首行/截断);
+# 接口失败或清洗后为空则给通用名。标题失败属静默降级,不打扰用户。
 overview() {
+    local msg request_body resp title
 
-    local chunk=""
-    # local res=""
-    local msg
-    local request_body
+    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]')
 
-    # echo "记录是: $messages"
-    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话，总结一个恰当的标题。输入格式如下: 标题内容。注意：除了按格式输出外，不可以有多余文字，标题内容不可有特殊字符换行符号等。"}]')
-
-    request_body=$(jq -n  --argjson msgs "$msg" --arg model "$flash_model" '{
+    request_body=$(jq -n --argjson msgs "$msg" --arg model "$flash_model" '{
         model: $model,
         messages: $msgs,
+        tools: [{
+            type: "function",
+            function: {
+                name: "set_title",
+                description: "提交为本次对话总结的标题",
+                parameters: {
+                    type: "object",
+                    properties: {
+                        title: {type: "string", description: "对话标题,简短精炼,不超过 30 字,不含特殊字符与换行"}
+                    },
+                    required: ["title"]
+                }
+            }
+        }],
         thinking: {type: "disabled"},
         reasoning_effort: "high",
-        stream: true,
-        stream_options: {include_usage: true}
+        stream: false
     }')
+    # 同步一次拿完(标题失败只影响历史文件名,无需走 ask_ai 的重试链路)
+    resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
+        -d "$request_body" 2>/dev/null)
+    title=$(printf '%s' "$resp" | jq -r '.choices[0].message.tool_calls[0].function.arguments | fromjson | .title // empty' 2>/dev/null)
 
-    # ask_ai 会把流式正文直接 printf 到 stdout(主屏幕显示),而这里末尾又
-    # printf 一次 full_response。若两者都进 stdout,chat_title=$(overview)
-    # 会捕获两份标题,导致历史文件名重叠(历史 bug:标题重复两遍)。
-    # 把 ask_ai 的 stdout 丢弃,只保留末尾这一次 printf 作为函数返回值。
-    ask_ai "$request_body" >/dev/null
+    if [[ -z "$title" ]]; then
+        # 兜底 1:模型没调工具,直接输出文本——清洗后取用:取首行、
+        # 去"标题是/标题为"等前缀与成对引号、去首尾空白与尾部标点
+        title=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        title=$(printf '%s' "$title" | head -n 1 \
+            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^.*标题[是为如]//' -e 's/^[:：]//' \
+                  -e 's/^[「『"“]//' -e 's/[」』"”。！!，,。、]*$//')
+        # 超长截断(后续 save_history 还会再做文件名特殊字符清洗)
+        (( ${#title} > 40 )) && title="${title:0:40}"
+    fi
+    # 兜底 2:接口失败/清洗后为空——通用名
+    [[ -z "$title" ]] && title="未命名对话"
 
-    printf "%s" "$full_response"
+    printf "%s" "$title"
 }
 
 # 检测当前运行环境：macos / wsl / linux
@@ -2394,6 +2665,10 @@ normal_line() {
         fi
         if [[ "$line" == "-c" ]]; then
             compact_messages
+            break
+        fi
+        if [[ "$line" == "-skill" ]]; then
+            skill_save
             break
         fi
         if [[ "$line" == "-u" ]]; then
