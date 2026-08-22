@@ -85,10 +85,44 @@ GREP_MAX_COL=500
 
 # web_fetch 单次返回网页纯文本的字符上限,超出按行截断并提示
 WEB_MAX_CHARS=20000
+
+# ---------- 图片理解(多模态,转述架构)配置 ----------
+# 设计原则:用户发图(@/-img)与 AI 读图(read_image)都不把图片放进 messages——
+# 本地 base64 后单独调一次视觉接口(mimo-v2.5,当前唯一支持图片的模型),
+# 只把文字转述作为普通文本写入上下文。好处:messages/历史不膨胀、
+# 压缩不因图片频繁触发、图片 token 每张只付一次(转述请求本身)。
+# 图片文件超过该体积(字节)时触发自动压缩。15MB → base64 约 20MB,
+# 文档单张上限 50MB,留 2.5 倍余量。
+IMG_MAX_BYTES=15728640
+
+# 压缩目标:最长边像素。2048 → 约 4M 像素 ≈ 4k token,清晰度与费用的平衡点
+IMG_MAX_SIDE=2048
+
+# 一次转述请求最多合并的图片张数
+IMG_MAX_BATCH=4
+
+# 一次转述请求所有图片字节合计上限(约 35MB → base64 约 47MB,逼近文档上限)
+IMG_BATCH_MAX_BYTES=36700160
+
+# 支持的图片扩展名(按扩展名识别,不做内容嗅探——为便利牺牲准确性)
+IMG_EXTS="png jpg jpeg gif webp bmp"
+
+# jq ≥ 1.6 才支持 --rawfile(大体积 base64 不能经 --arg 传参,会撞 ARG_MAX)
+JQ_HAS_RAWFILE=1
+jq --help 2>/dev/null | grep -q -- '--rawfile' || JQ_HAS_RAWFILE=0
+
+# 图片转述提示词模板(行业通用视觉描述范式):{N} 在调用时替换为图片张数
+IMG_DESC_PROMPT='以下 {N} 张图片依次编号为图片1至图片{N},请逐张转述为文字。要求:1. 客观、详尽地描述画面内容:主体对象、场景、布局、颜色、状态与关键细节;2. 图中出现的所有文字(标题、按钮、菜单、代码、报错、数据等)必须完整逐字转录,不得省略或改写;3. 若为截图或图表,说明界面类型、视觉层级与关键数据;4. 每张图片独立成段,以「图片N:」开头;5. 只输出转述内容本身,不要任何开场白、解释或总结。'
 # ----------------------------------------------------
 
 # 用户输入的内容
 input=""
+# 用户通过 @ 选图 / -img 参数加入的待转述图片路径。提交(printContent)时
+# 统一转述为文字再进 messages,原图不进上下文(转述架构,见上方图片配置)。
+input_images=()
+# 用户通过 @ 显式选择的文件路径(只读授权):AI 的 read_file/read_image 工具
+# 除 WORK_ROOT 沙箱外,还可读取这些用户亲手选中的文件。写入工具不受影响。
+granted_files=()
 # Ctrl+C 状态标志(配合 handle_ctrl_c):
 #   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
 #   ai_active=0     主屏幕(输入行的 Ctrl+C 由 readline 清行;普通 read 被打断
@@ -128,7 +162,7 @@ BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
 # 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
 INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 
-options_list=("-l" "-msgs" "-h" "-c" "-u")
+options_list=("-l" "-msgs" "-h" "-c" "-u" "-img")
 
 # 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
 if [[ -z "$BREW_BASH_CHECKED" ]]; then
@@ -390,6 +424,7 @@ help_user() {
     echo "  -f    忽略历史记录"
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
+    echo "  -img  发送图片(后接图片路径,自动转述为文字)"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
     echo "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
@@ -400,6 +435,8 @@ help_user() {
     echo "  -l    查看历史记录并选择加载"
     echo "  -c    手动压缩对话历史"
     echo "  -u    查看当前上下文 token 用量"
+    echo "  -img <路径> 发送图片(自动转述为文字)"
+    echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
     echo "  -q    退出程序"
     echo "  -h    显示帮助信息"
 }
@@ -435,6 +472,25 @@ parse_options() {
             else
                     content="${prectx}: $content"
             fi
+            continue
+        fi
+
+        if [[ "${!i}" == "-img" ]]; then
+            local nxt=$((i + 1))
+            local img_path="${!nxt}"
+            # 展开 ~ 波浪号
+            img_path="${img_path/#\~/$HOME}"
+            if [[ -n "$img_path" && -f "$img_path" ]] && is_image "$img_path"; then
+                input_images+=("$img_path")
+                echo "[图片] $img_path"
+            elif [[ -n "$img_path" && -f "$img_path" ]]; then
+                echo "⚠️  -img 只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+            elif [[ -n "$img_path" ]]; then
+                echo "⚠️  -img 文件不存在: $img_path"
+            else
+                echo "⚠️  -img 需要图片路径"
+            fi
+            ((i++))
             continue
         fi
 
@@ -839,6 +895,20 @@ tools() {
         {
             "type": "function",
             "function": {
+                "name": "read_image",
+                "description": "读取本地图片并返回其内容的文字转述(含图中所有文字的完整转录)。需要查看截图、图表、照片内容时使用本工具;它返回的是文字描述,不是原图。路径只能在工作目录内。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "图片文件路径,相对路径基于当前工作目录"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "run_shell_command",
                 "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_fetch。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
                 "parameters": {
@@ -1140,6 +1210,33 @@ resolve_path() {
     printf '%s/%s%s' "$canon" "$missing" "$base"
 }
 
+# 只读授权:用户通过 @ 亲手选择的文件(可能在工作目录之外)加入白名单,
+# read_file/read_image 工具在沙箱拒绝时再查此名单——用户手势即同意读取。
+# 写入类工具绝不查询该名单,沙箱约束保持不变。
+grant_file() {
+    local p="$1" canon
+    granted_files+=("$p")
+    # 同时存物理规范化形式,模型用别名/符号链接拼法也能命中
+    if [[ -d "$(dirname "$p")" ]]; then
+        canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 0
+        granted_files+=("$canon/$(basename "$p")")
+    fi
+}
+is_granted() {
+    local p="$1" canon g
+    for g in "${granted_files[@]}"; do
+        [[ "$g" == "$p" ]] && return 0
+    done
+    # 物理规范化后比对(符号链接等)
+    if [[ -d "$(dirname "$p")" ]]; then
+        canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 1
+        for g in "${granted_files[@]}"; do
+            [[ "$g" == "$canon/$(basename "$p")" ]] && return 0
+        done
+    fi
+    return 1
+}
+
 # 文件类工具的实现约定:结果写入全局变量 content(与 shell 工具一致),
 # 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
 
@@ -1151,7 +1248,16 @@ tool_read_file() {
     [[ -z "$offset" || "$offset" == "null" ]] && offset=1
     [[ -z "$limit" || "$limit" == "null" ]] && limit=0
 
-    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    if ! resolved=$(resolve_path "$path"); then
+        # 沙箱拒绝:查用户 @ 显式授权名单(只读;写入工具无此通道)
+        if is_granted "$path"; then
+            resolved="$path"
+        else
+            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
+            printf ' ⛔ 路径越界:%s\n' "$path"
+            return 0
+        fi
+    fi
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
 
     total_lines=$(wc -l < "$resolved" | tr -d ' ')
@@ -1314,6 +1420,255 @@ tool_web_fetch() {
     printf ' 已抓取 %s(%s)\n' "$url" "$renderer"
 }
 
+# ========== 图片理解(多模态,转述架构) ==========
+# 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
+# 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉接口
+# (mimo-v2.5,当前唯一支持图片的模型),只把文字转述作为普通文本写入上下文,
+# 避免消息/历史膨胀、压缩频繁触发与图片 token 每轮重复计费。
+
+# 扩展名 → MIME 类型。按扩展名识别,不做内容嗅探(为便利牺牲准确性)。
+img_mime() {
+    local ext
+    ext=$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')
+    case "$ext" in
+        png)  printf 'image/png' ;;
+        jpg|jpeg) printf 'image/jpeg' ;;
+        gif)  printf 'image/gif' ;;
+        webp) printf 'image/webp' ;;
+        bmp)  printf 'image/bmp' ;;
+        *)    printf '' ;;
+    esac
+}
+
+# 判断路径是否命中图片扩展名白名单
+is_image() {
+    local ext
+    ext=$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')
+    [[ -n "$ext" && " $IMG_EXTS " == *" $ext "* ]]
+}
+
+# 判断文件是否为文本(file 命令看 MIME;无 file 时用 grep -I 兜底)。
+# 二进制文件(如 .psd)绝不能读进 bash 变量再传 jq --arg:
+# NUL 字节会触发 "ignored null byte" 警告,超大内容直接撞 ARG_MAX。
+# file 认不出时放行(仅影响是否提示"已跳过",内容本身不会再拼进输入)。
+is_text_file() {
+    local mime=""
+    [[ ! -s "$1" ]] && return 0    # 空文件按文本处理(导入空内容无副作用)
+    if command -v file >/dev/null 2>&1; then
+        # --mime-type 在新版 BSD(macOS)与 GNU(Linux) 都支持;老系统回退 -bI/-bi
+        # (macOS 的 -i 是小写无效选项,会输出 "regular file" 假阳性)
+        mime=$(file -b --mime-type "$1" 2>/dev/null) \
+            || mime=$(file -bI "$1" 2>/dev/null) \
+            || mime=$(file -bi "$1" 2>/dev/null)
+        mime="${mime%%;*}"   # 去掉 "; charset=..." 尾巴
+        [[ -z "$mime" || "$mime" == "regular file" ]] && return 0
+    else
+        # 兜底:grep -I 遇到二进制按"无匹配"处理(退出 1)
+        grep -Iq . "$1" 2>/dev/null && return 0
+        return 1
+    fi
+    case "$mime" in
+        text/*|application/json|application/xml|application/javascript|application/csv|application/rtf|application/x-empty|inode/x-empty) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 图片体积检查/压缩:$1 原图路径,输出最终可用路径(原图或压缩后的临时文件)。
+# 超 IMG_MAX_BYTES 时依次尝试 sips(macOS 自带) → ffmpeg → python3(PIL),
+# 统一压缩为最长边 ≤ IMG_MAX_SIDE 的 JPEG。原文件永不改写;
+# 压缩产物由调用方负责清理。失败返回 1,进度提示走 stderr 不污染 stdout。
+prepare_image() {
+    local in="$1" out size
+    size=$(wc -c < "$in" | tr -d ' ')
+    if (( size <= IMG_MAX_BYTES )); then
+        printf '%s\n' "$in"
+        return 0
+    fi
+    printf ' ⚠️  图片 %sMB 超限,尝试自动压缩(最长边 %s px)…\n' "$((size / 1024 / 1024))" "$IMG_MAX_SIDE" >&2
+    out=$(mktemp "${TMPDIR:-/tmp}/ct_shrink_XXXXXX")
+    # 依次尝试 sips → ffmpeg → python3(PIL),任一成功即停(前一工具失败
+    # 留空文件时由下一工具覆盖写兜底)。全部失败返回 1。
+    if command -v sips >/dev/null 2>&1; then
+        # macOS 自带:sips -Z 按最长边等比缩放;formatOptions 80 控制 JPEG 质量
+        sips -Z "$IMG_MAX_SIDE" -s format jpeg -s formatOptions 80 "$in" --out "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    if command -v ffmpeg >/dev/null 2>&1; then
+        # -f image2 -c:v mjpeg 显式指定封装/编码,不依赖临时文件扩展名
+        ffmpeg -y -loglevel error -i "$in" \
+            -vf "scale='min(${IMG_MAX_SIDE},iw)':'min(${IMG_MAX_SIDE},ih)':force_original_aspect_ratio=decrease" \
+            -f image2 -c:v mjpeg -q:v 4 "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    if python3 -c 'import PIL' >/dev/null 2>&1; then
+        IMG_SIDE="$IMG_MAX_SIDE" python3 -c 'import os, sys
+from PIL import Image
+side = int(os.environ["IMG_SIDE"])
+im = Image.open(sys.argv[1])
+im.thumbnail((side, side))
+im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null 2>&1
+        [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    fi
+    rm -f "$out"
+    return 1
+}
+
+# 图片转述核心:批量图片路径 → 一次视觉 API 请求 → 文字转述。
+# 结果写全局 describe_result,失败置 describe_failed=1(不阻塞对话)。
+# 关键实现点:
+#   - 图片 base64 可能达数十 MB,绝不能走 jq --arg / curl -d 传参
+#     (exec 参数受 ARG_MAX 限制,macOS 仅约 1MB):parts 经 jq --rawfile
+#     从临时文件读入,请求体用 curl --data-binary @file 发送;
+#   - base64 字符集只有 [A-Za-z0-9+/=],手拼 JSON 字符串无需转义;
+#   - 转述请求固定 flash 模型(唯一支持图片的模型),与主对话模型无关。
+describe_images() {
+    local -a files=("$@") cleanup=()
+    local i n path new_path ext mime b64 parts sep tmpdir req_file resp err
+    local size total_size=0 prompt
+
+    describe_result=""
+    describe_failed=0
+    n=${#files[@]}
+    (( n == 0 )) && return 0
+    tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/ct_img_XXXXXX")
+
+    _img_cleanup() {
+        rm -rf "$tmpdir"
+        (( ${#cleanup[@]} > 0 )) && rm -f "${cleanup[@]}"
+    }
+
+    (( n > IMG_MAX_BATCH )) && {
+        describe_failed=1
+        describe_result="一次最多转述 ${IMG_MAX_BATCH} 张图片,当前 ${n} 张,请分批发"
+        _img_cleanup
+        return 0
+    }
+
+    printf ' 📷 正在识别图片(%s 张)…\n' "$n"
+    parts=""
+    sep=""
+    for ((i = 0; i < n; i++)); do
+        path="${files[$i]}"
+        [[ -f "$path" ]] || {
+            describe_failed=1
+            describe_result="图片文件不存在: $path"
+            _img_cleanup
+            return 0
+        }
+        is_image "$path" || {
+            describe_failed=1
+            describe_result="不支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"
+            _img_cleanup
+            return 0
+        }
+        # 超体积自动压缩;成功时可能返回新的临时文件路径,记入清理列表
+        new_path=$(prepare_image "$path") || {
+            describe_failed=1
+            describe_result="图片超体积且本机无 sips/ffmpeg/python3(PIL) 可自动压缩: $path"
+            _img_cleanup
+            return 0
+        }
+        [[ "$new_path" != "$path" ]] && cleanup+=("$new_path")
+        path="$new_path"
+
+        size=$(wc -c < "$path" | tr -d ' ')
+        total_size=$((total_size + size))
+        # 合并请求总体积防护:总 base64(≈体积×4/3)逼近文档 50MB 上限即拒绝
+        if (( total_size > IMG_BATCH_MAX_BYTES )); then
+            describe_failed=1
+            describe_result="图片合计体积过大(${total_size} 字节,超过单次请求上限),请分批发"
+            _img_cleanup
+            return 0
+        fi
+
+        ext=$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')
+        mime=$(img_mime "$ext")
+        [[ -z "$mime" ]] && mime="image/jpeg"
+        b64=$(base64 < "$path" | tr -d '\n')   # BSD/Linux 通用;去掉 base64 自带换行
+        parts+="${sep}{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:${mime};base64,${b64}\"}}"
+        sep=","
+    done
+
+    prompt=${IMG_DESC_PROMPT//"{N}"/"$n"}
+
+    (( JQ_HAS_RAWFILE )) || {
+        describe_failed=1
+        describe_result="图片转述需要 jq 1.6+ 的 --rawfile 支持,请升级 jq"
+        _img_cleanup
+        return 0
+    }
+
+    # parts 可能达数十 MB:--arg 会撞 ARG_MAX,--rawfile 从文件读入规避。
+    # parts 是逗号拼接的若干对象,这里补上数组括号,fromjson 才能得到数组
+    printf '[%s]' "$parts" > "$tmpdir/parts.json"
+    request_body=$(jq -nc \
+        --rawfile parts "$tmpdir/parts.json" \
+        --arg model "$flash_model" \
+        --arg prompt "$prompt" \
+        '{
+            model: $model,
+            messages: [
+                {role: "system", content: "你是图片内容转述助手。任务:把用户提供的图片转述为详尽、忠实的文字描述,只描述图片本身呈现的内容,不添加图片之外的信息或推测。"},
+                {role: "user", content: (($parts | fromjson) + [{type: "text", text: $prompt}])}
+            ],
+            thinking: {type: "disabled"},
+            reasoning_effort: "high",
+            stream: false
+        }') || {
+        describe_failed=1
+        describe_result="转述请求体构建失败(jq 异常)"
+        _img_cleanup
+        return 0
+    }
+
+    req_file="$tmpdir/req.json"
+    printf '%s' "$request_body" > "$req_file"
+    # --data-binary @file:请求体从文件读,绕开命令行参数长度限制
+    resp=$(curl -s --connect-timeout 15 --max-time 180 "$BASE_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
+        --data-binary @"$req_file" 2>/dev/null)
+
+    describe_result=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    if [[ -z "$describe_result" ]]; then
+        describe_failed=1
+        err=$(printf '%s' "$resp" | jq -r '.error.message // empty' 2>/dev/null)
+        describe_result="转述接口无响应或报错: ${err:-未知错误}"
+    fi
+    _img_cleanup
+    return 0
+}
+
+# AI 工具:读取工作目录内的图片。与用户发图共用转述管线——返回给模型的
+# 是文字转述而非图片本身(OpenAI 协议中 tool 消息 content 只能是字符串,
+# 无法携带 image_url,转述是唯一协议合规的"看图"方式)。
+# 沙箱与 read_file 一致:路径必须解析后落在 WORK_ROOT 内。
+tool_read_image() {
+    local path resolved
+    path=$(jq -r '.path // empty' <<< "$fn_args")
+    if ! resolved=$(resolve_path "$path"); then
+        # 沙箱拒绝:查用户 @ 显式授权名单(只读)
+        if is_granted "$path"; then
+            resolved="$path"
+        else
+            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
+            printf ' ⛔ 路径越界:%s\n' "$path"
+            return 0
+        fi
+    fi
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+    is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
+
+    describe_images "$resolved"
+    if (( describe_failed )); then
+        content="图片识别失败: $describe_result"
+    else
+        content="图片 $path 的内容转述(本工具返回文字描述,非原图):"$'\n\n'"$describe_result"
+    fi
+    printf ' 已识别图片 %s\n' "$path"
+}
+
 # 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
@@ -1362,6 +1717,14 @@ tool_run_and_parse() {
             first_call=0
         else
             add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
+        fi
+
+        # 执行前再查一次:Ctrl+C 可能在工具横幅/上一条工具执行期间到来,
+        # 此时立即回滚并结束本轮,不再执行后续工具
+        if (( input_aborted )); then
+            input_aborted=0
+            messages=$msgs_before_call
+            return 130
         fi
 
         if [[ "$fn_name" == "run_shell_command" ]]; then
@@ -1448,9 +1811,18 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep|web_fetch) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
+        fi
+
+        # 工具执行期间 Ctrl+C(如 read_image/web_fetch 的同步转述/抓取被 SIGINT
+        # 打断):回滚本条未配对的 assistant(tool_calls),向上传播 130 结束本轮,
+        # 与 shell 工具的 auth 打断处理同策略
+        if (( input_aborted )); then
+            input_aborted=0
+            messages=$msgs_before_call
+            return 130
         fi
 
         add_message "$content" "tool" "$fn_id"
@@ -1718,6 +2090,33 @@ flush_thinking() {
 printContent() {
     round_aborted=0
 
+    # 图片转述:本轮 @/-img 选的图片在此统一转述(独立视觉请求,转述文本
+    # 进 messages,原图不进上下文)。纯图片无文字时,描述即消息内容。
+    if (( ${#input_images[@]} > 0 )); then
+        local img_n=${#input_images[@]} img_desc=""
+        describe_images "${input_images[@]}"
+        # 转述(同步 curl)期间 Ctrl+C:trap 置 input_aborted,curl 同进程组被
+        # SIGINT 杀掉、resp 为空。视为本轮取消:不写入任何消息,直接回到输入
+        if (( input_aborted )); then
+            input_aborted=0
+            input_images=()
+            round_aborted=1
+            printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n'
+            return 0
+        fi
+        input_images=()
+        if (( describe_failed )); then
+            img_desc=$'\n[图片识别失败: '"$describe_result"']'
+        else
+            img_desc=$'\n(用户发送了 '"$img_n"' 张图片,以下是图片内容的文字转述)\n'"$describe_result"
+        fi
+        if [[ -n "$content" ]]; then
+            content+="$img_desc"
+        else
+            content="$img_desc"
+        fi
+    fi
+
     add_message "$content"
     local tools
     local request_body rc
@@ -1868,7 +2267,8 @@ linux_choose_file() {
     echo "$pick"
 }
 
-# 读取文件内容并追加到输入中
+# 交互式文件选择(@):图片记入 input_images 待转述;文本只把路径放进输入
+# 并加入只读授权(内容由 AI 用 read_file 工具按需读取);其他文件跳过。
 read_file() {
 
     [[ "$forget_history" == 1 ]] && return 0
@@ -1886,10 +2286,25 @@ read_file() {
             filePath=$(linux_choose_file)
             ;;
     esac
-	echo "[文件] $filePath"
     if [[ -n "$filePath" && "$filePath" != "CANCELLED" && -f "$filePath" ]]; then
-        fileContent=$(<"$filePath")
-        input+="$fileContent"$'\n'
+        # 图片按扩展名分流:只记路径进 input_images,提交时统一转述;
+        # 文本文件不再把内容拼进 input——只把路径放进消息并加入只读授权,
+        # 由 AI 按需用 read_file 工具(带行号/offset/limit/截断)自行读取,
+        # 避免大文件撑爆 user 消息与上下文。
+        if is_image "$filePath"; then
+            echo "[图片] $filePath"
+            input_images+=("$filePath")
+        elif is_text_file "$filePath"; then
+            echo "[文件] $filePath"
+            grant_file "$filePath"
+            # 坑:brew bash 5 里 $var 后紧跟多字节字符(如句号「。」)会吃掉
+            # 变量展开并破坏后续字符(实测 $filePath。 → 空),必须用 ${var} 花括号
+            input+="(用户通过 @ 选择了文件: ${filePath}。该文件已获只读授权,如需查看内容,请先调用 read_file 工具读取,再回答用户问题。)"$'\n'
+        else
+            echo "⚠️  不是文本/图片文件,已跳过(仅支持文本与图片): $filePath"
+            # 跳过也要告知 AI,否则它不知道发生了什么,会自己去翻目录乱找
+            input+="(用户尝试选择文件: ${filePath},但该文件不是文本/图片格式,已被跳过。请勿尝试读取;如需处理请告知用户先转换格式。)"$'\n'
+        fi
     elif [[ "$filePath" == "CANCELLED" ]]; then
         # 取消选择时静默返回（错误提示已由各选择器打印）
         :
@@ -1951,6 +2366,9 @@ normal_line() {
             line="${line%@}"
             input+="$line"$'\n'
             read_file
+            # 必须 break:read_file 内已递归 normal_line 0 收集后续输入,
+            # 不 break 会继续往下走,把 $line 再次拼进 input(历史 bug:输入重复)
+            break
         fi
         if [[ "$line" == *\\ ]]; then
             # 行尾有反斜杠 → 续行。只删掉最后一个字符（即那个反斜杠），
@@ -1986,6 +2404,25 @@ normal_line() {
             help_user
             break
         fi
+        if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
+            local img_path="${line#-img}"
+            img_path="${img_path# }"
+            if [[ -z "$img_path" ]]; then
+                echo "用法: -img <图片路径>"
+                break
+            fi
+            # 展开 ~ 波浪号
+            img_path="${img_path/#\~/$HOME}"
+            if [[ -f "$img_path" ]] && is_image "$img_path"; then
+                input_images+=("$img_path")
+                echo "[图片] $img_path"
+            elif [[ -f "$img_path" ]]; then
+                echo "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+            else
+                echo "⚠️  文件不存在: $img_path"
+            fi
+            break
+        fi
 
         input+="$line"$'\n'
         prompt=".. "
@@ -2011,7 +2448,7 @@ normal_line() {
 parse_options "$@"
 # 是否是第一次进入
 first_time=1
-if [[ -n "$content" ]]; then
+if [[ -n "$content" || ${#input_images[@]} -gt 0 ]]; then
     printContent
     # 本轮被打断时跳过标题生成,保留 first_time,下一轮成功后再生成
     if (( round_aborted )); then
@@ -2027,7 +2464,8 @@ while true; do
     normal_line 1
     content="$input"
 
-    [[ -z "$content" ]] && continue
+    # 纯图片无文字时也允许提交(转述文本即消息内容)
+    [[ -z "$content" && ${#input_images[@]} -eq 0 ]] && continue
 
     printContent
 
