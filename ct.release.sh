@@ -221,6 +221,22 @@ THROTTLE=50000
 # 显示层只保留可视宽度;完整内容照旧进 window_output(喂给 AI,由截断兜底)。
 DISP_COL=300
 
+# pending 上限(字节):无换行的超长输出(ninja 编译进度、minified 单行文件等)
+# 会让 pending 无限增长,每轮 += 与换行扫描都 O(n),bash 卡在字符串操作中
+# 无法回到 read 超时点,信号检查(Ctrl+C)被无限推迟——用户实测 ESP-IDF 编译
+# 卡死只能关终端重开。超过上限只保留尾部:超长行最终会被 truncate_output
+# 截断,行首内容反正进不了上下文,丢弃无损失。
+PENDING_MAX=262144   # 256KB
+
+# window_output 环形缓冲:命令输出海量行(ESP-IDF 编译等几千行完整路径)时,
+# window_output+= 每行都全量复制,O(n²) 总复杂度,bash 卡死在追加操作上
+# 信号无法处理(Ctrl+C 失效,与 pending 无界是同一病根的不同面)。
+# 改为固定大小环形数组,每行追加 O(1);命令结束后按
+# "头 OUT_HEAD_LINES 行 + 省略计数 + 最近 OUT_BUF_SIZE 行" 一次性重组,
+# 喂 AI 前 truncate_output 仍会再截,信息无损。
+OUT_HEAD_LINES=50    # 保留开头行数(表头/摘要)
+OUT_BUF_SIZE=300     # 环形缓冲容量(最近行数)
+
 # run_with_window 兜底:命令主体已退出,但输出管道(FIFO 写端)仍被其后台子进程
 # 握着(AI 在命令里误用 & 启动服务),EOF 永远不来。主进程已死且静默超过该时长
 # 就提前收尾,防止窗口永久挂死。仅当主进程已退出才计时,不影响正常慢命令。
@@ -648,9 +664,13 @@ run_with_window() {
     local total=0 drawn=0
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
+    local _full="" _tail=""
     local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
     local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
     local in_fd="" key="" tty_save="" tty_cols="" tty_rows="" wrapped_cmd=""
+    # 环形缓冲(见 OUT_BUF_SIZE 配置注释):每行追加 O(1),防 O(n²) 卡死
+    local -a tail_buf=()
+    local tail_idx=0 out_head="" tail_count=0 tstart=0 ti
     # 全量输出通过全局变量回传给调用方（窗口只显示末尾 WIN 行）
     window_output=""
 
@@ -668,7 +688,10 @@ run_with_window() {
     # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
     clean_line() {
         line=${line//$'\r'/}
-        line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        # ANSI 序列剥离必须用 +([0-9;?]) 而非 *([0-9;?]):可空重复 + 后置
+        # 锚定字符会让 bash 的 extglob 替换回溯爆炸(超长 ANSI 行实测卡死
+        # 数十秒,CPU 100% 且 INT 杀不掉)。真实序列必带参数([1;32m 等),+ 合法。
+        line=${line//$'\e'\[+([0-9;?])[[:alpha:]]/}
         # BSD script 在 stdin EOF 时向 pty 回显的 "^D" + 退格残留;
         # 先剥定向残留再剥散落的退格(窗口无法正确渲染 \b)
         line=${line//'^D'$'\b\b'/}
@@ -793,16 +816,45 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
         fi
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
-            while [[ "$pending" == *$'\n'* ]]; do
-                line="${pending%%$'\n'*}"
-                pending="${pending#*$'\n'}"
+            # 无换行超长行:pending 限长只留尾部,保证每轮循环 O(1),
+            # 信号(Ctrl+C)能在命令边界及时处理(见 PENDING_MAX 配置注释)
+            (( ${#pending} > PENDING_MAX )) && pending="${pending: -PENDING_MAX}"
+            # 批量拆行:while read 逐行(C 层实现,整体 O(n))。旧实现逐行
+            # ${pending#*$'\n'} 每拆一行都全量复制剩余 pending——chunk 内含
+            # 数千短行时(seq 输出/编译日志)该操作 O(n²),成为继
+            # window_output += 之后的第二个卡死点(实测 10 万行 93 秒)。
+            # 残段切分必须显式分三种情况:以 \n 结尾(全完整行)/含 \n 但尾段
+            # 无换行(切残段)/完全无 \n(整个是残段)。坑:${pending%$'\n'*}
+            # 在无 \n 时因不匹配返回原值,会把整个残段误当完整行做昂贵的
+            # clean_line,实测直接卡死(CPU 100% 且两次 INT 杀不掉)。
+            if [[ "$pending" == *$'\n' ]]; then
+                _full="$pending"
+                _tail=""
+            elif [[ "$pending" == *$'\n'* ]]; then
+                _tail="${pending##*$'\n'}"
+                _full="${pending%$'\n'*}"
+            else
+                _tail="$pending"
+                _full=""
+            fi
+            while IFS= read -r line; do
+                # 先截长行再清洗:clean_line 的 ANSI 剥离是模式替换,在超长行
+                # (256KB 含数千颜色码,idf.py build 真实行为)上即使 +() 也慢,
+                # 截到 2000 字符后微秒级。环形缓冲本来就只留截断后的行。
+                (( ${#line} > TOOL_OUTPUT_MAX_COL )) && line="${line:0:$TOOL_OUTPUT_MAX_COL}…(该行过长已截断)"
                 clean_line
-                window_output+="$line"$'\n'
+                # 环形缓冲追加(O(1)):头 N 行另存,最近 OUT_BUF_SIZE 行进环形
+                total=$((total + 1))
+                if (( total <= OUT_HEAD_LINES )); then
+                    out_head+="$line"$'\n'
+                fi
+                tail_buf[$tail_idx]="$line"
+                tail_idx=$(( (tail_idx + 1) % OUT_BUF_SIZE ))
                 # 显示缓冲只存可视宽度:超长行若全量进 buf,paint 每帧向终端喷数 MB
                 buf+=("${line:0:$DISP_COL}")
                 (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
-                (( total++ ))
-            done
+            done < <(printf '%s' "$_full")
+            pending="$_tail"
             # 底行 partial 同样只清洗/显示可视宽度,保证每轮循环 O(1),
             # 信号能在命令边界及时处理
             line="${pending:0:$DISP_COL}"; clean_line; partial="$line"
@@ -848,14 +900,35 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
     if [[ -n "$pending" ]]; then
-        line="$pending"; clean_line
+        # 先截长行再清洗(同拆行循环:pending 最大 256KB,直接在原值上做
+        # clean_line 的模式替换可能回溯爆炸)
+        line="${pending:0:$TOOL_OUTPUT_MAX_COL}"; clean_line
         if [[ -n "$line" ]]; then
-            window_output+="$line"$'\n'
+            total=$((total + 1))
+            if (( total <= OUT_HEAD_LINES )); then
+                out_head+="$line"$'\n'
+            fi
+            tail_buf[$tail_idx]="$line"
+            tail_idx=$(( (tail_idx + 1) % OUT_BUF_SIZE ))
             buf+=("${line:0:$DISP_COL}")
             (( ${#buf[@]} > WIN )) && buf=("${buf[@]:1}")
-            (( total++ ))
         fi
     fi
+    # 环形缓冲重组为最终输出:头 OUT_HEAD_LINES 行 + 省略计数 + 最近
+    # OUT_BUF_SIZE 行。一次性拼接,无逐行 O(n²) 追加。
+    window_output="$out_head"
+    tail_count=0
+    if (( total > OUT_HEAD_LINES )); then
+        tail_count=$((total - OUT_HEAD_LINES))
+        (( tail_count > OUT_BUF_SIZE )) && tail_count=$OUT_BUF_SIZE
+    fi
+    tstart=$(( (tail_idx - tail_count + OUT_BUF_SIZE) % OUT_BUF_SIZE ))
+    if (( total > OUT_HEAD_LINES + tail_count )); then
+        window_output+=$'\n'"... (中间 $((total - OUT_HEAD_LINES - tail_count)) 行已省略) ..."$'\n'
+    fi
+    for ((ti = 0; ti < tail_count; ti++)); do
+        window_output+="${tail_buf[$(( (tstart + ti) % OUT_BUF_SIZE ))]}"$'\n'
+    done
     partial=""
     paint    # 节流可能吞掉最后的内容，收尾必须补画一帧
     printf '\033[?25h\033[?7h'
@@ -906,7 +979,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "write_file",
-                "description": "创建或整文件覆盖写入。编写代码或生成文件时,优先使用本工具,不要用 heredoc/echo 重定向等 shell 写法(引号转义极易出错)。父目录不存在会自动创建。路径只能在工作目录内。",
+                "description": "创建或整文件覆盖写入。编写代码或生成文件时,优先使用本工具,不要用 heredoc/echo 重定向等 shell 写法(引号转义极易出错)。父目录不存在会自动创建。路径在工作目录外时会请求用户确认,确认通过即可写入。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -951,7 +1024,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "grep",
-                "description": "在工作目录内递归搜索文本(正则),返回 文件路径:行号: 内容 格式的结果。查找函数定义、变量引用、特定字符串时使用本工具,不要用 shell grep。默认跳过 .git/node_modules/.venv 目录,最多返回 200 条。",
+                "description": "默认在工作目录内递归搜索文本(正则),返回 文件路径:行号: 内容 格式的结果;指定外部路径时会请求用户确认。查找函数定义、变量引用、特定字符串时使用本工具,不要用 shell grep。默认跳过 .git/node_modules/.venv 目录,最多返回 200 条。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -981,7 +1054,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "read_image",
-                "description": "读取本地图片并返回其内容的文字转述(含图中所有文字的完整转录)。需要查看截图、图表、照片内容时使用本工具;它返回的是文字描述,不是原图。路径只能在工作目录内。",
+                "description": "读取本地图片并返回其内容的文字转述(含图中所有文字的完整转录)。需要查看截图、图表、照片内容时使用本工具;它返回的是文字描述,不是原图。路径在工作目录外时会请求用户确认,确认通过即可读取。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1309,9 +1382,11 @@ resolve_path() {
     printf '%s/%s%s' "$canon" "$missing" "$base"
 }
 
-# 只读授权:用户通过 @ 亲手选择的文件(可能在工作目录之外)加入白名单,
-# read_file/read_image 工具在沙箱拒绝时再查此名单——用户手势即同意读取。
-# 写入类工具绝不查询该名单,沙箱约束保持不变。
+# 会话级授权名单(不持久化,重启/换会话失效):两类来源——
+# 1. 用户通过 @ 亲手选择的文件(只读手势);
+# 2. AI 越界访问(读或写)时用户 y/n 确认放行(ask_path_grant)。
+# 所有文件类工具(read/write/edit/list/grep/read_image)在沙箱拒绝后都查
+# 此名单:用户明确放行过的路径,本次及后续同路径访问不再询问。
 grant_file() {
     local p="$1" canon
     granted_files+=("$p")
@@ -1336,6 +1411,35 @@ is_granted() {
     return 1
 }
 
+# 越界访问确认:AI 请求访问工作目录外的文件(读或写)时,询问用户是否放行。
+# 用户 y → 加入会话级授权名单(grant_file 同时存原始与物理规范化路径),
+# 本次与后续同路径访问不再询问;n / 空回车 / Ctrl+C → 拒绝。
+# 业界同款:Claude Code 的权限确认模式(越界访问弹确认,由用户裁决)。
+ask_path_grant() {
+    local p="$1" answer rc
+    printf '\033[2K\033[1;41;37mAI 请求访问工作目录外文件,是否放行?(y/n) \033[0m\n'
+    printf '  路径: %s\n' "$p"
+    # 与 shell 工具危险命令确认同款轮询读取:Ctrl+C 当作拒绝
+    stty -echoctl 2>/dev/null
+    answer=""
+    while :; do
+        IFS= read -r -t 0.2 answer
+        rc=$?
+        (( input_aborted )) && break
+        (( rc <= 128 )) && break
+    done
+    stty echoctl 2>/dev/null
+    if (( input_aborted )); then
+        input_aborted=0
+        printf '\r\033[2K\n'
+    fi
+    if [[ "$answer" == "y" ]]; then
+        grant_file "$p"
+        return 0
+    fi
+    return 1
+}
+
 # 文件类工具的实现约定:结果写入全局变量 content(与 shell 工具一致),
 # 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
 
@@ -1348,12 +1452,15 @@ tool_read_file() {
     [[ -z "$limit" || "$limit" == "null" ]] && limit=0
 
     if ! resolved=$(resolve_path "$path"); then
-        # 沙箱拒绝:查用户 @ 显式授权名单(只读;写入工具无此通道)
+        # 沙箱拒绝:先查会话级授权名单(@ 选择 / 越界放行过),没有则询问
+        # 用户是否放行(业界同款:Claude Code 越界访问弹权限确认)
         if is_granted "$path"; then
             resolved="$path"
+        elif ask_path_grant "$path"; then
+            resolved="$path"
         else
-            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
-            printf ' ⛔ 路径越界:%s\n' "$path"
+            content="错误:读取被拒绝(路径位于工作目录外,用户未放行): $path"
+            printf ' ⛔ 越界读取被拒绝:%s\n' "$path"
             return 0
         fi
     fi
@@ -1381,7 +1488,18 @@ tool_read_file() {
 tool_write_file() {
     local path resolved
     path=$(jq -r '.path // empty' <<< "$fn_args")
-    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    if ! resolved=$(resolve_path "$path"); then
+        # 越界写入:先查会话级授权名单(放行过不再问),否则询问用户是否放行
+        if is_granted "$path"; then
+            resolved="$path"
+        elif ask_path_grant "$path"; then
+            resolved="$path"
+        else
+            content="错误:写入被拒绝(路径位于工作目录外,用户未放行): $path"
+            printf ' ⛔ 越界写入被拒绝:%s\n' "$path"
+            return 0
+        fi
+    fi
 
     mkdir -p "$(dirname "$resolved")" 2>/dev/null || { content="错误:无法创建目录: $path"; return 0; }
     # 内容直接由 jq 流式写入文件,不经过命令替换(命令替换会剥掉末尾换行)
@@ -1398,7 +1516,18 @@ tool_edit_file() {
     old_str=$(jq -r '.old_string // empty' <<< "$fn_args")
     new_str=$(jq -r '.new_string // empty' <<< "$fn_args")
 
-    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    resolved=$(resolve_path "$path") || {
+        # 越界修改:先查会话级授权名单(放行过不再问),否则询问用户是否放行
+        if is_granted "$path"; then
+            resolved="$path"
+        elif ask_path_grant "$path"; then
+            resolved="$path"
+        else
+            content="错误:修改被拒绝(路径位于工作目录外,用户未放行): $path"
+            printf ' ⛔ 越界修改被拒绝:%s\n' "$path"
+            return 0
+        fi
+    }
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     [[ -z "$old_str" ]] && { content="错误:old_string 不能为空"; return 0; }
 
@@ -1424,7 +1553,18 @@ tool_list_dir() {
     local path resolved files dirs
     path=$(jq -r '.path // empty' <<< "$fn_args")
     [[ -z "$path" || "$path" == "null" ]] && path="."
-    resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+    resolved=$(resolve_path "$path") || {
+        # 越界列出目录:先查会话级授权名单(放行过不再问),否则询问用户
+        if is_granted "$path"; then
+            resolved="$path"
+        elif ask_path_grant "$path"; then
+            resolved="$path"
+        else
+            content="错误:列出目录被拒绝(路径位于工作目录外,用户未放行): $path"
+            printf ' ⛔ 越界列出被拒绝:%s\n' "$path"
+            return 0
+        fi
+    }
     [[ -d "$resolved" ]] || { content="错误:目录不存在: $path"; return 0; }
 
     files=$(find "$resolved" -maxdepth 1 -type f -exec basename {} \; | sort)
@@ -1442,7 +1582,18 @@ tool_grep() {
     [[ -z "$max_matches" || "$max_matches" == "null" ]] && max_matches=$GREP_MAX_MATCHES
 
     if [[ -n "$path" && "$path" != "null" ]]; then
-        resolved=$(resolve_path "$path") || { content="错误:路径不允许访问(必须位于工作目录内): $path"; printf ' ⛔ 路径越界:%s\n' "$path"; return 0; }
+        if ! resolved=$(resolve_path "$path"); then
+            # 越界搜索:先查会话级授权名单(放行过不再问),否则询问用户
+            if is_granted "$path"; then
+                resolved="$path"
+            elif ask_path_grant "$path"; then
+                resolved="$path"
+            else
+                content="错误:搜索被拒绝(路径位于工作目录外,用户未放行): $path"
+                printf ' ⛔ 越界搜索被拒绝:%s\n' "$path"
+                return 0
+            fi
+        fi
     else
         resolved="$WORK_ROOT"
     fi
@@ -1747,12 +1898,14 @@ tool_read_image() {
     local path resolved
     path=$(jq -r '.path // empty' <<< "$fn_args")
     if ! resolved=$(resolve_path "$path"); then
-        # 沙箱拒绝:查用户 @ 显式授权名单(只读)
+        # 沙箱拒绝:先查会话级授权名单,没有则询问用户是否放行
         if is_granted "$path"; then
             resolved="$path"
+        elif ask_path_grant "$path"; then
+            resolved="$path"
         else
-            content="错误:路径不允许访问(必须位于工作目录内或由用户 @ 选择): $path"
-            printf ' ⛔ 路径越界:%s\n' "$path"
+            content="错误:读取被拒绝(路径位于工作目录外,用户未放行): $path"
+            printf ' ⛔ 越界读取被拒绝:%s\n' "$path"
             return 0
         fi
     fi
