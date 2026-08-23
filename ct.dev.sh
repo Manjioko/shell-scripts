@@ -688,7 +688,10 @@ run_with_window() {
     # 剥掉 \r 和 CSI 转义序列（子命令的进度条/颜色码会画烂窗口）
     clean_line() {
         line=${line//$'\r'/}
-        line=${line//$'\e'\[*([0-9;?])[[:alpha:]]/}
+        # ANSI 序列剥离必须用 +([0-9;?]) 而非 *([0-9;?]):可空重复 + 后置
+        # 锚定字符会让 bash 的 extglob 替换回溯爆炸(超长 ANSI 行实测卡死
+        # 数十秒,CPU 100% 且 INT 杀不掉)。真实序列必带参数([1;32m 等),+ 合法。
+        line=${line//$'\e'\[+([0-9;?])[[:alpha:]]/}
         # BSD script 在 stdin EOF 时向 pty 回显的 "^D" + 退格残留;
         # 先剥定向残留再剥散落的退格(窗口无法正确渲染 \b)
         line=${line//'^D'$'\b\b'/}
@@ -835,14 +838,16 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
                 _full=""
             fi
             while IFS= read -r line; do
+                # 先截长行再清洗:clean_line 的 ANSI 剥离是模式替换,在超长行
+                # (256KB 含数千颜色码,idf.py build 真实行为)上即使 +() 也慢,
+                # 截到 2000 字符后微秒级。环形缓冲本来就只留截断后的行。
+                (( ${#line} > TOOL_OUTPUT_MAX_COL )) && line="${line:0:$TOOL_OUTPUT_MAX_COL}…(该行过长已截断)"
                 clean_line
                 # 环形缓冲追加(O(1)):头 N 行另存,最近 OUT_BUF_SIZE 行进环形
                 total=$((total + 1))
                 if (( total <= OUT_HEAD_LINES )); then
                     out_head+="$line"$'\n'
                 fi
-                # 超长行截断:防单行 256KB 灌满环形缓冲(重组后 truncate_output 还会再截)
-                (( ${#line} > TOOL_OUTPUT_MAX_COL )) && line="${line:0:$TOOL_OUTPUT_MAX_COL}…(该行过长已截断)"
                 tail_buf[$tail_idx]="$line"
                 tail_idx=$(( (tail_idx + 1) % OUT_BUF_SIZE ))
                 # 显示缓冲只存可视宽度:超长行若全量进 buf,paint 每帧向终端喷数 MB
@@ -895,13 +900,14 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 
     # 收尾：无换行的残段按一行落盘（清洗后为空的不算，如子进程退出时打的转义序列）
     if [[ -n "$pending" ]]; then
-        line="$pending"; clean_line
+        # 先截长行再清洗(同拆行循环:pending 最大 256KB,直接在原值上做
+        # clean_line 的模式替换可能回溯爆炸)
+        line="${pending:0:$TOOL_OUTPUT_MAX_COL}"; clean_line
         if [[ -n "$line" ]]; then
             total=$((total + 1))
             if (( total <= OUT_HEAD_LINES )); then
                 out_head+="$line"$'\n'
             fi
-            (( ${#line} > TOOL_OUTPUT_MAX_COL )) && line="${line:0:$TOOL_OUTPUT_MAX_COL}…(该行过长已截断)"
             tail_buf[$tail_idx]="$line"
             tail_idx=$(( (tail_idx + 1) % OUT_BUF_SIZE ))
             buf+=("${line:0:$DISP_COL}")
