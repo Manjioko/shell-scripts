@@ -221,6 +221,13 @@ THROTTLE=50000
 # 显示层只保留可视宽度;完整内容照旧进 window_output(喂给 AI,由截断兜底)。
 DISP_COL=300
 
+# pending 上限(字节):无换行的超长输出(ninja 编译进度、minified 单行文件等)
+# 会让 pending 无限增长,每轮 += 与换行扫描都 O(n),bash 卡在字符串操作中
+# 无法回到 read 超时点,信号检查(Ctrl+C)被无限推迟——用户实测 ESP-IDF 编译
+# 卡死只能关终端重开。超过上限只保留尾部:超长行最终会被 truncate_output
+# 截断,行首内容反正进不了上下文,丢弃无损失。
+PENDING_MAX=262144   # 256KB
+
 # run_with_window 兜底:命令主体已退出,但输出管道(FIFO 写端)仍被其后台子进程
 # 握着(AI 在命令里误用 & 启动服务),EOF 永远不来。主进程已死且静默超过该时长
 # 就提前收尾,防止窗口永久挂死。仅当主进程已退出才计时,不影响正常慢命令。
@@ -793,6 +800,9 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
         fi
         if [[ -n "$chunk" ]]; then
             pending+="$chunk"
+            # 无换行超长行:pending 限长只留尾部,保证每轮循环 O(1),
+            # 信号(Ctrl+C)能在命令边界及时处理(见 PENDING_MAX 配置注释)
+            (( ${#pending} > PENDING_MAX )) && pending="${pending: -PENDING_MAX}"
             while [[ "$pending" == *$'\n'* ]]; do
                 line="${pending%%$'\n'*}"
                 pending="${pending#*$'\n'}"
