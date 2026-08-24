@@ -295,6 +295,16 @@ _ct_inputrc=$(mktemp)
 printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
 export INPUTRC="$_ct_inputrc"
 
+# 双保险：实测(brew bash 5.3)运行期才 export 的 INPUTRC 不一定被首个 read -e
+# 读到——readline 惰性初始化可能直接用默认值，括号粘贴保持开启，多行粘贴时
+# 首行之后的内容被 readline 吞掉丢弃(排干读到空,只剩一行)。
+# 1) bind 直接设置 readline 变量，不依赖 inputrc 的加载时机；
+# 2) 直接向终端发关闭序列：父 shell(zsh 默认开启括号粘贴)可能把终端留在
+#    开启状态，而 readline 处于关闭时不会再补发关闭序列，终端仍会给粘贴
+#    包上 \e[200~...\e[201~ 标记，多行内容照样被截断。
+bind 'set enable-bracketed-paste off' 2>/dev/null
+[[ -t 1 ]] && printf '\033[?2004l'
+
 # 主屏输入行(read -e)按 Ctrl+C 立即清空当前行:readline 读取期间会强制打开
 # ISIG,所以单靠 trap 拦不住——SIGINT 打断不了 readline 的 read,旧内容会留在
 # 缓冲区里"复活"。做法:normal_line 在每次 read 前临时 stty intr undef(驱动层
