@@ -2768,6 +2768,9 @@ normal_line() {
         # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
+        # 保存光标位置:粘贴重绘需要——readline 渲染与驱动回显残留都会被
+        # 清除后统一重打(见下方 \033[u\033[J)
+        printf '\033[s'
         IFS= read -e -r -p "$prompt" line
         rc=$?
         stty isig intr '^C' 2>/dev/null
@@ -2788,9 +2791,24 @@ normal_line() {
         stty "$stty_save"
         if [[ -n "$rest" ]]; then
             # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
-            rest="${rest%$'\n'}"
-            # 排干时回显是关的，补印粘贴的剩余行让用户确认内容
-            printf '%s\n' "$rest"
+            local nl=$'\n'
+            rest="${rest%$nl}"
+            # readline 读期间 pty 的 ICRNL 是开的(它依赖 \r→\n 识别回车),
+            # 粘贴的 \r\n 全部转成 \n\n 入队:readline 消费第一行+一个 \n,
+            # 队列头残留一个 \n;其余行间全是 \n\n。先归并成对换行(连续 4 个
+            # \n 的真实空行归并后剩 2 个,内容空行仍保留),再剥前导残留一个。
+            # 注意不能用 "${rest#"$'\n'"}" 嵌套双引号写法,会被词法拆散失效。
+            rest=${rest//$'\r'/}
+            rest=${rest//"$nl$nl"/"$nl"}
+            rest="${rest#"$nl"}"
+            line="${line%$'\r'}"
+            # 统一重绘:粘贴时屏幕上可能已出现两层显示——readline 渲染的
+            # 第一行 + 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显
+            # 输入队列中未消费的字节,实测粘贴内容后几行显示两遍;macOS 无
+            # 此行为但重绘同样安全)。恢复保存的光标位置、清除到屏底、
+            # 重新渲染 prompt+全文,保证一行不多一行不少。
+            printf '\033[u\033[J'
+            printf '%s%s\n' "$prompt" "$line"$'\n'"$rest"
             line+=$'\n'"$rest"
             input+="$line"$'\n'
             prompt=".. "
