@@ -2753,6 +2753,11 @@ read_file() {
 # 读取用户输入的多行内容，支持续行、粘贴、文件导入等
 normal_line() {
     local line rc
+    # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
+    # 会话全部行(而非当前行),屏幕不丢前轮内容
+    local paste_lines=""
+    # 用户粘完立即按回车时,排干会把回车一并读入——标记提交信号
+    local paste_enter=0
 
     local prompt
     if [[ "$1" == 0 ]]; then
@@ -2768,50 +2773,58 @@ normal_line() {
         # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
-        # 保存光标位置:粘贴重绘需要——readline 渲染与驱动回显残留都会被
-        # 清除后统一重打(见下方 \033[u\033[J)
-        printf '\033[s'
+        # 保存光标位置:粘贴重绘锚点。粘贴会话进行中不重存,
+        # 让 \033[u 始终回到会话首行起点(见下方 \033[u\033[J)
+        if [[ -z "$paste_lines" ]]; then
+            printf '\033[s'
+        fi
         IFS= read -e -r -p "$prompt" line
         rc=$?
         stty isig intr '^C' 2>/dev/null
         (( rc != 0 )) && break
         # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
-        # 一次性非阻塞大块读取（-N 走非规范模式，末尾没换行的残段超时后也会存入变量）；
-        # 排干期间关掉回显，避免 macOS 在 tty 模式切换时重复回显残余队列
         local rest=""
-        local chunk=""
         local stty_save
+        paste_enter=0
         stty_save=$(stty -g)
-        stty -echo
-        # 循环排干：慢速粘贴（SSH/分块粘贴）可能跨越多个超时窗口
-        while IFS= read -r -t 0.05 -N 1000000 chunk; [[ -n "$chunk" ]]; do
-            rest+="$chunk"
-            chunk=""
-        done
+        # 排干用单次短窗读:read -e 返回前有 ~1s 延迟,粘贴剩余字节在此窗口
+        # 已全部入队,一次读完即可。长窗循环反而会吞掉窗口内到达的用户回车
+        # (read -N 阻塞期间到达的字节超时后被 bash 丢弃,字节不回流)。
+        stty raw
+        IFS= read -r -t 0.05 -N 1000000 rest
         stty "$stty_save"
         if [[ -n "$rest" ]]; then
             # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
             local nl=$'\n'
+            # 用户粘完立即按的回车:read -e 返回前有 ~1s 延迟,回车也会被
+            # 排干读入。粘贴行尾是 \r\n 对,独立裸 \r 只会来自用户
+            # Enter——剥下并标记为提交信号。
+            while [[ "$rest" == *$'\r' ]]; do
+                rest="${rest%$'\r'}"
+                paste_enter=1
+            done
+            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:剥 \r 后行间
+            # 就是单 \n;空行的 \r\n 剥后剩单 \n,自然保留,不要再归并
+            # (归并会把真实空行吞掉)。首行行尾 \r\n 中 readline 消费
+            # \r 后留下的 \n 剥前导一个即可。
             rest="${rest%$nl}"
-            # readline 读期间 pty 的 ICRNL 是开的(它依赖 \r→\n 识别回车),
-            # 粘贴的 \r\n 全部转成 \n\n 入队:readline 消费第一行+一个 \n,
-            # 队列头残留一个 \n;其余行间全是 \n\n。先归并成对换行(连续 4 个
-            # \n 的真实空行归并后剩 2 个,内容空行仍保留),再剥前导残留一个。
-            # 注意不能用 "${rest#"$'\n'"}" 嵌套双引号写法,会被词法拆散失效。
             rest=${rest//$'\r'/}
-            rest=${rest//"$nl$nl"/"$nl"}
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
             # 统一重绘:粘贴时屏幕上可能已出现两层显示——readline 渲染的
             # 第一行 + 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显
-            # 输入队列中未消费的字节,实测粘贴内容后几行显示两遍;macOS 无
-            # 此行为但重绘同样安全)。恢复保存的光标位置、清除到屏底、
-            # 重新渲染 prompt+全文,保证一行不多一行不少。
+            # 输入队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
+            # 会话累积的全部行,保证一行不多一行不少。
+            paste_lines+="$line"$'\n'"$rest"$'\n'
             printf '\033[u\033[J'
-            printf '%s%s\n' "$prompt" "$line"$'\n'"$rest"
+            printf '%s%s' "$prompt" "$paste_lines"
             line+=$'\n'"$rest"
             input+="$line"$'\n'
             prompt=".. "
+            if (( paste_enter )); then
+                # 用户粘完即回车 = 提交
+                break
+            fi
             continue
         fi
         if [[ "$line" == "@" ]]; then
