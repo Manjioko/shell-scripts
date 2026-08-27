@@ -192,6 +192,9 @@ input_images=()
 # 用户通过 @ 显式选择的文件路径(只读授权):AI 的 read_file/read_image 工具
 # 除 WORK_ROOT 沙箱外,还可读取这些用户亲手选中的文件。写入工具不受影响。
 granted_files=()
+# -tr/-to 模式标志:会话全程禁用工具(翻译/词源任务不需要工具,从 API 层面
+# 硬约束——不发送 tools 字段,模型物理上无法发起 tool_call)。
+no_tools=0
 # Ctrl+C 状态标志(配合 handle_ctrl_c):
 #   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
 #   ai_active=0     主屏幕(输入行的 Ctrl+C 由 readline 清行;普通 read 被打断
@@ -544,36 +547,17 @@ help_user() {
 }
 
 parse_options() {
+    local _has_tr=0 _has_to=0
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" != "-"* ]]; then
             content+="${!i}"
         fi
         if [[ "${!i}" == "-tr" ]]; then
-            prectx="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
-            原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
-            译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
-            语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
-            总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
-
-            以上是格式，需要翻译的文本如下 "
-            if [[ -z "$content" ]]; then
-                    content="${prectx}: $(pbpaste)"
-            else
-                    content="${prectx}: $content"
-            fi
+            _has_tr=1
             continue
         fi
         if [[ "${!i}" == "-to" ]]; then
-            prectx="**注意：翻译任务不需要调用任何工具**。请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
-            词源词根：（在此处解释该词的词源词根）\
-            延伸意思：（在此处解释由该词源词根延伸出来的意思）\
-            常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
-            以上是格式，需要解释的词如下"
-            if [[ -z "$content" ]]; then
-                    content="${prectx}: $(pbpaste)"
-            else
-                    content="${prectx}: $content"
-            fi
+            _has_to=1
             continue
         fi
 
@@ -655,6 +639,37 @@ parse_options() {
         fi
 
     done
+
+    # -tr / -to 的剪切板兜底逻辑移到循环结束后统一处理:
+    # 先让循环完整收集所有 content 参数,最后再判断是否有内容;
+    # 只有 content 为空时才读剪切板,保证用户显式传入的内容优先。
+    if (( _has_tr )); then
+        local _prectx_tr="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
+            原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
+            译文：（译文内容显示在此处,注意，这里译文可以按照自己格式化美化后的文本进行翻译，因为用户提供的翻译文本很多都存在乱换行，结构松散的问题。）\
+            语法分析：（语法分析在此处，尽量保持行文简洁,同样使用markdown格式标注出讲解的重点）\
+            总结：（将以上内容做一个通俗易懂的总结，让用户将整个翻译串联起来，加深记忆）
+
+            以上是格式，需要翻译的文本如下 "
+        if [[ -z "$content" ]]; then
+            content="${_prectx_tr}: $(pbpaste)"
+        else
+            content="${_prectx_tr}: $content"
+        fi
+    elif (( _has_to )); then
+        local _prectx_to="**注意：翻译任务不需要调用任何工具**。请解释该词的词源词根，以及由此延伸的词普遍都有哪些意思，并且给出一些常用的例句，注意例句要尽量简短，方便记忆。其输入格式如下：\
+            词源词根：（在此处解释该词的词源词根）\
+            延伸意思：（在此处解释由该词源词根延伸出来的意思）\
+            常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
+            以上是格式，需要解释的词如下"
+        if [[ -z "$content" ]]; then
+            content="${_prectx_to}: $(pbpaste)"
+        else
+            content="${_prectx_to}: $content"
+        fi
+    fi
+    # 翻译/词源模式:会话全程禁用工具
+    (( _has_tr || _has_to )) && no_tools=1
 }
 
 # 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
@@ -1257,7 +1272,11 @@ retry_after_compact() {
         printf '⚠️ 自动压缩未减少消息量,请手动 -c 压缩或重开对话\n'
         return 1
     fi
-    tools_json=$(tools)
+    if (( no_tools )); then
+        tools_json="[]"
+    else
+        tools_json=$(tools)
+    fi
     request_body=$(jq -n \
         --arg model "$model" \
         --argjson msgs "$messages" \
@@ -2242,7 +2261,11 @@ tool_run_and_parse() {
     fn_args=""
     fn_id=""
 
-    tools=$(tools)
+    if (( no_tools )); then
+        tools="[]"
+    else
+        tools=$(tools)
+    fi
     request_body=$(jq -n \
         --arg model "$model" \
         --argjson msgs "$messages" \
@@ -2538,7 +2561,12 @@ printContent() {
     # 构建请求体
     # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
     # thinking 为空时不应发送 thinking 字段
-    tools=$(tools)
+    # -tr/-to 模式:不发送工具(API 层硬约束,模型无法调用任何工具)
+    if (( no_tools )); then
+        tools="[]"
+    else
+        tools=$(tools)
+    fi
     request_body=$(jq -n \
         --arg model "$model" \
         --argjson msgs "$messages" \
@@ -2950,6 +2978,3 @@ while true; do
         chat_title=$(overview) && first_time=0
     fi
 done
-
-
-
