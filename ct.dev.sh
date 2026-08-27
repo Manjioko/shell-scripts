@@ -541,6 +541,8 @@ help_user() {
     echo "  -l    查看历史记录并选择加载"
     echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
+    echo "  -n    新对话(清空历史并清屏)"
+    echo "  -cl   清屏(保留对话历史)"
     echo "  -u    查看当前上下文 token 用量"
     echo "  -img <路径> 发送图片(自动转述为文字)"
     echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
@@ -2839,7 +2841,7 @@ normal_line() {
             # 就是单 \n;空行的 \r\n 剥后剩单 \n,自然保留,不要再归并
             # (归并会把真实空行吞掉)。首行行尾 \r\n 中 readline 消费
             # \r 后留下的 \n 剥前导一个即可。
-            rest="${rest%$nl}"
+            rest="${rest%"$nl"}"
             rest=${rest//$'\r'/}
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
@@ -2907,6 +2909,18 @@ normal_line() {
         fi
         if [[ "$line" == "-h" ]]; then
             help_user
+            break
+        fi
+        if [[ "$line" == "-n" ]]; then
+            messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+            inject_skills
+            chat_title=""
+            first_time=1
+            clear
+            break
+        fi
+        if [[ "$line" == "-cl" ]]; then
+            clear
             break
         fi
         if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
