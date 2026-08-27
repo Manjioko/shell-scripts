@@ -543,6 +543,11 @@ help_user() {
     echo "  -c    手动压缩对话历史"
     echo "  -n    新对话(清空历史并清屏)"
     echo "  -cl   清屏(保留对话历史)"
+    echo "  -stp  切换到 pro 模型"
+    echo "  -stt  开启思考模式"
+    echo "  -stf  恢复默认(flash 模型,关闭思考)"
+    echo "  -fs   立即保存当前对话历史(-f 模式下静默跳过)"
+    echo "  -md   查看当前模型/思考/标题信息"
     echo "  -u    查看当前上下文 token 用量"
     echo "  -img <路径> 发送图片(自动转述为文字)"
     echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
@@ -2921,6 +2926,38 @@ normal_line() {
         fi
         if [[ "$line" == "-cl" ]]; then
             clear
+            break
+        fi
+        if [[ "$line" == "-stp" ]]; then
+            model="$pro_model"
+            echo "✅ 已切换到 pro 模型 ($model)"
+            break
+        fi
+        if [[ "$line" == "-stt" ]]; then
+            thinking="enabled"
+            echo "✅ 已开启思考模式"
+            break
+        fi
+        if [[ "$line" == "-stf" ]]; then
+            model="$flash_model"
+            thinking="disabled"
+            echo "✅ 已恢复默认 (model=$model, thinking=disabled)"
+            break
+        fi
+        if [[ "$line" == "-fs" ]]; then
+            if [[ -z "$chat_title" ]]; then
+                echo "⚠️  当前无对话标题，无法保存"
+            elif [[ $forget_history == 1 ]]; then
+                : # -f 模式，静默跳过
+            else
+                save_history && echo "✅ 已保存: ${HISTORY_DIR}/${name}.json"
+            fi
+            break
+        fi
+        if [[ "$line" == "-md" ]]; then
+            echo "模型: ${model}"
+            echo "思考: ${thinking}"
+            echo "标题: ${chat_title:-（空）}"
             break
         fi
         if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
