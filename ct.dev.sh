@@ -195,6 +195,8 @@ granted_files=()
 # -tr/-to 模式标志:会话全程禁用工具(翻译/词源任务不需要工具,从 API 层面
 # 硬约束——不发送 tools 字段,模型物理上无法发起 tool_call)。
 no_tools=0
+# 快速模式标志:-tr/-to 时置 1,单轮对话后直接退出,不进交互循环
+quick_mode=0
 # Ctrl+C 状态标志(配合 handle_ctrl_c):
 #   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
 #   ai_active=0     主屏幕(输入行的 Ctrl+C 由 readline 清行;普通 read 被打断
@@ -670,6 +672,8 @@ parse_options() {
     fi
     # 翻译/词源模式:会话全程禁用工具
     (( _has_tr || _has_to )) && no_tools=1
+    # 快速模式:单轮对话后直接退出,不保存历史
+    (( _has_tr || _has_to )) && quick_mode=1 && forget_history=1
 }
 
 # 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
@@ -2951,6 +2955,10 @@ parse_options "$@"
 first_time=1
 if [[ -n "$content" || ${#input_images[@]} -gt 0 ]]; then
     printContent
+    # 快速模式(-tr/-to):单轮对话后直接退出
+    if (( quick_mode )); then
+        exit 0
+    fi
     # 本轮被打断时跳过标题生成,保留 first_time,下一轮成功后再生成
     if (( round_aborted )); then
         round_aborted=0
