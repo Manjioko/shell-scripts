@@ -179,6 +179,9 @@ IMG_EXTS="png jpg jpeg gif webp bmp"
 # jq ≥ 1.6 才支持 --rawfile(大体积 base64 不能经 --arg 传参,会撞 ARG_MAX)
 JQ_HAS_RAWFILE=1
 jq --help 2>/dev/null | grep -q -- '--rawfile' || JQ_HAS_RAWFILE=0
+# 脚本全局依赖 --rawfile/--slurpfile(ARG_MAX 防护),jq 过旧时启动即报错,
+# 避免运行时冒出 "unknown option" 之类难以定位的错误
+(( JQ_HAS_RAWFILE )) || { echo "❌ 需要 jq 1.6+(支持 --rawfile),当前: $(jq --version 2>/dev/null || echo '未安装')"; exit 1; }
 
 # 图片转述提示词模板(行业通用视觉描述范式):{N} 在调用时替换为图片张数
 IMG_DESC_PROMPT='以下 {N} 张图片依次编号为图片1至图片{N},请逐张转述为文字。要求:1. 客观、详尽地描述画面内容:主体对象、场景、布局、颜色、状态与关键细节;2. 图中出现的所有文字(标题、按钮、菜单、代码、报错、数据等)必须完整逐字转录,不得省略或改写;3. 若为截图或图表,说明界面类型、视觉层级与关键数据;4. 每张图片独立成段,以「图片N:」开头;5. 只输出转述内容本身,不要任何开场白、解释或总结。'
@@ -1192,6 +1195,7 @@ truncate_output() {
 #     破坏 tool_call_id 配对,API 会直接报错。
 compact_messages() {
     local total cut system_msg tail_msgs to_compact summary request_body
+    local compact_file sys_file tail_file
     total=$(echo "$messages" | jq 'length')
     (( total <= KEEP_MSGS )) && echo "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
 
@@ -1228,7 +1232,11 @@ compact_messages() {
         printf '📦 正在压缩历史…(当前 %s tokens,阈值 %s)\n' "${last_prompt_tokens:-0}" "$TOKEN_THRESHOLD"
     fi
 
-    request_body=$(jq -n --arg compact_text "$to_compact" --arg model "$flash_model" '{
+    # to_compact 是整段对话的文本转写,远超 Linux 单参数上限(128KB):
+    # 写临时文件用 --rawfile 读入(ARG_MAX 防护,见 make_request_body 注释)
+    compact_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$to_compact" > "$compact_file"
+    request_body=$(jq -n --rawfile compact_text "$compact_file" --arg model "$flash_model" '{
         model: $model,
         messages: [
             {role: "system", content: "你是对话历史压缩助手。任务:把用户提供的旧对话记录压缩成一段精炼的摘要,替代原始记录用于后续继续对话。要求:1. 保留用户的整体目标与意图、关键决策与结论、已执行的命令及其重要结果、出现的错误与最终修复方式、涉及的重要文件路径、用户的个人偏好与约束;2. 丢弃客套话、重复内容与冗长的命令输出;3. 用中文输出,不超过 500 字,只输出摘要正文,不要任何前缀或解释。"},
@@ -1239,24 +1247,73 @@ compact_messages() {
         stream: false
     }')
 
-    # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支
+    # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支。
+    # 请求体复用 compact_file 发送:curl -d 同样走参数列表,大请求体撞 ARG_MAX
+    printf '%s' "$request_body" > "$compact_file"
     summary=$(curl -s --max-time 120 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
         -H "api-key: $DEEPSEEK_API_KEY" \
-        -d "$request_body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        --data-binary @"$compact_file" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    rm -f "$compact_file"
 
     if [[ -z "$summary" ]]; then
         messages=$(echo "$messages" | jq --argjson cut "$cut" '.[0:1] + .[$cut:]')
         printf '⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 %s 条原文\n' "$KEEP_MSGS"
     else
-        messages=$(jq -n --argjson sys "$system_msg" --arg prefix "$SUMMARY_PREFIX" \
-            --arg summary "$summary" --argjson tail "$tail_msgs" \
-            '[ $sys, {role: "user", content: ($prefix + "\n" + $summary)}, $tail[] ]')
+        # system_msg/tail_msgs 可能很大:--argjson 传参撞 ARG_MAX,走 slurpfile
+        sys_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+        printf '%s' "$system_msg" > "$sys_file"
+        tail_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+        printf '%s' "$tail_msgs" > "$tail_file"
+        messages=$(jq -n --slurpfile sys "$sys_file" --arg prefix "$SUMMARY_PREFIX" \
+            --arg summary "$summary" --slurpfile tail "$tail_file" \
+            '[ $sys[0], {role: "user", content: ($prefix + "\n" + $summary)}, $tail[0][] ]')
+        rm -f "$sys_file" "$tail_file"
         printf '✅ 压缩完成:%s 条消息 → 1 条摘要 + %s 条原文\n' "$total" "$KEEP_MSGS"
     fi
     # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
     last_prompt_tokens=0
+}
+
+# ========== ARG_MAX 防护:大字符串绝不走命令行参数 ==========
+# 背景:Linux 单个参数上限 128KB(MAX_ARG_STRLEN),macOS 全参合计约 1MB。
+# messages/工具输出/请求体随对话增长必然超过该限,jq --arg/--argjson 与
+# curl -d 把大字符串放进参数列表,报 "Argument list too long" 且请求体变空,
+# 随后表现为 "⚠️ API 请求失败: {…}"(截图里 /usr/bin/jq 的三处报错即此因)。
+# 统一方案:大体积数据写临时文件,再由文件读入/发送:
+#   - jq 用 --rawfile(字符串)/--slurpfile(JSON 数组)从文件读入;
+#   - curl 用 --data-binary @file 发送请求体;
+#   - 临时文件放 ${TMPDIR:-/tmp}(mktemp 模板),用完即删。
+# jq 需 1.6+(脚本图片转述功能已要求该版本,不再降级兼容)。
+
+# 构建主对话流式请求体。messages 从临时文件经 --slurpfile 读入;
+# tools 由 tools 函数生成(体积固定且小,可走 --argjson)。
+make_request_body() {
+    local tools_json tmpfile out
+    if (( no_tools )); then
+        tools_json="[]"
+    else
+        tools_json=$(tools)
+    fi
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$messages" > "$tmpfile"
+    out=$(jq -n \
+        --arg model "$model" \
+        --arg thinking "$thinking" \
+        --argjson tool "$tools_json" \
+        --slurpfile msgs "$tmpfile" \
+        '{
+        model: $model,
+        messages: $msgs[0],
+        thinking: {type: $thinking},
+        reasoning_effort: "high",
+        stream: true,
+        tools: $tool,
+        stream_options: {include_usage: true}
+    }')
+    rm -f "$tmpfile"
+    printf '%s' "$out"
 }
 
 # 失败自愈:请求失败(无响应/传输层断连/上下文越界)时,若本地字节粗算已超阈值,
@@ -1266,7 +1323,7 @@ compact_messages() {
 # 返回 0 = 已压缩并重发(调用方应直接 return);返回 1 = 未处理(交给原兜底逻辑)。
 retry_after_compact() {
     local is_lock=$1 is_record=$2
-    local est_bytes est_tokens before_count after_count tools_json request_body
+    local est_bytes est_tokens before_count after_count request_body
     # auth 旁路请求(is_record=0)用的是 auth_message,不是主对话 messages,
     # 不参与上下文自愈(否则会误用主对话 messages 重建请求体)
     (( is_record == 0 )) && return 1
@@ -1284,25 +1341,7 @@ retry_after_compact() {
         printf '⚠️ 自动压缩未减少消息量,请手动 -c 压缩或重开对话\n'
         return 1
     fi
-    if (( no_tools )); then
-        tools_json="[]"
-    else
-        tools_json=$(tools)
-    fi
-    request_body=$(jq -n \
-        --arg model "$model" \
-        --argjson msgs "$messages" \
-        --arg thinking "$thinking" \
-        --argjson tool "$tools_json" \
-        '{
-        model: $model,
-        messages: $msgs,
-        thinking: {type: $thinking},
-        reasoning_effort: "high",
-        stream: true,
-        tools: $tool,
-        stream_options: {include_usage: true}
-    }')
+    request_body=$(make_request_body)
     # 透传 ask_ai 的返回码:130(Ctrl+C 打断)需要继续向上传播
     ask_ai "$request_body" "$is_lock" "$is_record"
     return $?
@@ -1331,9 +1370,18 @@ add_message() {
     local tool_call_name="$4"
     local tool_call_args="$5"
     local reasoning="$6"
+    # content(工具输出可达几十 KB 甚至更大)与 reasoning(思考全文)经 --arg
+    # 传参都属单个参数:Linux 单参数上限 128KB,超限即
+    # "Argument list too long"。一律写临时文件后用 --rawfile 读入
+    # (需 jq 1.6+,脚本图片功能已要求该版本)。
+    local ctx_file rsn_file
+    ctx_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$addctx" > "$ctx_file"
+    rsn_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$reasoning" > "$rsn_file"
     if [[ -z "$role" ]]; then
         # 默认 user 消息
-        messages=$(echo "$messages" | jq --arg content "$addctx" '. + [{role: "user", content: $content}]')
+        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" '. + [{role: "user", content: $content}]')
     elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
         # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
         # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
@@ -1341,26 +1389,32 @@ add_message() {
         # 模型没有输出思考(flash 模型 -t 下偶发只返回工具调用)也要带空串
         # 字段:省略字段会让下一轮请求 400(真实 API 实测复现)。
         if [[ -z "$addctx" ]]; then
-            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" \
                 '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         else
-            messages=$(echo "$messages" | jq --arg content "$addctx" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --arg reasoning "$reasoning" --arg thinking "$thinking" \
+            messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" \
                 '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
         fi
     elif [[ -n "$tool_call_id" ]]; then
         # tool 角色：工具执行结果，带 tool_call_id
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
+        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
     else
         # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content,
         # 无思考时同样带空串字段(原因同上:省略字段会让下一轮请求 400)
-        messages=$(echo "$messages" | jq --arg content "$addctx" --arg role "$role" --arg reasoning "$reasoning" --arg thinking "$thinking" '. + [{role: $role, content: $content} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
+        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg role "$role" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" '. + [{role: $role, content: $content} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
     fi
+    rm -f "$ctx_file" "$rsn_file"
 }
 auth_add_message() {
     local addctx="$1"
     local role="${2:-user}"
-    # 基于 auth_message 自身拼接（原实现误用了 $messages，会丢掉对话历史）
-    auth_message=$(echo "$auth_message" | jq --arg content "$addctx" --arg role "$role" '. + [{role: $role, content: $content}]')
+    local tmpf
+    # 基于 auth_message 自身拼接（原实现误用了 $messages，会丢掉对话历史）;
+    # 命令文本理论上也可能超限,与主链路一样走临时文件(ARG_MAX 防护)
+    tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$addctx" > "$tmpf"
+    auth_message=$(echo "$auth_message" | jq --rawfile content "$tmpf" --arg role "$role" '. + [{role: $role, content: $content}]')
+    rm -f "$tmpf"
 }
 
 # 工具调用处理器已删除:并行调用按 index 解析已内联进 ask_ai 的流式循环,
@@ -1368,19 +1422,23 @@ auth_add_message() {
 
 auth_think() {
     local cmd=$1
-    local request_body rc
+    local request_body rc auth_file
     auth_add_message "$cmd"
+    # auth 消息本身极小,几乎不可能撞 ARG_MAX;但为与主链路一致,同样走临时文件
+    auth_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$auth_message" > "$auth_file"
     request_body=$(jq -n \
-            --argjson msgs "$auth_message" \
+            --slurpfile msgs "$auth_file" \
             --arg model "$flash_model" \
             '{
             model: $model,
-            messages: $msgs,
+            messages: $msgs[0],
             thinking: {type: "disabled"},
             reasoning_effort: "high",
             stream: true,
             stream_options: {include_usage: true}
         }')
+    rm -f "$auth_file"
     # 结果通过全局 full_response 传回（ask_ai 会重置它），这里不再 printf。
     # 本函数绝不能放进 $(...) 里调用：ask_ai 的流式输出会塞满命令替换的
     # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
@@ -1989,7 +2047,7 @@ tool_read_skill() {
 # 草稿必须经用户确认才落盘,防止模型把劣质经验沉淀成长期误导。
 skill_save() {
     local to_summarize request_body resp raw name description body
-    local file_dir answer rc attempt sys_text user_text prev_text fail_text
+    local file_dir answer rc attempt sys_text user_text prev_text fail_text tmpf
 
     (( $(echo "$messages" | jq 'length') <= 1 )) && { echo "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
 
@@ -2014,7 +2072,10 @@ skill_save() {
             sys_text="你上次没有调用工具提交技能草稿。请现在立即调用 save_skill 工具,只允许调用工具,禁止输出任何文字或代码围栏。"
             user_text="$to_summarize"$'\n\n(你上次的输出不符合要求,原文如下,请改为调用 save_skill 工具,把内容填进工具参数:)'$'\n'"${prev_text:0:500}"
         fi
-        request_body=$(jq -n --arg text "$user_text" --arg model "$flash_model" --arg sys "$sys_text" '{
+        # user_text 是整段对话转写,可能远超 ARG_MAX:临时文件 + --rawfile
+        tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+        printf '%s' "$user_text" > "$tmpf"
+        request_body=$(jq -n --rawfile text "$tmpf" --arg model "$flash_model" --arg sys "$sys_text" '{
             model: $model,
             messages: [
                 {role: "system", content: $sys},
@@ -2040,11 +2101,14 @@ skill_save() {
             reasoning_effort: "high",
             stream: false
         }')
+        # 请求体复用 tmpf 发送(curl -d 同样撞 ARG_MAX)
+        printf '%s' "$request_body" > "$tmpf"
         resp=$(curl -s --connect-timeout 15 --max-time 120 "$BASE_URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
             -H "api-key: $DEEPSEEK_API_KEY" \
-            -d "$request_body" 2>/dev/null)
+            --data-binary @"$tmpf" 2>/dev/null)
+        rm -f "$tmpf"
         # 优先取工具调用参数(API 保证合法 JSON);没调工具则记下模型文本,
         # 作为下一轮自纠的素材。必须用 fromjson 在同一次 jq 里转成对象:
         # arguments 的值是 JSON 字符串,若先 -r 取出再二次解析,-r 会把值里
@@ -2114,7 +2178,7 @@ skill_save() {
 # tool_calls)。每个调用独立产生一条 assistant(tool_calls) 消息和一条 tool
 # 结果消息(API 要求每个 tool_call_id 都有响应,缺一报 400)。
 tool_run_and_parse() {
-    local tools request_body args_preview rc msgs_before_call
+    local request_body args_preview rc msgs_before_call
     local -a ids_arr names_arr args_arr
     local first_call=1 i
 
@@ -2273,26 +2337,7 @@ tool_run_and_parse() {
     fn_args=""
     fn_id=""
 
-    if (( no_tools )); then
-        tools="[]"
-    else
-        tools=$(tools)
-    fi
-    request_body=$(jq -n \
-        --arg model "$model" \
-        --argjson msgs "$messages" \
-        --arg thinking "$thinking" \
-        --argjson tool "$tools" \
-        '{
-        model: $model,
-        messages: $msgs,
-        thinking: {type: $thinking},
-        reasoning_effort: "high",
-        stream: true,
-        tools: $tool,
-        stream_options: {include_usage: true}
-    }')
-
+    request_body=$(make_request_body)
     ask_ai "$request_body" 1
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
@@ -2315,7 +2360,7 @@ ask_ai() {
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
     # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
-    local attempt max_attempts=3 think_save_len rc
+    local attempt max_attempts=3 think_save_len rc req_file
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -2335,6 +2380,17 @@ ask_ai() {
     # 残留的打断标志。主屏幕输入阶段的 Ctrl+C 只置 input_aborted。
     ai_active=1
     ai_abort=0
+
+    # 请求体为空 = 上游 jq 构建失败(如上下文过大撞 ARG_MAX):立即给出
+    # 可见反馈并返回,不发空请求(空请求体只会得到无意义的 API 报错)
+    if [[ -z "$request_body" ]]; then
+        full_response="⚠️ 请求体构建失败(上下文过大,超出系统命令行参数上限)。请 -c 压缩历史或 -n 重开对话。"
+        return 1
+    fi
+    # 请求体经临时文件发送:curl -d "$request_body" 同样把大字符串放进
+    # 参数列表,会撞 ARG_MAX(与 jq --argjson 是同一病根)
+    req_file=$(mktemp "${TMPDIR:-/tmp}/ct_req_XXXXXX")
+    printf '%s' "$request_body" > "$req_file"
 
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
@@ -2451,7 +2507,7 @@ ask_ai() {
                 -H "Content-Type: application/json" \
                 -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
                 -H "api-key: $DEEPSEEK_API_KEY" \
-                -d "$request_body"\
+                --data-binary @"$req_file"\
             2>&1
         )
         # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
@@ -2463,6 +2519,7 @@ ask_ai() {
 
     [[ "$is_lock_screen" == 1 ]] && unlock_screen
     ai_active=0
+    rm -f "$req_file"
 
     # Ctrl+C 打断:丢弃本轮全部产出(正文/思考/工具调用),回滚本请求期间
     # 累积进 thinking_response 的思考(此前已渲染部分保留),返回 130 供
@@ -2563,38 +2620,16 @@ printContent() {
     fi
 
     add_message "$content"
-    local tools
     local request_body rc
 
     # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
     # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
     (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
 
-    # 构建请求体
-    # messages 是 JSON 数组，必须用 --argjson 而不是 --arg
-    # thinking 为空时不应发送 thinking 字段
-    # -tr/-to 模式:不发送工具(API 层硬约束,模型无法调用任何工具)
-    if (( no_tools )); then
-        tools="[]"
-    else
-        tools=$(tools)
-    fi
-    request_body=$(jq -n \
-        --arg model "$model" \
-        --argjson msgs "$messages" \
-        --arg thinking "$thinking" \
-        --argjson tool "$tools" \
-        '{
-        model: $model,
-        messages: $msgs,
-        thinking: {type: $thinking},
-        reasoning_effort: "high",
-        stream: true,
-        tools: $tool,
-        stream_options: {include_usage: true}
-    }')
+    # 构建请求体:大体积 messages 经临时文件传入,防止 jq --argjson 撞
+    # ARG_MAX(详见 make_request_body 注释);-tr/-to 模式不发送工具
+    request_body=$(make_request_body)
 
-    
     ask_ai "$request_body" 1
     
 
@@ -2633,13 +2668,16 @@ printContent() {
 # 模型没调工具时兜底:取其文本输出做清洗(去前缀/去引号/取首行/截断);
 # 接口失败或清洗后为空则给通用名。标题失败属静默降级,不打扰用户。
 overview() {
-    local msg request_body resp title
+    local msg request_body resp title tmpf
 
     msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]')
 
-    request_body=$(jq -n --argjson msgs "$msg" --arg model "$flash_model" '{
+    # msg 是整段对话历史,必须走临时文件(见 make_request_body 的 ARG_MAX 防护)
+    tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$msg" > "$tmpf"
+    request_body=$(jq -n --slurpfile msgs "$tmpf" --arg model "$flash_model" '{
         model: $model,
-        messages: $msgs,
+        messages: $msgs[0],
         tools: [{
             type: "function",
             function: {
@@ -2658,12 +2696,15 @@ overview() {
         reasoning_effort: "high",
         stream: false
     }')
-    # 同步一次拿完(标题失败只影响历史文件名,无需走 ask_ai 的重试链路)
+    # 同步一次拿完(标题失败只影响历史文件名,无需走 ask_ai 的重试链路);
+    # 请求体复用 tmpf 发送,同样绕开命令行参数长度限制
+    printf '%s' "$request_body" > "$tmpf"
     resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
         -H "api-key: $DEEPSEEK_API_KEY" \
-        -d "$request_body" 2>/dev/null)
+        --data-binary @"$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
     title=$(printf '%s' "$resp" | jq -r '.choices[0].message.tool_calls[0].function.arguments | fromjson | .title // empty' 2>/dev/null)
 
     if [[ -z "$title" ]]; then
