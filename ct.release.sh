@@ -680,7 +680,8 @@ parse_options() {
     # 翻译/词源模式:会话全程禁用工具
     (( _has_tr || _has_to )) && no_tools=1
     # 快速模式:单轮对话后直接退出,不保存历史
-    (( _has_tr || _has_to )) && quick_mode=1 && forget_history=1
+    (( _has_to )) && quick_mode=1 && forget_history=1
+    (( _has_tr )) && forget_history=1
 }
 
 # 递归杀掉一个进程及其全部后代（TERM）。必须整树杀干净：
