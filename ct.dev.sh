@@ -2840,9 +2840,14 @@ normal_line() {
     # 用户粘完立即按回车时,排干会把回车一并读入——标记提交信号
     local paste_enter=0
 
+    # 命令解析开关:只有全新消息的首行允许把 -x 输入解释为命令;
+    # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
+    # 补输)即置 0,此后一切输入(包括 -q/-c/-h 等形似命令的行)都按正文处理
+    local cmd_ok=1
     local prompt
     if [[ "$1" == 0 ]]; then
         prompt="..  "
+        cmd_ok=0
     else
         prompt="> "
     fi
@@ -2902,6 +2907,7 @@ normal_line() {
             line+=$'\n'"$rest"
             input+="$line"$'\n'
             prompt=".. "
+            cmd_ok=0
             if (( paste_enter )); then
                 # 用户粘完即回车 = 提交
                 break
@@ -2927,7 +2933,14 @@ normal_line() {
             line="${line%?}"
             input+="$line"$'\n'
             prompt=".. "
+            cmd_ok=0
             continue
+        fi
+        # 续行/补输阶段:一切输入都是正文(包括 -q/-c/-h 等形似命令的行),
+        # 追加进 input 并随消息一起提交,绝不解释为命令
+        if (( !cmd_ok )); then
+            input+="$line"$'\n'
+            break
         fi
         if [[ "$line" == "-q" ]]; then
             # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
