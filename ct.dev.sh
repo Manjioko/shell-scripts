@@ -1241,11 +1241,12 @@ stream_box_paint() {
     (( stream_anchor )) || stream_box_reserve
     printf '\033[u'
     for i in "${stream_buf[@]}"; do
-        printf '\033[2K%s\r\033[1B' "$i"
+        # 左侧加 dim │ 边框 + 空格:与工具窗口一致,视觉上表明在"容器"内输出
+        printf '\033[2K\033[2m│\033[0m %s\r\033[1B' "$i"
     done
     stream_drawn=${#stream_buf[@]}
     if [[ -n "$stream_line_buf" ]]; then
-        printf '\033[2K%s' "$stream_line_buf"
+        printf '\033[2K\033[2m│\033[0m %s' "$stream_line_buf"
         stream_drawn=$((stream_drawn + 1))
     fi
 }
