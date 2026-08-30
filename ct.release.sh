@@ -322,6 +322,13 @@ bind 'set enable-bracketed-paste off' 2>/dev/null
 # 选择)的 Ctrl+C 仍走 SIGINT 打断流程。
 bind '"\C-c": unix-line-discard' 2>/dev/null
 
+# Ctrl+R 整段清空:readline 宏 = 清本行(\C-u) + quoted-insert 哨兵 0x01(\C-q\C-a)
+# + accept-line(\C-m)。一次按键 read 立即返回 line=0x01(无需再按回车),由
+# normal_line 最先识别:清空本轮全部输入(正文/粘贴/待发图片),清屏回到全新首行。
+# 与 Ctrl+C 分工:前者清当前行,后者整段重来;输入行内失去历史增量搜索,
+# 但 ↑ 方向键翻历史不受影响。
+bind '"\C-r": "\C-u\C-q\C-a\C-m"' 2>/dev/null
+
 trap handle_ctrl_c INT
 
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
@@ -2879,6 +2886,26 @@ normal_line() {
         stty raw
         IFS= read -r -t 0.05 -N 1000000 rest
         stty "$stty_save"
+        # Ctrl+R 清空哨兵(宏 \C-u\C-q\C-a\C-m):readline 收到按键时执行宏,
+        # read 立即返回 line=0x01;若按键在排干窗口内被卷进 rest(刚粘完立刻
+        # 按 Ctrl+R,raw 模式读走的是原始字节),则 rest 里是 0x12。两种形态
+        # 都视为清空:整段重来,正文、粘贴、待发图片全部作废,清屏回到全新
+        # 首行。必须早于粘贴分支与续行门控(cmd_ok=0),否则哨兵会被当正文
+        if [[ "$line$rest" == *$'\x01'* || "$line$rest" == *$'\x12'* ]]; then
+            input=""
+            input_images=()
+            paste_lines=""
+            paste_enter=0
+            prompt="> "
+            cmd_ok=1
+            # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
+            stty raw
+            IFS= read -r -t 0.05 -N 1000000 2>/dev/null
+            stty "$stty_save"
+            printf '\033[2J\033[H'
+            printf '已清空本轮输入\n'
+            continue
+        fi
         if [[ -n "$rest" ]]; then
             # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
             local nl=$'\n'

@@ -322,6 +322,13 @@ bind 'set enable-bracketed-paste off' 2>/dev/null
 # 选择)的 Ctrl+C 仍走 SIGINT 打断流程。
 bind '"\C-c": unix-line-discard' 2>/dev/null
 
+# Ctrl+R 整段清空:readline 宏 = 清本行(\C-u) + quoted-insert 哨兵 0x01(\C-q\C-a)
+# + accept-line(\C-m)。一次按键 read 立即返回 line=0x01(无需再按回车),由
+# normal_line 最先识别:清空本轮全部输入(正文/粘贴/待发图片),清屏回到全新首行。
+# 与 Ctrl+C 分工:前者清当前行,后者整段重来;输入行内失去历史增量搜索,
+# 但 ↑ 方向键翻历史不受影响。
+bind '"\C-r": "\C-u\C-q\C-a\C-m"' 2>/dev/null
+
 trap handle_ctrl_c INT
 
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
@@ -556,6 +563,12 @@ help_user() {
     echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
     echo "  -q    退出程序"
     echo "  -h    显示帮助信息"
+    echo
+    echo "输入规则:"
+    echo "  - 任何提示符下,输入内容后回车 = 换行继续(提示符变为 ..),空行回车 = 发送"
+    echo "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
+    echo "  - 以上 -x 命令仅在全新消息首行(>)生效,续行中输入 -x 按正文处理"
+    echo "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
 }
 
 parse_options() {
@@ -2837,8 +2850,6 @@ normal_line() {
     # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
     # 会话全部行(而非当前行),屏幕不丢前轮内容
     local paste_lines=""
-    # 用户粘完立即按回车时,排干会把回车一并读入——标记提交信号
-    local paste_enter=0
 
     # 命令解析开关:只有全新消息的首行允许把 -x 输入解释为命令;
     # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
@@ -2871,7 +2882,6 @@ normal_line() {
         # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
         local rest=""
         local stty_save
-        paste_enter=0
         stty_save=$(stty -g)
         # 排干用单次短窗读:read -e 返回前有 ~1s 延迟,粘贴剩余字节在此窗口
         # 已全部入队,一次读完即可。长窗循环反而会吞掉窗口内到达的用户回车
@@ -2879,39 +2889,60 @@ normal_line() {
         stty raw
         IFS= read -r -t 0.05 -N 1000000 rest
         stty "$stty_save"
+        # Ctrl+R 清空哨兵(宏 \C-u\C-q\C-a\C-m):readline 收到按键时执行宏,
+        # read 立即返回 line=0x01;若按键在排干窗口内被卷进 rest(刚粘完立刻
+        # 按 Ctrl+R,raw 模式读走的是原始字节),则 rest 里是 0x12。两种形态
+        # 都视为清空:整段重来,正文、粘贴、待发图片全部作废,清屏回到全新
+        # 首行。必须早于粘贴分支与续行门控(cmd_ok=0),否则哨兵会被当正文
+        if [[ "$line$rest" == *$'\x01'* || "$line$rest" == *$'\x12'* ]]; then
+            input=""
+            input_images=()
+            paste_lines=""
+            prompt="> "
+            cmd_ok=1
+            # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
+            stty raw
+            IFS= read -r -t 0.05 -N 1000000 2>/dev/null
+            stty "$stty_save"
+            printf '\033[2J\033[H'
+            printf '已清空本轮输入\n'
+            continue
+        fi
         if [[ -n "$rest" ]]; then
-            # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
+            # 粘贴绝不直接提交:转入续行模式,由用户在【..】空回车提交整段。
+            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:行尾的 \r(粘贴
+            # 自带换行/用户粘完立即按的 Enter 都剥在这里,一律视为行尾,
+            # 不再当作提交信号);剥 \r 后行间就是单 \n,空行的 \r\n 剥后剩
+            # 单 \n,自然保留,不要再归并(归并会把真实空行吞掉)。首行行尾
+            # \r\n 中 readline 消费 \r 后留下的 \n 剥前导一个即可。
             local nl=$'\n'
-            # 用户粘完立即按的回车:read -e 返回前有 ~1s 延迟,回车也会被
-            # 排干读入。粘贴行尾是 \r\n 对,独立裸 \r 只会来自用户
-            # Enter——剥下并标记为提交信号。
             while [[ "$rest" == *$'\r' ]]; do
                 rest="${rest%$'\r'}"
-                paste_enter=1
             done
-            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:剥 \r 后行间
-            # 就是单 \n;空行的 \r\n 剥后剩单 \n,自然保留,不要再归并
-            # (归并会把真实空行吞掉)。首行行尾 \r\n 中 readline 消费
-            # \r 后留下的 \n 剥前导一个即可。
+            # 换行归一:终端粘贴的换行字节因平台而异——iTerm2/Terminal.app
+            # 发裸 \r,WSL 等发 \r\n 对,个别终端发裸 \n。先把 \r\n 对归并为
+            # \n,再把残留裸 \r 转成 \n。绝不能直接删除 \r:那会吃掉行间隔,
+            # 把多行内容压成一行(历史 bug:粘贴代码块全部糊成一行)
+            rest=${rest//$'\r\n'/$'\n'}
+            rest=${rest//$'\r'/$'\n'}
             rest="${rest%"$nl"}"
-            rest=${rest//$'\r'/}
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
-            # 统一重绘:粘贴时屏幕上可能已出现两层显示——readline 渲染的
-            # 第一行 + 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显
-            # 输入队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
-            # 会话累积的全部行,保证一行不多一行不少。
-            paste_lines+="$line"$'\n'"$rest"$'\n'
-            printf '\033[u\033[J'
-            printf '%s%s' "$prompt" "$paste_lines"
-            line+=$'\n'"$rest"
+            if [[ -n "$rest" ]]; then
+                # 多行粘贴:屏幕上已出现两层显示——readline 渲染的首行 +
+                # 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显输入
+                # 队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
+                # 会话累积的全部行,保证一行不多一行不少。
+                paste_lines+="$line"$'\n'"$rest"$'\n'
+                printf '\033[u\033[J'
+                printf '%s%s' "$prompt" "$paste_lines"
+                line+=$'\n'"$rest"
+            fi
+            # 单行粘贴带尾换行时 rest 剥边后为空:内容已由 readline 正确
+            # 显示,无需重绘,直接续行
             input+="$line"$'\n'
             prompt=".. "
             cmd_ok=0
-            if (( paste_enter )); then
-                # 用户粘完即回车 = 提交
-                break
-            fi
             continue
         fi
         if [[ "$line" == "@" ]]; then
@@ -2937,10 +2968,13 @@ normal_line() {
             continue
         fi
         # 续行/补输阶段:一切输入都是正文(包括 -q/-c/-h 等形似命令的行),
-        # 追加进 input 并随消息一起提交,绝不解释为命令
+        # 绝不解释为命令。普通行追加后停留在【..】继续输入,空行回车才
+        # 提交整段消息(粘贴后补输多行文本的标准姿势)
         if (( !cmd_ok )); then
+            [[ -z "$line" ]] && break
             input+="$line"$'\n'
-            break
+            prompt=".. "
+            continue
         fi
         if [[ "$line" == "-q" ]]; then
             # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
@@ -3035,10 +3069,13 @@ normal_line() {
             break
         fi
 
+        # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
+        # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
+        [[ -z "$line" ]] && break
         input+="$line"$'\n'
         prompt=".. "
-
-        break
+        cmd_ok=0
+        continue
     done
     # 兜底:kill -INT 等外部 SIGINT 打断 read -e 时(readline 的 read 不会提前
     # 返回,回车后才走到这里),按惯例清空本次累计的全部输入,换行后返回,
