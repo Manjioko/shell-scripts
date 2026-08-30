@@ -332,11 +332,18 @@ bind '"\C-r": "\C-u\C-q\C-a\C-m"' 2>/dev/null
 trap handle_ctrl_c INT
 
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
-trap 'printf "\033[?25h\033[?7h"; stty echo isig 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
+trap 'printf "\033[?25h\033[?7h"; stty echo isig opost onlcr 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
+
+# 多行输出(glow/mdcat/echo 都以 \n 结尾)依赖终端 ONLCR 把 \n 翻译成
+# 回车+换行;ONLCR 一旦被外部环境关闭,多行内容会级联缩进、排版错乱。
+# 启动时显式确保一次,防终端被其他程序留下 onlcr 关闭的状态。
+stty opost onlcr 2>/dev/null
 
 
 render_markdown() {
     local text="$1"
+    # 渲染前复位 OPOST+ONLCR(兜底):glow/mdcat/echo 的 \n 必须被翻译成回车+换行
+    stty opost onlcr 2>/dev/null
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
@@ -563,6 +570,12 @@ help_user() {
     echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
     echo "  -q    退出程序"
     echo "  -h    显示帮助信息"
+    echo
+    echo "输入规则:"
+    echo "  - 任何提示符下,输入内容后回车 = 换行继续(提示符变为 ..),空行回车 = 发送"
+    echo "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
+    echo "  - 以上 -x 命令仅在全新消息首行(>)生效,续行中输入 -x 按正文处理"
+    echo "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
 }
 
 parse_options() {
@@ -751,8 +764,11 @@ run_with_window() {
         printf '\r'
         (( drawn > 0 )) && printf '\033[%dA' "$drawn"
         for i in "${buf[@]}"; do
-            # \033[2K 整行擦除，清掉上一帧更长内容的残留
-            printf '\033[2K\033[2m│\033[0m %s\n' "$i"
+            # \033[2K 整行擦除，清掉上一帧更长内容的残留。
+            # 行尾显式 \r\n:不依赖终端 ONLCR 把 \n 翻译成回车+换行——
+            # ONLCR 被关闭时 \n 只换行不回行首,下一行会从上一行文本结尾
+            # 处续打,多行输出级联缩进、排版错乱(历史 bug)
+            printf '\033[2K\033[2m│\033[0m %s\r\n' "$i"
         done
         # 底行：交互提示等无换行输出画在这里，光标停在其末尾方便用户应答
         printf '\033[2K'
@@ -1172,6 +1188,130 @@ unlock_screen() {
      # 恢复终端状态
     stty "$stty_save"
 }
+# ================= 流箱:替代交替屏的流式输出小窗口 =================
+# ask_ai 流式期间在主屏底部画一块固定 N 行的滚动区域(环形缓冲+节流),
+# 全程不切换屏幕,消除 smcup/rmcup 闪烁;流结束(正常/打断/报错/重试)后
+# 整箱擦除,再由 flush_thinking 与 render_markdown(glow) 渲染最终结果。
+# 关键几何约束(历史 bug:重画逐行带 \n 会在终端底部每帧滚动一次,把会话
+# 内容一行行顶出屏幕,最后只剩流箱内容):首次有内容时一次性预留箱区
+# (正常滚动让位,之后会话固定可见),锚定箱顶;此后所有重画都从锚点出发、
+# 用 \033[1B 光标下移(到底部钳制,绝不触发滚动),全程零换行零滚动。
+# lock_screen/unlock_screen 保留未用。
+# 流箱高度:随终端高度自适应(取 40%,夹在 10~24 行)。10 行虽可用但视觉
+# 狭窄;过大则预留箱区时把会话滚动掉太多。工具窗口(run_with_window)仍 10 行
+# 不变——shell 输出只关心最后几行。
+_stream_rows=$(tput lines 2>/dev/null); _stream_rows=${_stream_rows:-40}
+STREAM_WIN=$(( (_stream_rows * 2) / 5 ))
+(( STREAM_WIN < 10 )) && STREAM_WIN=10
+(( STREAM_WIN > 24 )) && STREAM_WIN=24
+STREAM_THROTTLE=50000  # 重画节流间隔(微秒,EPOCHREALTIME 去小数点)
+
+# 开箱:关回显+藏光标+关自动换行(1 逻辑行=1 物理行,光标算术才成立)
+stream_box_open() {
+    (( stream_open )) && return 0
+    stream_stty_save=$(stty -g)
+    stty -echo
+    printf '\033[?25l\033[?7l'
+    stream_buf=()
+    stream_line_buf=""
+    stream_drawn=0
+    stream_anchor=0
+    stream_last_paint=0
+    stream_open=1
+}
+
+# 预留箱区(仅首次有内容时调用一次):在内容末尾之下预留 STREAM_WIN 行
+# (光标在底部时经正常滚动让位,会话最多上移一次、之后固定可见),
+# 回退到箱顶并锚定。箱顶=原光标下一行,输入回显/会话内容不受损
+stream_box_reserve() {
+    local i
+    for ((i = 0; i < STREAM_WIN; i++)); do printf '\n'; done
+    printf '\033[%dA' "$((STREAM_WIN - 1))"
+    printf '\033[s'
+    stream_anchor=1
+}
+
+# 重画:回到锚点(箱顶),整行擦除后逐行重打。行间用 \r 回行首再 \033[1B 下移
+# (下移钳制不滚动);必须先 \r 再下移——若只下移,光标保留上一行文本末尾列,
+# 下一行从那里续打,多行输出逐行累积成楼梯状(历史 bug)。
+# 未完成行作为最后一帧不换行重画,下一帧从锚点重画续写
+stream_box_paint() {
+    local i
+    (( stream_open )) || return 0
+    (( stream_anchor )) || stream_box_reserve
+    printf '\033[u'
+    for i in "${stream_buf[@]}"; do
+        # 左侧加 dim │ 边框 + 空格:与工具窗口一致,视觉上表明在"容器"内输出
+        printf '\033[2K\033[2m│\033[0m %s\r\033[1B' "$i"
+    done
+    stream_drawn=${#stream_buf[@]}
+    if [[ -n "$stream_line_buf" ]]; then
+        printf '\033[2K\033[2m│\033[0m %s' "$stream_line_buf"
+        stream_drawn=$((stream_drawn + 1))
+    fi
+}
+
+# 仅把一行推进环形缓冲(不重画);超窗丢最旧。供拆行阶段批量入队使用,
+# 避免拆行循环中每次 feed 都重画、且重画时 line_buf 尚未拆完的状态
+stream_box_push() {
+    stream_buf+=("$1")
+    (( ${#stream_buf[@]} > STREAM_WIN )) && stream_buf=("${stream_buf[@]:1}")
+}
+
+# 喂一行(完整行)并节流重画:用于思考开始/结束标记、重试提示等单行事件
+stream_box_feed() {
+    stream_box_push "$1"
+    local now=${EPOCHREALTIME/./}
+    if (( now - stream_last_paint > STREAM_THROTTLE )); then
+        stream_box_paint
+        stream_last_paint=$now
+    fi
+}
+
+# 追加流式文本(思考/正文分片):按 \n 拆行进箱;残行也要实时上屏——
+# 流式正文常整段无换行,不画残行的话用户流式期间什么都看不到
+stream_box_append() {
+    local text="$1" line
+    [[ -z "$text" ]] && return 0
+    stream_line_buf+="$text"
+    # 拆行阶段只入队不重画:若边拆边 feed,feed 的 paint 会把尚未拆完的
+    # 整段 line_buf(含 \n)当残行画上屏,多行内容在残行处错乱(历史 bug)
+    while [[ "$stream_line_buf" == *$'\n'* ]]; do
+        line="${stream_line_buf%%$'\n'*}"
+        stream_line_buf="${stream_line_buf#*$'\n'}"
+        stream_box_push "$line"
+    done
+    # 拆完后 line_buf 是真正的残行,统一节流重画一次
+    local now=${EPOCHREALTIME/./}
+    if (( now - stream_last_paint > STREAM_THROTTLE )); then
+        stream_box_paint
+        stream_last_paint=$now
+    fi
+}
+
+# 关箱:整箱擦除(回到锚点,逐行 2K 擦 + 下移,零换行零滚动),擦完回到
+# 锚点让后续 glow 渲染从箱顶位置接续;恢复光标/换行/回显。未消费的
+# 残行直接丢弃——箱体即删,无需补画,完整内容由后续 glow 渲染
+stream_box_close() {
+    (( stream_open )) || return 0
+    local i
+    if (( stream_anchor )); then
+        printf '\033[u'
+        for ((i = 0; i < stream_drawn; i++)); do
+            printf '\033[2K\033[1B'
+        done
+        printf '\033[u'
+    fi
+    stream_buf=()
+    stream_line_buf=""
+    stream_drawn=0
+    stream_anchor=0
+    stream_last_paint=0
+    stream_open=0
+    printf '\033[?25h\033[?7h'
+    stty "$stream_stty_save"
+}
+
 # 工具输出截断:命令输出是上下文里最占 token 的部分,超长时只保留头尾。
 # 头部=摘要/表头,尾部=报错/最终结果,中间多为重复性日志,AI 不需要全文。
 # 两层限制:先截超长单行(minified 文件一行可达几十万字符),再按行数截头尾。
@@ -2402,7 +2542,7 @@ ask_ai() {
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
     think_save_len=${#thinking_response}
-    [[  "$is_lock_screen" == 1 ]] && lock_screen
+    [[ "$is_lock_screen" == 1 ]] && stream_box_open
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
         # 每轮尝试前复位单轮产物,上一尝试的残留会干扰"是否有产出"的判断
         full_response=""
@@ -2414,10 +2554,10 @@ ask_ai() {
         think_start=0
         think_end=0
         if (( attempt > 1 )); then
-            # 上一尝试零产出:回滚其思考残留、清掉交替屏幕残影、退避后重发
+            # 上一尝试零产出:回滚其思考残留、在流箱内提示重试、退避后重发
             # 同一请求体(零产出的请求无副作用,重发安全)
             thinking_response="${thinking_response:0:think_save_len}"
-            printf '\033[2J\033[H'
+            (( is_lock_screen )) && stream_box_feed "⚠️ 无响应,重试中($attempt/$max_attempts)…"
             sleep "$attempt"
         fi
 
@@ -2450,10 +2590,10 @@ ask_ai() {
             if [[ -n "$thinking_chunk" ]]; then
                 if [[ $think_start -eq 0 ]]; then
                     think_start=1
-                    printf '\n\033[33m----------思考开始------------\033[0m\n'
+                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考开始------------\033[0m'
                     thinking_response+=$'\n\n----------思考开始------------\n\n\n'
                 fi
-                printf '%s' "$thinking_chunk"
+                (( is_lock_screen )) && stream_box_append "$thinking_chunk"
             fi
             [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; }
 
@@ -2465,13 +2605,13 @@ ask_ai() {
             if [[ $think_end -eq 0 && $think_start -eq 1 ]]; then
                 if [[ -z "$thinking_chunk" && -n "$chunk" ]]; then
                     think_end=1
-                    printf '\n\033[33m----------思考结束------------\033[0m\n'
+                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考结束------------\033[0m'
                     thinking_response+=$'\n\n----------思考结束----------\n\n\n'
                 fi
             fi
 
             if [[ -n "$chunk" ]]; then
-                printf '%s' "$chunk"
+                (( is_lock_screen )) && stream_box_append "$chunk"
             fi
             [[ -n "$chunk" ]] && full_response+="$chunk"
 
@@ -2524,7 +2664,7 @@ ask_ai() {
         (( ai_abort )) && break
     done
 
-    [[ "$is_lock_screen" == 1 ]] && unlock_screen
+    [[ "$is_lock_screen" == 1 ]] && stream_box_close
     ai_active=0
     rm -f "$req_file"
 
@@ -2844,8 +2984,6 @@ normal_line() {
     # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
     # 会话全部行(而非当前行),屏幕不丢前轮内容
     local paste_lines=""
-    # 用户粘完立即按回车时,排干会把回车一并读入——标记提交信号
-    local paste_enter=0
 
     # 命令解析开关:只有全新消息的首行允许把 -x 输入解释为命令;
     # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
@@ -2878,7 +3016,6 @@ normal_line() {
         # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
         local rest=""
         local stty_save
-        paste_enter=0
         stty_save=$(stty -g)
         # 排干用单次短窗读:read -e 返回前有 ~1s 延迟,粘贴剩余字节在此窗口
         # 已全部入队,一次读完即可。长窗循环反而会吞掉窗口内到达的用户回车
@@ -2895,7 +3032,6 @@ normal_line() {
             input=""
             input_images=()
             paste_lines=""
-            paste_enter=0
             prompt="> "
             cmd_ok=1
             # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
@@ -2907,38 +3043,40 @@ normal_line() {
             continue
         fi
         if [[ -n "$rest" ]]; then
-            # 粘贴不直接提交：转入续行模式，用户可继续补充，真正按回车才结束
+            # 粘贴绝不直接提交:转入续行模式,由用户在【..】空回车提交整段。
+            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:行尾的 \r(粘贴
+            # 自带换行/用户粘完立即按的 Enter 都剥在这里,一律视为行尾,
+            # 不再当作提交信号);剥 \r 后行间就是单 \n,空行的 \r\n 剥后剩
+            # 单 \n,自然保留,不要再归并(归并会把真实空行吞掉)。首行行尾
+            # \r\n 中 readline 消费 \r 后留下的 \n 剥前导一个即可。
             local nl=$'\n'
-            # 用户粘完立即按的回车:read -e 返回前有 ~1s 延迟,回车也会被
-            # 排干读入。粘贴行尾是 \r\n 对,独立裸 \r 只会来自用户
-            # Enter——剥下并标记为提交信号。
             while [[ "$rest" == *$'\r' ]]; do
                 rest="${rest%$'\r'}"
-                paste_enter=1
             done
-            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:剥 \r 后行间
-            # 就是单 \n;空行的 \r\n 剥后剩单 \n,自然保留,不要再归并
-            # (归并会把真实空行吞掉)。首行行尾 \r\n 中 readline 消费
-            # \r 后留下的 \n 剥前导一个即可。
+            # 换行归一:终端粘贴的换行字节因平台而异——iTerm2/Terminal.app
+            # 发裸 \r,WSL 等发 \r\n 对,个别终端发裸 \n。先把 \r\n 对归并为
+            # \n,再把残留裸 \r 转成 \n。绝不能直接删除 \r:那会吃掉行间隔,
+            # 把多行内容压成一行(历史 bug:粘贴代码块全部糊成一行)
+            rest=${rest//$'\r\n'/$'\n'}
+            rest=${rest//$'\r'/$'\n'}
             rest="${rest%"$nl"}"
-            rest=${rest//$'\r'/}
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
-            # 统一重绘:粘贴时屏幕上可能已出现两层显示——readline 渲染的
-            # 第一行 + 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显
-            # 输入队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
-            # 会话累积的全部行,保证一行不多一行不少。
-            paste_lines+="$line"$'\n'"$rest"$'\n'
-            printf '\033[u\033[J'
-            printf '%s%s' "$prompt" "$paste_lines"
-            line+=$'\n'"$rest"
+            if [[ -n "$rest" ]]; then
+                # 多行粘贴:屏幕上已出现两层显示——readline 渲染的首行 +
+                # 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显输入
+                # 队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
+                # 会话累积的全部行,保证一行不多一行不少。
+                paste_lines+="$line"$'\n'"$rest"$'\n'
+                printf '\033[u\033[J'
+                printf '%s%s' "$prompt" "$paste_lines"
+                line+=$'\n'"$rest"
+            fi
+            # 单行粘贴带尾换行时 rest 剥边后为空:内容已由 readline 正确
+            # 显示,无需重绘,直接续行
             input+="$line"$'\n'
             prompt=".. "
             cmd_ok=0
-            if (( paste_enter )); then
-                # 用户粘完即回车 = 提交
-                break
-            fi
             continue
         fi
         if [[ "$line" == "@" ]]; then
@@ -2964,10 +3102,13 @@ normal_line() {
             continue
         fi
         # 续行/补输阶段:一切输入都是正文(包括 -q/-c/-h 等形似命令的行),
-        # 追加进 input 并随消息一起提交,绝不解释为命令
+        # 绝不解释为命令。普通行追加后停留在【..】继续输入,空行回车才
+        # 提交整段消息(粘贴后补输多行文本的标准姿势)
         if (( !cmd_ok )); then
+            [[ -z "$line" ]] && break
             input+="$line"$'\n'
-            break
+            prompt=".. "
+            continue
         fi
         if [[ "$line" == "-q" ]]; then
             # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
@@ -3062,10 +3203,13 @@ normal_line() {
             break
         fi
 
+        # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
+        # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
+        [[ -z "$line" ]] && break
         input+="$line"$'\n'
         prompt=".. "
-
-        break
+        cmd_ok=0
+        continue
     done
     # 兜底:kill -INT 等外部 SIGINT 打断 read -e 时(readline 的 read 不会提前
     # 返回,回车后才走到这里),按惯例清空本次累计的全部输入,换行后返回,
