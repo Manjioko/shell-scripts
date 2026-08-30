@@ -332,11 +332,18 @@ bind '"\C-r": "\C-u\C-q\C-a\C-m"' 2>/dev/null
 trap handle_ctrl_c INT
 
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
-trap 'printf "\033[?25h\033[?7h"; stty echo isig 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
+trap 'printf "\033[?25h\033[?7h"; stty echo isig opost onlcr 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
+
+# 多行输出(glow/mdcat/echo 都以 \n 结尾)依赖终端 ONLCR 把 \n 翻译成
+# 回车+换行;ONLCR 一旦被外部环境关闭,多行内容会级联缩进、排版错乱。
+# 启动时显式确保一次,防终端被其他程序留下 onlcr 关闭的状态。
+stty opost onlcr 2>/dev/null
 
 
 render_markdown() {
     local text="$1"
+    # 渲染前复位 OPOST+ONLCR(兜底):glow/mdcat/echo 的 \n 必须被翻译成回车+换行
+    stty opost onlcr 2>/dev/null
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
@@ -757,8 +764,11 @@ run_with_window() {
         printf '\r'
         (( drawn > 0 )) && printf '\033[%dA' "$drawn"
         for i in "${buf[@]}"; do
-            # \033[2K 整行擦除，清掉上一帧更长内容的残留
-            printf '\033[2K\033[2m│\033[0m %s\n' "$i"
+            # \033[2K 整行擦除，清掉上一帧更长内容的残留。
+            # 行尾显式 \r\n:不依赖终端 ONLCR 把 \n 翻译成回车+换行——
+            # ONLCR 被关闭时 \n 只换行不回行首,下一行会从上一行文本结尾
+            # 处续打,多行输出级联缩进、排版错乱(历史 bug)
+            printf '\033[2K\033[2m│\033[0m %s\r\n' "$i"
         done
         # 底行：交互提示等无换行输出画在这里，光标停在其末尾方便用户应答
         printf '\033[2K'
@@ -1178,6 +1188,129 @@ unlock_screen() {
      # 恢复终端状态
     stty "$stty_save"
 }
+# ================= 流箱:替代交替屏的流式输出小窗口 =================
+# ask_ai 流式期间在主屏底部画一块固定 N 行的滚动区域(环形缓冲+节流),
+# 全程不切换屏幕,消除 smcup/rmcup 闪烁;流结束(正常/打断/报错/重试)后
+# 整箱擦除,再由 flush_thinking 与 render_markdown(glow) 渲染最终结果。
+# 关键几何约束(历史 bug:重画逐行带 \n 会在终端底部每帧滚动一次,把会话
+# 内容一行行顶出屏幕,最后只剩流箱内容):首次有内容时一次性预留箱区
+# (正常滚动让位,之后会话固定可见),锚定箱顶;此后所有重画都从锚点出发、
+# 用 \033[1B 光标下移(到底部钳制,绝不触发滚动),全程零换行零滚动。
+# lock_screen/unlock_screen 保留未用。
+# 流箱高度:随终端高度自适应(取 40%,夹在 10~24 行)。10 行虽可用但视觉
+# 狭窄;过大则预留箱区时把会话滚动掉太多。工具窗口(run_with_window)仍 10 行
+# 不变——shell 输出只关心最后几行。
+_stream_rows=$(tput lines 2>/dev/null); _stream_rows=${_stream_rows:-40}
+STREAM_WIN=$(( (_stream_rows * 2) / 5 ))
+(( STREAM_WIN < 10 )) && STREAM_WIN=10
+(( STREAM_WIN > 24 )) && STREAM_WIN=24
+STREAM_THROTTLE=50000  # 重画节流间隔(微秒,EPOCHREALTIME 去小数点)
+
+# 开箱:关回显+藏光标+关自动换行(1 逻辑行=1 物理行,光标算术才成立)
+stream_box_open() {
+    (( stream_open )) && return 0
+    stream_stty_save=$(stty -g)
+    stty -echo
+    printf '\033[?25l\033[?7l'
+    stream_buf=()
+    stream_line_buf=""
+    stream_drawn=0
+    stream_anchor=0
+    stream_last_paint=0
+    stream_open=1
+}
+
+# 预留箱区(仅首次有内容时调用一次):在内容末尾之下预留 STREAM_WIN 行
+# (光标在底部时经正常滚动让位,会话最多上移一次、之后固定可见),
+# 回退到箱顶并锚定。箱顶=原光标下一行,输入回显/会话内容不受损
+stream_box_reserve() {
+    local i
+    for ((i = 0; i < STREAM_WIN; i++)); do printf '\n'; done
+    printf '\033[%dA' "$((STREAM_WIN - 1))"
+    printf '\033[s'
+    stream_anchor=1
+}
+
+# 重画:回到锚点(箱顶),整行擦除后逐行重打。行间用 \r 回行首再 \033[1B 下移
+# (下移钳制不滚动);必须先 \r 再下移——若只下移,光标保留上一行文本末尾列,
+# 下一行从那里续打,多行输出逐行累积成楼梯状(历史 bug)。
+# 未完成行作为最后一帧不换行重画,下一帧从锚点重画续写
+stream_box_paint() {
+    local i
+    (( stream_open )) || return 0
+    (( stream_anchor )) || stream_box_reserve
+    printf '\033[u'
+    for i in "${stream_buf[@]}"; do
+        printf '\033[2K%s\r\033[1B' "$i"
+    done
+    stream_drawn=${#stream_buf[@]}
+    if [[ -n "$stream_line_buf" ]]; then
+        printf '\033[2K%s' "$stream_line_buf"
+        stream_drawn=$((stream_drawn + 1))
+    fi
+}
+
+# 仅把一行推进环形缓冲(不重画);超窗丢最旧。供拆行阶段批量入队使用,
+# 避免拆行循环中每次 feed 都重画、且重画时 line_buf 尚未拆完的状态
+stream_box_push() {
+    stream_buf+=("$1")
+    (( ${#stream_buf[@]} > STREAM_WIN )) && stream_buf=("${stream_buf[@]:1}")
+}
+
+# 喂一行(完整行)并节流重画:用于思考开始/结束标记、重试提示等单行事件
+stream_box_feed() {
+    stream_box_push "$1"
+    local now=${EPOCHREALTIME/./}
+    if (( now - stream_last_paint > STREAM_THROTTLE )); then
+        stream_box_paint
+        stream_last_paint=$now
+    fi
+}
+
+# 追加流式文本(思考/正文分片):按 \n 拆行进箱;残行也要实时上屏——
+# 流式正文常整段无换行,不画残行的话用户流式期间什么都看不到
+stream_box_append() {
+    local text="$1" line
+    [[ -z "$text" ]] && return 0
+    stream_line_buf+="$text"
+    # 拆行阶段只入队不重画:若边拆边 feed,feed 的 paint 会把尚未拆完的
+    # 整段 line_buf(含 \n)当残行画上屏,多行内容在残行处错乱(历史 bug)
+    while [[ "$stream_line_buf" == *$'\n'* ]]; do
+        line="${stream_line_buf%%$'\n'*}"
+        stream_line_buf="${stream_line_buf#*$'\n'}"
+        stream_box_push "$line"
+    done
+    # 拆完后 line_buf 是真正的残行,统一节流重画一次
+    local now=${EPOCHREALTIME/./}
+    if (( now - stream_last_paint > STREAM_THROTTLE )); then
+        stream_box_paint
+        stream_last_paint=$now
+    fi
+}
+
+# 关箱:整箱擦除(回到锚点,逐行 2K 擦 + 下移,零换行零滚动),擦完回到
+# 锚点让后续 glow 渲染从箱顶位置接续;恢复光标/换行/回显。未消费的
+# 残行直接丢弃——箱体即删,无需补画,完整内容由后续 glow 渲染
+stream_box_close() {
+    (( stream_open )) || return 0
+    local i
+    if (( stream_anchor )); then
+        printf '\033[u'
+        for ((i = 0; i < stream_drawn; i++)); do
+            printf '\033[2K\033[1B'
+        done
+        printf '\033[u'
+    fi
+    stream_buf=()
+    stream_line_buf=""
+    stream_drawn=0
+    stream_anchor=0
+    stream_last_paint=0
+    stream_open=0
+    printf '\033[?25h\033[?7h'
+    stty "$stream_stty_save"
+}
+
 # 工具输出截断:命令输出是上下文里最占 token 的部分,超长时只保留头尾。
 # 头部=摘要/表头,尾部=报错/最终结果,中间多为重复性日志,AI 不需要全文。
 # 两层限制:先截超长单行(minified 文件一行可达几十万字符),再按行数截头尾。
@@ -2408,7 +2541,7 @@ ask_ai() {
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
     think_save_len=${#thinking_response}
-    [[  "$is_lock_screen" == 1 ]] && lock_screen
+    [[ "$is_lock_screen" == 1 ]] && stream_box_open
     for ((attempt=1; attempt<=max_attempts; attempt++)); do
         # 每轮尝试前复位单轮产物,上一尝试的残留会干扰"是否有产出"的判断
         full_response=""
@@ -2420,10 +2553,10 @@ ask_ai() {
         think_start=0
         think_end=0
         if (( attempt > 1 )); then
-            # 上一尝试零产出:回滚其思考残留、清掉交替屏幕残影、退避后重发
+            # 上一尝试零产出:回滚其思考残留、在流箱内提示重试、退避后重发
             # 同一请求体(零产出的请求无副作用,重发安全)
             thinking_response="${thinking_response:0:think_save_len}"
-            printf '\033[2J\033[H'
+            (( is_lock_screen )) && stream_box_feed "⚠️ 无响应,重试中($attempt/$max_attempts)…"
             sleep "$attempt"
         fi
 
@@ -2456,10 +2589,10 @@ ask_ai() {
             if [[ -n "$thinking_chunk" ]]; then
                 if [[ $think_start -eq 0 ]]; then
                     think_start=1
-                    printf '\n\033[33m----------思考开始------------\033[0m\n'
+                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考开始------------\033[0m'
                     thinking_response+=$'\n\n----------思考开始------------\n\n\n'
                 fi
-                printf '%s' "$thinking_chunk"
+                (( is_lock_screen )) && stream_box_append "$thinking_chunk"
             fi
             [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; }
 
@@ -2471,13 +2604,13 @@ ask_ai() {
             if [[ $think_end -eq 0 && $think_start -eq 1 ]]; then
                 if [[ -z "$thinking_chunk" && -n "$chunk" ]]; then
                     think_end=1
-                    printf '\n\033[33m----------思考结束------------\033[0m\n'
+                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考结束------------\033[0m'
                     thinking_response+=$'\n\n----------思考结束----------\n\n\n'
                 fi
             fi
 
             if [[ -n "$chunk" ]]; then
-                printf '%s' "$chunk"
+                (( is_lock_screen )) && stream_box_append "$chunk"
             fi
             [[ -n "$chunk" ]] && full_response+="$chunk"
 
@@ -2530,7 +2663,7 @@ ask_ai() {
         (( ai_abort )) && break
     done
 
-    [[ "$is_lock_screen" == 1 ]] && unlock_screen
+    [[ "$is_lock_screen" == 1 ]] && stream_box_close
     ai_active=0
     rm -f "$req_file"
 
