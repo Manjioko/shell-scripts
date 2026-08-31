@@ -34,3 +34,5 @@
 [v]29. 流箱(stream_box)多行正文楼梯状级联:①paint 每行用 \033[1B 下移却不回行首,下一行从上一行文本末尾列续打;②stream_box_append 边拆行边 feed,feed 触发 paint 时 line_buf 还是整段未拆完的多行,残行把剩余所有行连 \n 一起打出<1>【done】paint 行间改 \r\033[1B(先回行首再下移);append 拆行阶段只入队(新增 stream_box_push)不重画,拆完统一节流重画;新增场景N(流箱多行逐行 \r\033[1B)回归
 [v]30. 流箱高度固定 10 行,视觉上狭窄(工具窗口 shell 输出 10 行合理,但 AI 回答流箱也 10 行显得窄)<3>【done】STREAM_WIN 改为随终端高度自适应:取 40%,夹在 10~24 行;工具窗口 run_with_window 仍 10 行不变
 [v]31. 流箱输出无左侧边框,视觉上不像"容器内输出"(shell 工具窗口有 dim │ 边框,流箱没有,不统一)<3>【done】stream_box_paint 完整行与残行都加 \033[2m│\033[0m 左侧边框+空格,与工具窗口一致
+[-]32. 使用subshell 时，连按两次ctrl-c，第一次会退出subshell,第二次会退出程序，但是退出程序本身是不允许的，这是bug <2> 【todo】
+[-]33. ask_ai 会在使用tool_grep后卡住，有可能是在 curl 过程中，curl responese 迟迟不响应，导致read 一直在pending,这个时候ctrl-c不管用，退不出当前这轮对话。 <2> 【todo】
