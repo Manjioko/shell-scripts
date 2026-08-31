@@ -198,7 +198,7 @@ granted_files=()
 # -tr/-to 模式标志:会话全程禁用工具(翻译/词源任务不需要工具,从 API 层面
 # 硬约束——不发送 tools 字段,模型物理上无法发起 tool_call)。
 no_tools=0
-# 快速模式标志:-tr/-to 时置 1,单轮对话后直接退出,不进交互循环
+# 快速模式标志:-to/-st 时置 1,单轮对话后直接退出,不进交互循环
 quick_mode=0
 # Ctrl+C 状态标志(配合 handle_ctrl_c):
 #   ai_active=1     正处于 ask_ai 流式输出阶段 → Ctrl+C 打断本轮输出(ai_abort)
@@ -254,6 +254,13 @@ BG_SILENT_TIMEOUT=3000000   # 3 秒(微秒)
 # (杀组失败/孤儿写端等极端情况),静默超过该时长直接强制收尾。
 # 保证"按一次 Ctrl+C 最多卡 2 秒"的硬承诺,不依赖杀组是否成功。
 INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
+
+# ask_ai 流式 curl 的停滞兜底:连接建立后若平均速率持续低于 1 字节/秒超过
+# 该秒数,curl 自行断开并报 "curl: (28)"(进入 api_error,可见报错),把
+# "服务端静默挂死、read 无限 pending"的极端情况降级为可恢复的报错。
+# 正常流式输出 token 连续,不会误伤;与 run_with_window 的 job control
+# 恢复(见该函数 set -m 注释)构成双保险。
+SSE_STALL_TIMEOUT=120      # 2 分钟
 
 options_list=("-l" "-msgs" "-h" "-c" "-u" "-img" "-skill")
 
@@ -476,6 +483,16 @@ get_history() {
 handle_ctrl_c() {
     if (( ai_active )); then
         ai_abort=1
+        # 显式 TERM 掉正在流式读取的 curl:job control 关闭时 bash 会把异步
+        # 子进程(进程替换/后台任务)的 SIGINT/SIGQUIT 置为 SIG_IGN,而 curl
+        # 有意保留继承的 SIG_IGN(只在未继承时才安装自己的 SIGINT 处理器),
+        # 导致"连接已建立但服务端迟迟不吐数据"的停滞场景下,终端 Ctrl+C 的
+        # SIGINT 对 curl 无效,read 永久 pending、ai_abort 永远检查不到
+        # (历史 bug:tool_grep 后 ask_ai 卡死、Ctrl+C 退不出本轮对话)。
+        # TERM 不受 SIG_IGN 屏蔽,curl 一死写端关闭 → EOF → SSE 读循环退出。
+        # curl_pid 由 ask_ai 在每次启动 curl 时设置、读循环结束时立即清空,
+        # 误杀其他进程的窗口极小。
+        [[ -n "${curl_pid:-}" ]] && kill -TERM "$curl_pid" 2>/dev/null
     else
         input_aborted=1
     fi
@@ -546,6 +563,7 @@ help_user() {
     echo "  -f    忽略历史记录"
     echo "  -tr   翻译任务"
     echo "  -to   词源词根解释任务"
+    echo "  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)"
     echo "  -img  发送图片(后接图片路径,自动转述为文字)"
     echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
     echo "  -c    手动压缩对话历史"
@@ -590,6 +608,15 @@ parse_options() {
         fi
         if [[ "${!i}" == "-to" ]]; then
             _has_to=1
+            continue
+        fi
+
+        if [[ "${!i}" == "-st" ]]; then
+            # 单轮模式:-st 手动强制"执行一轮即退出",不进交互循环。
+            # 与 -to 共用 quick_mode;不保存历史(单轮无标题可存,
+            # 也避免为生成标题多花一次 API 调用)
+            quick_mode=1
+            forget_history=1
             continue
         fi
 
@@ -675,6 +702,8 @@ parse_options() {
     # -tr / -to 的剪切板兜底逻辑移到循环结束后统一处理:
     # 先让循环完整收集所有 content 参数,最后再判断是否有内容;
     # 只有 content 为空时才读剪切板,保证用户显式传入的内容优先。
+    # 剪切板读取走 get_clipboard(跨平台:macOS/Linux/WSL2),读不到时
+    # 保持 content 为空,由下方流程自然落到交互输入,不发送空翻译请求。
     if (( _has_tr )); then
         local _prectx_tr="**注意：翻译任务不需要调用任何工具**。请翻译以下内容为中文，并拆解其语法的重点难点,其输入的格式如下：\
             原文：（原文内容显示在此处,原文可适当按照自己的理解进行格式化美化，然后输出并翻译）\
@@ -684,7 +713,9 @@ parse_options() {
 
             以上是格式，需要翻译的文本如下 "
         if [[ -z "$content" ]]; then
-            content="${_prectx_tr}: $(pbpaste)"
+            local _clip
+            _clip=$(get_clipboard)
+            [[ -n "$_clip" ]] && content="${_prectx_tr}: $_clip"
         else
             content="${_prectx_tr}: $content"
         fi
@@ -695,7 +726,9 @@ parse_options() {
             常用例句：（在此处给出一些常用的例句，注意例句要尽量简短，方便记忆）\
             以上是格式，需要解释的词如下"
         if [[ -z "$content" ]]; then
-            content="${_prectx_to}: $(pbpaste)"
+            local _clip
+            _clip=$(get_clipboard)
+            [[ -n "$_clip" ]] && content="${_prectx_to}: $_clip"
         else
             content="${_prectx_to}: $content"
         fi
@@ -725,7 +758,7 @@ run_with_window() {
     local now last_paint=0 dirty=0
     local chunk rc line pending="" partial=""
     local _full="" _tail=""
-    local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir=""
+    local cmd_pid="" interrupted=0 old_trap="" win_fd="" win_tmpdir="" monitor_was_on=0
     local cmd_stat="" last_data=0 bg_leak=0 forced=0 win_pgid=""
     local in_fd="" key="" tty_save="" tty_cols="" tty_rows="" wrapped_cmd=""
     # 环形缓冲(见 OUT_BUF_SIZE 配置注释):每行追加 O(1),防 O(n²) 卡死
@@ -738,6 +771,12 @@ run_with_window() {
     # bash 5 对异步管道的实现中,管道成员不再是 $! 的后代(pgrep -P 父链断裂,
     # kill_tree 找不到孩子,只剩孤儿攥着 FIFO 写端,EOF 永远不来,Ctrl+C 杀不掉)。
     # 按进程组杀是业界标准做法(Claude Code 同款)。
+    # job control 是 shell 全局状态,函数返回后不会自动还原:若永久开启,
+    # 全脚本的异步子进程语义都会偏离启动初始态——job control 关闭时 bash
+    # 会给异步子进程(进程替换/后台任务)置 SIG_IGN(SIGINT),开启后不再置,
+    # 前后行为不一致且影响信号语义。因此进入时保存原状态,本函数所有出口
+    # (含下面的 mkfifo 失败)必须恢复,保证窗口之外与程序启动时完全一致。
+    [[ $- == *m* ]] && monitor_was_on=1
     set -m
 
     shopt -s extglob
@@ -785,13 +824,13 @@ run_with_window() {
     # 不用 coproc 的原因：coproc 一结束 bash 会 unset 其数组并关掉读端 fd，
     # read 会撞上 "invalid file descriptor"；FIFO 读端由我们自己控制，EOF 语义干净。
     win_tmpdir=$(mktemp -d)
-    mkfifo "$win_tmpdir/fifo" || return 1
+    mkfifo "$win_tmpdir/fifo" || { (( monitor_was_on )) || set +m; rm -rf "$win_tmpdir"; return 1; }
     # 输入 FIFO:子命令的 stdin 从这里读,由主 shell 代读 tty 后转发进来。
     # 后台进程组自己读 tty 会被 SIGTTIN 整树停住(npm create vite 实测
     # bash/npm/node 全部 T 状态挂死);主 shell 是前台进程组,读 tty 合法。
     # <> 打开:读写两端同时就位永不阻塞,且窗口存活期间写端常开,
     # 子命令的交互式提示会等待输入而非读到 EOF 直接返回。
-    mkfifo "$win_tmpdir/in" || return 1
+    mkfifo "$win_tmpdir/in" || { (( monitor_was_on )) || set +m; rm -rf "$win_tmpdir"; return 1; }
     exec {in_fd}<>"$win_tmpdir/in"
     # pty 的窗口尺寸默认 0×0(stdin 非 tty 时 script 无从继承):clack 等 UI 库
     # 会按宽度 0 折行,每字符一行。命令前注入 stty 把真实终端尺寸写进 pty slave
@@ -845,14 +884,19 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
     cmd_pid=$!
     exec {win_fd}<"$win_tmpdir/fifo"   # 读端与子命令的写端 rendezvous，不会死锁
 
-    # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成"只杀子命令"：
+    # 备份原 INT trap（通常是 handle_ctrl_c），窗口期间换成窗口专属语义：
     # - 第一次 Ctrl+C：先按进程组整组 TERM(job control 下子命令在独立进程组),
-    #   再用 kill_tree 递归兜底(杀不在组内的散兵),写端全部关闭 → EOF → 窗口正常收尾;
-    # - 第二次 Ctrl+C：兜底恢复原 trap 并重新触发，走 handle_ctrl_c 整体退出。
+    #   再用 kill_tree 递归兜底(杀不在组内的散兵),写端全部关闭 → EOF → 窗口正常收尾,
+    #   本轮对话继续(命令结果按"已被用户中断"喂给模型);
+    # - 第二次 Ctrl+C：置 interrupted=2 + input_aborted,读循环立即强制收尾,
+    #   由 tool_run_and_parse 回滚未配对的 tool_calls 并返回 130 —— 放弃整轮
+    #   对话回到输入屏。程序本身绝不退出(历史 bug:旧实现第二次 Ctrl+C 走
+    #   kill -INT $$ 重新触发原 trap 意图"整体退出",违反 Ctrl+C 永不退出程序
+    #   的原则,且 handle_ctrl_c 早已不退出,只会留下脆弱的自杀式写法)。
     # trap 能在 0.1s 内执行的前提是下面 read 的 -t 轮询超时；无限阻塞的 read 会
     # 把 trap 推迟到 read 完成才执行（死锁），这里不存在。
     old_trap=$(trap -p INT)
-    trap 'if (( interrupted )); then eval "$old_trap"; kill -INT $$; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
+    trap 'if (( interrupted )); then interrupted=2; input_aborted=1; else interrupted=1; win_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " "); [[ -n "$win_pgid" ]] && kill -TERM -- "-$win_pgid" 2>/dev/null; kill_tree "$cmd_pid"; fi' INT
 
     # 关本地回显:用户按键由子命令的 pty 回显(行提示原样回、菜单 UI 重画)
     # 后经输出 FIFO 画到窗口,避免 tty 与 pty 双重回显;ISIG 仍开,Ctrl+C 不受影响
@@ -860,6 +904,9 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 
     last_data=${EPOCHREALTIME/./}
     while :; do
+        # 第二次 Ctrl+C:trap 已置 interrupted=2 + input_aborted,立即强制收尾
+        # (不等 INT_FORCE_TIMEOUT),返回后 tool_run_and_parse 放弃整轮对话
+        (( interrupted == 2 )) && { forced=1; break; }
         chunk=""
         # 按块读而非按行读：交互提示通常不带换行，按行 read 永远等不到 \n，
         # 用户只能面对空窗口；-N+超时能把无换行的残段也取出来实时展示
@@ -954,9 +1001,12 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
         fi
     done
 
-    # 恢复回显与原 INT trap，关闭两个 FIFO 端并清理临时目录
+    # 恢复回显与原 INT trap，关闭两个 FIFO 端并清理临时目录；
+    # 同时恢复 job control 原状态(见上方 set -m 注释:泄漏会让全脚本
+    # 异步子进程的信号语义永久偏离启动初始态)
     [[ -n "$tty_save" ]] && stty "$tty_save"
     [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
+    (( monitor_was_on )) || set +m
     eval "exec $win_fd<&-"
     eval "exec $in_fd<&-"
     rm -rf "$win_tmpdir"
@@ -2447,8 +2497,14 @@ tool_run_and_parse() {
                     # 窗口内执行命令；完整输出在 window_output，作为工具结果喂给 AI
                     # 先截断:超长输出保留头尾,砍掉重复性日志,控制上下文体积
                     run_with_window "$command"
-                    content=$(truncate_output "$window_output")
-                    sleep 2
+                    # 窗口内第二次 Ctrl+C 已置 input_aborted:跳过截断与等待,
+                    # 由下方检查回滚本轮并返回 130(历史:被打断仍 sleep 2,反馈慢)
+                    if (( input_aborted )); then
+                        content=""
+                    else
+                        content=$(truncate_output "$window_output")
+                        sleep 2
+                    fi
                 fi
             else
                 content="用户拒绝执行命令: $command"
@@ -2538,6 +2594,14 @@ ask_ai() {
     # 参数列表,会撞 ARG_MAX(与 jq --argjson 是同一病根)
     req_file=$(mktemp "${TMPDIR:-/tmp}/ct_req_XXXXXX")
     printf '%s' "$request_body" > "$req_file"
+    # SSE 输出走 FIFO + 显式 curl PID(而非进程替换):进程替换/后台任务这类
+    # 异步子进程在 job control 关闭时会被 bash 置 SIG_IGN(SIGINT),curl 保留
+    # 继承的 SIG_IGN,停滞时 Ctrl+C 打不死它(见 handle_ctrl_c 注释)。
+    # 显式 PID 让 handle_ctrl_c 能直接 TERM curl,EOF 一来到读循环就退出。
+    # FIFO 在函数级创建、所有退出路径统一清理(下方 rm -f "$req_file" 处)。
+    req_fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/ct_sse_XXXXXX")
+    mkfifo "$req_fifo_dir/fifo" || { rm -rf "$req_fifo_dir"; full_response="⚠️ 创建 SSE 管道失败"; return 1; }
+    curl_pid=""
 
     # 记录本轮请求开始前 thinking_response 的长度:若本轮完全空响应需要重试,
     # 重试前按此回滚上一尝试写进去的思考,防止思考被重复累积。
@@ -2561,13 +2625,42 @@ ask_ai() {
             sleep "$attempt"
         fi
 
+        # 启动本次尝试的 curl:显式后台任务 + 记录 PID(而非进程替换),让
+        # handle_ctrl_c 能直接 TERM 它(见其注释)。--connect-timeout 连接阶段
+        # 超时;--retry 连接失败自动重试 2 次,--retry-max-time 限制重试总窗口:
+        # 连接拒绝等快速失败(毫秒级)可正常重试,而流式停滞中止要等满
+        # SSE_STALL_TIMEOUT,远超窗口,不再被 --retry 放大成多轮停滞(历史实测
+        # 3 次重试把 5s 停滞拖成 36s);-sS 静默进度条但保留错误输出(传输层
+        # 断连时报 "curl: (52)..." 等,由上方 else 分支记录进 api_error,否则
+        # 错误被吞、误报成"无响应");--speed-time/--speed-limit 流式停滞兜底
+        # ——连接建立后若平均速率低于 1 字节/秒持续 SSE_STALL_TIMEOUT 秒,curl
+        # 自行断开报 "curl: (28)"(进入 api_error,可见报错),防止无人干预时
+        # 服务端静默挂死、read 无限 pending。
+        curl -sSN --connect-timeout 15 --retry 2 --retry-connrefused --retry-max-time 15 \
+            --speed-time "$SSE_STALL_TIMEOUT" --speed-limit 1 \
+            "$BASE_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+            -H "api-key: $DEEPSEEK_API_KEY" \
+            --data-binary @"$req_file" \
+            > "$req_fifo_dir/fifo" 2>&1 &
+        curl_pid=$!
+        # 竞态兜底:curl 启动与 $! 捕获之间的瞬间 Ctrl+C 可能已置 ai_abort,
+        # 而 trap 里 curl_pid 仍是空/旧值,这里补一刀(重复 TERM 无害)
+        (( ai_abort )) && kill -TERM "$curl_pid" 2>/dev/null
+        # 每个尝试独立重开 FIFO 读端:上一次尝试结束时 fd 已读到 EOF,
+        # 复用同一 fd 会立即返回 EOF,导致假"空响应"误重试。
+        # 必须在 while 之前完成:done 的重定向在循环开始时求值,若把 exec
+        # 放进循环体,req_fd 求值时还是空、循环直接报 Bad file descriptor
+        # (历史 bug,此顺序不可颠倒)
+        exec {req_fd}<"$req_fifo_dir/fifo"
         # read 只对"以换行结尾的完整行"返回 0。DeepSeek 的整段 JSON 错误响应
         # (400 等)末尾没有换行符:若只写 while read,EOF 残段让 read 返回非零,
         # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
         # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
         while IFS= read -r line || [[ -n "$line" ]]; do
-        # Ctrl+C 打断:立即退出读循环(curl 同进程组一并收到 SIGINT 会自行
-        # 终止;此检查兜底 read 被中断后仍带着残留行进入循环体的情况)
+        # Ctrl+C 打断:立即退出读循环(handle_ctrl_c 已 TERM 掉 curl → EOF;
+        # 此检查兜底 read 被中断后仍带着残留行进入循环体的情况)
         (( ai_abort )) && break
         if [[ "$line" =~ ^data:\  ]]; then
             json="${line#data: }"
@@ -2644,19 +2737,10 @@ ask_ai() {
                 api_error+="$line"$'\n'
             fi
         fi
-        done < <(
-            # --connect-timeout 连接阶段超时;--retry 连接失败自动重试 2 次
-            # (仅请求未发送时重试,不重复消费 token,不会破坏流式会话)
-            # -sS:静默进度条但保留错误输出(传输层断连时报 "curl: (52)..." 等),
-            # 由上方 else 分支记录进 api_error,否则错误被吞、误报成"无响应"。
-            curl -sSN --connect-timeout 15 --retry 2 --retry-connrefused \
-                "$BASE_URL" \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-                -H "api-key: $DEEPSEEK_API_KEY" \
-                --data-binary @"$req_file"\
-            2>&1
-        )
+        done <&"$req_fd"
+        # 本尝试结束:立即清 curl_pid(缩小 trap 误杀窗口)并关闭读端
+        curl_pid=""
+        [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-" 2>/dev/null
         # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
         # 完全零产出才进入下一尝试(退避重发);被 Ctrl+C 打断也绝不重试
         [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
@@ -2667,6 +2751,9 @@ ask_ai() {
     [[ "$is_lock_screen" == 1 ]] && stream_box_close
     ai_active=0
     rm -f "$req_file"
+    # 统一清理 SSE FIFO(所有退出路径都在此之后,含 Ctrl+C 打断的 return 130)
+    [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-" 2>/dev/null
+    [[ -n "$req_fifo_dir" ]] && rm -rf "$req_fifo_dir"
 
     # Ctrl+C 打断:丢弃本轮全部产出(正文/思考/工具调用),回滚本请求期间
     # 累积进 thinking_response 的思考(此前已渲染部分保留),返回 130 供
@@ -2880,6 +2967,35 @@ detect_os() {
     else
         echo "linux"
     fi
+}
+
+# 跨平台剪切板读取:
+#   macOS 用系统自带 pbpaste;
+#   WSL2  通过 interop 调 powershell.exe 读 Windows 侧剪切板(Linux 侧通常为空,
+#         且输出带 \r\n,统一剥 \r;显式置 UTF-8 输出编码防中文乱码);
+#   Linux 优先 Wayland(wl-paste),再 X11(xclip),最后 xsel,取第一个非空结果。
+# 全部失败/读空都返回空串,由调用方决定降级行为(如落到交互输入)。
+get_clipboard() {
+    local out=""
+    case "$(detect_os)" in
+        macos)
+            out=$(pbpaste 2>/dev/null)
+            ;;
+        wsl)
+            if command -v powershell.exe >/dev/null 2>&1; then
+                out=$(powershell.exe -NoProfile -Command \
+                    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard" 2>/dev/null | tr -d '\r')
+            fi
+            ;;
+        linux)
+            if [[ -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-paste >/dev/null 2>&1; then
+                out=$(wl-paste --no-newline 2>/dev/null)
+            fi
+            [[ -z "$out" ]] && command -v xclip >/dev/null 2>&1 && out=$(xclip -selection clipboard -o 2>/dev/null)
+            [[ -z "$out" ]] && command -v xsel >/dev/null 2>&1 && out=$(xsel --clipboard --output 2>/dev/null)
+            ;;
+    esac
+    printf '%s' "$out"
 }
 
 # WSL 下选择文件：优先 WSLg 的 zenity，否则用 Windows 原生对话框（PowerShell + WinForms），
@@ -3232,7 +3348,7 @@ parse_options "$@"
 first_time=1
 if [[ -n "$content" || ${#input_images[@]} -gt 0 ]]; then
     printContent
-    # 快速模式(-tr/-to):单轮对话后直接退出
+    # 快速模式(-to/-st):单轮对话后直接退出
     if (( quick_mode )); then
         exit 0
     fi
@@ -3254,6 +3370,10 @@ while true; do
     [[ -z "$content" && ${#input_images[@]} -eq 0 ]] && continue
 
     printContent
+
+    # 单轮模式(-st/-to):执行完一轮立即退出(被打断也算执行完一轮),
+    # 不进入下一轮输入;标题生成对单轮无用(历史也不保存),直接跳过
+    (( quick_mode )) && exit 0
 
     if (( round_aborted )); then
         round_aborted=0
