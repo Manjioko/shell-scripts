@@ -1153,13 +1153,30 @@ tools() {
             "type": "function",
             "function": {
                 "name": "web_fetch",
-                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。浏览网页、宽泛的网页搜索(把搜索引擎结果页 URL 传给本工具)时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
+                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。当 mimo_web_fetch 工具搜索失败或需要抓取特定网页时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "url": {"type": "string", "description": "完整网页地址,必须以 http:// 或 https:// 开头,如 https://www.google.com/search?q=xxx"}
                     },
                     "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "mimo_web_fetch",
+                "description": "优先使用的联网搜索工具。通过小米 mimo 模型的联网搜索能力获取实时网络信息。适用于新闻、天气、商品价格等需要实时数据的搜索。如果搜索失败，可回退到 web_fetch 工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string", 
+                            "description": "搜索关键词或问题，如'武汉明天天气'、'iPhone 16 价格'"
+                        }
+                    },
+                    "required": ["query"]
                 }
             }
         },
@@ -1966,6 +1983,77 @@ tool_web_fetch() {
     printf ' 已抓取 %s(%s)\n' "$url" "$renderer"
 }
 
+tool_mimo_web_fetch() {
+    # 注意:content 绝不能声明为 local——工具结果靠全局 content 传回
+    # tool_run_and_parse 的 add_message(历史 bug:local content 导致工具结果
+    # 丢失,模型拿到的"搜索结果"是上一条用户消息,反复重调工具迟迟不回提示符)
+    local query request_body resp
+    query=$(jq -r '.query // empty' <<< "$fn_args")
+    [[ -z "$query" ]] && { content="错误:查询内容不能为空"; printf ' ⛔ 空查询\n'; return 0; }
+    
+    # 构造请求体（复用 overview 的模式）。消息经 jq --arg 构造,query 里的
+    # 引号/反斜杠不会破坏 JSON(旧实现裸拼字符串,含引号即 JSON 非法)
+    local tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    jq -n --arg q "$query" '[{role: "user", content: $q}]' > "$tmpf"
+    
+    request_body=$(jq -n --slurpfile msgs "$tmpf" --arg model "$flash_model" '{
+        model: $model,
+        messages: $msgs[0],
+        tools: [{
+            type: "web_search",
+            max_keyword: 3,
+            force_search: true,
+            limit: 5
+        }],
+        thinking: {type: "disabled"},
+        reasoning_effort: "high",
+        stream: false
+    }')
+    
+    printf '%s' "$request_body" > "$tmpf"
+    resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+        -H "api-key: $DEEPSEEK_API_KEY" \
+        --data-binary @"$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    
+    # 检查响应是否为空
+    if [[ -z "$resp" ]]; then
+        content="错误:mimo 联网搜索失败，无响应。建议回退到 web_fetch 工具。"
+        printf ' ⛔ 无响应\n'
+        return 0
+    fi
+    
+    # 解析响应
+    local message_content=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    local tool_usage=$(printf '%s' "$resp" | jq -r '.usage.web_search_usage.tool_usage // 0' 2>/dev/null)
+    
+    if [[ -z "$message_content" ]]; then
+        content="错误:mimo 联网搜索失败，无搜索结果。建议回退到 web_fetch 工具。"
+        printf ' ⛔ 搜索失败\n'
+        return 0
+    fi
+    
+    # 提取搜索来源（annotations）
+    local sources=""
+    local annotations_count=$(printf '%s' "$resp" | jq '.choices[0].message.annotations | length' 2>/dev/null)
+    if (( annotations_count > 0 )); then
+        sources=$(printf '%s' "$resp" | jq -r '.choices[0].message.annotations[] | 
+            "• " + .title + " (" + .site_name + ")\n  " + .url' 2>/dev/null)
+        sources=$'\n\n📚 搜索来源:\n'"$sources"
+    fi
+    
+    # 格式化输出(用 $'...' 生成真实换行:双引号里 "\n" 只是字面反斜杠+n,
+    # 会把搜索结果糊成一行)
+    content="🔍 搜索: \"$query\""$'\n\n'"$message_content$sources"
+    if (( tool_usage > 0 )); then
+        content+=$'\n\n📊 搜索统计: 使用了 '"$tool_usage"$' 个搜索资源'
+    fi
+    
+    printf ' 已搜索: %s\n' "$query"
+}
+
 # ========== 图片理解(多模态,转述架构) ==========
 # 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
 # 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉接口
@@ -2519,7 +2607,7 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill|mimo_web_fetch) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
         fi
@@ -2740,7 +2828,12 @@ ask_ai() {
         done <&"$req_fd"
         # 本尝试结束:立即清 curl_pid(缩小 trap 误杀窗口)并关闭读端
         curl_pid=""
-        [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-" 2>/dev/null
+        # 注意:绝不能写成 eval "exec N<&-" 2>/dev/null——exec 仅带重定向时
+        # 会把当前生效的全部重定向永久化,eval 的 2>/dev/null 会被固化,
+        # fd2 从此指向 /dev/null(历史 bug:read -e 的提示符画在 stderr 上,
+        # 一轮回答后提示符【>】静默消失,输入却正常)。此 fd 必然已打开,
+        # 关闭不会报错,无需静默。
+        [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-"
         # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
         # 完全零产出才进入下一尝试(退避重发);被 Ctrl+C 打断也绝不重试
         [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
@@ -2752,7 +2845,8 @@ ask_ai() {
     ai_active=0
     rm -f "$req_file"
     # 统一清理 SSE FIFO(所有退出路径都在此之后,含 Ctrl+C 打断的 return 130)
-    [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-" 2>/dev/null
+    # (2>/dev/null 陷阱同上,禁止加在带 exec 的 eval 上)
+    [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-"
     [[ -n "$req_fifo_dir" ]] && rm -rf "$req_fifo_dir"
 
     # Ctrl+C 打断:丢弃本轮全部产出(正文/思考/工具调用),回滚本请求期间
@@ -3097,6 +3191,11 @@ read_file() {
 # 读取用户输入的多行内容，支持续行、粘贴、文件导入等
 normal_line() {
     local line rc
+    # 兜底:read -e 的提示符由 readline 画在 stderr 上,fd2 一旦不是 tty
+    # (历史 bug:eval "exec N<&-" 2>/dev/null 会把 2>/dev/null 固化到 fd2),
+    # 提示符静默消失而输入正常,表现为"一轮回答后迟迟不显示【>】"。
+    # 每次进入读取前检测:fd0 是 tty 而 fd2 不是时,把 fd2 对齐回 tty。
+    [[ -t 0 && ! -t 2 ]] && exec 2>&0
     # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
     # 会话全部行(而非当前行),屏幕不丢前轮内容
     local paste_lines=""
@@ -3187,13 +3286,20 @@ normal_line() {
                 printf '\033[u\033[J'
                 printf '%s%s' "$prompt" "$paste_lines"
                 line+=$'\n'"$rest"
+                input+="$line"$'\n'
+                prompt=".. "
+                cmd_ok=0
+                continue
             fi
-            # 单行粘贴带尾换行时 rest 剥边后为空:内容已由 readline 正确
-            # 显示,无需重绘,直接续行
+            # 排干到的只有换行字节:read -e 返回前有 ~1s 延迟(实测可达 2s+),
+            # 期间用户按下的提交回车(统一输入模型:空行回车=发送)会落进
+            # 队列被这里捞到。旧实现把它当粘贴残渣丢弃、只续行,提交信号
+            # 被吞,脚本停在 .. 续行态、迟迟回不到【>】(实测复现)。
+            # 一律按提交处理。代价:单行粘贴的尾随换行也走此分支、会直接
+            # 发送——与"打字+回车"字节不可区分(历史 #21 注释同结论),
+            # 两害相权,吞掉提交回车比粘贴自动发送更影响使用。
             input+="$line"$'\n'
-            prompt=".. "
-            cmd_ok=0
-            continue
+            break
         fi
         if [[ "$line" == "@" ]]; then
             read_file
