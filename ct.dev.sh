@@ -3220,9 +3220,12 @@ normal_line() {
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
         # 保存光标位置:粘贴重绘锚点。粘贴会话进行中不重存,
-        # 让 \033[u 始终回到会话首行起点(见下方 \033[u\033[J)
+        # 让 \0338 始终回到会话首行起点(见下方 \0338\033[J)。
+        # 用 DEC 保存/恢复光标(ESC 7 / ESC 8)而非 ANSI 的 CSI s/u:
+        # ANSI 版(\033[s/\033[u)在部分终端(如 Ghostty)不可靠,恢复位置
+        # 错乱会让 readline 回显的首行残留在屏幕上,造成粘贴首行重影。
         if [[ -z "$paste_lines" ]]; then
-            printf '\033[s'
+            printf '\0337'
         fi
         IFS= read -e -r -p "$prompt" line
         rc=$?
@@ -3282,9 +3285,12 @@ normal_line() {
                 # 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显输入
                 # 队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
                 # 会话累积的全部行,保证一行不多一行不少。
-                paste_lines+="$line"$'\n'"$rest"$'\n'
-                printf '\033[u\033[J'
-                printf '%s%s' "$prompt" "$paste_lines"
+                # paste_lines 是"整段输入的显示缓冲"(每行带各自的提示符):
+                # 首行带当前提示符,粘贴续行不带提示符;手打的行也同步追加,
+                # 这样后续再粘贴时重打整段不会把手打行吃掉。
+                paste_lines+="$prompt$line"$'\n'"$rest"$'\n'
+                printf '\0338\033[J'
+                printf '%s' "$paste_lines"
                 line+=$'\n'"$rest"
                 input+="$line"$'\n'
                 prompt=".. "
@@ -3318,6 +3324,7 @@ normal_line() {
             # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
             # 避免不同 bash 版本对 pattern 中反斜杠转义的解析差异导致删多了。
             line="${line%?}"
+            paste_lines+="$prompt$line"$'\n'
             input+="$line"$'\n'
             prompt=".. "
             cmd_ok=0
@@ -3328,6 +3335,7 @@ normal_line() {
         # 提交整段消息(粘贴后补输多行文本的标准姿势)
         if (( !cmd_ok )); then
             [[ -z "$line" ]] && break
+            paste_lines+="$prompt$line"$'\n'
             input+="$line"$'\n'
             prompt=".. "
             continue
@@ -3428,6 +3436,7 @@ normal_line() {
         # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
         # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
         [[ -z "$line" ]] && break
+        paste_lines+="$prompt$line"$'\n'
         input+="$line"$'\n'
         prompt=".. "
         cmd_ok=0
