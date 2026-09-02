@@ -2504,13 +2504,16 @@ tool_run_and_parse() {
         # 必须回滚,否则下一轮请求会因孤儿 tool_calls 报 400
         msgs_before_call=$messages
         # assistant 的 tool_calls 消息:并行调用拆成多条 assistant 消息时,
-        # DeepSeek 要求每一条都回传 reasoning_content(实测缺一即 400),
-        # 所以每条都带同一轮的思考原文;正文只在第一条。
+        # DeepSeek 要求每条都回传 reasoning_content 字段(缺字段会 400),但
+        # 绝不能把同一份思考原文复制进相邻的多条 assistant 消息——第三方托管
+        # 的 DeepSeek/MiMo 会把自己"连续复读同一段思考"当成当前行为模式,
+        # 随后每一轮都原样复读上一段 reasoning_content(死循环)。因此只有第一条
+        # 带本轮思考原文,其余条带空串(字段仍在,既不 400 也不触发复读);正文只在第一条。
         if (( first_call )); then
             add_message "$full_response" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
             first_call=0
         else
-            add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args" "$raw_reasoning"
+            add_message "" "assistant" "$fn_id" "$fn_name" "$fn_args" ""
         fi
 
         # 执行前再查一次:Ctrl+C 可能在工具横幅/上一条工具执行期间到来,
