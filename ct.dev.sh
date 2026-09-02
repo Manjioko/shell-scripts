@@ -3433,6 +3433,14 @@ normal_line() {
             break
         fi
 
+        # 兜底:拦截以 - 开头的未知命令(含前导空格),避免误当正文提交给 AI
+        local trimmed="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$trimmed" == "-"* ]]; then
+            echo "⚠️  未知命令: ${trimmed%% *}"
+            echo "💡 使用 -h 查看可用命令"
+            continue
+        fi
+
         # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
         # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
         [[ -z "$line" ]] && break
