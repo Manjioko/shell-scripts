@@ -349,15 +349,19 @@ stty opost onlcr 2>/dev/null
 
 render_markdown() {
     local text="$1"
+    local term_width
+    # 动态获取终端宽度:tput 失败则 stty,再失败兜底 80
+    # 每次调用都获取,适配用户中途调整窗口大小
+    term_width=$(tput cols || echo 80)
     # 渲染前复位 OPOST+ONLCR(兜底):glow/mdcat/echo 的 \n 必须被翻译成回车+换行
     stty opost onlcr 2>/dev/null
     # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
     if command -v glow >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | glow -
+        echo "$text" | sed 's/\\$/\\\\/' | glow -w "$term_width"
     elif command -v mdcat >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | mdcat -
+        echo "$text" | sed 's/\\$/\\\\/' | mdcat --columns "$term_width"
     else
         echo "$text"
     fi
