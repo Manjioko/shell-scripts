@@ -359,7 +359,7 @@ render_markdown() {
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
     # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
     if command -v glow >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | glow -w "$term_width"
+        echo "$text" | sed 's/\\$/\\\\/' | glow -w "$((term_width - 4))"
     elif command -v mdcat >/dev/null 2>&1; then
         echo "$text" | sed 's/\\$/\\\\/' | mdcat --columns "$term_width"
     else
