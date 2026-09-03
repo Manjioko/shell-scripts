@@ -3292,12 +3292,12 @@ normal_line() {
     # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
     # 补输)即置 0,此后一切输入(包括 -q/-c/-h 等形似命令的行)都按正文处理
     local cmd_ok=1
-    local prompt
+    # local prompt
     if [[ "$1" == 0 ]]; then
-        prompt="..  "
+        # prompt="..  "
         cmd_ok=0
-    else
-        prompt="> "
+    # else
+        # prompt="> "
     fi
     # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
     input_aborted=0
@@ -3316,7 +3316,7 @@ normal_line() {
         if (( wsl_repaint )) && [[ -z "$paste_lines" ]]; then
             printf '\0337'
         fi
-        IFS= read -e -r -p "$prompt" line
+        IFS= read -e -r -p ": " line
         rc=$?
         stty isig intr '^C' 2>/dev/null
         (( rc != 0 )) && break
@@ -3339,7 +3339,7 @@ normal_line() {
             input=""
             input_images=()
             paste_lines=""
-            prompt="> "
+            # prompt="> "
             cmd_ok=1
             # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
             stty raw
@@ -3373,7 +3373,7 @@ normal_line() {
                 # paste_lines 是"整段输入的显示缓冲"(每行带各自的提示符):
                 # 首行带当前提示符,粘贴续行不带提示符;手打的行也同步追加,
                 # WSL 重绘时重打整段不会把手打行吃掉。
-                paste_lines+="$prompt$line"$'\n'"$rest"$'\n'
+                paste_lines+="$line"$'\n'"$rest"$'\n'
                 if (( wsl_repaint )); then
                     # WSL:双层显示(readline 首行 + pty 补回显的剩余行),
                     # 回锚点清除到屏底后重打会话全部行,一行不多一行不少
@@ -3387,7 +3387,7 @@ normal_line() {
                 fi
                 line+=$'\n'"$rest"
                 input+="$line"$'\n'
-                prompt=".. "
+                # prompt=".. "
                 cmd_ok=0
                 continue
             fi
@@ -3418,9 +3418,9 @@ normal_line() {
             # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
             # 避免不同 bash 版本对 pattern 中反斜杠转义的解析差异导致删多了。
             line="${line%?}"
-            paste_lines+="$prompt$line"$'\n'
+            paste_lines+="$line"$'\n'
             input+="$line"$'\n'
-            prompt=".. "
+            # prompt=".. "
             cmd_ok=0
             continue
         fi
@@ -3429,9 +3429,9 @@ normal_line() {
         # 提交整段消息(粘贴后补输多行文本的标准姿势)
         if (( !cmd_ok )); then
             [[ -z "$line" ]] && break
-            paste_lines+="$prompt$line"$'\n'
+            paste_lines+="$line"$'\n'
             input+="$line"$'\n'
-            prompt=".. "
+            # prompt=".. "
             continue
         fi
         if [[ "$line" == "-q" ]]; then
@@ -3538,9 +3538,9 @@ normal_line() {
         # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
         # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
         [[ -z "$line" ]] && break
-        paste_lines+="$prompt$line"$'\n'
+        paste_lines+="$line"$'\n'
         input+="$line"$'\n'
-        prompt=".. "
+        # prompt=".. "
         cmd_ok=0
         continue
     done
