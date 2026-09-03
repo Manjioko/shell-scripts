@@ -6,12 +6,18 @@
 # https://api.deepseek.com/chat/completions
 BASE_URL="https://api.xiaomimimo.com/v1/chat/completions"
 # api key
-DEEPSEEK_API_KEY="sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai"
+API_KEY="sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai"
 #"deepseek-v4-flash"
 #"deepseek-v4-pro"
 flash_model="mimo-v2.5"
 pro_model="mimo-v2.5-pro"
 # ===============================👆👆========================
+
+# 原生联网搜索(web_search 工具类型)是小米 mimo 接口私有能力:非 mimo
+# 接口时不注册 mimo_web_fetch 工具(见 tools 函数尾部过滤),模型自然
+# 回退通用的 web_fetch——切换模型/接口时零改动,也不会产生必然失败的工具调用
+WEB_SEARCH_NATIVE=0
+[[ "$BASE_URL" == *xiaomimimo* ]] && WEB_SEARCH_NATIVE=1
 
 
 # 保存当前对话的标题，默认空字符串，首次保存时由模型生成
@@ -92,9 +98,12 @@ inject_skills() {
 messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
 inject_skills
 
-#辅助权限判断助手消息
-# 
-auth_message=$(jq -n '[{role: "system", content: "你是一个bash命令判断专家，用户给你一个bash命令，你会根据上下文/bash命令本身，判断这个bash命令是否存在危险性，判断标准是：涉及写操作/bash命令存在严重的威胁用户电脑安全问题/可能存在让用户丢失数据的bash命令/存在模糊的，可能的攻击命令。如果存在以上这些命令，你总是回复N,否则，你会回复Y。注意，你不会调用任何bash命令，只是做判断，并且只能回复【Y/N】,不会回复多余文字。同时存在白名单机制:【1. /tmp/*】-> 遇到读写白名单内的目录/文件，应该放行(回复Y)。"}]')
+#辅助权限判断助手消息:按"能力分级"而非"读写二分"判定——只读/工作目录内写/
+# 常规开发流程放行(Y),提权/越界写删/不可逆破坏/管道执行远程脚本才要
+# 人工确认(N)。旧版"涉及写操作即 N"把 mkdir/npm install/git commit 等日常
+# 命令全拦下,误判率极高。注入工作目录让"越界"有具体坐标;拿不准回 N
+# (N 只是弹人工确认,代价一次按键,漏放行的代价远高于误拦截)。
+auth_message=$(jq -n --arg workdir "$(pwd -P)" '[{role: "system", content: ("你是 bash 命令安全审查器。用户每次给你一个 bash 命令,你只回复单个字母 Y(放行)或 N(需人工确认),禁止输出任何其他文字。当前工作目录: " + $workdir + "。回复 Y 的情形:1. 只读/查询:ls、cat、head、tail、grep、find、ps、df、stat、file、which、wc、diff、git status/log/diff/show/branch、curl/wget 仅下载或调用 API;2. 工作目录及其子目录内的写操作:创建/修改/移动/删除项目文件、mkdir、重定向、sed -i、git add/commit/checkout/stash;3. /tmp 与 $TMPDIR 下的读写;4. 常规开发流程:编译/构建/测试/lint/运行项目脚本、npm/pip/cargo 等项目级依赖安装、docker build、启动开发服务。回复 N 的情形:1. sudo/doas/su 提权;2. 工作目录之外的写入或删除(尤其 $HOME 下配置文件、/etc、/usr、/System 等系统路径);3. 大范围或不可逆破坏:rm -rf 指向工作目录外、dd、mkfs、diskutil、批量 chmod/chown;4. git push --force、git reset --hard 远端、改写已发布历史;5. 系统级全局安装/卸载(brew、apt、npm -g、无虚拟环境的 pip);6. 下载并直接执行:curl|bash、wget|sh 等管道执行远程脚本;7. 杀非本项目进程、shutdown/reboot、修改 shell 配置(~/.bashrc、~/.zshrc 等);8. 读取或外发密钥/密码等敏感文件。拿不准时一律回复 N。")}]')
 
 
 # 是否思考,默认关闭
@@ -1075,7 +1084,8 @@ tools() {
     #   找文件/找符号 → list_dir / grep
     #   编译/测试/安装/git → run_shell_command
     # 所有文件类工具的路径都强制限制在启动目录(WORK_ROOT)内,越界由代码层拒绝。
-    printf '%s' '[
+    local all
+    all='[
         {
             "type": "function",
             "function": {
@@ -1177,7 +1187,7 @@ tools() {
                     "properties": {
                         "query": {
                             "type": "string", 
-                            "description": "搜索关键词或问题，如'武汉明天天气'、'iPhone 16 价格'"
+                            "description": "搜索关键词或问题，如「武汉明天天气」「iPhone 16 价格」"
                         }
                     },
                     "required": ["query"]
@@ -1234,6 +1244,12 @@ tools() {
             }
         }
     ]'
+    if (( WEB_SEARCH_NATIVE )); then
+        printf '%s' "$all"
+    else
+        # 非 mimo 接口:剔除 mimo_web_fetch,模型自然回退 web_fetch
+        printf '%s' "$all" | jq -c 'map(select(.function.name != "mimo_web_fetch"))'
+    fi
 }
 
 # 锁定屏幕，进入原始模式，隐藏光标，切换到交替屏幕缓冲区
@@ -1470,8 +1486,8 @@ compact_messages() {
     printf '%s' "$request_body" > "$compact_file"
     summary=$(curl -s --max-time 120 "$BASE_URL" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-        -H "api-key: $DEEPSEEK_API_KEY" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "api-key: $API_KEY" \
         --data-binary @"$compact_file" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
     rm -f "$compact_file"
 
@@ -1638,11 +1654,20 @@ auth_add_message() {
 # 工具调用处理器已删除:并行调用按 index 解析已内联进 ask_ai 的流式循环,
 # 这里不再需要单工具解析(旧实现只取 .[0],会把并行调用的参数粘合导致 null 错误)。
 
+# 权限判断:同步短超时请求(判断只需一个 Y/N 字符,流式无价值)。
+# 历史问题:走 ask_ai 的 SSE 链路时,服务端停滞要等满 SSE_STALL_TIMEOUT
+# (2 分钟)且全程无提示;失败后 full_response 是报错文本(非 Y/N),
+# 调用方误当"用户拒绝"回传给模型。现在:connect 10s + 总 30s,
+# 最多 2 次尝试,硬上限约 1 分钟;结果写全局 auth_verdict(Y/N)。
+# 返回值:0=拿到判定  2=判断服务不可用(调用方降级人工确认)
+#         130=被 Ctrl+C 打断(同步 curl 与主 shell 同前台进程组,
+#             SIGINT 直接杀掉 curl,trap 置 input_aborted)
 auth_think() {
     local cmd=$1
-    local request_body rc auth_file
+    local request_body resp verdict attempt auth_file
+    auth_verdict=""
     auth_add_message "$cmd"
-    # auth 消息本身极小,几乎不可能撞 ARG_MAX;但为与主链路一致,同样走临时文件
+    # auth 消息极小,几乎不可能撞 ARG_MAX;但与主链路一致,同样走临时文件
     auth_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
     printf '%s' "$auth_message" > "$auth_file"
     request_body=$(jq -n \
@@ -1653,22 +1678,36 @@ auth_think() {
             messages: $msgs[0],
             thinking: {type: "disabled"},
             reasoning_effort: "high",
-            stream: true,
-            stream_options: {include_usage: true}
+            stream: false
         }')
+    printf '%s' "$request_body" > "$auth_file"
+    printf ' \033[2m🛡 权限判断中…\033[0m'
+    for attempt in 1 2; do
+        resp=$(curl -s --connect-timeout 10 --max-time 30 "$BASE_URL" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "api-key: $API_KEY" \
+            --data-binary @"$auth_file" 2>/dev/null)
+        if (( input_aborted )); then
+            rm -f "$auth_file"
+            printf '\r\033[2K'
+            return 130
+        fi
+        verdict=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+        [[ -n "$verdict" ]] && break
+        sleep 1
+    done
     rm -f "$auth_file"
-    # 结果通过全局 full_response 传回（ask_ai 会重置它），这里不再 printf。
-    # 本函数绝不能放进 $(...) 里调用：ask_ai 的流式输出会塞满命令替换的
-    # 管道缓冲（16K~64K），写端阻塞而父 shell 又在等它结束，直接死锁。
-    # 第三个参数 0:auth 消息极小,不把它的 usage 记入 last_prompt_tokens
-    ask_ai "$request_body" 0 0
-    rc=$?
-    # Ctrl+C 打断 auth 判断流:直接向上传播 130,不写空 assistant 消息
-    (( rc == 130 )) && return 130
-
-    sleep 0.5
-
-    auth_add_message "$full_response" "assistant"
+    printf '\r\033[2K'
+    [[ -z "$verdict" ]] && return 2
+    # 只认首字符;模型偶发多话/非常规输出一律按 N(人工确认)处理
+    verdict=$(printf '%s' "$verdict" | tr -d '[:space:]')
+    case "$verdict" in
+        Y*|y*) auth_verdict="Y" ;;
+        *)     auth_verdict="N" ;;
+    esac
+    auth_add_message "$auth_verdict" "assistant"
+    return 0
 }
 # 路径沙箱:解析工具传入的路径为物理绝对路径,并强制落在 WORK_ROOT 内。
 # 相对路径基于工作目录;.. 逃逸、绝对路径指向外部、symlink 指向外部都会被拒绝。
@@ -1734,8 +1773,8 @@ is_granted() {
 # 业界同款:Claude Code 的权限确认模式(越界访问弹确认,由用户裁决)。
 ask_path_grant() {
     local p="$1" answer rc
-    printf '\033[2K\033[1;41;37mAI 请求访问工作目录外文件,是否放行?(y/n) \033[0m\n'
-    printf '  路径: %s\n' "$p"
+    printf '\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n' "$p"
+    printf ' \033[1;31m是否放行?(y/n): \033[0m'
     # 与 shell 工具危险命令确认同款轮询读取:Ctrl+C 当作拒绝
     stty -echoctl 2>/dev/null
     answer=""
@@ -2015,11 +2054,15 @@ tool_mimo_web_fetch() {
     }')
     
     printf '%s' "$request_body" > "$tmpf"
+    # 同步搜索最长 60s:静默期间给可见反馈(历史问题:全程无提示,
+    # 分不清是搜索慢还是接口已死)
+    printf ' \033[2m🔍 联网搜索中…(最长 60 秒,Ctrl+C 可中断)\033[0m'
     resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-        -H "api-key: $DEEPSEEK_API_KEY" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "api-key: $API_KEY" \
         --data-binary @"$tmpf" 2>/dev/null)
+    printf '\r\033[2K'
     rm -f "$tmpf"
     
     # 检查响应是否为空
@@ -2264,8 +2307,8 @@ describe_images() {
     # --data-binary @file:请求体从文件读,绕开命令行参数长度限制
     resp=$(curl -s --connect-timeout 15 --max-time 180 "$BASE_URL" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-        -H "api-key: $DEEPSEEK_API_KEY" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "api-key: $API_KEY" \
         --data-binary @"$req_file" 2>/dev/null)
 
     describe_result=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
@@ -2394,8 +2437,8 @@ skill_save() {
         printf '%s' "$request_body" > "$tmpf"
         resp=$(curl -s --connect-timeout 15 --max-time 120 "$BASE_URL" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -H "api-key: $DEEPSEEK_API_KEY" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "api-key: $API_KEY" \
             --data-binary @"$tmpf" 2>/dev/null)
         rm -f "$tmpf"
         # 优先取工具调用参数(API 保证合法 JSON);没调工具则记下模型文本,
@@ -2461,6 +2504,13 @@ skill_save() {
     echo "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
     # 立即生效:重新注入最新技能列表
     inject_skills
+}
+
+# 工具调用横幅:前景色方案(dim 圆点 + 粗体青色名称 + 默认色内容),
+# 替代旧的整块黄底反色——长命令/长参数会刷出大色块,与 dim 边框的
+# 窗口/流箱视觉语言冲突。醍目样式(粗体红色)只留给用户决策提示。
+tool_banner() {
+    printf ' \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n' "$1" "$2"
 }
 
 # 工具调用执行器：串行执行收集到的所有并行调用(DeepSeek 一次可返回多个
@@ -2535,7 +2585,7 @@ tool_run_and_parse() {
             fi
             # 命令只作为 %s 参数传入,绝不能拼进 format:命令里含 % 时
             # (如 curl -w "%{http_code}"),printf 会把 %{ 当格式符报错
-            printf ' \033[43;30;1m  工具调用：%s  \033[0m\n' "$command"
+            tool_banner "shell" "$command"
             echo
 
             # 冲掉流式回复期间积压在 tty 队列的字节（粘贴/误触），
@@ -2543,22 +2593,28 @@ tool_run_and_parse() {
             local _junk=""
             while IFS= read -r -t 0.01 -N 1000000 _junk; [[ -n "$_junk" ]]; do _junk=""; done
 
-            # 不能写 ai_auth=$(auth_think ...)：命令替换会捕获 auth_think 的
-            # 全部 stdout，流式输出一旦超过管道缓冲就死锁。改为直接调用，
-            # 结果从全局变量 full_response 取。
-            # 重入安全:收集区已在函数开头清空,auth 内部 ask_ai 结束不会误触发本函数。
+            # auth_think 同步执行,结果经全局 auth_verdict 传回(Y/N);
+            # 返回 2=判断服务不可用 → 降级人工确认。绝不伪造"用户拒绝":
+            # 历史 bug:失败时 full_response 是报错文本(非 Y/N),不弹确认
+            # 提示就静默落到 else 分支,给模型回传假的"用户拒绝执行"。
             auth_think "$command"
             rc=$?
             if (( rc == 130 )); then
-                # 用户在权限判断流中被 Ctrl+C 打断:回滚本条未配对的
+                # 用户在权限判断期间 Ctrl+C:回滚本条未配对的
                 # assistant(tool_calls),不执行该命令,向上传播 130
                 messages=$msgs_before_call
                 return 130
             fi
-            ai_auth=$(echo -e "$full_response")
+            if (( rc == 2 )); then
+                printf ' ⚠️  AI 权限判断不可用,降级人工确认\n'
+                ai_auth="N"
+            else
+                ai_auth="$auth_verdict"
+            fi
+            answer=""
 
             if [[ "$ai_auth" == "N" ]]; then
-                printf '\033[2K\033[1;41;37m是否执行该命令？(y/n): \033[0m'
+                printf '\033[2K \033[1;31m⚠ 该命令需人工确认,是否执行?(y/n): \033[0m'
                 # 与历史选择的编号读取同策略:普通 read 不会被 SIGINT 打断,
                 # 用短超时轮询检测 input_aborted,Ctrl+C 立即当作"拒绝执行"
                 stty -echoctl 2>/dev/null
@@ -2612,7 +2668,8 @@ tool_run_and_parse() {
             args_preview=$(jq -c '.' <<< "$fn_args" 2>/dev/null)
             [[ "$args_preview" == "null" ]] && args_preview="(参数为空)"
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
-            printf ' \033[43;30;1m  工具调用：%s %s  \033[0m\n\n' "$fn_name" "$args_preview"
+            tool_banner "$fn_name" "$args_preview"
+            echo
             case "$fn_name" in
                 read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill|mimo_web_fetch) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
@@ -2657,8 +2714,8 @@ ask_ai() {
     local request_body=$1
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
-    # 空响应重试:最多 max_attempts 次,递增退避(逻辑见下方 for 循环)
-    local attempt max_attempts=3 think_save_len rc req_file
+    # 重试:零产出与可重试错误(传输层/5xx/429)最多 max_attempts 次,递增退避
+    local attempt max_attempts=3 think_save_len rc req_file retry_reason=""
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -2713,10 +2770,10 @@ ask_ai() {
         think_start=0
         think_end=0
         if (( attempt > 1 )); then
-            # 上一尝试零产出:回滚其思考残留、在流箱内提示重试、退避后重发
-            # 同一请求体(零产出的请求无副作用,重发安全)
+            # 回滚上一尝试的思考残留后退避重发同一请求体
+            # (messages 在重试期间未写入,重发安全)
             thinking_response="${thinking_response:0:think_save_len}"
-            (( is_lock_screen )) && stream_box_feed "⚠️ 无响应,重试中($attempt/$max_attempts)…"
+            (( is_lock_screen )) && stream_box_feed "⚠️ ${retry_reason:-无响应},重试中($attempt/$max_attempts)…"
             sleep "$attempt"
         fi
 
@@ -2735,8 +2792,8 @@ ask_ai() {
             --speed-time "$SSE_STALL_TIMEOUT" --speed-limit 1 \
             "$BASE_URL" \
             -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-            -H "api-key: $DEEPSEEK_API_KEY" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "api-key: $API_KEY" \
             --data-binary @"$req_file" \
             > "$req_fifo_dir/fifo" 2>&1 &
         curl_pid=$!
@@ -2841,11 +2898,27 @@ ask_ai() {
         # 一轮回答后提示符【>】静默消失,输入却正常)。此 fd 必然已打开,
         # 关闭不会报错,无需静默。
         [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-"
-        # 有任一产出(正文/思考/工具调用/明确 API 错误)→ 本轮完成,不再重试;
-        # 完全零产出才进入下一尝试(退避重发);被 Ctrl+C 打断也绝不重试
+        # 被 Ctrl+C 打断绝不重试
+        (( ai_abort )) && break
+        # 可重试错误:传输层断连/停滞(curl:*)与服务端 5xx/429/限流 → 丢弃
+        # 本尝试全部产出(含半截正文;messages 未写入,重发安全)退避重发,
+        # 根治"流断在中途只留半截回答,只能 Ctrl+C 后补【继续】"。
+        # 400/上下文越界不在此列:重发必然再失败,交给循环后的 compact/报错兕底
+        if [[ -n "$api_error" ]] && (( attempt < max_attempts )); then
+            if [[ "$api_error" == *"curl: ("* || "$api_error" == *"429"* || \
+                  "$api_error" == *[Rr]ate*[Ll]imit* || "$api_error" == *[Oo]verload* || \
+                  "$api_error" == *"Internal Server Error"* || "$api_error" == *"Bad Gateway"* || \
+                  "$api_error" == *"Service Unavailable"* || "$api_error" == *"Gateway Time"* || \
+                  "$api_error" == *'"code":5'* ]]; then
+                retry_reason="连接中断或服务端异常"
+                continue
+            fi
+        fi
+        # 有任一产出(正文/思考/工具调用/不可重试的 API 错误)→ 本轮完成;
+        # 完全零产出才按"无响应"进入下一尝试(退避重发)
         [[ -n "$full_response" || -n "$raw_reasoning" || -n "$api_error" ]] && break
         (( ${#tool_ids[@]} > 0 )) && break
-        (( ai_abort )) && break
+        retry_reason=""
     done
 
     [[ "$is_lock_screen" == 1 ]] && stream_box_close
@@ -3036,8 +3109,8 @@ overview() {
     printf '%s' "$request_body" > "$tmpf"
     resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
         -H "Content-Type: application/json" \
-        -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
-        -H "api-key: $DEEPSEEK_API_KEY" \
+        -H "Authorization: Bearer $API_KEY" \
+        -H "api-key: $API_KEY" \
         --data-binary @"$tmpf" 2>/dev/null)
     rm -f "$tmpf"
     title=$(printf '%s' "$resp" | jq -r '.choices[0].message.tool_calls[0].function.arguments | fromjson | .title // empty' 2>/dev/null)
@@ -3204,8 +3277,16 @@ normal_line() {
     # 每次进入读取前检测:fd0 是 tty 而 fd2 不是时,把 fd2 对齐回 tty。
     [[ -t 0 && ! -t 2 ]] && exec 2>&0
     # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
-    # 会话全部行(而非当前行),屏幕不丢前轮内容
+    # 会话全部行(而非当前行),屏幕不丢前轮内容(仅 WSL 重绘路径使用)
     local paste_lines=""
+    # 粘贴显示分流:仅 WSL 需要锚点重绘(pty 在 echo 恢复瞬间补回显队列里
+    # 未消费的字节,产生双层显示,必须回锚点擦掉重打);macOS/Linux 的剩余
+    # 字节从未被回显(到达时处于 -echo),直接增量追加即可。绝不能在
+    # macOS/Linux 也走锚点重绘:DEC 光标保存(\0337/\0338)是屏幕绝对坐标,
+    # 光标在底部时重打触发滚动后锚点失效,第二次粘贴从过期锚点重绘,
+    # 旧内容残留在上方 → 叠加/重复显示(历史 bug,Ghostty 实测复现)
+    local wsl_repaint=0
+    [[ "$(detect_os)" == "wsl" ]] && wsl_repaint=1
 
     # 命令解析开关:只有全新消息的首行允许把 -x 输入解释为命令;
     # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
@@ -3226,12 +3307,13 @@ normal_line() {
         # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
-        # 保存光标位置:粘贴重绘锚点。粘贴会话进行中不重存,
+        # 保存光标位置(仅 WSL 重绘路径需要):粘贴重绘锚点,会话进行中不重存,
         # 让 \0338 始终回到会话首行起点(见下方 \0338\033[J)。
         # 用 DEC 保存/恢复光标(ESC 7 / ESC 8)而非 ANSI 的 CSI s/u:
-        # ANSI 版(\033[s/\033[u)在部分终端(如 Ghostty)不可靠,恢复位置
-        # 错乱会让 readline 回显的首行残留在屏幕上,造成粘贴首行重影。
-        if [[ -z "$paste_lines" ]]; then
+        # ANSI 版(\033[s/\033[u)在部分终端(如 Ghostty)不可靠。
+        # 注意 DEC 锚点也是屏幕绝对坐标,滚动后会失效——这正是 macOS/Linux
+        # 不走此路径的原因(见 wsl_repaint 注释)。
+        if (( wsl_repaint )) && [[ -z "$paste_lines" ]]; then
             printf '\0337'
         fi
         IFS= read -e -r -p "$prompt" line
@@ -3288,16 +3370,21 @@ normal_line() {
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
             if [[ -n "$rest" ]]; then
-                # 多行粘贴:屏幕上已出现两层显示——readline 渲染的首行 +
-                # 驱动回显的剩余行(WSL 的 pty 在 echo 恢复瞬间会补回显输入
-                # 队列中未消费的字节)。恢复会话锚点、清除到屏底、重打
-                # 会话累积的全部行,保证一行不多一行不少。
                 # paste_lines 是"整段输入的显示缓冲"(每行带各自的提示符):
                 # 首行带当前提示符,粘贴续行不带提示符;手打的行也同步追加,
-                # 这样后续再粘贴时重打整段不会把手打行吃掉。
+                # WSL 重绘时重打整段不会把手打行吃掉。
                 paste_lines+="$prompt$line"$'\n'"$rest"$'\n'
-                printf '\0338\033[J'
-                printf '%s' "$paste_lines"
+                if (( wsl_repaint )); then
+                    # WSL:双层显示(readline 首行 + pty 补回显的剩余行),
+                    # 回锚点清除到屏底后重打会话全部行,一行不多一行不少
+                    printf '\0338\033[J'
+                    printf '%s' "$paste_lines"
+                else
+                    # macOS/Linux:剩余行从未被回显,readline 接受首行后光标
+                    # 已在下一行行首,直接增量打印——零坐标算术,滚动/软换行
+                    # 都安全,重复粘贴不会叠加(锚点重绘的滚动失效 bug 由此根除)
+                    printf '%s\n' "$rest"
+                fi
                 line+=$'\n'"$rest"
                 input+="$line"$'\n'
                 prompt=".. "
