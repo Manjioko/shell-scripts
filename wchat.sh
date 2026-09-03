@@ -370,7 +370,7 @@ render_markdown() {
     if command -v glow >/dev/null 2>&1; then
         echo "$text" | sed 's/\\$/\\\\/' | glow -w "$((term_width - 4))"
     elif command -v mdcat >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | mdcat --columns "$term_width"
+        echo "$text" | sed 's/\\$/\\\\/' | mdcat --columns "$((term_width - 4))"
     else
         echo "$text"
     fi
