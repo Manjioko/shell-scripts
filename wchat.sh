@@ -2835,8 +2835,6 @@ ask_ai() {
             if [[ -n "$thinking_chunk" ]]; then
                 if [[ $think_start -eq 0 ]]; then
                     think_start=1
-                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考开始------------\033[0m'
-                    thinking_response+=$'\n\n----------思考开始------------\n\n\n'
                 fi
                 (( is_lock_screen )) && stream_box_append "$thinking_chunk"
             fi
@@ -2850,8 +2848,6 @@ ask_ai() {
             if [[ $think_end -eq 0 && $think_start -eq 1 ]]; then
                 if [[ -z "$thinking_chunk" && -n "$chunk" ]]; then
                     think_end=1
-                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考结束------------\033[0m'
-                    thinking_response+=$'\n\n----------思考结束----------\n\n\n'
                 fi
             fi
 
@@ -2992,7 +2988,20 @@ ask_ai() {
 flush_thinking() {
     local delta="${thinking_response:thinking_rendered_len}"
     [[ -z "$delta" ]] && return 0
-    render_markdown "$delta"
+    
+    # 构建 Markdown 引用块，每行添加斜体
+    local markdown=""
+    while IFS= read -r line; do
+        if [[ -z "$line" ]]; then
+            markdown+=">"$'\n'
+        else
+            markdown+="> *${line}*"$'\n'
+        fi
+    done <<< "$delta"
+    
+    # 渲染 Markdown
+    render_markdown "$markdown"
+    
     thinking_rendered_len=${#thinking_response}
 }
 
