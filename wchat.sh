@@ -3348,6 +3348,30 @@ normal_line() {
             printf '已清空本轮输入\n'
             continue
         fi
+        # @ 选文件手势:单独 @ 或行尾 @。必须在粘贴分支之前判断——
+        # WSL2 回车常以 \r\n 成对到达,排干会捞到遗留换行字节,若先走
+        # 粘贴分支,"@" 行会被"只有换行字节=按提交处理"吞掉,手势失效
+        # (历史回归,实测复现)。仅当排干只含换行字节(手打行,非粘贴)
+        # 才算手势;粘贴首行以 @ 结尾按正文处理,交给下方粘贴分支。
+        local at_only="${rest//$'\r'/}"
+        at_only="${at_only//$'\n'/}"
+        if [[ -z "$at_only" ]]; then
+            # 恢复 echo:文件选择器与递归 normal_line 的下一轮 read -e
+            # 都依赖 tty 回显
+            stty "$stty_save"
+            if [[ "$line" == "@" ]]; then
+                read_file
+                break
+            fi
+            if [[ "${line: -1}" == "@" ]]; then
+                line="${line%@}"
+                input+="$line"$'\n'
+                read_file
+                # 必须 break:read_file 内已递归 normal_line 0 收集后续输入,
+                # 不 break 会继续往下走,把 $line 再次拼进 input(历史 bug:输入重复)
+                break
+            fi
+        fi
         if [[ -n "$rest" ]]; then
             # 粘贴绝不直接提交:转入续行模式,由用户在【..】空回车提交整段。
             # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:行尾的 \r(粘贴
@@ -3408,21 +3432,8 @@ normal_line() {
             input+="$line"$'\n'
             break
         fi
-        # 排干未捕获到粘贴(手打行):恢复 echo,后续分支(命令/@ 选文件递归
-        # 的下一轮 read -e)都依赖 tty 回显
+        # 排干未捕获到粘贴(手打行):恢复 echo,后续分支(命令/续行)依赖 tty 回显
         stty "$stty_save"
-        if [[ "$line" == "@" ]]; then
-            read_file
-            break
-        fi
-        if [[ "${line: -1}" == "@" ]]; then
-            line="${line%@}"
-            input+="$line"$'\n'
-            read_file
-            # 必须 break:read_file 内已递归 normal_line 0 收集后续输入,
-            # 不 break 会继续往下走,把 $line 再次拼进 input(历史 bug:输入重复)
-            break
-        fi
         if [[ "$line" == *\\ ]]; then
             # 行尾有反斜杠 → 续行。只删掉最后一个字符（即那个反斜杠），
             # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
