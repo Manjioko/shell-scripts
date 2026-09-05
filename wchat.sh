@@ -376,6 +376,14 @@ render_markdown() {
     fi
 }
 
+
+# 输入区消息:每行前置灰色 │ + 空格,与输入行提示符/粘贴重打视觉一致。
+# 输入阶段打印的状态/反馈文本(选文件/命令反馈/帮助/草稿等)统一走这里,
+# 避免输入框内有的行带 │ 有的不带、看着割裂。
+inp_msg() {
+    printf '%s\n' "$*" | sed $'s/^/\033[2m│\033[0m /'
+}
+
 save_history() {
     [[ -z "$chat_title" ]] && return 0
     [[ -z "$messages" ]] && return 0
@@ -405,7 +413,7 @@ save_history() {
         stream: true
     }' 2>&1)
 
-    echo "保存记录 ${HISTORY_DIR}/${name}.json"
+    inp_msg "保存记录 ${HISTORY_DIR}/${name}.json"
 
     echo "$history" > "${HISTORY_DIR}/${name}.json"
 }
@@ -567,46 +575,46 @@ history_handler() {
 
 
 help_user() {
-    echo "使用方法: ct [选项] [内容]"
-    echo "选项:"
-    echo "  -t    启用思考模式"
-    echo "  -p    使用 deepseek-v4-pro 模型"
-    echo "  -dp   启用思考模式并使用 deepseek-v4-pro 模型"
-    echo "  -l    查看历史记录并选择加载"
-    echo "  -f    忽略历史记录"
-    echo "  -tr   翻译任务"
-    echo "  -to   词源词根解释任务"
-    echo "  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)"
-    echo "  -img  发送图片(后接图片路径,自动转述为文字)"
-    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
-    echo "  -c    手动压缩对话历史"
-    echo "  -u    查看当前上下文 token 用量"
-    echo "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
-    echo "  -h    显示帮助信息"
-    echo
-    echo "内容交互时，也可使用以下选项:"
-    echo "  -msgs 显示当前消息记录"
-    echo "  -l    查看历史记录并选择加载"
-    echo "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
-    echo "  -c    手动压缩对话历史"
-    echo "  -n    新对话(清空历史并清屏)"
-    echo "  -cl   清屏(保留对话历史)"
-    echo "  -stp  切换到 pro 模型"
-    echo "  -stt  开启思考模式"
-    echo "  -stf  恢复默认(flash 模型,关闭思考)"
-    echo "  -fs   立即保存当前对话历史(-f 模式下静默跳过)"
-    echo "  -md   查看当前模型/思考/标题信息"
-    echo "  -u    查看当前上下文 token 用量"
-    echo "  -img <路径> 发送图片(自动转述为文字)"
-    echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
-    echo "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
-    echo "  -h    显示帮助信息"
-    echo
-    echo "输入规则:"
-    echo "  - 提示符(灰色 │)下输入内容后回车 = 换行继续,空行回车 = 发送"
-    echo "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
-    echo "  - 以上 -x 命令仅在全新消息首行生效,续行中输入 -x 按正文处理"
-    echo "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
+    inp_msg "使用方法: ct [选项] [内容]"
+    inp_msg "选项:"
+    inp_msg "  -t    启用思考模式"
+    inp_msg "  -p    使用 deepseek-v4-pro 模型"
+    inp_msg "  -dp   启用思考模式并使用 deepseek-v4-pro 模型"
+    inp_msg "  -l    查看历史记录并选择加载"
+    inp_msg "  -f    忽略历史记录"
+    inp_msg "  -tr   翻译任务"
+    inp_msg "  -to   词源词根解释任务"
+    inp_msg "  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)"
+    inp_msg "  -img  发送图片(后接图片路径,自动转述为文字)"
+    inp_msg "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
+    inp_msg "  -c    手动压缩对话历史"
+    inp_msg "  -u    查看当前上下文 token 用量"
+    inp_msg "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
+    inp_msg "  -h    显示帮助信息"
+    inp_msg
+    inp_msg "内容交互时，也可使用以下选项:"
+    inp_msg "  -msgs 显示当前消息记录"
+    inp_msg "  -l    查看历史记录并选择加载"
+    inp_msg "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
+    inp_msg "  -c    手动压缩对话历史"
+    inp_msg "  -n    新对话(清空历史并清屏)"
+    inp_msg "  -cl   清屏(保留对话历史)"
+    inp_msg "  -stp  切换到 pro 模型"
+    inp_msg "  -stt  开启思考模式"
+    inp_msg "  -stf  恢复默认(flash 模型,关闭思考)"
+    inp_msg "  -fs   立即保存当前对话历史(-f 模式下静默跳过)"
+    inp_msg "  -md   查看当前模型/思考/标题信息"
+    inp_msg "  -u    查看当前上下文 token 用量"
+    inp_msg "  -img <路径> 发送图片(自动转述为文字)"
+    inp_msg "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
+    inp_msg "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
+    inp_msg "  -h    显示帮助信息"
+    inp_msg
+    inp_msg "输入规则:"
+    inp_msg "  - 提示符(灰色 │)下输入内容后回车 = 换行继续,空行回车 = 发送"
+    inp_msg "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
+    inp_msg "  - 以上 -x 命令仅在全新消息首行生效,续行中输入 -x 按正文处理"
+    inp_msg "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
 }
 
 parse_options() {
@@ -640,11 +648,11 @@ parse_options() {
             img_path="${img_path/#\~/$HOME}"
             if [[ -n "$img_path" && -f "$img_path" ]] && is_image "$img_path"; then
                 input_images+=("$img_path")
-                echo "[图片] $img_path"
+                inp_msg "[图片] $img_path"
             elif [[ -n "$img_path" && -f "$img_path" ]]; then
-                echo "⚠️  -img 只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+                inp_msg "⚠️  -img 只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
             elif [[ -n "$img_path" ]]; then
-                echo "⚠️  -img 文件不存在: $img_path"
+                inp_msg "⚠️  -img 文件不存在: $img_path"
             else
                 echo "⚠️  -img 需要图片路径"
             fi
@@ -704,7 +712,7 @@ parse_options() {
             # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
             if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
                 local save_ans
-                printf '退出前保存对话? [Y/n] '
+                printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
                 IFS= read -r save_ans
                 [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
             else
@@ -1439,7 +1447,7 @@ compact_messages() {
     local total cut system_msg tail_msgs to_compact summary request_body
     local compact_file sys_file tail_file
     total=$(echo "$messages" | jq 'length')
-    (( total <= KEEP_MSGS )) && echo "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
+    (( total <= KEEP_MSGS )) && inp_msg "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
 
     cut=$((total - KEEP_MSGS))
     # 切点对齐工具链边界:tail 第一条绝不能是 tool 消息。否则它对应的
@@ -1452,7 +1460,7 @@ compact_messages() {
         cut=$((cut - 1))
     done
     # 极端情况:整个对话几乎全是未闭合的工具链,再压没有意义,放弃本次压缩
-    (( cut <= 1 )) && echo "工具链过长,跳过本次压缩" && return 0
+    (( cut <= 1 )) && inp_msg "工具链过长,跳过本次压缩" && return 0
 
     system_msg=$(echo "$messages" | jq '.[0]')
     tail_msgs=$(echo "$messages" | jq --argjson cut "$cut" '.[$cut:]')
@@ -1469,9 +1477,9 @@ compact_messages() {
         end')
 
     if (( last_prompt_tokens > TOKEN_THRESHOLD )); then
-        printf '📦 上下文 %s tokens 已超阈值 %s,正在自动压缩历史…\n' "$last_prompt_tokens" "$TOKEN_THRESHOLD"
+        inp_msg "📦 上下文 $last_prompt_tokens tokens 已超阈值 $TOKEN_THRESHOLD,正在自动压缩历史…"
     else
-        printf '📦 正在压缩历史…(当前 %s tokens,阈值 %s)\n' "${last_prompt_tokens:-0}" "$TOKEN_THRESHOLD"
+        inp_msg "📦 正在压缩历史…(当前 ${last_prompt_tokens:-0} tokens,阈值 $TOKEN_THRESHOLD)"
     fi
 
     # to_compact 是整段对话的文本转写,远超 Linux 单参数上限(128KB):
@@ -1501,7 +1509,7 @@ compact_messages() {
 
     if [[ -z "$summary" ]]; then
         messages=$(echo "$messages" | jq --argjson cut "$cut" '.[0:1] + .[$cut:]')
-        printf '⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 %s 条原文\n' "$KEEP_MSGS"
+        inp_msg "⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 $KEEP_MSGS 条原文"
     else
         # system_msg/tail_msgs 可能很大:--argjson 传参撞 ARG_MAX,走 slurpfile
         sys_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
@@ -1512,7 +1520,7 @@ compact_messages() {
             --arg summary "$summary" --slurpfile tail "$tail_file" \
             '[ $sys[0], {role: "user", content: ($prefix + "\n" + $summary)}, $tail[0][] ]')
         rm -f "$sys_file" "$tail_file"
-        printf '✅ 压缩完成:%s 条消息 → 1 条摘要 + %s 条原文\n' "$total" "$KEEP_MSGS"
+        inp_msg "✅ 压缩完成:$total 条消息 → 1 条摘要 + $KEEP_MSGS 条原文"
     fi
     # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
     last_prompt_tokens=0
@@ -1594,12 +1602,12 @@ print_usage() {
     local est pct
     est=$(printf '%s' "$messages" | wc -c | tr -d ' ')
     est=$((est * 2 / 5))
-    echo "消息条数: $(echo "$messages" | jq length)"
+    inp_msg "消息条数: $(echo "$messages" | jq length)"
     if (( last_prompt_tokens > 0 )); then
         pct=$((last_prompt_tokens * 100 / TOKEN_THRESHOLD))
-        echo "上下文用量: ${last_prompt_tokens} tokens / 阈值 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
+        inp_msg "上下文用量: ${last_prompt_tokens} tokens / 阈值 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
     else
-        echo "上下文用量: 约 ${est} tokens(字节粗算;精确值在下次请求后显示,阈值 ${TOKEN_THRESHOLD})"
+        inp_msg "上下文用量: 约 ${est} tokens(字节粗算;精确值在下次请求后显示,阈值 ${TOKEN_THRESHOLD})"
     fi
 }
 
@@ -2398,7 +2406,7 @@ skill_save() {
     local to_summarize request_body resp raw name description body
     local file_dir answer rc attempt sys_text user_text prev_text fail_text tmpf
 
-    (( $(echo "$messages" | jq 'length') <= 1 )) && { echo "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
+    (( $(echo "$messages" | jq 'length') <= 1 )) && { inp_msg "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
 
     # 对话转可读文本(与压缩同款格式),发给 flash 提炼
     to_summarize=$(echo "$messages" | jq -r '.[1:][] |
@@ -2407,7 +2415,7 @@ skill_save() {
         else
             "[" + .role + "] " + (.content // "")
         end')
-    printf '📦 正在从当前对话提炼技能…\n'
+    inp_msg '📦 正在从当前对话提炼技能…'
     # 用 function calling 拿结构化草稿:tool_calls 的 arguments 由 API 层保证
     # 是合法 JSON,比"提示词要求只输出 JSON"可靠得多(实测 flash 模型对
     # JSON 指令屡教不改,直接吐 markdown)。最多尝试两次:第一次正常要求
@@ -2471,16 +2479,16 @@ skill_save() {
     if [[ -z "$raw" ]]; then
         fail_text=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // .error.message // empty' 2>/dev/null)
         [[ -z "$fail_text" ]] && fail_text="(接口无响应)"
-        echo "⚠️  技能提炼失败(模型未按工具协议返回草稿),请重试。模型返回:"
-        printf '%s\n' "${fail_text:0:300}"
+        inp_msg "⚠️  技能提炼失败(模型未按工具协议返回草稿),请重试。模型返回:"
+        inp_msg "${fail_text:0:300}"
         return 0
     fi
     name=$(printf '%s' "$raw" | jq -r '.name // empty' 2>/dev/null)
     description=$(printf '%s' "$raw" | jq -r '.description // empty' 2>/dev/null)
     body=$(printf '%s' "$raw" | jq -r '.body // empty' 2>/dev/null)
     if [[ -z "$name" || -z "$description" || -z "$body" ]]; then
-        echo "⚠️  技能草稿字段缺失(name/description/body),请重试。草稿参数:"
-        printf '%s\n' "${raw:0:300}"
+        inp_msg "⚠️  技能草稿字段缺失(name/description/body),请重试。草稿参数:"
+        inp_msg "${raw:0:300}"
         return 0
     fi
 
@@ -2489,13 +2497,13 @@ skill_save() {
     [[ -z "$name" ]] && name="skill"
     description=$(printf '%s' "$description" | tr '\n' ' ' | tr -s ' ')
 
-    printf -- '──────── 技能草稿 ────────\n'
-    printf 'name: %s\n' "$name"
-    printf 'description: %s\n' "$description"
-    printf -- '──────── 正文 ────────\n'
-    printf '%s\n' "$body"
-    printf -- '────────────────────────\n'
-    printf '是否保存该技能?(y/n): '
+    inp_msg '──────── 技能草稿 ────────'
+    inp_msg "name: $name"
+    inp_msg "description: $description"
+    inp_msg '──────── 正文 ────────'
+    inp_msg "$body"
+    inp_msg '────────────────────────'
+    printf '\033[2m│\033[0m 是否保存该技能?(y/n): '
     # 与历史选择同款轮询读取:Ctrl+C 当作拒绝,不会执行写入
     stty -echoctl 2>/dev/null
     answer=""
@@ -2511,14 +2519,14 @@ skill_save() {
         printf '\r\033[2K\n'
     fi
     if [[ "$answer" != "y" ]]; then
-        echo "已取消,未保存"
+        inp_msg "已取消,未保存"
         return 0
     fi
 
     file_dir="$SKILLS_DIR/$name"
-    mkdir -p "$file_dir" || { echo "⚠️  创建技能目录失败: $file_dir"; return 0; }
+    mkdir -p "$file_dir" || { inp_msg "⚠️  创建技能目录失败: $file_dir"; return 0; }
     printf -- '---\nname: %s\ndescription: %s\n---\n\n%s\n' "$name" "$description" "$body" > "$file_dir/SKILL.md"
-    echo "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
+    inp_msg "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
     # 立即生效:重新注入最新技能列表
     inject_skills
 }
@@ -3256,16 +3264,16 @@ read_file() {
         # 由 AI 按需用 read_file 工具(带行号/offset/limit/截断)自行读取,
         # 避免大文件撑爆 user 消息与上下文。
         if is_image "$filePath"; then
-            echo "[图片] $filePath"
+            inp_msg "[图片] $filePath"
             input_images+=("$filePath")
         elif is_text_file "$filePath"; then
-            echo "[文件] $filePath"
+            inp_msg "[文件] $filePath"
             grant_file "$filePath"
             # 坑:brew bash 5 里 $var 后紧跟多字节字符(如句号「。」)会吃掉
             # 变量展开并破坏后续字符(实测 $filePath。 → 空),必须用 ${var} 花括号
             input+="(用户通过 @ 选择了文件: ${filePath}。该文件已获只读授权,如需查看内容,请先调用 read_file 工具读取,再回答用户问题。)"$'\n'
         else
-            echo "⚠️  不是文本/图片文件,已跳过(仅支持文本与图片): $filePath"
+            inp_msg "⚠️  不是文本/图片文件,已跳过(仅支持文本与图片): $filePath"
             # 跳过也要告知 AI,否则它不知道发生了什么,会自己去翻目录乱找
             input+="(用户尝试选择文件: ${filePath},但该文件不是文本/图片格式,已被跳过。请勿尝试读取;如需处理请告知用户先转换格式。)"$'\n'
         fi
@@ -3345,7 +3353,7 @@ normal_line() {
             IFS= read -r -t 0.05 -N 1000000 2>/dev/null
             stty "$stty_save"
             printf '\033[2J\033[H'
-            printf '已清空本轮输入\n'
+            inp_msg '已清空本轮输入'
             continue
         fi
         # @ 选文件手势:单独 @ 或行尾 @。必须在粘贴分支之前判断——
@@ -3458,7 +3466,7 @@ normal_line() {
             # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
             if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
                 local save_ans
-                printf '退出前保存对话? [Y/n] '
+                printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
                 IFS= read -r save_ans
                 [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
             else
@@ -3471,7 +3479,7 @@ normal_line() {
             break
         fi
         if [[ "$line" == "-msgs" ]]; then
-            echo "$messages"
+            inp_msg "$messages"
             break
         fi
         if [[ "$line" == "-c" ]]; then
@@ -3504,52 +3512,52 @@ normal_line() {
         fi
         if [[ "$line" == "-stp" ]]; then
             model="$pro_model"
-            echo "✅ 已切换到 pro 模型 ($model)"
+            inp_msg "✅ 已切换到 pro 模型 ($model)"
             break
         fi
         if [[ "$line" == "-stt" ]]; then
             thinking="enabled"
-            echo "✅ 已开启思考模式"
+            inp_msg "✅ 已开启思考模式"
             break
         fi
         if [[ "$line" == "-stf" ]]; then
             model="$flash_model"
             thinking="disabled"
-            echo "✅ 已恢复默认 (model=$model, thinking=disabled)"
+            inp_msg "✅ 已恢复默认 (model=$model, thinking=disabled)"
             break
         fi
         if [[ "$line" == "-fs" ]]; then
             if [[ -z "$chat_title" ]]; then
-                echo "⚠️  当前无对话标题，无法保存"
+                inp_msg "⚠️  当前无对话标题，无法保存"
             elif [[ $forget_history == 1 ]]; then
                 : # -f 模式，静默跳过
             else
-                save_history && echo "✅ 已保存: ${HISTORY_DIR}/${name}.json"
+                save_history && inp_msg "✅ 已保存: ${HISTORY_DIR}/${name}.json"
             fi
             break
         fi
         if [[ "$line" == "-md" ]]; then
-            echo "模型: ${model}"
-            echo "思考: ${thinking}"
-            echo "标题: ${chat_title:-（空）}"
+            inp_msg "模型: ${model}"
+            inp_msg "思考: ${thinking}"
+            inp_msg "标题: ${chat_title:-（空）}"
             break
         fi
         if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
             local img_path="${line#-img}"
             img_path="${img_path# }"
             if [[ -z "$img_path" ]]; then
-                echo "用法: -img <图片路径>"
+                inp_msg "用法: -img <图片路径>"
                 break
             fi
             # 展开 ~ 波浪号
             img_path="${img_path/#\~/$HOME}"
             if [[ -f "$img_path" ]] && is_image "$img_path"; then
                 input_images+=("$img_path")
-                echo "[图片] $img_path"
+                inp_msg "[图片] $img_path"
             elif [[ -f "$img_path" ]]; then
-                echo "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+                inp_msg "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
             else
-                echo "⚠️  文件不存在: $img_path"
+                inp_msg "⚠️  文件不存在: $img_path"
             fi
             break
         fi
@@ -3557,8 +3565,8 @@ normal_line() {
         # 兜底:拦截以 - 开头的未知命令(含前导空格),避免误当正文提交给 AI
         local trimmed="${line#"${line%%[![:space:]]*}"}"
         if [[ "$trimmed" == "-"* ]]; then
-            echo "⚠️  未知命令: ${trimmed%% *}"
-            echo "💡 使用 -h 查看可用命令"
+            inp_msg "⚠️  未知命令: ${trimmed%% *}"
+            inp_msg "💡 使用 -h 查看可用命令"
             continue
         fi
 
