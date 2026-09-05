@@ -3276,15 +3276,13 @@ normal_line() {
     # 提示符静默消失而输入正常,表现为"一轮回答后迟迟不显示【>】"。
     # 每次进入读取前检测:fd0 是 tty 而 fd2 不是时,把 fd2 对齐回 tty。
     [[ -t 0 && ! -t 2 ]] && exec 2>&0
-    # 粘贴会话累积缓冲区:慢速粘贴可能拆成多轮,每轮重绘时用它重打
-    # 会话全部行(而非当前行),屏幕不丢前轮内容(仅 WSL 重绘路径使用)
-    local paste_lines=""
-    # 粘贴显示分流:仅 WSL 需要锚点重绘(pty 在 echo 恢复瞬间补回显队列里
-    # 未消费的字节,产生双层显示,必须回锚点擦掉重打);macOS/Linux 的剩余
-    # 字节从未被回显(到达时处于 -echo),直接增量追加即可。绝不能在
-    # macOS/Linux 也走锚点重绘:DEC 光标保存(\0337/\0338)是屏幕绝对坐标,
-    # 光标在底部时重打触发滚动后锚点失效,第二次粘贴从过期锚点重绘,
-    # 旧内容残留在上方 → 叠加/重复显示(历史 bug,Ghostty 实测复现)
+    # 粘贴显示分流:仅 WSL 需要清理重绘(WSL2 内核 pty 在 echo 恢复瞬间
+    # 补回显队列里未消费的字节,产生双层显示);macOS/Linux 的剩余字节
+    # 从未被回显(到达时处于 -echo),直接增量追加即可。
+    # WSL 的清理用相对位移而非 DEC 绝对锚点(\0337/\0338):锚点是屏幕绝对
+    # 坐标,输入框在屏幕底部时补回显触发滚动,锚点失效,重打落到过期行号,
+    # 旧内容残留上方 → 叠加/重复显示(本 bug 根因)。相对位移从补回显
+    # 结束处上移 lf_count 行,滚动前后相对位置不变,永远落在补回显首行。
     local wsl_repaint=0
     [[ "$(detect_os)" == "wsl" ]] && wsl_repaint=1
 
@@ -3307,15 +3305,6 @@ normal_line() {
         # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
-        # 保存光标位置(仅 WSL 重绘路径需要):粘贴重绘锚点,会话进行中不重存,
-        # 让 \0338 始终回到会话首行起点(见下方 \0338\033[J)。
-        # 用 DEC 保存/恢复光标(ESC 7 / ESC 8)而非 ANSI 的 CSI s/u:
-        # ANSI 版(\033[s/\033[u)在部分终端(如 Ghostty)不可靠。
-        # 注意 DEC 锚点也是屏幕绝对坐标,滚动后会失效——这正是 macOS/Linux
-        # 不走此路径的原因(见 wsl_repaint 注释)。
-        if (( wsl_repaint )) && [[ -z "$paste_lines" ]]; then
-            printf '\0337'
-        fi
         IFS= read -e -r -p ": " line
         rc=$?
         stty isig intr '^C' 2>/dev/null
@@ -3329,7 +3318,9 @@ normal_line() {
         # (read -N 阻塞期间到达的字节超时后被 bash 丢弃,字节不回流)。
         stty raw
         IFS= read -r -t 0.05 -N 1000000 rest
-        stty "$stty_save"
+        # 注意:echo 仍处于关闭状态。WSL2 的补回显在 echo 恢复的瞬间触发,
+        # 恢复动作放到粘贴分支里(WSL 在恢复前先 ?7l 关自动换行,让补回显
+        # 行数严格等于 rest 的 \n 数);其余路径在各自分支内恢复。
         # Ctrl+R 清空哨兵(宏 \C-u\C-q\C-a\C-m):readline 收到按键时执行宏,
         # read 立即返回 line=0x01;若按键在排干窗口内被卷进 rest(刚粘完立刻
         # 按 Ctrl+R,raw 模式读走的是原始字节),则 rest 里是 0x12。两种形态
@@ -3338,7 +3329,6 @@ normal_line() {
         if [[ "$line$rest" == *$'\x01'* || "$line$rest" == *$'\x12'* ]]; then
             input=""
             input_images=()
-            paste_lines=""
             # prompt="> "
             cmd_ok=1
             # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
@@ -3357,6 +3347,10 @@ normal_line() {
             # 单 \n,自然保留,不要再归并(归并会把真实空行吞掉)。首行行尾
             # \r\n 中 readline 消费 \r 后留下的 \n 剥前导一个即可。
             local nl=$'\n'
+            # WSL 清理重绘的上移行数 = rest 的 \n 数(补回显逐 \n 下移一行,
+            # 含首行遗留的那个 \n)。必须在归一化改写 rest 之前取数。
+            local lf_count=${rest//[^$'\n']}
+            lf_count=${#lf_count}
             while [[ "$rest" == *$'\r' ]]; do
                 rest="${rest%$'\r'}"
             done
@@ -3370,21 +3364,23 @@ normal_line() {
             rest="${rest#"$nl"}"
             line="${line%$'\r'}"
             if [[ -n "$rest" ]]; then
-                # paste_lines 是"整段输入的显示缓冲"(每行带各自的提示符):
-                # 首行带当前提示符,粘贴续行不带提示符;手打的行也同步追加,
-                # WSL 重绘时重打整段不会把手打行吃掉。
-                paste_lines+="$line"$'\n'"$rest"$'\n'
                 if (( wsl_repaint )); then
-                    # WSL:双层显示(readline 首行 + pty 补回显的剩余行),
-                    # 回锚点清除到屏底后重打会话全部行,一行不多一行不少
-                    printf '\0338\033[J'
-                    printf '%s' "$paste_lines"
+                    # WSL:双层显示(readline 首行 + pty 补回显的剩余行)。
+                    # 恢复 echo 前先 ?7l 关自动换行:补回显逐 \n 下移一行,
+                    # 长行不折行,垃圾区行数严格等于 lf_count;echo 恢复的
+                    # 瞬间补回显在此渲染。随后从补回显结束处相对上移
+                    # lf_count 行回到其首行(滚动后绝对锚点会失效,相对位移
+                    # 不会),清除到屏底,恢复自动换行。
+                    printf '\033[?7l'
+                    stty "$stty_save"
+                    printf '\r\033[%dA\033[J\033[?7h' "$lf_count"
                 else
                     # macOS/Linux:剩余行从未被回显,readline 接受首行后光标
-                    # 已在下一行行首,直接增量打印——零坐标算术,滚动/软换行
-                    # 都安全,重复粘贴不会叠加(锚点重绘的滚动失效 bug 由此根除)
-                    printf '%s\n' "$rest"
+                    # 已在下一行行首,恢复 echo 后直接增量打印——零坐标算术,
+                    # 滚动/软换行都安全
+                    stty "$stty_save"
                 fi
+                printf '%s\n' "$rest"
                 line+=$'\n'"$rest"
                 input+="$line"$'\n'
                 # prompt=".. "
@@ -3398,9 +3394,13 @@ normal_line() {
             # 一律按提交处理。代价:单行粘贴的尾随换行也走此分支、会直接
             # 发送——与"打字+回车"字节不可区分(历史 #21 注释同结论),
             # 两害相权,吞掉提交回车比粘贴自动发送更影响使用。
+            stty "$stty_save"
             input+="$line"$'\n'
             break
         fi
+        # 排干未捕获到粘贴(手打行):恢复 echo,后续分支(命令/@ 选文件递归
+        # 的下一轮 read -e)都依赖 tty 回显
+        stty "$stty_save"
         if [[ "$line" == "@" ]]; then
             read_file
             break
@@ -3418,7 +3418,6 @@ normal_line() {
             # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
             # 避免不同 bash 版本对 pattern 中反斜杠转义的解析差异导致删多了。
             line="${line%?}"
-            paste_lines+="$line"$'\n'
             input+="$line"$'\n'
             # prompt=".. "
             cmd_ok=0
@@ -3429,7 +3428,6 @@ normal_line() {
         # 提交整段消息(粘贴后补输多行文本的标准姿势)
         if (( !cmd_ok )); then
             [[ -z "$line" ]] && break
-            paste_lines+="$line"$'\n'
             input+="$line"$'\n'
             # prompt=".. "
             continue
@@ -3538,7 +3536,6 @@ normal_line() {
         # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
         # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
         [[ -z "$line" ]] && break
-        paste_lines+="$line"$'\n'
         input+="$line"$'\n'
         # prompt=".. "
         cmd_ok=0
