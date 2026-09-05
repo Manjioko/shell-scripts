@@ -599,7 +599,7 @@ help_user() {
     echo "  -u    查看当前上下文 token 用量"
     echo "  -img <路径> 发送图片(自动转述为文字)"
     echo "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
-    echo "  -q    退出程序"
+    echo "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
     echo "  -h    显示帮助信息"
     echo
     echo "输入规则:"
@@ -700,8 +700,16 @@ parse_options() {
         fi
 
         if [[ "${!i}" == "-q" ]]; then
-            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
-            save_history
+            # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才
+            # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
+            if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
+                local save_ans
+                printf '退出前保存对话? [Y/n] '
+                IFS= read -r save_ans
+                [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
+            else
+                save_history
+            fi
             exit 0
         fi
 
@@ -1717,6 +1725,15 @@ auth_think() {
 resolve_path() {
     local p="$1" dir base canon missing seg
     [[ -z "$p" ]] && return 1
+    # ~ 展开:模型常传 ~/xxx 路径,bash 变量/命令替换里的 ~ 不会自动展开,
+    # 原样会拼成工作根目录下字面量 ~ 目录,导致"文件不存在"(历史 bug #15)
+    if [[ "$p" == '~' ]]; then
+        p="$HOME"
+    elif [[ "$p" == '~/'* ]]; then
+        # 注意:${p#~/} 的 word 会先做波浪号展开(~/ → $HOME/),必须给
+        # 模式加引号阻止展开,否则剥离永远不命中
+        p="$HOME/${p#'~/'}"
+    fi
     [[ "$p" != /* ]] && p="$WORK_ROOT/$p"
     dir=$(dirname "$p")
     base=$(basename "$p")
@@ -3426,8 +3443,16 @@ normal_line() {
             continue
         fi
         if [[ "$line" == "-q" ]]; then
-            # 唯一退出方式:退出前保存历史(沿用原 Ctrl+C 退出的保存逻辑)
-            save_history
+            # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才
+            # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
+            if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
+                local save_ans
+                printf '退出前保存对话? [Y/n] '
+                IFS= read -r save_ans
+                [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
+            else
+                save_history
+            fi
             exit 0
         fi
         if [[ "$line" == "-l" ]]; then
