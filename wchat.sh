@@ -603,9 +603,9 @@ help_user() {
     echo "  -h    显示帮助信息"
     echo
     echo "输入规则:"
-    echo "  - 任何提示符下,输入内容后回车 = 换行继续(提示符变为 ..),空行回车 = 发送"
+    echo "  - 提示符(灰色 │)下输入内容后回车 = 换行继续,空行回车 = 发送"
     echo "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
-    echo "  - 以上 -x 命令仅在全新消息首行(>)生效,续行中输入 -x 按正文处理"
+    echo "  - 以上 -x 命令仅在全新消息首行生效,续行中输入 -x 按正文处理"
     echo "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
 }
 
@@ -1345,7 +1345,7 @@ stream_box_push() {
     (( ${#stream_buf[@]} > STREAM_WIN )) && stream_buf=("${stream_buf[@]:1}")
 }
 
-# 喂一行(完整行)并节流重画:用于思考开始/结束标记、重试提示等单行事件
+# 喂一行(完整行)并节流重画:用于重试提示等单行事件
 stream_box_feed() {
     stream_box_push "$1"
     local now=${EPOCHREALTIME/./}
@@ -2705,7 +2705,6 @@ ask_ai() {
         [[ "$content" == "$option" || "$content" == "$option "* ]] && content="" && return 0
     done
 
-    local think_start think_end
     local chunk=""
     local json=""
     local usage_pt=""
@@ -2767,8 +2766,6 @@ ask_ai() {
         tool_ids=()
         tool_names=()
         tool_args=()
-        think_start=0
-        think_end=0
         if (( attempt > 1 )); then
             # 回滚上一尝试的思考残留后退避重发同一请求体
             # (messages 在重试期间未写入,重发安全)
@@ -2829,31 +2826,19 @@ ask_ai() {
                 [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
             fi
 
-            # 思考部分的输出也要显示出来
+            # 思考部分的输出也要显示出来:流箱内随流显示原文(无横幅装饰,
+            # 流箱样式保持不变);thinking_response 只累积思考原文——不再
+            # 夹带"思考开始/结束"横幅(横幅既影响主屏观感,也会随
+            # reasoning_content 回传进 API 上下文)
             thinking_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; echo x)"
             thinking_chunk="${thinking_chunk%x}"
-            if [[ -n "$thinking_chunk" ]]; then
-                if [[ $think_start -eq 0 ]]; then
-                    think_start=1
-                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考开始------------\033[0m'
-                    thinking_response+=$'\n\n----------思考开始------------\n\n\n'
-                fi
-                (( is_lock_screen )) && stream_box_append "$thinking_chunk"
-            fi
+            [[ -n "$thinking_chunk" ]] && (( is_lock_screen )) && stream_box_append "$thinking_chunk"
             [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; }
 
 
             # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
             chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; echo x)"
             chunk="${chunk%x}"
-
-            if [[ $think_end -eq 0 && $think_start -eq 1 ]]; then
-                if [[ -z "$thinking_chunk" && -n "$chunk" ]]; then
-                    think_end=1
-                    (( is_lock_screen )) && stream_box_feed $'\033[33m----------思考结束------------\033[0m'
-                    thinking_response+=$'\n\n----------思考结束----------\n\n\n'
-                fi
-            fi
 
             if [[ -n "$chunk" ]]; then
                 (( is_lock_screen )) && stream_box_append "$chunk"
@@ -2992,7 +2977,13 @@ ask_ai() {
 flush_thinking() {
     local delta="${thinking_response:thinking_rendered_len}"
     [[ -z "$delta" ]] && return 0
-    render_markdown "$delta"
+    # 思考块主屏渲染(Claude Code 风格):先一行灰色 ▸ 指示,随后思考文本
+    # 每行 2 空格缩进 + 灰色(经 $'\033' 展开成真实 ESC 字节再进 sed,
+    # BSD sed 不认 \033 转义、会打出字面量);末尾 \033[0m 复位防止
+    # 灰度泄漏进后续正文
+    printf '\033[2m▸\033[0m\n'
+    render_markdown "$delta" | sed $'s/^/  \033[2m/'
+    printf '\033[0m'
     thinking_rendered_len=${#thinking_response}
 }
 
@@ -3290,12 +3281,13 @@ normal_line() {
     # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
     # 补输)即置 0,此后一切输入(包括 -q/-c/-h 等形似命令的行)都按正文处理
     local cmd_ok=1
-    # local prompt
+    # 提示符:首行与续行统一为灰色 │ 引导。命令解析只在首行生效,由
+    # cmd_ok 门控,不靠提示符区分首行身份。色码用 \001/\002 包裹,
+    # readline 计算提示符宽度时会忽略它们,否则光标定位错乱(实测
+    # 裸色码会让 readline 行为异常)。
+    local prompt=$'\001\033[2m\002│\001\033[0m\002 '
     if [[ "$1" == 0 ]]; then
-        # prompt="..  "
         cmd_ok=0
-    # else
-        # prompt="> "
     fi
     # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
     input_aborted=0
@@ -3305,7 +3297,7 @@ normal_line() {
         # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
         # 的 Ctrl+C 仍走 SIGINT 打断流程
         stty -isig intr undef 2>/dev/null
-        IFS= read -e -r -p ": " line
+        IFS= read -e -r -p "$prompt" line
         rc=$?
         stty isig intr '^C' 2>/dev/null
         (( rc != 0 )) && break
@@ -3380,7 +3372,8 @@ normal_line() {
                     # 滚动/软换行都安全
                     stty "$stty_save"
                 fi
-                printf '%s\n' "$rest"
+                # 与续行提示符一致的灰色 │ 引导(粘贴行属续行内容)
+                printf '%s\n' "$rest" | sed $'s/^/\033[2m│\033[0m /'
                 line+=$'\n'"$rest"
                 input+="$line"$'\n'
                 # prompt=".. "
