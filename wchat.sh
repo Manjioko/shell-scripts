@@ -311,39 +311,29 @@ else
     PTY_STYLE="none"
 fi
 
-# 关闭 readline 括号粘贴：多行粘贴时首行立即被 read -e 接受，
-# 剩余字节留在 tty 输入队列里，可用不带 -e 的非阻塞 read 排干拿到全文
-# （若保持开启，bash 会把首行之后的内容直接丢弃）
-_ct_inputrc=$(mktemp)
-[[ -f "$HOME/.inputrc" ]] && printf '$include %s\n' "$HOME/.inputrc" > "$_ct_inputrc"
-printf 'set enable-bracketed-paste off\n' >> "$_ct_inputrc"
-export INPUTRC="$_ct_inputrc"
-
-# 双保险：实测(brew bash 5.3)运行期才 export 的 INPUTRC 不一定被首个 read -e
-# 读到——readline 惰性初始化可能直接用默认值，括号粘贴保持开启，多行粘贴时
-# 首行之后的内容被 readline 吞掉丢弃(排干读到空,只剩一行)。
-# 1) bind 直接设置 readline 变量，不依赖 inputrc 的加载时机；
-# 2) 直接向终端发关闭序列：父 shell(zsh 默认开启括号粘贴)可能把终端留在
-#    开启状态，而 readline 处于关闭时不会再补发关闭序列，终端仍会给粘贴
-#    包上 \e[200~...\e[201~ 标记，多行内容照样被截断。
-bind 'set enable-bracketed-paste off' 2>/dev/null
-[[ -t 1 ]] && printf '\033[?2004l'
-
-# 主屏输入行(read -e)按 Ctrl+C 立即清空当前行:readline 读取期间会强制打开
-# ISIG,所以单靠 trap 拦不住——SIGINT 打断不了 readline 的 read,旧内容会留在
-# 缓冲区里"复活"。做法:normal_line 在每次 read 前临时 stty intr undef(驱动层
-# 解除 Ctrl+C→SIGINT 映射),0x03 变成普通按键交给 readline 分派,这里绑定为
-# unix-line-discard(等价 C-u,清到行首),行被即时清空、提示符保留,继续输入
-# 不受影响;读完后 normal_line 立即恢复映射,其余阶段(AI 输出/工具窗口/历史
-# 选择)的 Ctrl+C 仍走 SIGINT 打断流程。
-bind '"\C-c": unix-line-discard' 2>/dev/null
-
-# Ctrl+R 整段清空:readline 宏 = 清本行(\C-u) + quoted-insert 哨兵 0x01(\C-q\C-a)
-# + accept-line(\C-m)。一次按键 read 立即返回 line=0x01(无需再按回车),由
-# normal_line 最先识别:清空本轮全部输入(正文/粘贴/待发图片),清屏回到全新首行。
-# 与 Ctrl+C 分工:前者清当前行,后者整段重来;输入行内失去历史增量搜索,
-# 但 ↑ 方向键翻历史不受影响。
-bind '"\C-r": "\C-u\C-q\C-a\C-m"' 2>/dev/null
+# ---------- Python 组件探测(prompt_toolkit 输入框 / rich 渲染) ----------
+# 两个助手同属 Python 组件通道,三平台行为一致。输入框由 prompt_toolkit
+# 渲染(方向键/历史/括号粘贴/中文宽度全原生,echo 全程关闭,WSL2 的 ConPTY
+# 粘贴回显问题从根上消失);markdown 由 rich 渲染,替代 glow/mdcat 的
+# 分平台分装。缺失时输入框提示先运行 setup.sh,渲染回退纯文本。
+PTK_HELPER=""
+RENDER_HELPER=""
+_py_probe=""
+if command -v python3 >/dev/null 2>&1; then
+    # find_spec 只查模块不导入,一次探测两个组件(~60ms)
+    _py_probe=$(python3 -c 'import importlib.util as u; print(int(u.find_spec("prompt_toolkit") is not None), int(u.find_spec("rich") is not None))' 2>/dev/null)
+fi
+_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [[ "${_py_probe:0:1}" == "1" && -f "$_script_dir/input_helper.py" ]]; then
+    PTK_HELPER="$_script_dir/input_helper.py"
+fi
+if [[ "${_py_probe:2:1}" == "1" && -f "$_script_dir/render_helper.py" ]]; then
+    RENDER_HELPER="$_script_dir/render_helper.py"
+fi
+unset _py_probe _script_dir
+# 单行命令集:助手对"单行+回车"的这类输入立即返回,由 bash 执行(与
+# handle_cmd_line 的命令列表保持一致)
+PTK_COMMANDS="-q -l -msgs -c -skill -u -h -n -cl -stp -stt -stf -fs -md -img"
 
 trap handle_ctrl_c INT
 
@@ -358,19 +348,14 @@ stty opost onlcr 2>/dev/null
 
 render_markdown() {
     local text="$1"
-    local term_width
-    # 动态获取终端宽度:tput 失败则 stty,再失败兜底 80
-    # 每次调用都获取,适配用户中途调整窗口大小
-    term_width=$(tput cols || echo 80)
-    # 渲染前复位 OPOST+ONLCR(兜底):glow/mdcat/echo 的 \n 必须被翻译成回车+换行
+    # 渲染前复位 OPOST+ONLCR(兜底):渲染输出与纯文本回退的 \n 必须被
+    # 翻译成回车+换行
     stty opost onlcr 2>/dev/null
-    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
-    # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
-    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
-    if command -v glow >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | glow -w "$((term_width - 4))"
-    elif command -v mdcat >/dev/null 2>&1; then
-        echo "$text" | sed 's/\\$/\\\\/' | mdcat --columns "$((term_width - 4))"
+    if [[ -n "$RENDER_HELPER" ]]; then
+        # CommonMark 系渲染器(rich/glow/mdcat)都把「行尾反斜杠 + 换行」当
+        # hard break 语法并隐藏反斜杠,导致用户输入的行尾 \ 显示丢失。
+        # 先把单个行尾 \ 转义成 \\,渲染后原样显示。
+        printf '%s' "$text" | sed 's/\\$/\\\\/' | python3 "$RENDER_HELPER" 2>/dev/null
     else
         echo "$text"
     fi
@@ -497,8 +482,8 @@ get_history() {
 # Ctrl+C 不再退出程序:
 # - AI 输出阶段(ask_ai 流式期间,副屏):置 ai_abort,由 ask_ai 打断流、
 #   丢弃本轮输出、返回主屏幕继续对话;
-# - 主屏幕:输入行(read -e)的 Ctrl+C 已在 readline 层直接清行(见 bind 配置),
-#   不会走到本函数;历史选择/命令确认等普通 read 被打断时置 input_aborted,
+# - 主屏幕:输入框的 Ctrl+C 已在输入助手(prompt_toolkit)层直接清行,不会
+#   走到本函数;历史选择/命令确认等普通 read 被打断时置 input_aborted,
 #   由调用处清空输入后重新提示。
 # 唯一退出方式是明确输入 -q(命令行参数或交互输入)。
 handle_ctrl_c() {
@@ -606,7 +591,7 @@ help_user() {
     inp_msg "  -md   查看当前模型/思考/标题信息"
     inp_msg "  -u    查看当前上下文 token 用量"
     inp_msg "  -img <路径> 发送图片(自动转述为文字)"
-    inp_msg "  @     选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
+    inp_msg "  Ctrl+F 选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
     inp_msg "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
     inp_msg "  -h    显示帮助信息"
     inp_msg
@@ -2566,7 +2551,10 @@ tool_run_and_parse() {
     flush_thinking
 
     # AI 在调用工具前输出的正文(如"我先看看这个文件"),只放进第一条 assistant 消息
-    [[ -n "$full_response" ]] && render_markdown "$full_response"
+    if [[ -n "$full_response" ]]; then
+        render_markdown "$full_response"
+        printf '\n'   # 正文块与后续工具横幅之间留空行
+    fi
 
     for i in "${!ids_arr[@]}"; do
         fn_id="${ids_arr[$i]}"
@@ -2711,6 +2699,8 @@ tool_run_and_parse() {
         fi
 
         add_message "$content" "tool" "$fn_id"
+        # 工具结果块与后续内容(并行的下一条横幅/下一段思考)之间留空行
+        echo
     done
 
     fn_name=""
@@ -2904,7 +2894,7 @@ ask_ai() {
         curl_pid=""
         # 注意:绝不能写成 eval "exec N<&-" 2>/dev/null——exec 仅带重定向时
         # 会把当前生效的全部重定向永久化,eval 的 2>/dev/null 会被固化,
-        # fd2 从此指向 /dev/null(历史 bug:read -e 的提示符画在 stderr 上,
+        # fd2 从此指向 /dev/null(历史 bug:输入渲染依赖 fd2 指向 tty,
         # 一轮回答后提示符【>】静默消失,输入却正常)。此 fd 必然已打开,
         # 关闭不会报错,无需静默。
         [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-"
@@ -3008,7 +2998,9 @@ flush_thinking() {
     # 灰度泄漏进后续正文
     printf '\033[2m▸\033[0m\n'
     render_markdown "$delta" | sed $'s/^/  \033[2m/'
-    printf '\033[0m'
+    # 末尾 \033[0m 复位防止灰度泄漏;补一个换行让思考块与后续内容
+    # (工具横幅/正文)之间留空行,与正文→输入框的空行观感一致
+    printf '\033[0m\n'
     thinking_rendered_len=${#thinking_response}
 }
 
@@ -3027,7 +3019,7 @@ printContent() {
             input_aborted=0
             input_images=()
             round_aborted=1
-            printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n'
+            printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n\n'
             return 0
         fi
         input_images=()
@@ -3063,7 +3055,7 @@ printContent() {
         # assistant 消息写入 messages(用户消息已在上方保留),回到主屏幕,
         # 用户可继续补充信息再次对话
         round_aborted=1
-        printf '\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n'
+        printf '\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n\n'
         return 0
     fi
 
@@ -3073,7 +3065,12 @@ printContent() {
     # 时间线渲染:先渲染最后一段思考的增量,再渲染最终正文。
     # 工具链中间的思考已由 flush_thinking 渲染在对应工具横幅之前。
     flush_thinking
-    render_markdown "$full_response"
+    # 正文渲染完后空一行再进输入框:响应结尾与新输入框直接挨着,观感拥挤
+    # (真机反馈)。仅正文非空时补空行(工具轮/空响应不加)
+    if [[ -n "$full_response" ]]; then
+        render_markdown "$full_response"
+        printf '\n'
+    fi
     # echo "$messages"
 
     # 思考内容已渲染到主屏幕,清空防止下一轮用户输入时累积旧思考
@@ -3193,7 +3190,35 @@ get_clipboard() {
 wsl_choose_file() {
     local winpath=""
 
-    # 有 WSLg 图形环境时直接用 Linux GUI 选择器
+    # 优先 Windows 原生对话框:WSL2 用户资料多在 Windows 侧,zenity 从
+    # Linux home 出发找 Windows 目录很困难(用户反馈)。仅当 PowerShell
+    # 不可用时回退 zenity(WSLg)。
+    if command -v powershell.exe >/dev/null 2>&1; then
+        # 两个实测坑:1) 绝不能带 -NonInteractive,它让 ShowDialog 静默立即
+        # 返回(0 秒,对话框根本不弹);2) 不带属主调用时对话框藏在终端后面
+        # (WSLg 环境实测 1 秒即 CANCELLED)——必须传一个 TopMost 属主表单,
+        # 对话框才会置顶弹出(实测阻塞等待用户操作)。
+        # shellcheck disable=SC2016
+        winpath=$(powershell.exe -NoProfile -Command '
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            Add-Type -AssemblyName System.Windows.Forms
+            $owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}
+            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.Title = "选择文件"
+            $dlg.Multiselect = $false
+            if ($dlg.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+                Write-Output $dlg.FileName
+            }
+        ' 2>/dev/null | tr -d '\r')
+        if [[ -n "$winpath" ]]; then
+            wslpath -u "$winpath" 2>/dev/null
+        else
+            echo "CANCELLED"
+        fi
+        return 0
+    fi
+
+    # 回退:WSLg 图形环境下的 Linux 选择器
     if [[ -n "$DISPLAY" ]] && command -v zenity >/dev/null 2>&1; then
         local pick
         pick=$(zenity --file-selection --title="选择文件" 2>/dev/null) || { echo "CANCELLED"; return 0; }
@@ -3201,24 +3226,7 @@ wsl_choose_file() {
         return 0
     fi
 
-    # 退回 Windows 原生对话框（不依赖图形环境/发行版内软件）
-    # shellcheck disable=SC2016
-    winpath=$(powershell.exe -NoProfile -NonInteractive -Command '
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-        Add-Type -AssemblyName System.Windows.Forms
-        $dlg = New-Object System.Windows.Forms.OpenFileDialog
-        $dlg.Title = "选择文件"
-        $dlg.Multiselect = $false
-        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            Write-Output $dlg.FileName
-        }
-    ' 2>/dev/null | tr -d '\r')
-
-    if [[ -n "$winpath" ]]; then
-        wslpath -u "$winpath" 2>/dev/null
-    else
-        echo "CANCELLED"
-    fi
+    echo "CANCELLED"
 }
 
 # Linux 下选择文件：依次尝试 zenity / kdialog / yad，都没有则退回 fzf
@@ -3239,14 +3247,16 @@ linux_choose_file() {
     echo "$pick"
 }
 
-# 交互式文件选择(@):图片记入 input_images 待转述;文本只把路径放进输入
-# 并加入只读授权(内容由 AI 用 read_file 工具按需读取);其他文件跳过。
+# 交互式文件选择(@):只做选择,产出占位行(FILE_PLACEHOLDER)交给调用方
+# 经 --default 拼进输入框——与粘贴占位同机制:行尾零宽标记、整行原子
+# 删除、删除即取消选择。不在这里登记任何状态,提交时由
+# parse_placeholders 按前缀解析:图片 → 登记;文本文件 → 授权说明;
+# 跳过 → 告知说明。选择的可撤销性完全由占位行保证。
 read_file() {
-
-    [[ "$forget_history" == 1 ]] && return 0
 
     filePath=""
     fileContent=""
+    FILE_PLACEHOLDER=""
     case "$(detect_os)" in
         macos)
             filePath=$(osascript -e 'try' -e 'POSIX path of (choose file)' -e 'on error' -e 'return "CANCELLED"' -e 'end try')
@@ -3259,335 +3269,269 @@ read_file() {
             ;;
     esac
     if [[ -n "$filePath" && "$filePath" != "CANCELLED" && -f "$filePath" ]]; then
-        # 图片按扩展名分流:只记路径进 input_images,提交时统一转述;
-        # 文本文件不再把内容拼进 input——只把路径放进消息并加入只读授权,
-        # 由 AI 按需用 read_file 工具(带行号/offset/limit/截断)自行读取,
+        # 图片按扩展名分流:占位行只记路径,提交时统一转述;文本文件提交
+        # 时换成路径引用+只读授权(内容由 AI 用 read_file 工具按需读取),
         # 避免大文件撑爆 user 消息与上下文。
         if is_image "$filePath"; then
-            inp_msg "[图片] $filePath"
-            input_images+=("$filePath")
+            FILE_PLACEHOLDER="📋 [图片] $filePath"
         elif is_text_file "$filePath"; then
-            inp_msg "[文件] $filePath"
-            grant_file "$filePath"
-            # 坑:brew bash 5 里 $var 后紧跟多字节字符(如句号「。」)会吃掉
-            # 变量展开并破坏后续字符(实测 $filePath。 → 空),必须用 ${var} 花括号
-            input+="(用户通过 @ 选择了文件: ${filePath}。该文件已获只读授权,如需查看内容,请先调用 read_file 工具读取,再回答用户问题。)"$'\n'
+            FILE_PLACEHOLDER="📋 [文件] $filePath"
         else
-            inp_msg "⚠️  不是文本/图片文件,已跳过(仅支持文本与图片): $filePath"
-            # 跳过也要告知 AI,否则它不知道发生了什么,会自己去翻目录乱找
-            input+="(用户尝试选择文件: ${filePath},但该文件不是文本/图片格式,已被跳过。请勿尝试读取;如需处理请告知用户先转换格式。)"$'\n'
+            FILE_PLACEHOLDER="📋 [跳过] $filePath"
         fi
-    elif [[ "$filePath" == "CANCELLED" ]]; then
-        # 取消选择时静默返回（错误提示已由各选择器打印）
-        :
+        # 行尾零宽空格:输入助手把含该标记的行视为原子单元,整行删除=
+        # 取消选择。用字面字符写入(不依赖 \u 转义,旧版 bash 也安全)
+        FILE_PLACEHOLDER+="​"
     fi
-    normal_line 0
 }
 
 # 读取用户输入的多行内容，支持续行、粘贴、文件导入等
+# 单行命令解析(prompt_toolkit 输入助手返回的全文调用):
+# 返回 0=已处理(结束本轮输入),1=非命令(按正文),2=未知命令(已警告,重新提示)
+handle_cmd_line() {
+    local line="$1"
+    if [[ "$line" == "-q" ]]; then
+        # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才
+        # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
+        if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
+            local save_ans
+            printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
+            IFS= read -r save_ans
+            [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
+        else
+            save_history
+        fi
+        exit 0
+    fi
+    if [[ "$line" == "-l" ]]; then
+        history_handler
+        return 0
+    fi
+    if [[ "$line" == "-msgs" ]]; then
+        inp_msg "$messages"
+        return 0
+    fi
+    if [[ "$line" == "-c" ]]; then
+        compact_messages
+        return 0
+    fi
+    if [[ "$line" == "-skill" ]]; then
+        skill_save
+        return 0
+    fi
+    if [[ "$line" == "-u" ]]; then
+        print_usage
+        return 0
+    fi
+    if [[ "$line" == "-h" ]]; then
+        help_user
+        return 0
+    fi
+    if [[ "$line" == "-n" ]]; then
+        messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+        inject_skills
+        chat_title=""
+        first_time=1
+        clear
+        return 0
+    fi
+    if [[ "$line" == "-cl" ]]; then
+        clear
+        return 0
+    fi
+    if [[ "$line" == "-stp" ]]; then
+        model="$pro_model"
+        inp_msg "✅ 已切换到 pro 模型 ($model)"
+        return 0
+    fi
+    if [[ "$line" == "-stt" ]]; then
+        thinking="enabled"
+        inp_msg "✅ 已开启思考模式"
+        return 0
+    fi
+    if [[ "$line" == "-stf" ]]; then
+        model="$flash_model"
+        thinking="disabled"
+        inp_msg "✅ 已恢复默认 (model=$model, thinking=disabled)"
+        return 0
+    fi
+    if [[ "$line" == "-fs" ]]; then
+        if [[ -z "$chat_title" ]]; then
+            inp_msg "⚠️  当前无对话标题，无法保存"
+        elif [[ $forget_history == 1 ]]; then
+            : # -f 模式，静默跳过
+        else
+            save_history && inp_msg "✅ 已保存: ${HISTORY_DIR}/${name}.json"
+        fi
+        return 0
+    fi
+    if [[ "$line" == "-md" ]]; then
+        inp_msg "模型: ${model}"
+        inp_msg "思考: ${thinking}"
+        inp_msg "标题: ${chat_title:-（空）}"
+        return 0
+    fi
+    if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
+        local img_path="${line#-img}"
+        img_path="${img_path# }"
+        if [[ -z "$img_path" ]]; then
+            inp_msg "用法: -img <图片路径>"
+            return 0
+        fi
+        # 展开 ~ 波浪号
+        img_path="${img_path/#\~/$HOME}"
+        if [[ -f "$img_path" ]] && is_image "$img_path"; then
+            input_images+=("$img_path")
+            inp_msg "[图片] $img_path"
+        elif [[ -f "$img_path" ]]; then
+            inp_msg "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
+        else
+            inp_msg "⚠️  文件不存在: $img_path"
+        fi
+        return 0
+    fi
+
+    # 兜底:拦截以 - 开头的未知命令(含前导空格),避免误当正文提交给 AI
+    local trimmed="${line#"${line%%[![:space:]]*}"}"
+    if [[ "$trimmed" == "-"* ]]; then
+        inp_msg "⚠️  未知命令: ${trimmed%% *}"
+        inp_msg "💡 使用 -h 查看可用命令"
+        return 2
+    fi
+    return 1
+}
+
+# 解析提交文本中的文件占位行(📋 [图片]/[文件]/[跳过] 前缀;零宽标记已由
+# 输入助手在提交时剥离):图片 → 登记 input_images 并剔除该行;文本文件 →
+# 原地替换为路径引用+只读授权说明;跳过 → 替换为告知说明;其余行原样
+# 保留。占位行在输入框内被删除(整行原子删除)即从未提交、自然取消选择;
+# 占位行内被手改导致文件不存在时按普通文本保留,不会误登记。
+# 解析结果经全局变量 PARSE_OUT 回传:函数必须直接调用,不能包在 $() 里——
+# input_images 数组与 grant_file 的副作用在命令替换子 shell 里会被丢弃。
+parse_placeholders() {
+    local text="$1" line out="" path
+    while IFS= read -r line; do
+        case "$line" in
+            "📋 [图片] "*)
+                path="${line#"📋 [图片] "}"
+                if [[ -f "$path" ]] && is_image "$path"; then
+                    input_images+=("$path")
+                    continue
+                fi
+                ;;
+            "📋 [文件] "*)
+                path="${line#"📋 [文件] "}"
+                if [[ -f "$path" ]] && is_text_file "$path"; then
+                    grant_file "$path"
+                    # 坑:brew bash 5 里 $var 后紧跟多字节字符(如句号「。」)会
+                    # 吃掉变量展开并破坏后续字符,必须用 ${var} 花括号
+                    [[ -n "$out" ]] && out+=$'\n'
+                    out+="(用户通过 @ 选择了文件: ${path}。该文件已获只读授权,如需查看内容,请先调用 read_file 工具读取,再回答用户问题。)"
+                    continue
+                fi
+                ;;
+            "📋 [跳过] "*)
+                path="${line#"📋 [跳过] "}"
+                # 跳过也要告知 AI,否则它不知道发生了什么,会自己去翻目录乱找
+                [[ -n "$out" ]] && out+=$'\n'
+                out+="(用户尝试选择文件: ${path},但该文件不是文本/图片格式,已被跳过。请勿尝试读取;如需处理请告知用户先转换格式。)"
+                continue
+                ;;
+        esac
+        [[ -n "$out" ]] && out+=$'\n'
+        out+="$line"
+    done <<< "$text"
+    PARSE_OUT="$out"
+}
+
 normal_line() {
-    local line rc
-    # 兜底:read -e 的提示符由 readline 画在 stderr 上,fd2 一旦不是 tty
-    # (历史 bug:eval "exec N<&-" 2>/dev/null 会把 2>/dev/null 固化到 fd2),
-    # 提示符静默消失而输入正常,表现为"一轮回答后迟迟不显示【>】"。
-    # 每次进入读取前检测:fd0 是 tty 而 fd2 不是时,把 fd2 对齐回 tty。
+    # 兜底:输入助手的渲染画在 /dev/tty 上,fd2 一旦不是 tty(历史 bug:
+    # eval "exec N<&-" 2>/dev/null 会把 2>/dev/null 固化到 fd2),先把
+    # fd2 对齐回 tty。
     [[ -t 0 && ! -t 2 ]] && exec 2>&0
-    # 粘贴显示分流:仅 WSL 需要清理重绘(WSL2 内核 pty 在 echo 恢复瞬间
-    # 补回显队列里未消费的字节,产生双层显示);macOS/Linux 的剩余字节
-    # 从未被回显(到达时处于 -echo),直接增量追加即可。
-    # WSL 的清理用相对位移而非 DEC 绝对锚点(\0337/\0338):锚点是屏幕绝对
-    # 坐标,输入框在屏幕底部时补回显触发滚动,锚点失效,重打落到过期行号,
-    # 旧内容残留上方 → 叠加/重复显示(本 bug 根因)。相对位移从补回显
-    # 结束处上移 lf_count 行,滚动前后相对位置不变,永远落在补回显首行。
-    local wsl_repaint=0
-    [[ "$(detect_os)" == "wsl" ]] && wsl_repaint=1
 
     # 命令解析开关:只有全新消息的首行允许把 -x 输入解释为命令;
-    # 一旦进入续行/补输状态(粘贴续行、行尾 \ 续行、@ 选文件后的递归
-    # 补输)即置 0,此后一切输入(包括 -q/-c/-h 等形似命令的行)都按正文处理
+    # 续行/补输(@ 选文件后的递归补输)一律按正文处理
     local cmd_ok=1
-    # 提示符:首行与续行统一为灰色 │ 引导。命令解析只在首行生效,由
-    # cmd_ok 门控,不靠提示符区分首行身份。色码用 \001/\002 包裹,
-    # readline 计算提示符宽度时会忽略它们,否则光标定位错乱(实测
-    # 裸色码会让 readline 行为异常)。
-    local prompt=$'\001\033[2m\002│\001\033[0m\002 '
     if [[ "$1" == 0 ]]; then
         cmd_ok=0
     fi
     # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
     input_aborted=0
-    while true; do
-        # 读取期间临时解除 Ctrl+C→SIGINT 的驱动层映射(readline 会强制打开
-        # ISIG,只有 intr undef 才能让 0x03 作为按键到达 readline),配合上方
-        # bind 的 unix-line-discard 立即清空本行;读后马上恢复映射,其余阶段
-        # 的 Ctrl+C 仍走 SIGINT 打断流程
-        stty -isig intr undef 2>/dev/null
-        IFS= read -e -r -p "$prompt" line
-        rc=$?
-        stty isig intr '^C' 2>/dev/null
-        (( rc != 0 )) && break
-        # 多行粘贴：括号粘贴已关闭，首行被 readline 接受后剩余字节还在 tty 队列里。
-        local rest=""
-        local stty_save
-        stty_save=$(stty -g)
-        # 排干用单次短窗读:read -e 返回前有 ~1s 延迟,粘贴剩余字节在此窗口
-        # 已全部入队,一次读完即可。长窗循环反而会吞掉窗口内到达的用户回车
-        # (read -N 阻塞期间到达的字节超时后被 bash 丢弃,字节不回流)。
-        stty raw
-        IFS= read -r -t 0.05 -N 1000000 rest
-        # 注意:echo 仍处于关闭状态。WSL2 的补回显在 echo 恢复的瞬间触发,
-        # 恢复动作放到粘贴分支里(WSL 在恢复前先 ?7l 关自动换行,让补回显
-        # 行数严格等于 rest 的 \n 数);其余路径在各自分支内恢复。
-        # Ctrl+R 清空哨兵(宏 \C-u\C-q\C-a\C-m):readline 收到按键时执行宏,
-        # read 立即返回 line=0x01;若按键在排干窗口内被卷进 rest(刚粘完立刻
-        # 按 Ctrl+R,raw 模式读走的是原始字节),则 rest 里是 0x12。两种形态
-        # 都视为清空:整段重来,正文、粘贴、待发图片全部作废,清屏回到全新
-        # 首行。必须早于粘贴分支与续行门控(cmd_ok=0),否则哨兵会被当正文
-        if [[ "$line$rest" == *$'\x01'* || "$line$rest" == *$'\x12'* ]]; then
-            input=""
-            input_images=()
-            # prompt="> "
-            cmd_ok=1
-            # 再排干一次:丢弃窗口后仍在途的粘贴字节,防止残留冒成下一行
-            stty raw
-            IFS= read -r -t 0.05 -N 1000000 2>/dev/null
-            stty "$stty_save"
-            printf '\033[2J\033[H'
-            inp_msg '已清空本轮输入'
-            continue
-        fi
-        # @ 选文件手势:单独 @ 或行尾 @。必须在粘贴分支之前判断——
-        # WSL2 回车常以 \r\n 成对到达,排干会捞到遗留换行字节,若先走
-        # 粘贴分支,"@" 行会被"只有换行字节=按提交处理"吞掉,手势失效
-        # (历史回归,实测复现)。仅当排干只含换行字节(手打行,非粘贴)
-        # 才算手势;粘贴首行以 @ 结尾按正文处理,交给下方粘贴分支。
-        local at_only="${rest//$'\r'/}"
-        at_only="${at_only//$'\n'/}"
-        if [[ -z "$at_only" ]]; then
-            # 恢复 echo:文件选择器与递归 normal_line 的下一轮 read -e
-            # 都依赖 tty 回显
-            stty "$stty_save"
-            if [[ "$line" == "@" ]]; then
-                read_file
-                break
+
+    # 输入组件缺失:提示安装后退出(单轮模式 -st 带内容不会走到这里)
+    if [[ -z "$PTK_HELPER" || ! -t 0 || ! -t 1 ]]; then
+        inp_msg "⚠️  缺少输入组件(python3 + prompt_toolkit),请先运行: bash setup.sh"
+        exit 1
+    fi
+
+    # 整个多行输入会话(首行+续行+粘贴+空行提交)在助手内完成,一次返回全文
+    local ptk_text ptk_args rc
+    if (( cmd_ok )); then
+        # = 形式:命令集以 - 开头,拆开传会被 argparse 当成选项拒绝
+        ptk_args=("--commands=$PTK_COMMANDS")
+    else
+        ptk_args=(--no-commands)
+    fi
+    ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" "${ptk_args[@]}" 2>/dev/null)
+    rc=$?
+    if (( rc == 4 )); then
+        # Ctrl+F 选择文件(替代旧 @ 手势):pick 文本经 --default 带回输入框
+        # 继续编辑;选中时 read_file 产出的占位行(与粘贴占位同机制:零宽
+        # 标记、整行原子删除、删除=取消选择)追加在文本之后,提交时
+        # parse_placeholders 解析登记。嵌套 Ctrl+F 把 pick 文本(含既有
+        # 占位行)带回来再选,选择只增不减。取消且无文本 → 直接返回,
+        # 由主循环重新提示(-q 陷阱修复)。
+        local ptk_pick_text="$ptk_text"
+        while true; do
+            read_file
+            if [[ -n "$filePath" && "$filePath" != "CANCELLED" ]]; then
+                [[ -n "$ptk_pick_text" ]] && ptk_pick_text+=$'\n'
+                ptk_pick_text+="$FILE_PLACEHOLDER"$'\n'
             fi
-            if [[ "${line: -1}" == "@" ]]; then
-                line="${line%@}"
-                input+="$line"$'\n'
-                read_file
-                # 必须 break:read_file 内已递归 normal_line 0 收集后续输入,
-                # 不 break 会继续往下走,把 $line 再次拼进 input(历史 bug:输入重复)
-                break
+            if [[ -z "$ptk_pick_text" ]]; then
+                return 0
             fi
-        fi
-        if [[ -n "$rest" ]]; then
-            # 粘贴绝不直接提交:转入续行模式,由用户在【..】空回车提交整段。
-            # 排干时终端是 raw(ICRNL 关),队列里 \r\n 原样:行尾的 \r(粘贴
-            # 自带换行/用户粘完立即按的 Enter 都剥在这里,一律视为行尾,
-            # 不再当作提交信号);剥 \r 后行间就是单 \n,空行的 \r\n 剥后剩
-            # 单 \n,自然保留,不要再归并(归并会把真实空行吞掉)。首行行尾
-            # \r\n 中 readline 消费 \r 后留下的 \n 剥前导一个即可。
-            local nl=$'\n'
-            # WSL 清理重绘的上移行数 = rest 的 \n 数(补回显逐 \n 下移一行,
-            # 含首行遗留的那个 \n)。必须在归一化改写 rest 之前取数。
-            local lf_count=${rest//[^$'\n']}
-            lf_count=${#lf_count}
-            while [[ "$rest" == *$'\r' ]]; do
-                rest="${rest%$'\r'}"
-            done
-            # 换行归一:终端粘贴的换行字节因平台而异——iTerm2/Terminal.app
-            # 发裸 \r,WSL 等发 \r\n 对,个别终端发裸 \n。先把 \r\n 对归并为
-            # \n,再把残留裸 \r 转成 \n。绝不能直接删除 \r:那会吃掉行间隔,
-            # 把多行内容压成一行(历史 bug:粘贴代码块全部糊成一行)
-            rest=${rest//$'\r\n'/$'\n'}
-            rest=${rest//$'\r'/$'\n'}
-            rest="${rest%"$nl"}"
-            rest="${rest#"$nl"}"
-            line="${line%$'\r'}"
-            if [[ -n "$rest" ]]; then
-                if (( wsl_repaint )); then
-                    # WSL:双层显示(readline 首行 + pty 补回显的剩余行)。
-                    # 恢复 echo 前先 ?7l 关自动换行:补回显逐 \n 下移一行,
-                    # 长行不折行,垃圾区行数严格等于 lf_count;echo 恢复的
-                    # 瞬间补回显在此渲染。随后从补回显结束处相对上移
-                    # lf_count 行回到其首行(滚动后绝对锚点会失效,相对位移
-                    # 不会),清除到屏底,恢复自动换行。
-                    printf '\033[?7l'
-                    stty "$stty_save"
-                    printf '\r\033[%dA\033[J\033[?7h' "$lf_count"
-                else
-                    # macOS/Linux:剩余行从未被回显,readline 接受首行后光标
-                    # 已在下一行行首,恢复 echo 后直接增量打印——零坐标算术,
-                    # 滚动/软换行都安全
-                    stty "$stty_save"
-                fi
-                # 与续行提示符一致的灰色 │ 引导(粘贴行属续行内容)
-                printf '%s\n' "$rest" | sed $'s/^/\033[2m│\033[0m /'
-                line+=$'\n'"$rest"
-                input+="$line"$'\n'
-                # prompt=".. "
-                cmd_ok=0
+            ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" "--commands=$PTK_COMMANDS" --default "$ptk_pick_text" 2>/dev/null)
+            rc=$?
+            if (( rc == 4 )); then
+                ptk_pick_text="$ptk_text"
                 continue
             fi
-            # 排干到的只有换行字节:read -e 返回前有 ~1s 延迟(实测可达 2s+),
-            # 期间用户按下的提交回车(统一输入模型:空行回车=发送)会落进
-            # 队列被这里捞到。旧实现把它当粘贴残渣丢弃、只续行,提交信号
-            # 被吞,脚本停在 .. 续行态、迟迟回不到【>】(实测复现)。
-            # 一律按提交处理。代价:单行粘贴的尾随换行也走此分支、会直接
-            # 发送——与"打字+回车"字节不可区分(历史 #21 注释同结论),
-            # 两害相权,吞掉提交回车比粘贴自动发送更影响使用。
-            stty "$stty_save"
-            input+="$line"$'\n'
-            break
-        fi
-        # 排干未捕获到粘贴(手打行):恢复 echo,后续分支(命令/续行)依赖 tty 回显
-        stty "$stty_save"
-        if [[ "$line" == *\\ ]]; then
-            # 行尾有反斜杠 → 续行。只删掉最后一个字符（即那个反斜杠），
-            # 用 ${line%?}（删除任意一个字符）而不是 ${line%\\}，
-            # 避免不同 bash 版本对 pattern 中反斜杠转义的解析差异导致删多了。
-            line="${line%?}"
-            input+="$line"$'\n'
-            # prompt=".. "
-            cmd_ok=0
-            continue
-        fi
-        # 续行/补输阶段:一切输入都是正文(包括 -q/-c/-h 等形似命令的行),
-        # 绝不解释为命令。普通行追加后停留在【..】继续输入,空行回车才
-        # 提交整段消息(粘贴后补输多行文本的标准姿势)
-        if (( !cmd_ok )); then
-            [[ -z "$line" ]] && break
-            input+="$line"$'\n'
-            # prompt=".. "
-            continue
-        fi
-        if [[ "$line" == "-q" ]]; then
-            # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才
-            # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
-            if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
-                local save_ans
-                printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
-                IFS= read -r save_ans
-                [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
-            else
-                save_history
+            if (( rc == 0 )); then
+                ptk_text="${ptk_text%$'\n'}"
+                if (( cmd_ok )) && [[ "$ptk_text" != *$'\n'* ]]; then
+                    handle_cmd_line "$ptk_text"
+                    case $? in
+                        0|2) return 0 ;;
+                    esac
+                fi
+                parse_placeholders "$ptk_text"
+                input="$PARSE_OUT"
             fi
-            exit 0
+            return 0
+        done
+    fi
+    if (( rc == 0 )); then
+        # 助手文本行尾带 \n(提交前最后一行由回车产生),剥一个
+        ptk_text="${ptk_text%$'\n'}"
+        if (( cmd_ok )) && [[ "$ptk_text" != *$'\n'* ]]; then
+            # 全新首行且单行:命令解析
+            handle_cmd_line "$ptk_text"
+            case $? in
+                0|2) return 0 ;;   # 已处理(结束本轮输入)/未知命令(重新提示)
+            esac
         fi
-        if [[ "$line" == "-l" ]]; then
-            history_handler
-            break
-        fi
-        if [[ "$line" == "-msgs" ]]; then
-            inp_msg "$messages"
-            break
-        fi
-        if [[ "$line" == "-c" ]]; then
-            compact_messages
-            break
-        fi
-        if [[ "$line" == "-skill" ]]; then
-            skill_save
-            break
-        fi
-        if [[ "$line" == "-u" ]]; then
-            print_usage
-            break
-        fi
-        if [[ "$line" == "-h" ]]; then
-            help_user
-            break
-        fi
-        if [[ "$line" == "-n" ]]; then
-            messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
-            inject_skills
-            chat_title=""
-            first_time=1
-            clear
-            break
-        fi
-        if [[ "$line" == "-cl" ]]; then
-            clear
-            break
-        fi
-        if [[ "$line" == "-stp" ]]; then
-            model="$pro_model"
-            inp_msg "✅ 已切换到 pro 模型 ($model)"
-            break
-        fi
-        if [[ "$line" == "-stt" ]]; then
-            thinking="enabled"
-            inp_msg "✅ 已开启思考模式"
-            break
-        fi
-        if [[ "$line" == "-stf" ]]; then
-            model="$flash_model"
-            thinking="disabled"
-            inp_msg "✅ 已恢复默认 (model=$model, thinking=disabled)"
-            break
-        fi
-        if [[ "$line" == "-fs" ]]; then
-            if [[ -z "$chat_title" ]]; then
-                inp_msg "⚠️  当前无对话标题，无法保存"
-            elif [[ $forget_history == 1 ]]; then
-                : # -f 模式，静默跳过
-            else
-                save_history && inp_msg "✅ 已保存: ${HISTORY_DIR}/${name}.json"
-            fi
-            break
-        fi
-        if [[ "$line" == "-md" ]]; then
-            inp_msg "模型: ${model}"
-            inp_msg "思考: ${thinking}"
-            inp_msg "标题: ${chat_title:-（空）}"
-            break
-        fi
-        if [[ "$line" == "-img" || "$line" == "-img "* ]]; then
-            local img_path="${line#-img}"
-            img_path="${img_path# }"
-            if [[ -z "$img_path" ]]; then
-                inp_msg "用法: -img <图片路径>"
-                break
-            fi
-            # 展开 ~ 波浪号
-            img_path="${img_path/#\~/$HOME}"
-            if [[ -f "$img_path" ]] && is_image "$img_path"; then
-                input_images+=("$img_path")
-                inp_msg "[图片] $img_path"
-            elif [[ -f "$img_path" ]]; then
-                inp_msg "⚠️  只支持图片(JPEG/PNG/GIF/WebP/BMP): $img_path"
-            else
-                inp_msg "⚠️  文件不存在: $img_path"
-            fi
-            break
-        fi
-
-        # 兜底:拦截以 - 开头的未知命令(含前导空格),避免误当正文提交给 AI
-        local trimmed="${line#"${line%%[![:space:]]*}"}"
-        if [[ "$trimmed" == "-"* ]]; then
-            inp_msg "⚠️  未知命令: ${trimmed%% *}"
-            inp_msg "💡 使用 -h 查看可用命令"
-            continue
-        fi
-
-        # 统一输入模型:全新首行输入内容后同样换行继续(与续行态一致,
-        # 无需行尾 \),空行回车才提交整段消息;命令解析只在首行生效
-        [[ -z "$line" ]] && break
-        input+="$line"$'\n'
-        # prompt=".. "
-        cmd_ok=0
-        continue
-    done
-    # 兜底:kill -INT 等外部 SIGINT 打断 read -e 时(readline 的 read 不会提前
-    # 返回,回车后才走到这里),按惯例清空本次累计的全部输入,换行后返回,
-    # 由主循环重新提示,程序不退出
-    if (( input_aborted )); then
-        input_aborted=0
-        input=""
-        printf '\n'
+        parse_placeholders "$ptk_text"
+        input="$PARSE_OUT"
         return 0
     fi
-    input="${input%$'\n'}"
+    if (( rc == 1 )); then
+        # EOF/中断:本轮无输入,重新提示
+        return 0
+    fi
+    inp_msg "⚠️  输入助手异常(退出码 $rc),请检查 python3/prompt_toolkit 安装"
+    exit 1
 }
 
 
