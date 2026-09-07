@@ -314,8 +314,8 @@ fi
 # ---------- Python 组件探测(prompt_toolkit 输入框 / rich 渲染) ----------
 # 两个助手同属 Python 组件通道,三平台行为一致。输入框由 prompt_toolkit
 # 渲染(方向键/历史/括号粘贴/中文宽度全原生,echo 全程关闭,WSL2 的 ConPTY
-# 粘贴回显问题从根上消失);markdown 由 rich 渲染,替代 glow/mdcat 的
-# 分平台分装。缺失时输入框提示先运行 setup.sh,渲染回退纯文本。
+# 粘贴回显问题从根上消失);markdown 由 rich 渲染,
+#缺失时输入框提示先运行 setup.sh,渲染回退纯文本。
 PTK_HELPER=""
 RENDER_HELPER=""
 _py_probe=""
@@ -340,7 +340,7 @@ trap handle_ctrl_c INT
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
 trap 'printf "\033[?25h\033[?7h"; stty echo isig opost onlcr 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
 
-# 多行输出(glow/mdcat/echo 都以 \n 结尾)依赖终端 ONLCR 把 \n 翻译成
+# 多行输出(echo 以 \n 结尾)依赖终端 ONLCR 把 \n 翻译成
 # 回车+换行;ONLCR 一旦被外部环境关闭,多行内容会级联缩进、排版错乱。
 # 启动时显式确保一次,防终端被其他程序留下 onlcr 关闭的状态。
 stty opost onlcr 2>/dev/null
@@ -352,7 +352,7 @@ render_markdown() {
     # 翻译成回车+换行
     stty opost onlcr 2>/dev/null
     if [[ -n "$RENDER_HELPER" ]]; then
-        # CommonMark 系渲染器(rich/glow/mdcat)都把「行尾反斜杠 + 换行」当
+        # CommonMark 系渲染器(rich)都把「行尾反斜杠 + 换行」当
         # hard break 语法并隐藏反斜杠,导致用户输入的行尾 \ 显示丢失。
         # 先把单个行尾 \ 转义成 \\,渲染后原样显示。
         printf '%s' "$text" | sed 's/\\$/\\\\/' | python3 "$RENDER_HELPER" 2>/dev/null
@@ -1279,7 +1279,7 @@ unlock_screen() {
 # ================= 流箱:替代交替屏的流式输出小窗口 =================
 # ask_ai 流式期间在主屏底部画一块固定 N 行的滚动区域(环形缓冲+节流),
 # 全程不切换屏幕,消除 smcup/rmcup 闪烁;流结束(正常/打断/报错/重试)后
-# 整箱擦除,再由 flush_thinking 与 render_markdown(glow) 渲染最终结果。
+# 整箱擦除,再由 flush_thinking 与 render_markdown(rich) 渲染最终结果。
 # 关键几何约束(历史 bug:重画逐行带 \n 会在终端底部每帧滚动一次,把会话
 # 内容一行行顶出屏幕,最后只剩流箱内容):首次有内容时一次性预留箱区
 # (正常滚动让位,之后会话固定可见),锚定箱顶;此后所有重画都从锚点出发、
@@ -1378,8 +1378,8 @@ stream_box_append() {
 }
 
 # 关箱:整箱擦除(回到锚点,逐行 2K 擦 + 下移,零换行零滚动),擦完回到
-# 锚点让后续 glow 渲染从箱顶位置接续;恢复光标/换行/回显。未消费的
-# 残行直接丢弃——箱体即删,无需补画,完整内容由后续 glow 渲染
+# 锚点让后续 rich 渲染从箱顶位置接续;恢复光标/换行/回显。未消费的
+# 残行直接丢弃——箱体即删,无需补画,完整内容由后续 rich 渲染
 stream_box_close() {
     (( stream_open )) || return 0
     local i
@@ -1710,6 +1710,18 @@ auth_think() {
     auth_add_message "$auth_verdict" "assistant"
     return 0
 }
+# 展开波浪号路径: ~/xxx -> $HOME/xxx, ~ -> $HOME
+# 用于越界访问放行时,将原始路径中的 ~ 展开为实际的家目录路径
+expand_tilde() {
+    local p="$1"
+    if [[ "$p" == '~' ]]; then
+        printf '%s' "$HOME"
+    elif [[ "$p" == '~/'* ]]; then
+        printf '%s/%s' "$HOME" "${p#'~/'}"
+    else
+        printf '%s' "$p"
+    fi
+}
 # 路径沙箱:解析工具传入的路径为物理绝对路径,并强制落在 WORK_ROOT 内。
 # 相对路径基于工作目录;.. 逃逸、绝对路径指向外部、symlink 指向外部都会被拒绝。
 # 写文件时父目录可能尚未存在:向上找最近的已存在祖先做物理规范化,
@@ -1783,7 +1795,7 @@ is_granted() {
 # 业界同款:Claude Code 的权限确认模式(越界访问弹确认,由用户裁决)。
 ask_path_grant() {
     local p="$1" answer rc
-    printf '\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n' "$p"
+    printf '\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n\n' "$p"
     printf ' \033[1;31m是否放行?(y/n): \033[0m'
     # 与 shell 工具危险命令确认同款轮询读取:Ctrl+C 当作拒绝
     stty -echoctl 2>/dev/null
@@ -1821,9 +1833,9 @@ tool_read_file() {
         # 沙箱拒绝:先查会话级授权名单(@ 选择 / 越界放行过),没有则询问
         # 用户是否放行(业界同款:Claude Code 越界访问弹权限确认)
         if is_granted "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         elif ask_path_grant "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         else
             content="错误:读取被拒绝(路径位于工作目录外,用户未放行): $path"
             printf ' ⛔ 越界读取被拒绝:%s\n' "$path"
@@ -1857,9 +1869,9 @@ tool_write_file() {
     if ! resolved=$(resolve_path "$path"); then
         # 越界写入:先查会话级授权名单(放行过不再问),否则询问用户是否放行
         if is_granted "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         elif ask_path_grant "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         else
             content="错误:写入被拒绝(路径位于工作目录外,用户未放行): $path"
             printf ' ⛔ 越界写入被拒绝:%s\n' "$path"
@@ -1885,9 +1897,9 @@ tool_edit_file() {
     resolved=$(resolve_path "$path") || {
         # 越界修改:先查会话级授权名单(放行过不再问),否则询问用户是否放行
         if is_granted "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         elif ask_path_grant "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         else
             content="错误:修改被拒绝(路径位于工作目录外,用户未放行): $path"
             printf ' ⛔ 越界修改被拒绝:%s\n' "$path"
@@ -1922,9 +1934,9 @@ tool_list_dir() {
     resolved=$(resolve_path "$path") || {
         # 越界列出目录:先查会话级授权名单(放行过不再问),否则询问用户
         if is_granted "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         elif ask_path_grant "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         else
             content="错误:列出目录被拒绝(路径位于工作目录外,用户未放行): $path"
             printf ' ⛔ 越界列出被拒绝:%s\n' "$path"
@@ -1951,9 +1963,9 @@ tool_grep() {
         if ! resolved=$(resolve_path "$path"); then
             # 越界搜索:先查会话级授权名单(放行过不再问),否则询问用户
             if is_granted "$path"; then
-                resolved="$path"
+                resolved="$(expand_tilde "$path")"
             elif ask_path_grant "$path"; then
-                resolved="$path"
+                resolved="$(expand_tilde "$path")"
             else
                 content="错误:搜索被拒绝(路径位于工作目录外,用户未放行): $path"
                 printf ' ⛔ 越界搜索被拒绝:%s\n' "$path"
@@ -2341,9 +2353,9 @@ tool_read_image() {
     if ! resolved=$(resolve_path "$path"); then
         # 沙箱拒绝:先查会话级授权名单,没有则询问用户是否放行
         if is_granted "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         elif ask_path_grant "$path"; then
-            resolved="$path"
+            resolved="$(expand_tilde "$path")"
         else
             content="错误:读取被拒绝(路径位于工作目录外,用户未放行): $path"
             printf ' ⛔ 越界读取被拒绝:%s\n' "$path"
@@ -3059,9 +3071,9 @@ printContent() {
         return 0
     fi
 
-    # glow 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
+    # rich 是 markdown 渲染器，会把「行尾反斜杠 + 换行」当作 hard break（硬换行）
     # 语法而隐藏反斜杠，导致用户输入的 \\ 只保留的一个 \ 看起来也被删了。
-    # 先用 sed 把行尾单个 \ 转义成 \\，glow 就能原样显示它。
+    # 先用 sed 把行尾单个 \ 转义成 \\ rich 就能原样显示它。
     # 时间线渲染:先渲染最后一段思考的增量,再渲染最终正文。
     # 工具链中间的思考已由 flush_thinking 渲染在对应工具横幅之前。
     flush_thinking
