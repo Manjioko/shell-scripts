@@ -44,6 +44,50 @@ if [[ "$OS" == "macos" ]]; then
             brew install "$pkg" || { fail "$pkg 安装失败"; rc=1; }
         fi
     done
+
+    # ---------- macOS: 检查 Bash 5.x 版本 ----------
+    step "检查 Bash 版本..."
+    # macOS 自带 Bash 3.2，但 wchat.sh 需要 Bash 5+ (使用了 declare -A 等特性)
+    current_bash_version=$(bash --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+    if [[ -z "$current_bash_version" ]]; then
+        current_bash_version="0.0"
+    fi
+    current_bash_major=${current_bash_version%%.*}
+
+    if [[ "$current_bash_major" -ge 5 ]]; then
+        ok "Bash $current_bash_version 已就绪"
+    else
+        warn "当前 Bash 版本为 ${current_bash_version}，wchat.sh 需要 Bash 5+"
+        step "安装 Homebrew bash..."
+        if brew install bash; then
+            ok "Homebrew bash 安装完成"
+            # 获取新安装的 bash 路径
+            brew_bash="$(brew --prefix)/bin/bash"
+            if [[ -x "$brew_bash" ]]; then
+                new_bash_version=$("$brew_bash" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+                if [[ -z "$new_bash_version" ]]; then
+                    new_bash_version="5.0"
+                fi
+                ok "新 Bash 版本: $new_bash_version"
+                # 检查是否需要添加到 shell 列表
+                if ! grep -q "$brew_bash" /etc/shells 2>/dev/null; then
+                    step "将 $brew_bash 添加到 /etc/shells (需要管理员权限)..."
+                    echo "$brew_bash" | sudo tee -a /etc/shells >/dev/null 2>&1 || {
+                        warn "无法添加到 /etc/shells，请手动执行: echo '$brew_bash' | sudo tee -a /etc/shells"
+                    }
+                fi
+                # 提示用户如何使用
+                echo ""
+                step "💡 提示: wchat.sh 将自动使用 Homebrew bash"
+                step "   如需手动切换，可运行: chsh -s $brew_bash"
+                step "   或直接使用: $brew_bash wchat.sh"
+                echo ""
+            fi
+        else
+            fail "Homebrew bash 安装失败"
+            rc=1
+        fi
+    fi
 fi
 
 # ---------- Linux / WSL2: apt(仅 Debian/Ubuntu 系) ----------
@@ -107,6 +151,24 @@ if have w3m || have lynx; then
     ok "网页解析: 就绪"
 else
     warn "未安装 w3m/lynx(可选,网页抓取能力受限)"
+fi
+
+# 终检 Bash 版本 (macOS)
+if [[ "$OS" == "macos" ]]; then
+    # 获取 Homebrew bash 路径
+    brew_bash="$(brew --prefix 2>/dev/null)/bin/bash"
+    if [[ -x "$brew_bash" ]]; then
+        bash_version=$("$brew_bash" --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)
+        bash_major=${bash_version%%.*}
+        if [[ "$bash_major" -ge 5 ]]; then
+            ok "Bash $bash_version (Homebrew) 就绪"
+        else
+            warn "Homebrew bash 版本为 $bash_major，建议升级到 5+"
+        fi
+    else
+        warn "未找到 Homebrew bash，wchat.sh 可能无法正常运行"
+        rc=1
+    fi
 fi
 
 if (( rc )); then
