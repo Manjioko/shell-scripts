@@ -3009,7 +3009,7 @@ flush_thinking() {
     # BSD sed 不认 \033 转义、会打出字面量);末尾 \033[0m 复位防止
     # 灰度泄漏进后续正文
     printf '\033[2m▸\033[0m\n'
-    render_markdown "$delta" | sed $'s/^/  \033[2m/'
+    render_markdown "$delta" | sed -e $'s/\033\\[0m/\033[0m\033[2m/g' -e $'s/^/  \033[2m/'
     # 末尾 \033[0m 复位防止灰度泄漏;补一个换行让思考块与后续内容
     # (工具横幅/正文)之间留空行,与正文→输入框的空行观感一致
     printf '\033[0m\n'
