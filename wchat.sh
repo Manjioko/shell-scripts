@@ -405,9 +405,22 @@ save_history() {
 
 get_history() {
     [[ -z $1 ]] && return 0
+    # 检查文件是否存在
+    if [[ ! -f "$1" ]]; then
+        printf "\033[1;31m❌ 历史文件不存在: $1\033[0m\n"
+        return 1
+    fi
     local history
     chat_title=$(basename "$1")
-    messages=$(jq '.messages' <<< "$(<"$1")")
+    # 显示加载提示，避免用户以为卡住
+    printf "\033[1;33m⏳ 正在加载历史记录...\033[0m"
+    # 读取并解析 JSON，失败时清除提示并报错
+    messages=$(jq '.messages' <<< "$(<"$1")" 2>/dev/null)
+    if [[ $? -ne 0 || -z "$messages" ]]; then
+        printf "\r\033[K"
+        printf "\033[1;31m❌ 历史文件格式错误或为空: $1\033[0m\n"
+        return 1
+    fi
     # 防御性清理:旧版本压缩可能把截断点切在工具链中间,产生"孤儿" tool
     # 消息(前一条不是含其 tool_call_id 的 assistant)。这种消息会让 API 400
     # 且无任何输出。加载时自动剔除,保证历史文件永远可继续对话。
@@ -436,19 +449,21 @@ get_history() {
     last_prompt_tokens=0
     thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
     model=$(jq -r '.model' <<< "$(<"$1")")
-    jq -c '. [1:][]' <<< "$messages" | while IFS= read -r line; do
+    local full_text=""
+    local msg_content role reasoning  # 局部变量,避免覆盖全局 content
+    while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
-        content=$(jq -r '.content // empty' <<< "$line")
+        msg_content=$(jq -r '.content // empty' <<< "$line")
         reasoning=$(jq -r '.reasoning_content // empty' <<< "$line")
+        # 构建该消息的文本
+        msg_text=""
         # 思考内容单独渲染:thinking 模式下 assistant 消息的 reasoning_content
         # 是历史正文的一部分,旧版只渲染 content,思考内容完全丢失
         if [[ -n "$reasoning" ]]; then
-            render_markdown "### 💭 思考"
-            echo "----------------------------------------------"
-            render_markdown "$reasoning"
+            msg_text+="### 💭 思考"$'\n'
+            msg_text+="$reasoning"$'\n'$'\n'
         fi
-        render_markdown "## $role"
-        echo "----------------------------------------------"
+        msg_text+="## $role"$'\n'
         if [[ "$role" == "tool" ]]; then
             # 工具输出渲染上限:超过 5 行只显示前 5 行并提示省略,避免
             # 长输出干扰主要信息阅读(仅影响显示,messages 保持完整)。
@@ -459,21 +474,33 @@ get_history() {
             # 2. 内容可能以 BOM/空行开头——前导空白行会吃掉 5 行的预算,
             #    出现"什么都没看到就被省略"。先剔除 BOM 和空行/纯空白行;
             # 3. 每行限宽 200 字符,防 minified 长行刷屏(仅显示层截断)。
-            disp=${content//"\\n"/$'\n'}
+            disp=${msg_content//"\\n"/$'\n'}
             disp=${disp/#$'\xef\xbb\xbf'/}
             disp=$(printf '%s' "$disp" | grep -vE '^[[:space:]]*$')
             nlines=$(printf '%s' "$disp" | awk 'END{print NR}')
-            shown=$(printf '%s' "$disp" | awk -v w=200 'NR<=5 { if (length($0)>w) print substr($0,1,w) "…(该行过长已截断)"; else print }')
-            if (( nlines > 5 )); then
-                render_markdown "$shown"$'\n'"…(其余 $((nlines - 5)) 行已省略)"
+            if [[ -z "$disp" || "$nlines" -eq 0 ]]; then
+                msg_text+="*内容为空*"$'\n'
             else
-                render_markdown "$shown"
+                shown=$(printf '%s' "$disp" | awk -v w=200 'NR<=5 { if (length($0)>w) print substr($0,1,w) "…(该行过长已截断)"; else print }')
+                if (( nlines > 5 )); then
+                    msg_text+="$shown"$'\n'"…(其余 $((nlines - 5)) 行已省略)"$'\n'
+                else
+                    msg_text+="$shown"$'\n'
+                fi
             fi
         else
             # assistant 的 tool_calls 消息 content 为 null,不再渲染出字面 "null"
-            [[ -n "$content" ]] && render_markdown "$content"
+            [[ -n "$msg_content" ]] && msg_text+="$msg_content"$'\n'
         fi
-    done
+        full_text+="$msg_text"
+    done < <(jq -c '. [1:][]' <<< "$messages")
+    # 清除加载提示并渲染
+    printf "\r\033[K"
+    if [[ -n "$full_text" ]]; then
+        render_markdown "$full_text"
+    else
+        printf "\033[1;33m⚠️ 历史记录为空\033[0m\n"
+    fi
     # 重新注入最新技能列表:历史里的 system 是旧的(不含 skills),旧历史若
     # 有旧注入段,split($mark)[0] 也会先剥离,不会叠加
     inject_skills
