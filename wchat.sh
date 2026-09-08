@@ -1,6 +1,9 @@
 #!/bin/bash
 
-# 该脚本支持mimo-2.5/deepseek-v4
+# 该脚本支持 mimo-2.5 / deepseek-v4 / qwen3.8 等 OpenAI 兼容接口
+# (接口差异集中在联网参数与上下文窗口两处,见 WEB_SEARCH_PROVIDER 与 TOKEN_THRESHOLD)
+# 联网搜索(web_search 工具)按接口自适应:mimo / qwen(dashscope) 走各家原生
+# 联网参数,其余接口不注册该工具、模型自然回退通用 web_fetch(见「联网搜索」配置段)
 # ================切换模型需要改这里👇👇=======================
 #deepseek
 # https://api.deepseek.com/chat/completions
@@ -21,11 +24,33 @@ flash_model="qwen3.8-flash"
 pro_model="qwen3.8-flash"
 # ===============================👆👆========================
 
-# 原生联网搜索(web_search 工具类型)是小米 mimo 接口私有能力:非 mimo
-# 接口时不注册 mimo_web_fetch 工具(见 tools 函数尾部过滤),模型自然
-# 回退通用的 web_fetch——切换模型/接口时零改动,也不会产生必然失败的工具调用
-WEB_SEARCH_NATIVE=0
-[[ "$BASE_URL" == *xiaomimimo* ]] && WEB_SEARCH_NATIVE=1
+# ---------- 联网搜索(web_search 工具)配置 ----------
+# 大模型原生联网搜索是各接口的"私有能力",且参数互不兼容(实测):
+#   mimo : 请求体带 tools:[{type:"web_search"}],来源在 message.annotations(含 URL)
+#   qwen : 请求体带 enable_search:true,来源已并入正文(带 [1][2] 角标,不回传 URL)
+#   参数发错家的后果:qwen 收 mimo 式 tools 直接 400;mimo 收 enable_search 静默不搜
+#   deepseek 等: 无原生联网 → provider=none,不注册本工具,模型自然回退通用 web_fetch
+# 所以换接口/模型时零改动:启动时探测一次即可(BASE_URL 脚本内不可变,
+# 运行时 -stp/-stf 只切 model,不影响联网方式)。判定以域名为主、模型名兜底
+# (走代理时域名看不出血统)。新增一家接口 = 此处加一行 + 在 web_search_build_body
+# 加一个 case,发请求/解析/回传全部共用(见该函数注释)。
+WEB_SEARCH_PROVIDER="${WEB_SEARCH_PROVIDER:-auto}"   # 环境变量可强制指定 mimo|qwen|none
+
+detect_web_search_provider() {
+    case "$BASE_URL" in
+        *xiaomimimo*|*mimo*)                            echo mimo; return ;;
+        *maas.aliyuncs.com*|*dashscope*|*aliyuncs.com*) echo qwen; return ;;
+    esac
+    case "$flash_model" in
+        mimo*)  echo mimo; return ;;
+        qwen*|qwq*) echo qwen; return ;;
+    esac
+    echo none
+}
+[[ "$WEB_SEARCH_PROVIDER" == "auto" ]] && WEB_SEARCH_PROVIDER=$(detect_web_search_provider)
+
+# 联网子请求总超时(秒):各家联网都是"搜完再答",实测 15~25s,留足余量
+WEB_SEARCH_TIMEOUT="${WEB_SEARCH_TIMEOUT:-90}"
 
 
 # 保存当前对话的标题，默认空字符串，首次保存时由模型生成
@@ -135,11 +160,16 @@ forget_history=0
 # 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
 last_prompt_tokens=0
 
-# 触发自动压缩的阈值。注意:本脚本默认跑 mimo-v2.5(小米)接口,实际窗口
-# 远小于 deepseek 的 1M——实测约 4 万 token 就会越界断连。按 32K 窗口的
-# 75% 取 24000,留出安全余量;换更大窗口的模型时再按比例调高。
-# 如果是deepseek-v4,可改成 100000
-TOKEN_THRESHOLD=24000
+# 触发自动压缩的阈值 = 接口真实上下文窗口 × 75%(留安全余量)。
+# 不要凭 model 名猜窗口:同一 model 挂在不同网关窗口不同,各家超限表现也不一致
+# (mimo 是静默断连,可能直接报 400),所以这里只放**实测过**的值,其余走保守默认。
+#   mimo-v2.5:官方标称 32K,实测约 4 万 token 越界断连 → 24000(按 32K 的 75%)
+#   deepseek-v4:1M 窗口,作者注:可改成 100000
+#   qwen3.8-flash:本仓库未实测窗口 → 沿用 24000 保守值(宁多压一次,不要静默断连)
+# 换模型/换网关时用环境变量覆盖,不必改代码:TOKEN_THRESHOLD=100000 wchat -st "..."
+# 取高了会怎样:超限表现为"请求失败 → retry_after_compact 按本地粗算判断是否压缩重发"
+# (见该函数),阈值过高会让它判成"不是上下文问题"而反复重试,所以拿不准就取小。
+TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-24000}"
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
 # + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
@@ -281,14 +311,33 @@ SSE_STALL_TIMEOUT=120      # 2 分钟
 
 options_list=("-l" "-msgs" "-h" "-c" "-u" "-img" "-skill")
 
-# 优先使用 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑）
-if [[ -z "$BREW_BASH_CHECKED" ]]; then
+# 切到 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑;且下面的
+# declare -A 关联数组是 bash 4+ 语法,3.2 上会直接失败）
+#
+# 判据必须用 BASH_VERSINFO,不要用自定义开关变量:旧实现 export
+# BREW_BASH_CHECKED=1 当"只 exec 一次"的守卫,该变量会被子进程与嵌套调用继承
+# （脚本里 run_in_background 起的命令、`script -q` 包 pty 的自重入都跑在本 shell
+# 下),第二次进入时跳过切换 → 继续跑在 /bin/bash 3.2 上 → declare -A 报
+# "invalid option" 但脚本不退出,工具调用参数收集全乱,现象极难归因。
+# 版本判断天然幂等:已经切到 5.x 再进来时条件为假,不会 exec 循环。
+if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
-        if [[ -x "$brew_bash" ]]; then
-            export BREW_BASH_CHECKED=1
+        [[ -x "$brew_bash" ]] || continue
+        # 只在目标确实是 bash 5+ 时才切换:避免 /opt/homebrew/bin/bash 本身
+        # 仍是 3.x 时被 exec 成无限循环(每次都"找到一个新 bash"再切回去)。
+        # 版本号必须先落成变量再判断:写成 (( $(("$brew_bash" ...) >= 5 )) 时,
+        # "$((" 会被当成算术展开的开头(shellcheck SC1102),而且子进程输出非数字
+        # 会让整个 if 条件直接变成语法错误。
+        brew_bash_major="$("$brew_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
+        [[ "$brew_bash_major" =~ ^[0-9]+$ ]] || brew_bash_major=0
+        if (( brew_bash_major >= 5 )); then
             exec "$brew_bash" "$0" "$@"
         fi
     done
+    # 找不到就别静默降级——后面的 declare -A 会以"工具参数错乱"这种难懂的方式失败
+    printf '⛔ 需要 bash 5.x(当前 %s,macOS 自带的是 3.2),且未找到 /opt/homebrew/bin/bash\n' "$BASH_VERSION" >&2
+    printf '   安装:brew install bash\n' >&2
+    exit 1
 fi
 
 # 并行工具调用收集区:DeepSeek 一次响应可返回多个 tool_calls(按 index 区分)。
@@ -1209,7 +1258,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "web_fetch",
-                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。当 mimo_web_fetch 工具搜索失败或需要抓取特定网页时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
+                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。当 web_search 工具搜索失败或需要抓取特定网页时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1222,8 +1271,8 @@ tools() {
         {
             "type": "function",
             "function": {
-                "name": "mimo_web_fetch",
-                "description": "优先使用的联网搜索工具。通过小米 mimo 模型的联网搜索能力获取实时网络信息。适用于新闻、天气、商品价格等需要实时数据的搜索。如果搜索失败，可回退到 web_fetch 工具。",
+                "name": "web_search",
+                "description": "优先使用的联网搜索工具。通过当前接口的原生联网搜索能力获取实时网络信息,返回汇总答案与来源。适用于新闻、天气、商品价格等需要实时数据的查询。注意:是否随结果返回来源 URL 取决于接口(部分接口只返回正文与 [1][2] 引用角标);当前接口不支持联网时本工具不会出现,那时改用 web_fetch。搜索失败时可回退 web_fetch 工具。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1268,7 +1317,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "run_shell_command",
-                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_fetch。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
+                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_search(或精确抓取已知 URL 时用 web_fetch),不要用 curl 去抓搜索引擎结果页。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死)。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1286,11 +1335,13 @@ tools() {
             }
         }
     ]'
-    if (( WEB_SEARCH_NATIVE )); then
-        printf '%s' "$all"
+    # 联网工具按接口能力注册(见顶部 WEB_SEARCH_PROVIDER):
+    # 接口不支持原生联网时剔除 web_search,模型自然回退通用 web_fetch——
+    # 不注册比"注册了但必然失败"好,省掉一轮注定报错的工具调用
+    if [[ "$WEB_SEARCH_PROVIDER" == "none" ]]; then
+        printf '%s' "$all" | jq -c 'map(select(.function.name != "web_search"))'
     else
-        # 非 mimo 接口:剔除 mimo_web_fetch,模型自然回退 web_fetch
-        printf '%s' "$all" | jq -c 'map(select(.function.name != "mimo_web_fetch"))'
+        printf '%s' "$all"
     fi
 }
 
@@ -1587,6 +1638,10 @@ make_request_body() {
         stream: true,
         tools: $tool,
         stream_options: {include_usage: true}
+        # 注意:这里绝不出现联网参数(enable_search / tools:[{type:web_search}])。
+        # 联网一律由 web_search 工具另发一次子请求完成(见文件顶部
+        # WEB_SEARCH_PROVIDER 与该工具的 build_body)——主请求每轮都带联网参数
+        # 等于每轮都付搜索费、还拖慢首字;各家参数还互不兼容,发错会静默失效或 400
     }')
     rm -f "$tmpfile"
     printf '%s' "$out"
@@ -2089,78 +2144,178 @@ tool_web_fetch() {
     printf ' 已抓取 %s(%s)\n' "$url" "$renderer"
 }
 
-tool_mimo_web_fetch() {
+# ---------- 联网搜索工具(web_search,原生 search 多接口自适应) ----------
+# 与 web_fetch 的分工:web_search 做"宽泛搜索"(接口侧替你搜完并汇总答案),
+# web_fetch 做"精确抓取"(已知 URL 取正文)。
+#
+# 为什么必须按接口分支(实测,别指望一份统一请求体通吃):
+#   mimo 收到 enable_search  → 200 但静默忽略(prompt_tokens 不变 = 根本没搜)
+#   qwen 收到 mimo 式 tools  → 400 "'function' is a required property"
+# 差异只留在"造请求体"这一处,发请求/解析/回传全部共用;
+# 新增一家接口 = 在 web_search_build_body 加一个 case + 顶部判定表加一行
+# (provider 判定见文件顶部 detect_web_search_provider)。
+#
+# 按接口构造联网请求体,输出到 stdout。$1=搜索词 $2=模型名
+# 未知 provider 返回 1(正常流程下工具不会注册,这里兜住模型的幻觉调用)
+web_search_build_body() {
+    local query="$1" mdl="$2"
+    case "$WEB_SEARCH_PROVIDER" in
+        mimo)
+            # mimo 私有:tools 数组声明 web_search 工具类型。force_search 强制必搜
+            # (否则模型可能凭记忆作答),limit 控制回传结果条数(实测字段均被接受)
+            jq -n --arg q "$query" --arg model "$mdl" '{
+                model: $model,
+                messages: [{role: "user", content: $q}],
+                tools: [{
+                    type: "web_search",
+                    search_result: true,
+                    keyword: true,
+                    max_keyword: 5,
+                    force_search: true,
+                    limit: 10
+                }],
+                thinking: {type: "disabled"},
+                reasoning_effort: "high",
+                stream: false
+            }'
+            ;;
+        qwen)
+            # dashscope/qwen:顶层 enable_search 开启联网,forced_search 强制必搜。
+            # enable_thinking:false 关掉思考链——实测同一查询开着思考要白烧 1429 个
+            # reasoning token(搜索由接口完成,思考对结果无增益)。
+            # 该接口把来源并入正文(形如 [1][2] 角标),不回传 URL,解析端已适配
+            jq -n --arg q "$query" --arg model "$mdl" '{
+                model: $model,
+                messages: [{role: "user", content: $q}],
+                enable_search: true,
+                enable_thinking: false,
+                search_options: {forced_search: true, enable_source: false},
+                stream: false
+            }'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+tool_web_search() {
+    # 与其他 tool_* 一致:实参不经位置传(分发处 "tool_$fn_name" 不带参数),
+    # 统一读全局 fn_args。历史 bug:写成 local fn_args="$1" 恒为空串,
+    # 现象是"⛔ 空查询"却查不出原因(实机测试才暴露,单测直传参数会掩盖)
     # 注意:content 绝不能声明为 local——工具结果靠全局 content 传回
-    # tool_run_and_parse 的 add_message(历史 bug:local content 导致工具结果
-    # 丢失,模型拿到的"搜索结果"是上一条用户消息,反复重调工具迟迟不回提示符)
-    local query request_body resp
-    query=$(jq -r '.query // empty' <<< "$fn_args")
-    [[ -z "$query" ]] && { content="错误:查询内容不能为空"; printf ' ⛔ 空查询\n'; return 0; }
-    
-    # 构造请求体（复用 overview 的模式）。消息经 jq --arg 构造,query 里的
-    # 引号/反斜杠不会破坏 JSON(旧实现裸拼字符串,含引号即 JSON 非法)
-    local tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    jq -n --arg q "$query" '[{role: "user", content: $q}]' > "$tmpf"
-    
-    request_body=$(jq -n --slurpfile msgs "$tmpf" --arg model "$flash_model" '{
-        model: $model,
-        messages: $msgs[0],
-        tools: [{
-            type: "web_search",
-            max_keyword: 3,
-            force_search: true,
-            limit: 5
-        }],
-        thinking: {type: "disabled"},
-        reasoning_effort: "high",
-        stream: false
-    }')
-    
-    printf '%s' "$request_body" > "$tmpf"
-    # 同步搜索最长 60s:静默期间给可见反馈(历史问题:全程无提示,
-    # 分不清是搜索慢还是接口已死)
-    printf ' \033[2m🔍 联网搜索中…(最长 60 秒,Ctrl+C 可中断)\033[0m'
-    resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
+    # tool_run_and_parse 末尾的 add_message(历史 bug:local content 会让工具结果
+    # 丢失,模型拿到的"搜索结果"是上一条用户消息,反复重调工具迟迟不回提示符)。
+    # 其余变量一律 local,免得把 ask_ai 里的同名全局变量踩脏
+    local query
+    # 键名容错:模型偶尔把参数写成 q/input/keyword(尤其历史里见过旧工具名时)
+    query=$(printf '%s' "$fn_args" | jq -r '.query // .q // .input // .keyword // empty' 2>/dev/null)
+    # 报错时把收到的原始参数带上:否则"空查询"这种问题在现场无法归因
+    # (是模型没传 query,还是参数键名不对,还是 fn_args 被上游清空)
+    [[ -z "$query" ]] && { content="错误:查询内容不能为空(收到的参数: ${fn_args:0:120})"; printf ' ⛔ 空查询\n'; return 0; }
+
+    # 临时文件名沿用 ct_jq_* 约定:异常退出没走到清理时,启动清扫能回收
+    local tmpf
+    tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmpf'" RETURN
+
+    # 用 flash 模型:搜索由接口侧完成,子请求只是把结果汇总成文字,不必上 pro。
+    # 搜索词经 --arg 传参(query 里的引号/反斜杠不会破坏 JSON);请求体写文件后用
+    # --data-binary @ 发送,与主流程同一套 ARG_MAX 防护
+    if ! web_search_build_body "$query" "$flash_model" > "$tmpf" 2>/dev/null; then
+        content="错误:当前接口不支持原生联网搜索(provider=$WEB_SEARCH_PROVIDER),请改用 web_fetch 工具直接抓取网页。"
+        printf ' ⛔ 不支持联网搜索\n'
+        return 0
+    fi
+
+    local resp
+    # 同步搜索最长 WEB_SEARCH_TIMEOUT 秒:静默期间给可见反馈(历史问题:全程无
+    # 提示,分不清是搜索慢还是接口已死)。结束后 \r ESC[2K 清掉这行临时提示
+    printf ' \033[2m🔍 联网搜索中…(最长 %s 秒,Ctrl+C 可中断)\033[0m' "$WEB_SEARCH_TIMEOUT"
+    resp=$(curl -s --connect-timeout 15 --max-time "$WEB_SEARCH_TIMEOUT" "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
         -H "api-key: $API_KEY" \
         --data-binary @"$tmpf" 2>/dev/null)
     printf '\r\033[2K'
-    rm -f "$tmpf"
-    
-    # 检查响应是否为空
+
+    # 失败归因分三种:接口无响应 / 接口报错(把 error.message 原话回传) / 正文为空。
+    # 合并成一句"搜索失败"会让模型以为重试即可,反复重烧工具轮次;
+    # 拿到具体原因它才会直接改道 web_fetch
+    local err=""
     if [[ -z "$resp" ]]; then
-        content="错误:mimo 联网搜索失败，无响应。建议回退到 web_fetch 工具。"
-        printf ' ⛔ 无响应\n'
-        return 0
+        err="接口无响应(超时或连接被重置);换用 shell 里的 curl 不会更好"
+    else
+        local api_err
+        api_err=$(printf '%s' "$resp" | jq -r '.error.message // empty' 2>/dev/null)
+        [[ -n "$api_err" ]] && err="接口报错: $api_err"
     fi
-    
-    # 解析响应
-    local message_content=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
-    local tool_usage=$(printf '%s' "$resp" | jq -r '.usage.web_search_usage.tool_usage // 0' 2>/dev/null)
-    
+
+    # 统一解析:正文恒在 choices[0].message.content;来源列表各家字段位置不同,
+    # 按优先级取第一个非空数组(mimo=message.annotations / 旧版 dashscope=search_info)。
+    # 探不到即"该接口不回传来源"(当前 qwen 就是,正文只带 [1][2] 角标),不算失败。
+    # title/site 必须 tostring 兜 null——jq 的字符串 + 遇 null 直接报错,
+    # 一条脏数据会让整段来源静默消失(实测过的坑)
+    local data
+    data=$(printf '%s' "$resp" | jq -c '
+        (.choices[0].message // {}) as $m
+        | ([$m.annotations, (.search_info.search_results // null)]
+           | map(select(type == "array" and length > 0)) | .[0] // []) as $raw
+        | {
+            content: ($m.content // ""),
+            reasoning: ($m.reasoning_content // ""),
+            sources: ($raw | map({
+              title: ((.title // "") | tostring),
+              site:  ((.site_name // .hostname // "") | tostring),
+              url:   ((.url // .site_url // "") | tostring)
+            })),
+            tokens: (.usage.prompt_tokens // 0),
+            calls:  (.usage.web_search_usage.tool_usage // 0)
+          }' 2>/dev/null)
+
+    local message_content
+    message_content=$(printf '%s' "$data" | jq -r '.content // empty' 2>/dev/null)
+    [[ -z "$message_content" ]] && \
+        message_content=$(printf '%s' "$data" | jq -r '.reasoning // empty' 2>/dev/null)
     if [[ -z "$message_content" ]]; then
-        content="错误:mimo 联网搜索失败，无搜索结果。建议回退到 web_fetch 工具。"
+        [[ -z "$err" ]] && err="无搜索结果(接口返回正文为空)"
+        content="错误:联网搜索失败 — ${err}。建议回退 web_fetch 工具"
         printf ' ⛔ 搜索失败\n'
         return 0
     fi
-    
-    # 提取搜索来源（annotations）
-    local sources=""
-    local annotations_count=$(printf '%s' "$resp" | jq '.choices[0].message.annotations | length' 2>/dev/null)
-    if (( annotations_count > 0 )); then
-        sources=$(printf '%s' "$resp" | jq -r '.choices[0].message.annotations[] | 
-            "• " + .title + " (" + .site_name + ")\n  " + .url' 2>/dev/null)
-        sources=$'\n\n📚 搜索来源:\n'"$sources"
+
+    local n_src sources="" tokens calls
+    n_src=$(printf '%s' "$data" | jq -r '.sources | length' 2>/dev/null)
+    [[ "$n_src" =~ ^[0-9]+$ ]] || n_src=0
+    if (( n_src > 0 )); then
+        # 无 title/site 的脏数据也不能丢:退化成"• URL"一行(旧实现遇 null
+        # 整段 jq 报错,来源全部静默消失)
+        sources=$(printf '%s' "$data" | jq -r '
+            .sources[:5][] | select((.title + .site + .url) != "")
+            | if (.title + .site) != ""
+              then "• " + .title + " (" + .site + ")\n  " + .url
+              else "• " + .url end' 2>/dev/null)
+        [[ -n "$sources" ]] && sources=$'\n\n📚 搜索来源:\n'"$sources"
     fi
-    
-    # 格式化输出(用 $'...' 生成真实换行:双引号里 "\n" 只是字面反斜杠+n,
-    # 会把搜索结果糊成一行)
-    content="🔍 搜索: \"$query\""$'\n\n'"$message_content$sources"
-    if (( tool_usage > 0 )); then
-        content+=$'\n\n📊 搜索统计: 使用了 '"$tool_usage"$' 个搜索资源'
+    tokens=$(printf '%s' "$data" | jq -r '.tokens // 0' 2>/dev/null)
+    calls=$(printf '%s' "$data" | jq -r '.calls // 0' 2>/dev/null)
+    [[ "$tokens" =~ ^[0-9]+$ ]] || tokens=0
+    [[ "$calls" =~ ^[0-9]+$ ]] || calls=0
+
+    # 正文保留接口原样(含 [1][2] 引用角标)。换行一律用 $'...' 生成真实换行:
+    # 双引号里的 "\n" 只是字面反斜杠+n,会把搜索结果糊成一行
+    content="🔍 搜索: \"$query\""
+    content+=$'\n\n'"$message_content"
+    if [[ -n "$sources" ]]; then
+        content+="$sources"
+    else
+        # 明说"本接口不回传来源",免得模型把"没有来源列表"当失败又重试一轮
+        content+=$'\n\n'"(接口未回传来源列表,正文中的 [1][2] 为引用角标)"
     fi
-    
+    content+=$'\n\n📊 联网搜索('"$WEB_SEARCH_PROVIDER"' · 注入上下文 '"$tokens"' tokens'
+    (( calls > 0 )) && content+=' · 搜索调用 '"$calls"' 次'
+    content+=')'
     printf ' 已搜索: %s\n' "$query"
 }
 
@@ -2737,7 +2892,7 @@ tool_run_and_parse() {
             tool_banner "$fn_name" "$args_preview"
             echo
             case "$fn_name" in
-                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill|mimo_web_fetch) "tool_$fn_name" ;;
+                read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill|web_search) "tool_$fn_name" ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
         fi
@@ -3421,6 +3576,11 @@ handle_cmd_line() {
     if [[ "$line" == "-md" ]]; then
         inp_msg "模型: ${model}"
         inp_msg "思考: ${thinking}"
+        # 换模型/换网关时这两项最容易跟着失配,所以放在同一屏里对照:
+        # 联网工具按接口分支(none 表示未注册 web_search,模型只能走 web_fetch);
+        # 压缩阈值是按接口窗口定的(窗口小而阈值大 → 表现为请求反复失败而非自动压缩)
+        inp_msg "联网搜索: ${WEB_SEARCH_PROVIDER}(超时 ${WEB_SEARCH_TIMEOUT}s)"
+        inp_msg "压缩阈值: ${TOKEN_THRESHOLD} tokens"
         inp_msg "标题: ${chat_title:-（空）}"
         return 0
     fi
