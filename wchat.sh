@@ -4,13 +4,21 @@
 # ================切换模型需要改这里👇👇=======================
 #deepseek
 # https://api.deepseek.com/chat/completions
-BASE_URL="https://api.xiaomimimo.com/v1/chat/completions"
+# qwen
+# https://ws-h1sc9zrfrttu9ixx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions
+# mimo
+# https://api.xiaomimimo.com/v1/chat/completions    
+BASE_URL="https://ws-h1sc9zrfrttu9ixx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
 # api key
-API_KEY="sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai"
+# mimo key: sk-czmvdt29sr03q4jaa7fonxycos40y02ipzvq6g34m73fewai
+
+API_KEY="sk-6023e9d84ac54a96b701bda1ed191534"
 #"deepseek-v4-flash"
 #"deepseek-v4-pro"
-flash_model="mimo-v2.5"
-pro_model="mimo-v2.5-pro"
+# mimo-v2.5
+# mimo-v2.5-pro
+flash_model="qwen3.8-flash"
+pro_model="qwen3.8-flash"
 # ===============================👆👆========================
 
 # 原生联网搜索(web_search 工具类型)是小米 mimo 接口私有能力:非 mimo
@@ -624,7 +632,7 @@ help_user() {
     inp_msg "  -u    查看当前上下文 token 用量"
     inp_msg "  -img <路径> 发送图片(自动转述为文字)"
     inp_msg "  Ctrl+F 选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
-    inp_msg "  Ctrl+G 粘贴剪贴板图片(截图后直接附加,自动转述;部分终端下 Ctrl+V 亦可)"
+    inp_msg "  Ctrl+G/Ctrl+V 粘贴剪贴板图片(截图后直接附加,自动转述;部分终端下直接粘贴亦可)"
     inp_msg "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
     inp_msg "  -h    显示帮助信息"
     inp_msg

@@ -6,8 +6,8 @@
   回车 = 换行继续;空行回车 = 提交整段;
   单行命令(-x,经 --commands 传入)回车立即返回,由 bash 执行;
   Ctrl+F 选择文件(退出码 4,携带缓冲区文本交 bash 走旧文件选择逻辑);
-  Ctrl+G 粘贴剪贴板图片(截图直接附加,与 Ctrl+F 同管线统一转述);
-  粘贴时若剪贴板装着图片(常见:截图后 Ctrl+V),空粘贴自动嗅探并附加;
+  Ctrl+G / Ctrl+V 粘贴剪贴板图片(截图直接附加,与 Ctrl+F 同管线统一转述);
+  粘贴时若剪贴板装着图片(常见:截图后 Cmd+V/Ctrl+V),空粘贴自动嗅探并附加;
   Ctrl+C 清空当前行,Ctrl+R 清空整段;方向键/历史/括号粘贴/中文宽度原生支持。
 退出码:0=提交(文本在 stdout),1=EOF/中断(无文本),2=环境异常(无 tty/缺库),
 4=Ctrl+F 选择文件(缓冲区文本在 stdout)。
@@ -39,7 +39,7 @@ def _erase_stale_box(tty, height):
 
 
 # ---------- 剪贴板图片嗅探(截图 → 直接粘贴) ----------
-# 终端粘贴协议只能传文本,图片字节永远不会从 Ctrl+V 通道进来。可行的是
+# 终端粘贴协议只能传文本,图片字节永远不会从 Cmd+V/Ctrl+V 通道进来。可行的是
 # 在粘贴/热键发生时主动问系统「剪贴板里现在装的是不是图片」:各平台都有
 # 零额外依赖的探测+提取手段。格式集合与 wchat 的 IMG_EXTS 对齐
 # (png/jpg/jpeg/gif/webp/bmp),提取结果按扩展名落盘,交给 bash 的
@@ -82,9 +82,17 @@ def _grab_macos():
         r = _run(["osascript", "-e", f"the clipboard as {cls}"])
         if not r or r.returncode != 0:
             return None, None
-        hexs = re.sub(r"[^0-9a-fA-F]", "", r.stdout.decode("utf-8", "replace"))
+        out = r.stdout.decode("utf-8", "replace")
+        # osascript 输出形如 «data PNGf89504E47...»:«data » 后先是格式
+        # 类名(PNGf/GIFf/TIFF),再往后才是十六进制数据。不能对整串做
+        # re.sub 剥壳,否则 "data" 与类名里的十六进制字母(d/a/f 等)会
+        # 被当成图片字节,写坏文件。按类名精确截取它后面的十六进制段。
+        token = cls.replace("«class ", "").replace("»", "")
+        m = re.search(r"«data\s+" + re.escape(token) + r"([0-9A-Fa-f]+)»", out)
+        if not m:
+            return None, None
         try:
-            data = bytes.fromhex(hexs)
+            data = bytes.fromhex(m.group(1))
         except ValueError:
             return None, None
         if cls == "«class TIFF»":
@@ -438,10 +446,12 @@ def main() -> int:
         event.app.exit(result=("file-pick", event.current_buffer.text))
 
     @kb.add("c-g")
+    @kb.add("c-v")
     def _(event):
-        """Ctrl+G:粘贴剪贴板图片。截图工具通常只把图片放进剪贴板,而各
-        终端对图片剪贴板的 Ctrl+V 行为不一(有的发空粘贴、有的干脆不发),
-        热键是空粘贴嗅探的兜底入口;无图时响铃提示。"""
+        """Ctrl+G / Ctrl+V:粘贴剪贴板图片。截图工具通常只把图片放进
+        剪贴板,而各终端对图片剪贴板的 Cmd+V/Ctrl+V 行为不一(有的发
+        空粘贴、有的干脆不发),热键是空粘贴嗅探的兜底入口;无图时响铃
+        提示。"""
         if not _insert_clip_image(event, args.clip_dir):
             event.app.output.bell()
 
