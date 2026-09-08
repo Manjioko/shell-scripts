@@ -337,8 +337,13 @@ PTK_COMMANDS="-q -l -msgs -c -skill -u -h -n -cl -stp -stt -stf -fs -md -img"
 
 trap handle_ctrl_c INT
 
+# 剪贴板图片的会话级临时目录:输入助手把粘贴/热键附加的截图落盘到这里,
+# 提交转述(消费)后由下一轮输入开始前清理;带未提交图片直接退出(-q)时
+# 由下方 EXIT trap 兜底。目录名含 $$ 与会话绑定,多开互不干扰。
+CLIP_DIR="${TMPDIR:-/tmp}/wchat_clip_$$"
+
 # 任何退出路径都恢复光标显示 + 自动换行 + 回显 + 中断键映射(窗口期间两次 Ctrl+C 会直接退出)
-trap 'printf "\033[?25h\033[?7h"; stty echo isig opost onlcr 2>/dev/null; stty intr "^C" 2>/dev/null' EXIT
+trap 'printf "\033[?25h\033[?7h"; stty echo isig opost onlcr 2>/dev/null; stty intr "^C" 2>/dev/null; rm -rf "$CLIP_DIR"' EXIT
 
 # 多行输出(echo 以 \n 结尾)依赖终端 ONLCR 把 \n 翻译成
 # 回车+换行;ONLCR 一旦被外部环境关闭,多行内容会级联缩进、排版错乱。
@@ -619,6 +624,7 @@ help_user() {
     inp_msg "  -u    查看当前上下文 token 用量"
     inp_msg "  -img <路径> 发送图片(自动转述为文字)"
     inp_msg "  Ctrl+F 选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)"
+    inp_msg "  Ctrl+G 粘贴剪贴板图片(截图后直接附加,自动转述;部分终端下 Ctrl+V 亦可)"
     inp_msg "  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)"
     inp_msg "  -h    显示帮助信息"
     inp_msg
@@ -3498,6 +3504,10 @@ normal_line() {
     # 清掉上一阶段(工具链/压缩等)误触 Ctrl+C 留下的标志
     input_aborted=0
 
+    # 上一轮的剪贴板图片提交转述后已消费完毕,本轮输入开始前清空
+    # (消费后清理;带未提交图片直接退出留下的残留由 EXIT trap 兜底)
+    rm -rf "$CLIP_DIR"
+
     # 输入组件缺失:提示安装后退出(单轮模式 -st 带内容不会走到这里)
     if [[ -z "$PTK_HELPER" || ! -t 0 || ! -t 1 ]]; then
         inp_msg "⚠️  缺少输入组件(python3 + prompt_toolkit),请先运行: bash setup.sh"
@@ -3512,7 +3522,7 @@ normal_line() {
     else
         ptk_args=(--no-commands)
     fi
-    ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" "${ptk_args[@]}" 2>/dev/null)
+    ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" --clip-dir "$CLIP_DIR" "${ptk_args[@]}" 2>/dev/null)
     rc=$?
     if (( rc == 4 )); then
         # Ctrl+F 选择文件(替代旧 @ 手势):pick 文本经 --default 带回输入框
@@ -3531,7 +3541,7 @@ normal_line() {
             if [[ -z "$ptk_pick_text" ]]; then
                 return 0
             fi
-            ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" "--commands=$PTK_COMMANDS" --default "$ptk_pick_text" 2>/dev/null)
+            ptk_text=$(python3 "$PTK_HELPER" --history "${CT_HOME}/input_history" --clip-dir "$CLIP_DIR" "--commands=$PTK_COMMANDS" --default "$ptk_pick_text" 2>/dev/null)
             rc=$?
             if (( rc == 4 )); then
                 ptk_pick_text="$ptk_text"

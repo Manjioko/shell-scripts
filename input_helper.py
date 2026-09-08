@@ -6,12 +6,19 @@
   回车 = 换行继续;空行回车 = 提交整段;
   单行命令(-x,经 --commands 传入)回车立即返回,由 bash 执行;
   Ctrl+F 选择文件(退出码 4,携带缓冲区文本交 bash 走旧文件选择逻辑);
+  Ctrl+G 粘贴剪贴板图片(截图直接附加,与 Ctrl+F 同管线统一转述);
+  粘贴时若剪贴板装着图片(常见:截图后 Ctrl+V),空粘贴自动嗅探并附加;
   Ctrl+C 清空当前行,Ctrl+R 清空整段;方向键/历史/括号粘贴/中文宽度原生支持。
 退出码:0=提交(文本在 stdout),1=EOF/中断(无文本),2=环境异常(无 tty/缺库),
 4=Ctrl+F 选择文件(缓冲区文本在 stdout)。
 """
+import os
+import re
 import sys
+import shutil
 import argparse
+import subprocess
+import tempfile
 
 
 def _erase_stale_box(tty, height):
@@ -31,6 +38,200 @@ def _erase_stale_box(tty, height):
         pass
 
 
+# ---------- 剪贴板图片嗅探(截图 → 直接粘贴) ----------
+# 终端粘贴协议只能传文本,图片字节永远不会从 Ctrl+V 通道进来。可行的是
+# 在粘贴/热键发生时主动问系统「剪贴板里现在装的是不是图片」:各平台都有
+# 零额外依赖的探测+提取手段。格式集合与 wchat 的 IMG_EXTS 对齐
+# (png/jpg/jpeg/gif/webp/bmp),提取结果按扩展名落盘,交给 bash 的
+# parse_placeholders 与 Ctrl+F 走同一条转述管线。
+
+def _run(args, timeout=3, **kwargs):
+    """subprocess.run 容错包装:工具缺失/超时/异常一律返回 None,
+    由调用方当作「剪贴板无图」降级。"""
+    try:
+        return subprocess.run(args, capture_output=True, timeout=timeout, **kwargs)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _is_wsl():
+    """与 wchat.sh 的 detect_os 同判据:WSL_DISTRO_NAME 或 /proc/version
+    含 microsoft。WSL 下剪贴板图片在 Windows 侧,必须走 interop。"""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _grab_macos():
+    """macOS:osascript 读剪贴板。「clipboard info」看格式类,再按类取
+    「the clipboard as «class X»」——osascript 把二进制输出成十六进制
+    文本(«data ...»),剥壳解码即可,零额外依赖。TIFF 不在 wchat 图片
+    白名单里,用系统自带 sips 转 png。"""
+    info = _run(["osascript", "-e", "clipboard info"])
+    if not info or info.returncode != 0:
+        return None, None
+    text = info.stdout.decode("utf-8", "replace")
+    for cls, ext in (("«class PNGf»", "png"), ("«class GIFf»", "gif"),
+                     ("«class TIFF»", "png")):
+        if cls not in text:
+            continue
+        r = _run(["osascript", "-e", f"the clipboard as {cls}"])
+        if not r or r.returncode != 0:
+            return None, None
+        hexs = re.sub(r"[^0-9a-fA-F]", "", r.stdout.decode("utf-8", "replace"))
+        try:
+            data = bytes.fromhex(hexs)
+        except ValueError:
+            return None, None
+        if cls == "«class TIFF»":
+            data = _tiff_to_png(data)
+        return data, ext
+    return None, None
+
+
+def _tiff_to_png(data):
+    """sips 把 TIFF 字节转 PNG(macOS 自带)。临时文件即用即删。"""
+    if not shutil.which("sips"):
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as f:
+        f.write(data)
+        tiff_path = f.name
+    png_path = tiff_path + ".png"
+    try:
+        r = _run(["sips", "-s", "format", "png", tiff_path, "--out", png_path],
+                 timeout=15)
+        if not r or r.returncode != 0 or not os.path.exists(png_path):
+            return None
+        with open(png_path, "rb") as f:
+            return f.read()
+    finally:
+        for p in (tiff_path, png_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+
+def _grab_wsl():
+    """WSL:经 interop 用 PowerShell 读 Windows 侧剪贴板(截图只存在于
+    Windows 侧,Linux 剪贴板通常是空的)。Clipboard.GetImage() 无图返回
+    null、不写文件;有图经 MemoryStream 序列化成 png 再写回 WSL 侧路径。
+    两个实测坑:1) WSL interop 默认不传自定义环境变量,必须经 WSLENV
+    显式声明,/l 标志顺带把路径自动转成 Windows 形式(\\wsl.localhost\…),
+    免去 wslpath 手动转换;2) GDI+ 的 Image.Save() 拒绝 wsl 桥接路径,
+    先存 MemoryStream、再 [IO.File]::WriteAllBytes 直写才成功。
+    -STA 必须带:剪贴板 API 要求单线程套间。"""
+    if not shutil.which("powershell.exe"):
+        return None, None
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        tmp_path = f.name
+    try:
+        # 用户 shell 可能已定义 WSLENV,追加而非覆盖
+        wsl_env = os.environ.get("WSLENV", "")
+        env = dict(os.environ, WCLIP_PATH=tmp_path,
+                   WSLENV="WCLIP_PATH/l" if not wsl_env else wsl_env + ":WCLIP_PATH/l")
+        r = _run(["powershell.exe", "-NoProfile", "-STA", "-Command",
+                  "Add-Type -AssemblyName System.Windows.Forms;"
+                  "$i=[System.Windows.Forms.Clipboard]::GetImage();"
+                  "if($i){$ms=New-Object System.IO.MemoryStream;"
+                  "$i.Save($ms,[System.Drawing.Imaging.ImageFormat]::Png);"
+                  "[System.IO.File]::WriteAllBytes($env:WCLIP_PATH,$ms.ToArray())}"],
+                 timeout=15, env=env)
+        if not r or r.returncode != 0 or os.path.getsize(tmp_path) == 0:
+            return None, None
+        with open(tmp_path, "rb") as f:
+            return f.read(), "png"
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _grab_x11():
+    """X11:xclip 列 TARGETS,命中 image/* 再按该 target 取二进制。"""
+    if not shutil.which("xclip") or not os.environ.get("DISPLAY"):
+        return None, None
+    targets = _run(["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"])
+    if not targets or targets.returncode != 0:
+        return None, None
+    m = re.search(rb"image/(png|jpeg|gif|webp|bmp)", targets.stdout)
+    if not m:
+        return None, None
+    fmt = m.group(1).decode()
+    r = _run(["xclip", "-selection", "clipboard", "-t", f"image/{fmt}", "-o"])
+    if not r or r.returncode != 0 or not r.stdout:
+        return None, None
+    return r.stdout, "jpg" if fmt == "jpeg" else fmt
+
+
+def _grab_wayland():
+    """Wayland:wl-paste 列类型,命中 image/* 按类型取二进制(格式同上)。"""
+    if not shutil.which("wl-paste"):
+        return None, None
+    types = _run(["wl-paste", "--list-types"])
+    if not types or types.returncode != 0:
+        return None, None
+    m = re.search(rb"image/(png|jpeg|gif|webp|bmp)", types.stdout)
+    if not m:
+        return None, None
+    fmt = m.group(1).decode()
+    r = _run(["wl-paste", "--type", f"image/{fmt}"])
+    if not r or r.returncode != 0 or not r.stdout:
+        return None, None
+    return r.stdout, "jpg" if fmt == "jpeg" else fmt
+
+
+def _clip_image_file(clip_dir):
+    """把剪贴板图片落盘到会话级临时目录,返回路径;无图/失败返回 None。
+    文件生命周期按业界惯例由调用方在消费(转述)后统一清理:bash 侧每轮
+    输入开始前清空上一轮的 clip 目录,退出时 EXIT trap 兜底。"""
+    if not clip_dir:
+        return None
+    if sys.platform == "darwin":
+        data, ext = _grab_macos()
+    elif _is_wsl():
+        data, ext = _grab_wsl()
+    elif os.environ.get("WAYLAND_DISPLAY"):
+        data, ext = _grab_wayland()
+    else:
+        data, ext = _grab_x11()
+    if not data or not ext:
+        return None
+    try:
+        os.makedirs(clip_dir, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix="clip_", suffix="." + ext, dir=clip_dir)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        return path
+    except OSError:
+        return None
+
+
+def _insert_clip_image(event, clip_dir):
+    """剪贴板图片 → 文件占位行。格式与 wchat 的 read_file 产物完全一致
+    (📋 [图片] <路径> + 零宽标记):提交时 bash 的 parse_placeholders 按
+    行前缀解析进 input_images 统一转述,零宽标记让整行原子删除 = 取消附加
+    (占位删除机制免费复用)。占位行必须独占一行:parse 只认行首前缀,
+    光标所在行已有内容时先补一个换行,否则占位与文字挤在同一行,提交时
+    整行按字面文本进消息、图片丢失(AI 转而用 read_image 猜路径,真机
+    复现)。行尾补换行,光标落空行,一次回车即提交。
+    返回 True=已附加;False=剪贴板无图。"""
+    path = _clip_image_file(clip_dir)
+    if not path:
+        return False
+    b = event.current_buffer
+    line_before = b.document.text_before_cursor.split("\n")[-1]
+    if line_before:
+        b.insert_text("\n")
+    b.insert_text("📋 [图片] " + path + "​\n")
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--history", default="", help="历史文件路径(空=不持久)")
@@ -38,6 +239,8 @@ def main() -> int:
     ap.add_argument("--default", default="", help="初始缓冲区文本(文件选择取消后带回)")
     ap.add_argument("--no-commands", action="store_true",
                     help="续行/补输模式:一切输入按正文")
+    ap.add_argument("--clip-dir", default="",
+                    help="剪贴板图片落盘的会话级临时目录(空=禁用图片嗅探)")
     args = ap.parse_args()
 
     if not sys.stdin.isatty():
@@ -71,8 +274,14 @@ def main() -> int:
         空行——一次回车即提交(与旧流"空行提交"一致)。单行粘贴原样插入。
         粘贴结尾的 \n 是终止符非内容,按旧流归一化剥掉一个。占位尾部拼
         上序号个零宽空格(U+200B,不可见)作唯一标记,提交时按整个占位串
-        换回,多次同规模粘贴互不混淆。"""
+        换回,多次同规模粘贴互不混淆。
+        空粘贴(图片剪贴板下 Ctrl+V 的常见形态)嗅探剪贴板图片:命中则
+        按文件占位行附加(与 Ctrl+F 同管线);无图静默——空文本粘贴本来
+        就不该插入任何内容。"""
         data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+        if data == "":
+            _insert_clip_image(event, args.clip_dir)
+            return
         if "\n" not in data:
             event.current_buffer.insert_text(data)
             return
@@ -227,6 +436,14 @@ def main() -> int:
         except Exception:
             fpick_height[0] = None
         event.app.exit(result=("file-pick", event.current_buffer.text))
+
+    @kb.add("c-g")
+    def _(event):
+        """Ctrl+G:粘贴剪贴板图片。截图工具通常只把图片放进剪贴板,而各
+        终端对图片剪贴板的 Ctrl+V 行为不一(有的发空粘贴、有的干脆不发),
+        热键是空粘贴嗅探的兜底入口;无图时响铃提示。"""
+        if not _insert_clip_image(event, args.clip_dir):
+            event.app.output.bell()
 
     try:
         tty = open("/dev/tty", "w")
