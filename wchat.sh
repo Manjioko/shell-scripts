@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # 该脚本支持 mimo-2.5 / deepseek-v4 / qwen3.8 等 OpenAI 兼容接口
-# (接口差异集中在联网参数与上下文窗口两处,见 WEB_SEARCH_PROVIDER 与 TOKEN_THRESHOLD)
+# (接口差异集中在三处:联网参数 WEB_SEARCH_PROVIDER、上下文窗口 TOKEN_THRESHOLD、
+#  图片请求形状 IMG_PROVIDER,各自的探测与差异点见对应配置段)
 # 联网搜索(web_search 工具)按接口自适应:mimo / qwen(dashscope) 走各家原生
 # 联网参数,其余接口不注册该工具、模型自然回退通用 web_fetch(见「联网搜索」配置段)
 # ================切换模型需要改这里👇👇=======================
@@ -22,7 +23,38 @@ API_KEY="sk-6023e9d84ac54a96b701bda1ed191534"
 # mimo-v2.5-pro
 flash_model="qwen3.8-flash"
 pro_model="qwen3.8-flash"
+# 图片转述用哪个模型见下方 VISION_MODEL(留空=用 flash_model)。主对话换成纯文字
+# 模型(deepseek 等)不影响读图;彻底关闭图片链路:环境变量 IMG_PROVIDER=none
 # ===============================👆👆========================
+
+# 切到 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑;且下面的
+# declare -A 关联数组是 bash 4+ 语法,3.2 上会直接失败）
+#
+# 判据必须用 BASH_VERSINFO,不要用自定义开关变量:旧实现 export
+# BREW_BASH_CHECKED=1 当"只 exec 一次"的守卫,该变量会被子进程与嵌套调用继承
+# （脚本里 run_in_background 起的命令、`script -q` 包 pty 的自重入都跑在本 shell
+# 下),第二次进入时跳过切换 → 继续跑在 /bin/bash 3.2 上 → declare -A 报
+# "invalid option" 但脚本不退出,工具调用参数收集全乱,现象极难归因。
+# 版本判断天然幂等:已经切到 5.x 再进来时条件为假,不会 exec 循环。
+if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
+    for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        [[ -x "$brew_bash" ]] || continue
+        # 只在目标确实是 bash 5+ 时才切换:避免 /opt/homebrew/bin/bash 本身
+        # 仍是 3.x 时被 exec 成无限循环(每次都"找到一个新 bash"再切回去)。
+        # 版本号必须先落成变量再判断:写成 (( $(("$brew_bash" ...) >= 5 )) 时,
+        # "$((" 会被当成算术展开的开头(shellcheck SC1102),而且子进程输出非数字
+        # 会让整个 if 条件直接变成语法错误。
+        brew_bash_major="$("$brew_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
+        [[ "$brew_bash_major" =~ ^[0-9]+$ ]] || brew_bash_major=0
+        if (( brew_bash_major >= 5 )); then
+            exec "$brew_bash" "$0" "$@"
+        fi
+    done
+    # 找不到就别静默降级——后面的 declare -A 会以"工具参数错乱"这种难懂的方式失败
+    printf '⛔ 需要 bash 5.x(当前 %s,macOS 自带的是 3.2),且未找到 /opt/homebrew/bin/bash\n' "$BASH_VERSION" >&2
+    printf '   安装:brew install bash\n' >&2
+    exit 1
+fi
 
 # ---------- 联网搜索(web_search 工具)配置 ----------
 # 大模型原生联网搜索是各接口的"私有能力",且参数互不兼容(实测):
@@ -204,21 +236,62 @@ WEB_MAX_CHARS=20000
 
 # ---------- 图片理解(多模态,转述架构)配置 ----------
 # 设计原则:用户发图(@/-img)与 AI 读图(read_image)都不把图片放进 messages——
-# 本地 base64 后单独调一次视觉接口(mimo-v2.5,当前唯一支持图片的模型),
-# 只把文字转述作为普通文本写入上下文。好处:messages/历史不膨胀、
-# 压缩不因图片频繁触发、图片 token 每张只付一次(转述请求本身)。
-# 图片文件超过该体积(字节)时触发自动压缩。15MB → base64 约 20MB,
-# 文档单张上限 50MB,留 2.5 倍余量。
-IMG_MAX_BYTES=15728640
+# 本地 base64 后单独调一次视觉接口,只把文字转述作为普通文本写入上下文。
+# 好处:messages/历史不膨胀、压缩不因图片频繁触发、图片 token 每张只付一次。
+#
+# 接口差异集中在三处,新增一家视觉接口不用碰链路其余部分:
+#   1) VISION_MODEL / IMG_PROVIDER(本节)——用哪个模型、按哪种请求形状
+#   2) vision_extra_fields()(转述请求章节)——该家专属字段的唯一落点
+#   3) 下面这几个 IMG_* 限额——都可用同名环境变量覆盖,换接口只改环境不改代码
+
+# 转述用的视觉模型。留空 = 退回 flash_model(默认档)。与主对话模型解耦:
+# -stp/-stf 只切文字模型,不影响转述模型;想固定用某个视觉强的模型就设它
+VISION_MODEL="${VISION_MODEL:-}"
+vision_model="${VISION_MODEL:-$flash_model}"
+
+# 请求形状家族:auto|mimo|openai|none。
+# none = 明确不发图(手工关闭,或运行中收到"不支持图片"报错后自动降级)
+IMG_PROVIDER="${IMG_PROVIDER:-auto}"
+
+# 域名为主、模型名兜底(与 detect_web_search_provider 同一理由:私有网关常把
+# https 终结在网关内部,按模型名猜会漏)。目前两家的图片请求形状实测一致,
+# 分支保留为扩展点;新增一家 = 在此加一行 case + 在 vision_extra_fields 加一分支
+detect_vision_provider() {
+    local url="${1,,}" m="${2,,}"
+    case "$url" in
+        *xiaomimimo.com*) echo mimo; return ;;
+    esac
+    case "$m" in
+        mimo*) echo mimo; return ;;
+    esac
+    echo openai
+}
+[[ "$IMG_PROVIDER" == "auto" ]] && IMG_PROVIDER=$(detect_vision_provider "$BASE_URL" "$vision_model")
+IMG_CAPABLE=1
+vision_disabled_reason=""
+[[ "$IMG_PROVIDER" == "none" ]] && IMG_CAPABLE=0
+
+# 接口明确拒绝图片输入时在进程内降级:后续发图直接提示,不再烧注定失败的请求
+# (重启复位)。比按模型名猜黑名单可靠——实测优先于假设
+vision_disable() {
+    IMG_PROVIDER=none
+    IMG_CAPABLE=0
+    vision_disabled_reason="$1"
+}
+
+# 单张与合计字节上限:base64 后约 1.37 倍。取各家最小公约(mimo 文档单张 50MB、
+# qwen maas 侧 10MB 量级),超限会 400 或静默截断,故按小的来;换大配额接口用
+# 环境变量放大即可。压缩后一般远低于此值,正常截图不会触发
+IMG_MAX_BYTES=${IMG_MAX_BYTES:-10485760}
 
 # 压缩目标:最长边像素。2048 → 约 4M 像素 ≈ 4k token,清晰度与费用的平衡点
-IMG_MAX_SIDE=2048
+IMG_MAX_SIDE=${IMG_MAX_SIDE:-2048}
 
 # 一次转述请求最多合并的图片张数
-IMG_MAX_BATCH=4
+IMG_MAX_BATCH=${IMG_MAX_BATCH:-4}
 
-# 一次转述请求所有图片字节合计上限(约 35MB → base64 约 47MB,逼近文档上限)
-IMG_BATCH_MAX_BYTES=36700160
+# 一次转述请求所有图片字节合计上限(约 4 张 × 10MB 再留 base64 余量)
+IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}
 
 # 支持的图片扩展名(按扩展名识别,不做内容嗅探——为便利牺牲准确性)
 IMG_EXTS="png jpg jpeg gif webp bmp"
@@ -311,34 +384,6 @@ SSE_STALL_TIMEOUT=120      # 2 分钟
 
 options_list=("-l" "-msgs" "-h" "-c" "-u" "-img" "-skill")
 
-# 切到 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑;且下面的
-# declare -A 关联数组是 bash 4+ 语法,3.2 上会直接失败）
-#
-# 判据必须用 BASH_VERSINFO,不要用自定义开关变量:旧实现 export
-# BREW_BASH_CHECKED=1 当"只 exec 一次"的守卫,该变量会被子进程与嵌套调用继承
-# （脚本里 run_in_background 起的命令、`script -q` 包 pty 的自重入都跑在本 shell
-# 下),第二次进入时跳过切换 → 继续跑在 /bin/bash 3.2 上 → declare -A 报
-# "invalid option" 但脚本不退出,工具调用参数收集全乱,现象极难归因。
-# 版本判断天然幂等:已经切到 5.x 再进来时条件为假,不会 exec 循环。
-if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
-    for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
-        [[ -x "$brew_bash" ]] || continue
-        # 只在目标确实是 bash 5+ 时才切换:避免 /opt/homebrew/bin/bash 本身
-        # 仍是 3.x 时被 exec 成无限循环(每次都"找到一个新 bash"再切回去)。
-        # 版本号必须先落成变量再判断:写成 (( $(("$brew_bash" ...) >= 5 )) 时,
-        # "$((" 会被当成算术展开的开头(shellcheck SC1102),而且子进程输出非数字
-        # 会让整个 if 条件直接变成语法错误。
-        brew_bash_major="$("$brew_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
-        [[ "$brew_bash_major" =~ ^[0-9]+$ ]] || brew_bash_major=0
-        if (( brew_bash_major >= 5 )); then
-            exec "$brew_bash" "$0" "$@"
-        fi
-    done
-    # 找不到就别静默降级——后面的 declare -A 会以"工具参数错乱"这种难懂的方式失败
-    printf '⛔ 需要 bash 5.x(当前 %s,macOS 自带的是 3.2),且未找到 /opt/homebrew/bin/bash\n' "$BASH_VERSION" >&2
-    printf '   安装:brew install bash\n' >&2
-    exit 1
-fi
 
 # 并行工具调用收集区:DeepSeek 一次响应可返回多个 tool_calls(按 index 区分)。
 # 按 index 存入关联数组,arguments 分片按 index 各自累加。
@@ -2321,8 +2366,9 @@ tool_web_search() {
 
 # ========== 图片理解(多模态,转述架构) ==========
 # 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
-# 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉接口
-# (mimo-v2.5,当前唯一支持图片的模型),只把文字转述作为普通文本写入上下文,
+# 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉请求
+# (模型由 VISION_MODEL/flash_model 决定,形状由 IMG_PROVIDER 决定),
+# 只把文字转述作为普通文本写入上下文,
 # 避免消息/历史膨胀、压缩频繁触发与图片 token 每轮重复计费。
 
 # 扩展名 → MIME 类型。按扩展名识别,不做内容嗅探(为便利牺牲准确性)。
@@ -2412,6 +2458,47 @@ im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null
     return 1
 }
 
+# ---------- 请求/响应形状(按 IMG_PROVIDER 分叉) ----------
+# 视觉请求的各家专属字段唯一落点。公共骨架(模型/messages/stream)不放这里,
+# 以免分支间复制。以 jq 对象片段形式返回,由 vision_build_body 拼进请求体。
+#
+# 实测(2026-07-09,同一张 220px PNG,五种形状对撞):
+#   openai 家族(qwen maas compatible-mode):带 reasoning_effort 且
+#     thinking=disabled 时回 400 "'reasoning_effort' must be 'none' when
+#     'enable_thinking' is false"。坑在同 body 的纯文本请求不报错——网关只
+#     对多模态请求校验二者一致性,所以主对话一直正常、只有读图必挂。
+#     转述本就不需要思考链,故统一省略 reasoning_effort。
+#   mimo:带/不带 reasoning_effort 都收(旧注释称"mimo 会 400"已不复现),
+#     省略以与上对齐。
+# 新增一家:在此加一个 case 分支即可,链路其它部分(压缩/批量/注册/提示)不动。
+vision_extra_fields() {
+    case "$IMG_PROVIDER" in
+        mimo)   printf ', thinking: {type:"disabled"}' ;;
+        openai) printf ', thinking: {type:"disabled"}' ;;
+        *)      printf '' ;;
+    esac
+}
+
+# 组装转述请求体。$1=模型 $2=parts 文件(image_url 数组 JSON) $3=用户提示词
+# $4=system 提示(可空)。转述是独立请求:不注册 tools、不参与主对话形状,
+# 只吃几张图 + 一句话;$2 走文件是为了避开 ARG_MAX(图片 base64 可达数十 MB)
+vision_build_body() {
+    local extra sysfrag=""
+    extra=$(vision_extra_fields)
+    [[ -n "${4:-}" ]] && sysfrag="{role: \"system\", content: \$sys}, "
+    jq -nc --rawfile parts "$2" --arg model "$1" --arg prompt "$3" --arg sys "${4:-}" \
+        "{ model: \$model, messages: [ ${sysfrag}{role: \"user\", content: ((\$parts | fromjson) + [{type: \"text\", text: \$prompt}])} ] $extra, stream: false }"
+}
+
+# 响应取文归一:多数网关返回字符串 content;部分网关(Anthropic 风格)把回复
+# 拆成 parts 数组,不归一会把对象字面量当转述文本喂给模型
+vision_parse_resp() {
+    jq -r '.choices[0].message.content
+        | if type == "array"
+          then [.[] | if type == "object" then (.text // "") else tostring end] | join("")
+          else . end // ""' <<<"$1" 2>/dev/null
+}
+
 # 图片转述核心:批量图片路径 → 一次视觉 API 请求 → 文字转述。
 # 结果写全局 describe_result,失败置 describe_failed=1(不阻塞对话)。
 # 关键实现点:
@@ -2419,16 +2506,27 @@ im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null
 #     (exec 参数受 ARG_MAX 限制,macOS 仅约 1MB):parts 经 jq --rawfile
 #     从临时文件读入,请求体用 curl --data-binary @file 发送;
 #   - base64 字符集只有 [A-Za-z0-9+/=],手拼 JSON 字符串无需转义;
-#   - 转述请求固定 flash 模型(唯一支持图片的模型),与主对话模型无关。
+#   - 视觉模型与请求形状解耦于主对话:模型取 vision_model(VISION_MODEL 空则
+#     退回 flash_model),形状取 IMG_PROVIDER,切文字模型(-stp/-stf)不影响转述。
 describe_images() {
     local -a files=("$@") cleanup=()
-    local i n path new_path ext mime b64 parts sep tmpdir req_file resp err
-    local size total_size=0 prompt
+    local i n path new_path ext mime b64 parts sep tmpdir req_file resp err http_status
+    local size total_size=0 prompt request_body
 
     describe_result=""
     describe_failed=0
     n=${#files[@]}
     (( n == 0 )) && return 0
+
+    # 能力门槛:provider=none(手工关或曾被接口拒)时不发请求,直接把"不支持"
+    # 作为结果返回。调用方把 describe_result 写进 messages,模型因此被告知
+    # 图没看成,不会假装读过图
+    if (( ! IMG_CAPABLE )); then
+        describe_failed=1
+        describe_result="当前视觉模型(${vision_model})不支持图片输入,原因:${vision_disabled_reason}(IMG_PROVIDER=${IMG_PROVIDER})。如需读图:设 VISION_MODEL 指向带视觉的模型,或把 IMG_PROVIDER 设为 openai/mimo"
+        return 1
+    fi
+
     tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/ct_img_XXXXXX")
 
     _img_cleanup() {
@@ -2463,7 +2561,7 @@ describe_images() {
         # 超体积自动压缩;成功时可能返回新的临时文件路径,记入清理列表
         new_path=$(prepare_image "$path") || {
             describe_failed=1
-            describe_result="图片超体积且本机无 sips/ffmpeg/python3(PIL) 可自动压缩: $path"
+            describe_result="图片超单次上限 $((IMG_MAX_BYTES / 1024 / 1024))MB 且本机无 sips/ffmpeg/python3(PIL) 可自动压缩: $path(上限可用环境变量 IMG_MAX_BYTES 调高)"
             _img_cleanup
             return 0
         }
@@ -2472,10 +2570,11 @@ describe_images() {
 
         size=$(wc -c < "$path" | tr -d ' ')
         total_size=$((total_size + size))
-        # 合并请求总体积防护:总 base64(≈体积×4/3)逼近文档 50MB 上限即拒绝
+        # 合并请求总体积防护:上限按各家配额的最小公约取(见顶部 IMG_BATCH_MAX_BYTES),
+        # 超限的表现为 400 或静默截断,故宁可在本地先拒并说明怎么办
         if (( total_size > IMG_BATCH_MAX_BYTES )); then
             describe_failed=1
-            describe_result="图片合计体积过大(${total_size} 字节,超过单次请求上限),请分批发"
+            describe_result="图片合计体积过大($((total_size / 1024 / 1024))MB > $((IMG_BATCH_MAX_BYTES / 1024 / 1024))MB 单次上限),请分批发"
             _img_cleanup
             return 0
         fi
@@ -2500,20 +2599,8 @@ describe_images() {
     # parts 可能达数十 MB:--arg 会撞 ARG_MAX,--rawfile 从文件读入规避。
     # parts 是逗号拼接的若干对象,这里补上数组括号,fromjson 才能得到数组
     printf '[%s]' "$parts" > "$tmpdir/parts.json"
-    request_body=$(jq -nc \
-        --rawfile parts "$tmpdir/parts.json" \
-        --arg model "$flash_model" \
-        --arg prompt "$prompt" \
-        '{
-            model: $model,
-            messages: [
-                {role: "system", content: "你是图片内容转述助手。任务:把用户提供的图片转述为详尽、忠实的文字描述,只描述图片本身呈现的内容,不添加图片之外的信息或推测。"},
-                {role: "user", content: (($parts | fromjson) + [{type: "text", text: $prompt}])}
-            ],
-            thinking: {type: "disabled"},
-            reasoning_effort: "high",
-            stream: false
-        }') || {
+    request_body=$(vision_build_body "$vision_model" "$tmpdir/parts.json" "$prompt" \
+        "你是图片内容转述助手。任务:把用户提供的图片转述为详尽、忠实的文字描述,只描述图片本身呈现的内容,不添加图片之外的信息或推测。") || {
         describe_failed=1
         describe_result="转述请求体构建失败(jq 异常)"
         _img_cleanup
@@ -2522,18 +2609,40 @@ describe_images() {
 
     req_file="$tmpdir/req.json"
     printf '%s' "$request_body" > "$req_file"
-    # --data-binary @file:请求体从文件读,绕开命令行参数长度限制
-    resp=$(curl -s --connect-timeout 15 --max-time 180 "$BASE_URL" \
+    # --data-binary @file:请求体从文件读,绕开命令行参数长度限制。
+    # 状态码单独取:401/403 要区分 Key 失效与"模型不支持图片",只看 body 易误判
+    http_status=$(curl -s -o "$tmpdir/resp.json" -w '%{http_code}' \
+        --connect-timeout 15 --max-time 180 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
         -H "api-key: $API_KEY" \
         --data-binary @"$req_file" 2>/dev/null)
+    resp=$(<"$tmpdir/resp.json")
 
-    describe_result=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+    describe_result=$(vision_parse_resp "$resp")
     if [[ -z "$describe_result" ]]; then
         describe_failed=1
-        err=$(printf '%s' "$resp" | jq -r '.error.message // empty' 2>/dev/null)
-        describe_result="转述接口无响应或报错: ${err:-未知错误}"
+        err=$(jq -r '.error.message // .message // empty' <<< "$resp" 2>/dev/null)
+        case "$http_status" in
+            401 | 403)
+                describe_result="鉴权失败(HTTP $http_status):API Key 可能已失效,请更新脚本顶部 API_KEY" ;;
+            000 | "")
+                describe_result="转述请求未能完成(网络不通或超时)" ;;
+            *)
+                describe_result="转述接口报错(HTTP ${http_status:-?}):${err:-响应无 content 字段}" ;;
+        esac
+        # 接口明确说"不支持图片输入"→ 进程内降级为 none,后续发图直接提示即可,
+        # 不再烧注定失败的请求。判定要同时出现 image/vision 与 not support:
+        # 只按 "not support" 匹配会把"格式不支持"误判成"模型不支持"(整会话作废)
+        case "${err,,}" in
+            # 只认"模型/接口不支持图片输入"这一类措辞。用词要紧:宽松匹配会把
+            # "图片格式不支持"当成"模型不支持",一次坏文件就让整会话失去读图能力
+            *"not support image"* | *"not support visual"* | *"image input is not supported"* | \
+            *"does not accept image"* | *"not a vision model"* | *"no vision capability"* | *"不支持图片"*)
+                
+                describe_result="当前视觉模型(${vision_model})不支持图片,本轮起不再尝试识别图片(报错: ${err})"
+                vision_disable "$describe_result" ;;
+        esac
     fi
     _img_cleanup
     return 0
@@ -2561,13 +2670,17 @@ tool_read_image() {
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
 
+    # provider=none(手工关或曾被接口拒)时 describe_images 不发请求,直接返回
+    # "不支持图片"文案。这里把它作为工具结果回给模型(tool content 协议上只能是
+    # 字符串),模型才知道图没看成,而不是凭文件名猜内容
     describe_images "$resolved"
     if (( describe_failed )); then
-        content="图片识别失败: $describe_result"
+        content="图片未识别: $describe_result"
+        printf ' ⚠️ 图片未识别:%s\n' "$path"
     else
         content="图片 $path 的内容转述(本工具返回文字描述,非原图):"$'\n\n'"$describe_result"
+        printf ' 已识别图片 %s\n' "$path"
     fi
-    printf ' 已识别图片 %s\n' "$path"
 }
 
 # read_skill 工具:读取技能全文。技能目录(~/.ct/skills)在工作目录之外,
@@ -3232,7 +3345,9 @@ printContent() {
         fi
         input_images=()
         if (( describe_failed )); then
-            img_desc=$'\n[图片识别失败: '"$describe_result"']'
+            # 括号内是给模型看的说明:明确"没看到图"+"别再调 read_image",
+            # 否则模型会反复重试同一工具(实测会烧掉十几轮才放弃)
+            img_desc=$'\n[图片未识别: '"$describe_result"'。你看不到这张图的内容,不要臆测,也不要再调用 read_image 重试]'
         else
             img_desc=$'\n(用户发送了 '"$img_n"' 张图片,以下是图片内容的文字转述)\n'"$describe_result"
         fi
