@@ -304,7 +304,7 @@ last_prompt_tokens=0
 # 换模型/换网关时用环境变量覆盖,不必改代码:TOKEN_THRESHOLD=100000 wchat -st "..."
 # 取高了会怎样:超限表现为"请求失败 → retry_after_compact 按本地粗算判断是否压缩重发"
 # (见该函数),阈值过高会让它判成"不是上下文问题"而反复重试,所以拿不准就取小。
-TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-24000}"
+TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-100000}"
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
 # + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
