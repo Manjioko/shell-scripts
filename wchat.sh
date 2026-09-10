@@ -248,7 +248,7 @@ auto_allow_rw=()
 
 # 单条 shell 命令墙钟超时(秒)。auto 下没有人按 Ctrl+C,交互命令/挂死命令
 # 会把整轮永久卡住(本机无 coreutils 的 timeout,用窗口轮询自己实现,
-# 见 run_tool_in_window 的超时分支)。取 120s 覆盖"编译大项目"以外的大部分场景。
+# 见 run_with_window 的超时分支)。取 120s 覆盖"编译大项目"以外的大部分场景。
 CMD_TIMEOUT="${CMD_TIMEOUT:-120}"
 
 # 每会话自动放行次数配额:超配额后退回人工确认(防失控循环 + 防烧钱)
@@ -280,7 +280,7 @@ auto_ck_kind=""; auto_ck_head=""; auto_ck_note=""; auto_ck_dirty=0
 AUTO_SNAPSHOT_MAX_KB="${AUTO_SNAPSHOT_MAX_KB:-204800}"
 # 单轮用户输入内的工具调用计数(刹车①),printContent 每轮清零
 tool_round=0
-# 命令窗口内两次 Ctrl+C 的急停标志(run_tool_in_window 每次清零,trap 里置位)
+# 命令窗口内两次 Ctrl+C 的急停标志(run_with_window 每次清零,trap 里置位)
 auto_estop=0
 
 # 历史记录集合
@@ -582,7 +582,11 @@ inp_msg() {
     printf '%s\n' "$*" | sed $'s/^/\033[2m│\033[0m /'
 }
 
+last_saved_history=""
 save_history() {
+    # 供调用方回显真实落盘路径。必须在每个提前 return 前保持为空,否则
+    # "-fs 无标题" 这种没保存成功的情况会沿用上一轮的文件名报"已保存"。
+    last_saved_history=""
     [[ -z "$chat_title" ]] && return 0
     [[ -z "$messages" ]] && return 0
     [[ $forget_history == 1 ]] && return 0
@@ -615,7 +619,10 @@ save_history() {
 
     inp_msg "保存记录 ${HISTORY_DIR}/${name}.json"
 
-    echo "$history" > "${HISTORY_DIR}/${name}.json"
+    # 只在真正写盘成功后回传路径(目录被删/磁盘满等重定向失败时不留假路径)
+    if echo "$history" > "${HISTORY_DIR}/${name}.json"; then
+        last_saved_history="${HISTORY_DIR}/${name}.json"
+    fi
 }
 
 get_history() {
@@ -914,7 +921,11 @@ parse_options() {
         if [[ "${!i}" == "--allow" || "${!i}" == "--allow-write" ]]; then
             local _m="r"
             [[ "${!i}" == "--allow-write" ]] && _m="rw"
-            local _n=$((i + 1)) _p="${!n}"
+            local _n=$((i + 1))
+            # 不能用 ${!n}:这里变量名是 _n,写错会让 bash 报 "invalid indirect
+            # expansion" 并把路径丢掉(--allow 静默失效)。${@:偏移:长度} 越界时
+            # 返回空串,正好用来判"没给参数"。
+            local _p="${@:_n:1}"
             if [[ -z "$_p" ]]; then
                 inp_msg "⚠️  ${!i} 需要一个路径参数"
             else
@@ -2819,7 +2830,8 @@ auto_enable() {
         full)    printf '  越界写:   仅 %s 个 --allow-write 路径,且覆盖前备份\n  shell N:  由终审器带 reason 复审后自动决定\n' "${#auto_allow_rw[@]}" ;;
     esac
     printf '  硬墙(任何档位都不放行): H1 提权 H2 下载即执行 H3 家目录/系统删 H4 磁盘\n'
-    printf '    H5 家目录配置 H6 凭据 H7 改写发布历史 H8 电源 H9 批量杀进程 H10 外发密钥 H11/H12 越界写\n'
+    printf '    H5 家目录配置 H6 凭据 H7 改写发布历史 H8 电源 H9 批量杀进程 H10 外发密钥 H11 系统路径\n'
+    printf '    越界写(工作目录之外)按路径判据报 P1/P2/P3,与文件工具同一口径\n'
     printf '  刹车: 单轮工具≤%s 次 · 单命令≤%ss · 自动放行配额 %s 次 · 连续拒 %s 次降级人工\n' \
         "$MAX_TOOL_ROUNDS" "$CMD_TIMEOUT" "$AUTO_MAX_APPROVALS" "$AUTO_DENY_STREAK"
     (( ${#auto_allow_ro[@]} )) && printf '  只读白名单: %s\n' "${auto_allow_ro[*]}"
@@ -4677,7 +4689,15 @@ handle_cmd_line() {
         elif [[ $forget_history == 1 ]]; then
             : # -f 模式，静默跳过
         else
-            save_history && inp_msg "✅ 已保存: ${HISTORY_DIR}/${name}.json"
+            # 不能写 save_history && echo 已保存:messages 为空时 save_history
+            # 静默不写盘但仍返回 0,提示会沿用上一轮的旧文件名报假成功。
+            # 现在按 save_history 回传的真实落盘路径判。
+            save_history
+            if [[ -n "$last_saved_history" ]]; then
+                inp_msg "✅ 已保存: $last_saved_history"
+            else
+                inp_msg "⚠️  未保存:当前对话内容为空"
+            fi
         fi
         return 0
     fi
