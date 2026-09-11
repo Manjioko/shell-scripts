@@ -138,6 +138,47 @@ for _ct_old in "$CT_HOME"/*.json; do
     [[ -f "$_ct_old" ]] && mv -f "$_ct_old" "$HISTORY_DIR/" 2>/dev/null
 done
 
+# ---------- UTF-8 安全的按宽度截行 ----------
+# 绝对不要用 `awk 'print substr($0,1,w)'` 截中文文本:macOS 自带的是 BSD awk,
+# length/substr 都是**字节**语义,一个汉字 3 字节、emoji 4 字节,w 处正好落在字符
+# 中间就把字符切成半个,输出非法 UTF-8。危害不止"少一个字":
+#   · render_markdown 把整篇文本一次喂给 BSD sed,遇到非法字节直接
+#     "sed: RE error: illegal byte sequence" 中止 → 该行之后的内容全部丢失,
+#     表现为"-l 加载历史只渲染到一半,后面几十条消息凭空消失";
+#   · 渲染助手 sys.stdin.read() 也会 UnicodeDecodeError,整篇渲染崩掉;
+#   · 截断结果还会被 add_message 写进历史 JSON,坏字节就此落盘、每次重新加载复发。
+# 本函数按 UTF-8 首字节推算当前字符占几字节,只在**字符边界**下刀;LC_ALL=C 让
+# awk 逐字节匹配正则(否则 [\200-\377] 这类字节类在 UTF-8 locale 下不成立)。
+# 用法:printf '%s\n' "$text" | clip_line_width <最大字节数> <截断标记>
+clip_line_width() {
+    LC_ALL=C awk -v max="${1:-200}" -v mark="${2-…}" '
+    function clip(s,   n, i, need, c) {
+        n = length(s); i = 1
+        while (i <= n) {
+            c = substr(s, i, 1)
+            if      (c !~ /^[\200-\377]$/) need = 1   # ASCII
+            else if (c ~ /^[\200-\277]$/)  need = 1   # 游离续字节,跳过不卡死
+            else if (c ~ /^[\300-\337]$/)  need = 2
+            else if (c ~ /^[\340-\357]$/)  need = 3
+            else                            need = 4   # [\360-\377] emoji
+            if (i + need - 1 > n) need = 1             # 序列被截尾,别越界
+            if (i + need - 1 > max) break              # 放不下 → 在字符边界停刀
+            i += need
+        }
+        return substr(s, 1, i - 1)
+    }
+    { if (max > 0 && length($0) > max) print clip($0) mark; else print }'
+}
+
+# 同族坑的第二半:BSD awk 的 length() 也是**字节**数,拿它当"字符预算"时,中文按
+# 3 字节、emoji 按 4 字节计,预算实际缩水到 1/3 —— 读中文文件几行就"因长度限制被
+# 截断",网页正文也只拿到本该量的一小截(不报错、纯静默少给内容,比崩更难发现)。
+# 合法 UTF-8 里 字符数 = 总字节数 - 续字节(0x80-0xBF)数,下面这个 awk 函数就按这个
+# 恒等式计数,不依赖 locale;调用处必须配 LC_ALL=C,否则字节类正则 [\200-\277] 在
+# UTF-8 locale 下不成立(同 clip_line_width 的理由)。
+# 用法:LC_ALL=C awk "$_AWK_U8LEN"'{ acc += u8len($0) + 1; ... }'
+_AWK_U8LEN='function u8len(s,   t, n) { t = s; n = gsub(/[\200-\277]/, "", t); return length(s) - n }'
+
 # 扫描技能目录,解析每个 SKILL.md 的 frontmatter(name/description),
 # 输出"技能名: 描述"列表供注入。按 mtime 排序,只取前 SKILL_MAX_INJECT 个。
 scan_skills() {
@@ -168,7 +209,7 @@ scan_skills() {
         # name 缺失用目录名兜底;description 缺失(没有检索价值)跳过注入
         [[ -z "$name" ]] && name=$(basename "$(dirname "$f")")
         [[ -z "$desc" ]] && continue
-        desc=$(printf '%s' "$desc" | awk -v n="$SKILL_DESC_MAX" '{ if (length($0) > n) print substr($0, 1, n) "…"; else print }')
+        desc=$(printf '%s' "$desc" | clip_line_width "$SKILL_DESC_MAX" '…')
         skills_text+="- ${name}: ${desc}"$'\n'
     done < <(ls -t "$SKILLS_DIR"/*/SKILL.md 2>/dev/null | head -n "$SKILL_MAX_INJECT")
     printf '%s' "$skills_text"
@@ -568,7 +609,19 @@ render_markdown() {
         # CommonMark 系渲染器(rich)都把「行尾反斜杠 + 换行」当
         # hard break 语法并隐藏反斜杠,导致用户输入的行尾 \ 显示丢失。
         # 先把单个行尾 \ 转义成 \\,渲染后原样显示。
-        printf '%s' "$text" | sed 's/\\$/\\\\/' | python3 "$RENDER_HELPER" 2>/dev/null
+        # LC_ALL=C 是必须的:BSD sed 在 UTF-8 locale 下遇到非法字节序列会
+        # 报 "RE error: illegal byte sequence" **当场中止**,它之后的内容再也没
+        # 有机会交给渲染助手 —— 加载历史时"渲染到一半就没了"就是这里断的。
+        # 这条替换只涉及 ASCII 反斜杠,按字节处理完全等价;万一输入里仍有坏字节
+        # (旧版本存进历史文件的),渲染助手会按 U+FFFD 降级显示,内容不再丢失。
+        # rc 必须显式接住:脚本开了 set -e + pipefail,渲染器一失败整条 wchat
+        # 会被中止(表现为"聊着聊着终端退出了"),这里降级成纯文本继续。
+        local rc=0
+        printf '%s' "$text" | LC_ALL=C sed 's/\\$/\\\\/' | python3 "$RENDER_HELPER" 2>/dev/null || rc=$?
+        if (( rc != 0 )); then
+            printf '\n\033[2m[渲染降级 rc=%s:rich 渲染失败,以下为纯文本]\033[0m\n' "$rc"
+            printf '%s\n' "$text"
+        fi
     else
         echo "$text"
     fi
@@ -672,11 +725,39 @@ get_history() {
     thinking=$(jq -r '.thinking.type' <<< "$(<"$1")")
     model=$(jq -r '.model' <<< "$(<"$1")")
     local full_text=""
-    local msg_content role reasoning  # 局部变量,避免覆盖全局 content
+    local msg_content role reasoning tool_calls tool_call_id _tcid _tcnm _tname _rest _key
+    # tool_call_id → 工具名 的查表串("id 名字" 一行一条)。
+    # 不用 declare -A:macOS 自带 /bin/bash 是 3.2,不支持关联数组,而本脚本开了
+    # set -e —— 一句 `declare -A` 失败就会把整个 -l 加载流程直接中止。
+    local tc_map=""
     while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
         msg_content=$(jq -r '.content // empty' <<< "$line")
         reasoning=$(jq -r '.reasoning_content // empty' <<< "$line")
+        # 本条 assistant 发起的工具调用。真实历史里 95/97 条 assistant 只带
+        # tool_calls(content 为空),旧版一条都不显示 —— 加载历史后完全看不出
+        # 模型当时执行了什么命令,这就是"内容少了一部分"的另一半成因。
+        # 仅显示层摘要,messages 数组原样保留,续聊回传 API 不受影响。
+        tool_calls=$(jq -r '(.tool_calls // [])[]
+            | "🔧 " + (.function.name // "?") + ": "
+              + ((.function.arguments // "") | tostring | gsub("[\n\r\t]"; " "))' <<< "$line")
+        tool_call_id=$(jq -r '.tool_call_id // empty' <<< "$line")
+        if [[ "$role" == "assistant" && -n "$tool_calls" ]]; then
+            while IFS=$'\t' read -r _tcid _tcnm; do
+                if [[ -n "$_tcid" ]]; then tc_map+="$_tcid $_tcnm"$'\n'; fi
+            done < <(jq -r '(.tool_calls // [])[]
+                            | [(.id // ""), (.function.name // "?")] | @tsv' <<< "$line")
+        fi
+        # 反查本条 tool 结果的来源工具名(历史里的 tool 消息只有 id、没有 name)
+        _tname=""
+        if [[ "$role" == "tool" && -n "$tool_call_id" ]]; then
+            _rest=$'\n'"$tc_map"
+            _key=$'\n'"$tool_call_id "
+            if [[ "$_rest" == *"$_key"* ]]; then
+                _tname=${_rest#*"$_key"}
+                _tname=${_tname%%$'\n'*}
+            fi
+        fi
         # 构建该消息的文本
         msg_text=""
         # 思考内容单独渲染:thinking 模式下 assistant 消息的 reasoning_content
@@ -685,7 +766,13 @@ get_history() {
             msg_text+="### 💭 思考"$'\n'
             msg_text+="$reasoning"$'\n'$'\n'
         fi
-        msg_text+="## $role"$'\n'
+        if [[ "$role" == "tool" && -n "$_tname" ]]; then
+            # 历史里的 tool 消息只有 tool_call_id、没有工具名,用上一条 assistant 的
+            # tool_calls 反查标注;否则几十条清一色 "## tool",根本分不清是谁的输出
+            msg_text+="## $role → $_tname"$'\n'
+        else
+            msg_text+="## $role"$'\n'
+        fi
         if [[ "$role" == "tool" ]]; then
             # 工具输出渲染上限:超过 5 行只显示前 5 行并提示省略,避免
             # 长输出干扰主要信息阅读(仅影响显示,messages 保持完整)。
@@ -698,12 +785,12 @@ get_history() {
             # 3. 每行限宽 200 字符,防 minified 长行刷屏(仅显示层截断)。
             disp=${msg_content//"\\n"/$'\n'}
             disp=${disp/#$'\xef\xbb\xbf'/}
-            disp=$(printf '%s' "$disp" | grep -vE '^[[:space:]]*$')
-            nlines=$(printf '%s' "$disp" | awk 'END{print NR}')
+            disp=$(printf '%s' "$disp" | LC_ALL=C grep -vE '^[[:space:]]*$' || true)
+            nlines=$(printf '%s\n' "$disp" | LC_ALL=C awk 'END{print NR+0}')
             if [[ -z "$disp" || "$nlines" -eq 0 ]]; then
                 msg_text+="*内容为空*"$'\n'
             else
-                shown=$(printf '%s' "$disp" | awk -v w=200 'NR<=5 { if (length($0)>w) print substr($0,1,w) "…(该行过长已截断)"; else print }')
+                shown=$(printf '%s\n' "$disp" | head -n 5 | clip_line_width 200 '…(该行过长已截断)')
                 if (( nlines > 5 )); then
                     msg_text+="$shown"$'\n'"…(其余 $((nlines - 5)) 行已省略)"$'\n'
                 else
@@ -713,6 +800,13 @@ get_history() {
         else
             # assistant 的 tool_calls 消息 content 为 null,不再渲染出字面 "null"
             [[ -n "$msg_content" ]] && msg_text+="$msg_content"$'\n'
+            if [[ -n "$tool_calls" ]]; then
+                # 参数常是几百字节的一整行:同样走 UTF-8 安全限宽,不用 substr
+                shown=$(printf '%s\n' "$tool_calls" | head -n 6 | clip_line_width 200 '…')
+                msg_text+="$shown"$'\n'
+            elif [[ -z "$msg_content" ]]; then
+                msg_text+="*（本轮无文本内容）*"$'\n'
+            fi
         fi
         full_text+="$msg_text"
     done < <(jq -c '. [1:][]' <<< "$messages")
@@ -759,11 +853,32 @@ handle_ctrl_c() {
 history_handler() {
     local tmpList=()
     echo "请从以下编号中选择你要加载的历史记录："
-    # shellcheck disable=SC2207
-    tmpList=($(ls -t "$HISTORY_DIR"/*.json 2>/dev/null))
+    # 不能用 tmpList=($(ls -t ...)):命令替换不加引号会按空白**拆词**。历史文件名
+    # 取自模型生成的会话标题,含空格/换行的文件会被拆成好几条,序号与实际文件整体
+    # 错位 —— 选 0 加载到的却是别的会话(表现就是"渲染的内容和我选的不对")。
+    # 改用 glob 逐条收集 + 纯 bash 插入排序:文件名全程不经文本行解析,不会被拆。
+    local -a _files=() _mts=()
+    local _f _mt _i
+    for _f in "$HISTORY_DIR"/*.json; do
+        [[ -f "$_f" ]] || continue
+        _mt=$(stat -f '%m' "$_f" 2>/dev/null || stat -c '%Y' "$_f" 2>/dev/null || echo 0)
+        _i=${#_files[@]}
+        # 同秒并列时后创建的排在前面(mtime 只有秒级精度,glob 是字母序);
+        # 用 <= 而不是 <,否则同一秒内新建的文件会排在后面,和 ls -t 观感相反
+        while (( _i > 0 )) && (( _mts[_i - 1] <= _mt )); do
+            _files[_i]="${_files[_i - 1]}"
+            _mts[_i]="${_mts[_i - 1]}"
+            ((_i--))
+        done
+        _files[_i]="$_f"
+        _mts[_i]="$_mt"
+    done
+    (( ${#_files[@]} > 0 )) && tmpList=("${_files[@]}")
     history_list=()
     for i in "${!tmpList[@]}"; do
-        echo "$i. $(basename "${tmpList[$i]}")"
+        # 显示时把文件名里的换行/回车压成空格,否则一条记录刷成多行、编号看着错位;
+        # history_list 里存的仍是完整路径,加载不受影响
+        echo "$i. $(basename "${tmpList[$i]}" | LC_ALL=C tr '\n\r\t' '   ')"
         history_list+=("$i. ${tmpList[$i]}")
     done
     local filePath="" rc
@@ -1744,8 +1859,7 @@ stream_box_close() {
 truncate_output() {
     local text="$1" lines cropped head_lines
     lines=$(printf '%s' "$text" | wc -l | tr -d ' ')
-    cropped=$(printf '%s' "$text" | awk -v max="$TOOL_OUTPUT_MAX_COL" \
-        'length($0) > max { print substr($0, 1, max) "...(该行过长已截断)"; next } { print }')
+    cropped=$(printf '%s' "$text" | clip_line_width "$TOOL_OUTPUT_MAX_COL" '...(该行过长已截断)')
     if (( lines > TOOL_OUTPUT_MAX_LINES )); then
         head_lines=$((TOOL_OUTPUT_MAX_LINES / 2))
         {
@@ -2581,7 +2695,7 @@ auto_final_judge() {
     case "${verdict^^}" in
         ALLOW*|Y*|YES*) auto_judge="ALLOW" ;;
         *)              auto_judge="DENY"
-                        auto_judge_reason=$(printf '%s' "${verdict#* }" | cut -c1-80) ;;
+                        auto_judge_reason=$(printf '%s' "${verdict#* }" | clip_line_width 80 '') ;;
     esac
     return 0
 }
@@ -2923,7 +3037,7 @@ tool_read_file() {
         content="📄 $path · 第 ${offset}-$((offset + limit - 1)) 行(共 ${total_lines} 行):\n\n$out"
     elif (( total_chars > READ_MAX_CHARS )); then
         # 按行粒度截断:awk 逐行累计字符数,超阈值即停,不会切断多字节字符
-        out=$(awk -v max="$READ_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; printf "%6d│ %s\n", NR, $0}' "$resolved")
+        out=$(LC_ALL=C awk -v max="$READ_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; printf "%6d│ %s\n", NR, $0}' "$resolved")
         content="📄 $path · 共 ${total_lines} 行 / ${total_chars} 字符,文件过大仅返回前半部分。请用 offset/limit 参数继续分段读取:\n\n$out"
     else
         out=$(awk '{printf "%6d│ %s\n", NR, $0}' "$resolved")
@@ -3022,7 +3136,7 @@ tool_grep() {
     # -E 正则 -r 递归 -n 行号 -I 跳过二进制;结果单行截宽,防 minified 长行污染上下文
     out=$(grep -rnIE --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
         -e "$pattern" "$resolved" 2>/dev/null | head -n "$max_matches" | \
-        awk -v max="$GREP_MAX_COL" 'length($0) > max { $0 = substr($0, 1, max) "…(过长已截断)" } { print }')
+        clip_line_width "$GREP_MAX_COL" '…(过长已截断)')
 
     if [[ -z "$out" ]]; then
         content="未找到匹配 \"$pattern\" 的内容。"
@@ -3082,7 +3196,7 @@ tool_web_fetch() {
     local total_chars out
     total_chars=$(printf '%s' "$rendered" | wc -m | tr -d ' ')
     if (( total_chars > WEB_MAX_CHARS )); then
-        out=$(printf '%s' "$rendered" | awk -v max="$WEB_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; print}')
+        out=$(printf '%s' "$rendered" | LC_ALL=C awk -v max="$WEB_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; print}')
         content="🌐 $url · HTTP ${http_code:-?} · 渲染器 $renderer · 内容过长仅返回前 ${WEB_MAX_CHARS} 字符:\n\n$out"
     else
         content="🌐 $url · HTTP ${http_code:-?} · 渲染器 $renderer · ${total_chars} 字符:\n\n$rendered"
@@ -3589,7 +3703,7 @@ tool_read_skill() {
     [[ -f "$path" ]] || { content="错误:技能不存在: $name。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
     total_chars=$(wc -m < "$path" | tr -d ' ')
     if (( total_chars > READ_MAX_CHARS )); then
-        out=$(awk -v max="$READ_MAX_CHARS" '{acc += length($0) + 1; if (acc > max) exit; print}' "$path")
+        out=$(LC_ALL=C awk -v max="$READ_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; print}' "$path")
         content="📖 技能 $name(SKILL.md,共 ${total_chars} 字符,过长已截断):\n\n$out"
     else
         out=$(cat "$path")

@@ -67,7 +67,11 @@ def main() -> int:
         elements = dict(_Markdown.elements)
         elements["heading_open"] = _LeftHeading
 
-    text = sys.stdin.read()
+    # 按字节读入再自行解码:输入里可能夹带被切掉一半的 UTF-8 序列(长行按字节
+    # 截断的产物、旧版本存进历史文件的坏数据)。sys.stdin.read() 撞上非法字节会
+    # 抛 UnicodeDecodeError,整篇文档一个字都渲染不出来;改成 replace 解码,坏
+    # 字节降级为一个占位符,后面的内容照常渲染。
+    text = sys.stdin.buffer.read().decode("utf-8", "replace")
     buf = io.StringIO()
     console = Console(
         width=_term_width(),
