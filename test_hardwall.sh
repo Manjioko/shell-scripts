@@ -112,6 +112,27 @@ expect NP "grep 匹配 curl|sh 形态"               "grep -oE 'curl[^|]*\\| *sh
 expect 'NP' "fd 复制不是重定向"                  "cat 2>&1"
 expect NP "只读系统文件"                         "head -c 100 /etc/hosts"
 expect NP "工作目录内的绝对路径 ls"              "ls -l $PWD"
+# H5 的 fd 复制误杀(实际事故):模型想跑 `ls -la ~/.ct 2>&1 | head` 做只读排查,
+# 被判 H5"禁止写入主目录配置"。根因是 [[ "$c" == *'>'* ]] 把 2>&1 当成了重定向。
+# 上一行的 "cat 2>&1" 拦不住这个回归 —— 它不含 dotfile 路径,压根进不了 H5 分支。
+# 必须用「dotfile + 2>&1」的组合用例才有效(下面四条 + T2 的 H5 正例一起构成收窄证据)。
+expect NP "dotfile 路径 + 2>&1 仍是只读"         "ls -la ~/.ct 2>&1 | head"
+expect NP "读 zshrc 带 fd 复制"                  "cat ~/.zshrc 2>&1 | grep PATH"
+expect NP "grep bashrc 带 1>&2"                  "grep -n alias ~/.bashrc 1>&2"
+expect NP "关 fd 的 2>&- 不算重定向"             "exec 2>&- ; cat ~/.vimrc"
+# H5 的第二批误杀(实际事故,同一根因的另一半):上一组只处理了 `2>&1`,但
+# `2>/dev/null` 里那个 `>` 后面跟的是**路径**而非 fd,fd 复制的正则抹不掉它,
+# 于是 hd_has_write 认定"有写动作"。而模型每条只读命令都爱挂 2>/dev/null,
+# 误杀面比 2>&1 那批大得多(本次就是我自己核验文案时的 grep 被 H5 拦了)。
+# 注:事故原样那条 `grep -oiE 'API_KEY' ~/.ct/config 2>/dev/null` **不能**当反例 ——
+# `~/.ct/config` 合法命中 H6(凭据访问墙,与写动作无关)。修复前是 H5 抢先报错,
+# 修好后同一命令由 H6 正确拒绝,现象才自洽。所以这里用同形状的**非凭据** dotfile,
+# 测的是"H5 不再因 sink 误杀只读命令"这一件事。
+expect NP "grep dotfile 配置 + 2>/dev/null 仍只读"  "grep -oiE 'PATH' ~/.bash_profile 2>/dev/null"
+expect NP "cat dotfile + 2>/dev/null"               "cat ~/.bashrc 2>/dev/null"
+expect NP "fd 复制与 sink 混用"                     "ls -la ~/.ct 2>&1 >/dev/null"
+expect NP "head 到 /dev/null 是真丢弃不是落盘"       "head -20 ~/.gitconfig > /dev/null"
+expect NP "dotfile_cfg + 2>/dev/null"               "grep -n proxy ~/.config/git/config 2>/dev/null"
 
 # ================= 正表:真实破坏性操作,一条都不许漏 =================
 echo 'T2 正表(必须仍拦)'
@@ -129,6 +150,21 @@ expect H3 "非白名单动词的引号参数不脱敏" "sh -c \"rm -rf ~/x\""
 expect H3 "命令替换里的删除"    "echo \$(rm -rf ~/x)"
 expect H3 "链式命令后段是删除"  "echo hi > /tmp/a && rm -rf ~"
 expect H3 "整段未加引号"        "rm -rf ~/Documents"
+# H5 收窄的反面对照:上面 4 条放行之后,真写入一条都不许跟着漏掉。
+expect H5 "追加写 zshrc"                        "echo 'export A=1' >> ~/.zshrc"
+expect H5 "真重定向覆盖 zshrc"                  "cat /tmp/x > ~/.zshrc"
+expect H5 "bash 的 &>> 双流追加是真重定向"      "mycmd &>> ~/.zshrc"
+expect H5 "写动词 + 2>&1 仍拦(fd 复制不豁免动词)" "sed -i '' 's/a/b/' ~/.bashrc 2>&1"
+expect H5 "cp 到 dotfile + 2>&1 仍拦"           "cp /tmp/x ~/.vimrc 2>&1"
+# sink 抹除的反面对照:抹掉 `> /dev/null` 之后,真写入一条都不许跟着漏。
+expect H5 "同串里既有 sink 又有真追加"          "cat ~/.bashrc > /dev/null; echo hi >> ~/.bashrc"
+expect H5 "sed -i 写 dotfile 且带 2>/dev/null"  "sed -i.bak 's/a/b/' ~/.tmux.conf 2>/dev/null"
+expect H5 "cp 到 dotfile 全_output_丢_sink"     "cp /tmp/x ~/.zshrc >/dev/null 2>&1"
+# 刻意保守(非缺陷):dotfile 只读、但同串确实往别处写了 —— 现口径是"命令里有写动作
+# 且串里出现 dotfile"就拦,不改成"写目标本身是 dotfile"才拦(那要把 fail-open 的
+# hd_write_targets 接进硬墙,提取器一坏等于放开整条 H5,见 hd_has_write 注释)。
+# 代价就是这条误杀;修好(改走方案②)时这条会红,提醒同步改注释与 hd_has_write。
+expect H5 "[设计如此] 读 dotfile 同时写 /tmp"   "cat ~/.bashrc > /tmp/o.txt 2>/dev/null"
 
 # ================= 脱敏器自身的行为约束 =================
 echo 'T3 hd_mask_readonly 只收窄匹配域'
@@ -403,14 +439,120 @@ path_access "/private/tmp/hw-t9-probe.txt" rw "写入" >/dev/null 2>&1
 rm -f "${_tw_l}" "${_tw_l}-cred" "${_tw_l}-wr" "${_tw_l}.real"
 unset _tw_atp _tw_e2e _tw_l
 
+# ================= T10 确认弹窗的输入读取(假拒绝 → 诱导绕行) =================
+# 为什么进这张表:弹窗把用户敲的 yes 读成 "es",后果不是"白问一次",而是
+# ① 模型收到"用户未放行"的文案 → 转去 shell 找等价通路(实测发生过:read_file 读
+#    history 被假拒后改跑 `ls ~/.ct/history`,把凭据墙目录列了出来);
+# ② 反方向更糟 —— 上一次没吃完的按键会成为下一条高危命令的默认答案。
+# 这两条都直接削弱硬墙,所以判据必须钉在这里,而不是 UX 脚本里。
+echo 'T10 ask_read_line 累积读取 / ask_drain_input 清残留'
+for _fn in ask_drain_input ask_read_line; do
+    eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
+done
+unset _fn
+input_aborted=${input_aborted:-0}      # 被测函数在 set -u 下要读它
+HAS_ASKRL=0; type ask_read_line >/dev/null 2>&1 && HAS_ASKRL=1
+
+# askrl_case <说明> <期望内容> <期望rc(空=不校验)> <喂给 stdin 的命令>
+askrl_case() {
+    local lbl="$1" want="$2" wrc="$3" feed="$4" out rc line
+    if (( ! HAS_ASKRL )); then
+        bad "$lbl" "被测版本没有 ask_read_line(负对照在此应为红)"
+        return
+    fi
+    out=$( eval "$feed" | { ask_read_line; rc=$?; printf '%s\037%s' "$rc" "$ask_line"; } )
+    rc="${out%%$'\037'*}"; line="${out#*$'\037'}"
+    if [[ "$line" != "$want" ]]; then
+        bad "$lbl" "读到[$line] 期望[$want]"
+        return
+    fi
+    if [[ -n "$wrc" && "$rc" != "$wrc" ]]; then
+        bad "$lbl" "内容对但 rc=$rc 期望 rc=$wrc"
+        return
+    fi
+    ok "$lbl"
+}
+# ① 分段输入:旧写法在这里得到 "es" → 判成拒绝(本次修的正是这条)
+askrl_case "分段敲的 yes 读成 yes"        "yes" "0" "(printf 'y'; sleep 0.45; printf 'es\n')"
+# ② 一次性输入不能因为改动而退化
+askrl_case "一次性 yes 读成 yes"          "yes" "0" "printf 'yes\n'"
+# ③ 只有前缀 + 回车
+askrl_case "单字符 y 加回车读成 y"         "y"   "0" "(printf 'y'; sleep 0.45; printf '\n')"
+# ④ EOF 前没有换行:内容与旧实现一致(旧代码 break 后照用 answer),但 rc!=0
+askrl_case "EOF 无换行保留内容"            "yes" "1" "printf 'yes'"
+# ⑤ 非交互喂 /dev/null:必须**当场返回**而不是空等(旧写法靠 rc<=128 break,
+#    新写法的 _rc>128 判据一旦写反就是弹窗永久卡死)
+askrl_case "stdin 关闭立即返回空"          ""    "1" "cat /dev/null"
+# ⑥ 冲读:提前到达的按键必须被丢掉(它属于上一个弹窗,不该自动批掉下一个)
+if (( HAS_ASKRL )); then
+    out6=$( { printf 'yes\n'; } | { ask_drain_input; ask_read_line; printf '%s' "$ask_line"; } )
+    [[ -z "$out6" ]] && ok "drain 丢掉提前到达的按键" || bad "drain 未清残留" "读到[$out6]"
+else
+    bad "drain 丢掉提前到达的按键" "被测版本没有 ask_drain_input"
+fi
+unset out6
+
+# ================= T11 硬墙文案与行为必须相符(谎话会教模型绕行) =================
+# 为什么进这张表:P1/H6 的 hd_msg 原本写着"任何档位都不放开",但非 auto 档的实际
+# 出口是 ask_path_grant/confirm_cmd 的严格人工确认(逐字 yes 即放行、并记 human_yes)。
+# 文案与行为脱钩不是文风问题:模型读到"任何档位都不放开"后遇到"用户已放行",得到的
+# 结论是"这套声明是假的、真边界在别处",于是去找等价通路(实测:改跑 `ls ~/.ct/history`)。
+# 所以这里的守卫是**结构性的**:判据一改,文案断言立刻变红,逼着两边同步。
+echo 'T11 hd_msg 措辞 ⇔ 严格确认实现 一致'
+# ① hd_msg 行内禁止绝对化措辞(注释里的教学性引用不算:只扫 hd_msg= 赋值)
+_abs=$(grep -c 'hd_msg=.*\(任何档位都不放开\|一律拒绝\|永不放开\|绝对禁止\)' "$SRC_ABS")
+if [[ "${_abs:-0}" == "0" ]]; then
+    ok "hd_msg 内无绝对化措辞(与非 auto 可人工放行相符)"
+else
+    bad "hd_msg 内残留绝对化措辞 ${_abs} 条" "声称恒拒但实现允许用户 yes 放行 → 假话"
+fi
+# ② 凭据类四条文案必须两条出口都在(auto 直接拒 / 非 auto 须用户手输 yes)
+_n_p1=$(grep -c 'hd_rule="P1"\|hd_rule="H6"' "$SRC_ABS")
+_ok_p1=$(grep 'hd_rule="P1"\|hd_rule="H6"' "$SRC_ABS" | grep -c 'auto.*yes')
+if (( _n_p1 > 0 )) && [[ "$_n_p1" == "$_ok_p1" ]]; then
+    ok "凭据类 ${_n_p1} 条文案同时写明 auto 直拒 / 非 auto 须手输 yes"
+else
+    bad "凭据类文案缺出口说明" "共 ${_n_p1} 条、仅 ${_ok_p1} 条提到 auto+yes"
+fi
+# ③ 硬墙那条 confirm_cmd 必须带 strict=1(文案承诺"逐字 yes"的前提)
+if grep -q 'confirm_cmd .*"\$hd_msg" 1; then' "$SRC_ABS"; then
+    ok "硬墙确认调用点传 strict=1"
+else
+    bad "硬墙确认调用点未传 strict=1" "文案承诺逐字 yes,实现却是宽松 y/Enter"
+fi
+# ④ 严格判据只能是 == "yes"(退化成 y 或空回车放行,②的文案立刻变假话)
+_yes=$(grep -c '\[\[ "${answer,,}" == "yes" \]\]' "$SRC_ABS")
+if [[ "$_yes" == "2" ]]; then
+    ok "两处严格判据均为逐字 yes(ask_path_grant + confirm_cmd)"
+else
+    bad "严格判据数量异常" "找到 ${_yes} 处,应为 2 处"
+fi
+# ⑤ ask_path_grant 必须把 $mode 传下去:丢了 mode 就退化成 r,P2/P3(只在 rw 才命中)
+#    会从严格确认降级成普通 y/Enter —— 文案再准也没用。
+if grep -q 'ask_path_grant "\$p" "\$mode"' "$SRC_ABS"; then
+    ok "ask_path_grant 调用点带 \$mode(P2/P3 不被降级)"
+else
+    bad "ask_path_grant 调用点丢了 \$mode" "写侧规则命中不了 → 严格确认降级成普通确认"
+fi
+# ⑥ "换写法也还是会被拒"只允许在 auto 档注入(非 auto 下用户能放行,说了就是假话)
+_gate=$(awk '/^inject_auto\(\) \{/{getline; print; exit}' "$SRC_ABS")
+if [[ "$_gate" == *'-n "$auto_mode"'* && "$_gate" == *"return 0"* ]]; then
+    ok "inject_auto 首行按 auto_mode 设门"
+else
+    bad "inject_auto 缺 auto_mode 门" "非 auto 也会注入恒拒话术 → 又成假话"
+fi
+unset _abs _n_p1 _ok_p1 _yes _gate
+
 # 断言总数守卫:pass+fail 必须等于表里的条数。少了就是有断言**一行输出都没产生**
 # (典型:被测版本里函数还不存在 → command not found → ok/bad 根本没被调用,既不红
 # 也不绿)。拿旧版本做负对照时这种现象一定出现(实测:改完 T9 后对 HEAD 跑本表 104/32,
 # 32 条红 = 13 条 rc=127"被测版本根本没这个函数" + 19 条语义红[T8 凭据口径 16 +
 # 临时目录 4.5 那步未生效 2 + 本守卫 1]);更早的 a0bcd52^ 则在 T9 集成断言处当场猝死、
 # 连汇总行都没有)。没有这道守卫,表会变成"看起来全绿"的假绿。
-# T1~T8=114 + T9 临时目录/符号链接=22。加断言时同步改这里。
-EXPECT_TOTAL=136
+# T1~T8=114 + T9 临时目录/符号链接=22 + H5 fd 复制收窄=9(T1 反例 4 + T2 正例 5)
+# + T10 弹窗输入读取=6 + T11 文案⇔行为结构守卫=6 + H5 sink 抹除=9(反例 5 + 正例 4)。
+# 加断言时同步改这里。
+EXPECT_TOTAL=166
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?)\n' "$total" "$EXPECT_TOTAL"

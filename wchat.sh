@@ -29,12 +29,31 @@ pro_model="qwen3.8-flash"
 # 模型(deepseek 等)不影响读图;彻底关闭图片链路:环境变量 IMG_PROVIDER=none
 # ===============================👆👆========================
 
+# ---------- stat 数字字段取值(GNU/BSD 兼容) ----------
+# 取 stat 的数字字段：GNU coreutils 用 -c，BSD/macOS 用 -f。
+# 顺序必须 GNU 在前：GNU stat 的 -f 是 --file-system 且**不接格式参数**，
+# "stat -f '%m' f" 会把 '%m' 当成第二个文件参数 —— 真错误只进 stderr(常被
+# 2>/dev/null 吃掉)，stdout 照样打印整块文件系统信息(File/ID/Block size/
+# Inodes…)且退出码 1，于是 || 后面的 stat -c 也执行，两段输出拼成一个多行
+# 串。喂进 (( )) 就是 "syntax error in expression"(历史 bug: wchat -l 每个
+# 历史文件刷 6 行报错，且插入排序条件恒假 → 列表退化成 glob 字母序、
+# 空输入"加载最新一条"实际加载到字母序第一条)。
+# 取值后强制校验纯数字：任何实现(busybox/别名/异常)给出脏值都退化成 0，
+# 而不是把报错留给下游的算术上下文。
+stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
+    local _v
+    _v=$(stat -c "$1" -- "$3" 2>/dev/null)
+    [[ "$_v" =~ ^[0-9]+$ ]] || _v=$(stat -f "$2" "$3" 2>/dev/null)
+    [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
+    printf '%s' "$_v"
+}
+
 # ---------- 本地配置文件 ~/.ct/config ----------
 # 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
 # 加载前校验权限:被同机其他用户可读写时拒绝加载(否则等于把 key 交给别人)。
 CT_CONFIG_FILE="${CT_CONFIG_FILE:-$HOME/.ct/config}"
 if [[ -z "$API_KEY" && -f "$CT_CONFIG_FILE" ]]; then
-    _cfg_perm=$(stat -f '%Lp' "$CT_CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CT_CONFIG_FILE" 2>/dev/null)
+    _cfg_perm=$(stat_num '%a' '%Lp' "$CT_CONFIG_FILE")
     if [[ -n "$_cfg_perm" && "$_cfg_perm" != "600" && "$_cfg_perm" != "400" ]]; then
         printf '\033[31m✗ %s 权限为 %s(应为 600),已拒绝加载:\033[0m chmod 600 "%s"\n' \
             "$CT_CONFIG_FILE" "$_cfg_perm" "$CT_CONFIG_FILE" >&2
@@ -271,6 +290,11 @@ MAX_TOOL_ROUNDS="${MAX_TOOL_ROUNDS:-25}"
 #   1. AI 决定"做不做",代码决定"能不能"。硬墙(hard_deny_*)在任何模式下
 #      都不允许 AI 批准;auto 下命中硬墙 = 直接拒绝并把规则号与理由回传给
 #      模型让它换路,而不是弹窗,也不是放行。
+#      非 auto 下命中硬墙 = 升级为严格人工确认(**必须逐字输入 yes**,按回车/输 y
+#      都不算),用户放行则照常执行并记 human_yes。也就是说"拦"的是 AI 的自授权,
+#      不是人的裁量权 —— 所以 hd_msg 的措辞只能是"auto 直接拒 / 非 auto 须用户
+#      手输 yes",绝不能写成"任何档位都不放开":那是假话,模型 once 读到就会把
+#      "用户已放行"当成系统在撒谎,进而去找绕行路径(实测发生过)。
 #   2. 审批器与执行器解耦:终审用独立上下文(auth_message 链,compaction 压不到)
 #      + 可换更高档模型(AUTH_MODEL),且要求模型提交执行理由 reason 作为材料。
 #   3. 不可逆操作必须有退路:进 auto 前做 checkpoint(git HEAD 或快照),
@@ -637,6 +661,56 @@ render_markdown() {
 }
 
 
+# ---------- 确认弹窗的统一读取(4 个调用点共用) ----------
+# 历史 bug:四处确认都写成同一套裸轮询——
+#     while :; do IFS= read -r -t 0.2 answer; rc=$?; (( input_aborted )) && break
+#                 (( rc <= 128 )) && break; done
+# 而 bash 的 read 是**覆盖赋值**:0.2s 超时那一次会把上一轮已收到的残缺前缀清空。
+# 实测(敲 y、停 0.5s、再敲 es)最终 answer="es" → 严格确认判成拒绝。用户明明按了
+# yes 却被拒,回传给模型的文案还是"用户未放行" —— 模型于是转去 shell 找等价通路,
+# 真实发生过的链路是:read_file 读 history 被假拒 → 改跑 `ls ~/.ct/history` 拿到
+# 目录列表。一次假拒绝的直接代价就是诱导绕行,和"误杀硬墙的反噬"同一类。
+#
+# 反方向更危险:上一条弹窗没吃完的按键留在 tty 缓冲里,会变成下一条弹窗的**默认
+# 答案**——你拒的是 A 命令,放行的却是紧接着的 B 命令,屏幕上完全看不出来。
+#
+# 所以两个方向一起修:
+#   ① ask_read_line:跨超时**累积**输入,分段敲的 yes 不再被误判成拒绝;
+#   ② 出提示前 ask_drain_input 清残留 + 复位 input_aborted:一次中断/一段残留
+#      只影响它发生时的那个弹窗,不顺延到下一个。
+# 结果放全局 ask_line(不用命令替换:$(...) 会开子 shell,残留按键会被子 shell
+# 吃掉、又回到原样,而且超时语义在子 shell 里不可靠)。
+
+# 丢弃 tty 里已经到达、还没被读走的按键。必须在打印提示**之前**调用。
+# 上限 64 轮只为防空转(每轮 0.05s 超时即返回,正常一两轮就干净了)。
+ask_drain_input() {
+    local _c _rc _i=0
+    while (( _i < 64 )); do
+        _i=$((_i + 1))
+        IFS= read -r -t 0.05 -n 200 _c 2>/dev/null
+        _rc=$?
+        (( _rc == 0 )) || return 0
+    done
+    return 0
+}
+
+# 读一行到全局 ask_line。返回 0=拿到完整行;1=EOF 或被 Ctrl+C 打断
+# (两种情况 ask_line 里仍是已收到的内容,由调用方按各自的拒绝口径判定)。
+ask_read_line() {
+    local _rc
+    ask_line=""
+    while :; do
+        IFS= read -r -t 0.2 ask_chunk
+        _rc=$?
+        (( input_aborted )) && return 1
+        ask_line="$ask_line$ask_chunk"
+        (( _rc == 0 )) && return 0
+        # _rc==1:stdin 已关闭(非交互跑批、-q 单轮、测试喂 /dev/null)——
+        # 有什么用什么,绝不再空等,否则整个弹窗会卡死成永久循环。
+        (( _rc > 128 )) || return 1
+    done
+}
+
 # 输入区消息:每行前置灰色 │ + 空格,与输入行提示符/粘贴重打视觉一致。
 # 输入阶段打印的状态/反馈文本(选文件/命令反馈/帮助/草稿等)统一走这里,
 # 避免输入框内有的行带 │ 有的不带、看着割裂。
@@ -870,7 +944,10 @@ history_handler() {
     local _f _mt _i
     for _f in "$HISTORY_DIR"/*.json; do
         [[ -f "$_f" ]] || continue
-        _mt=$(stat -f '%m' "$_f" 2>/dev/null || stat -c '%Y' "$_f" 2>/dev/null || echo 0)
+        # 必须是纯整数:比较在 (( )) 里做,脏值(旧实现在 GNU 下取到整块文件系统
+        # 信息)会让 while 条件恒假 → 每个文件都插到队尾 → 列表退化成字母序,
+        # 且空输入走 history_list[0] 的"加载最新一条"会加载到错的那条。
+        _mt=$(stat_num '%Y' '%m' "$_f")
         _i=${#_files[@]}
         # 同秒并列时后创建的排在前面(mtime 只有秒级精度,glob 是字母序);
         # 用 <= 而不是 <,否则同一秒内新建的文件会排在后面,和 ls -t 观感相反
@@ -890,21 +967,17 @@ history_handler() {
         echo "$i. $(basename "${tmpList[$i]}" | LC_ALL=C tr '\n\r\t' '   ')"
         history_list+=("$i. ${tmpList[$i]}")
     done
-    local filePath="" rc
-    local isSelect=0
-    # 普通 read 在 trap 存在时不会被 SIGINT 打断(实测:trap 执行后 read 继续
-    # 等输入,只是驱动缓冲区被 VINTR 清空,屏幕残留已输入字符)。改成短超时
-    # 轮询:检测到 input_aborted 立即退出选择器。读取期间关 ECHOCTL 避免 ^C
-    # 回显;数字输入的正常回显不受影响。
+    local filePath=""
+    # 轮询读取的实现统一在 ask_read_line(为什么不能裸写 read -t 见其注释:
+    # 超时那次会把已收到的残缺前缀清掉,分段敲的编号会被读成"最后一截")。
+    # 普通 read 在 trap 存在时不会被 SIGINT 打断,所以要短超时轮询检测
+    # input_aborted;读取期间关 ECHOCTL 避免 ^C 回显,数字输入的正常回显不受影响。
     stty -echoctl 2>/dev/null
+    ask_drain_input              # 先丢掉上一个弹窗没吃完的按键,再出提示
+    input_aborted=0              # 上一次中断只该吃掉它发生时那个弹窗
     printf '_>'
-    num=""
-    while :; do
-        IFS= read -r -t 0.2 num
-        rc=$?
-        (( input_aborted )) && break
-        (( rc <= 128 )) && break
-    done
+    ask_read_line
+    num="$ask_line"
     stty echoctl 2>/dev/null
     # Ctrl+C 打断编号输入:擦掉屏幕残留行,不把空编号误判成"默认加载最新历史"
     if (( input_aborted )); then
@@ -917,19 +990,19 @@ history_handler() {
     [[ ! "$num" =~ ^[0-9]+$ ]] && echo "请输入正确的编号" && return 1
     [[ "$num" -lt 0 || "$num" -ge "${#history_list[@]}" ]] && echo "请选择正确的编号" && return 1
     echo "选中的数字: $num"
-    for ((i = 0; i < "${#history_list[@]}"; i++)); do
-        if [[ ${history_list[i]} =~ ^${num} ]]; then
-            echo "切换到 ${history_list[i]#${i}. }"
-            filePath="${history_list[i]#${i}. }"
-            isSelect=1
-
-            [[ -n "$filePath" ]] && reset && get_history "$filePath"
-            break
-        else
-            isSelect=0
-        fi
-    done
-    [[ "$isSelect" == 0 ]] && echo "请选择正确的编号"
+    # 直接按索引取，不再遍历前缀匹配。旧写法 [[ ${history_list[i]} =~ ^${num} ]]
+    # 是"前缀正则":num=1 同样匹配 "10. xxx"，只是靠循环从 0 递增、串以 "$i. "
+    # 开头才先撞上正确那条 —— 侥幸正确，且文件名含换行时 =~ 会跨行匹配。
+    # num 在上面已由"纯数字 + 0≤num<长度"两道校验保证合法。
+    local _prefix="$num. "
+    filePath="${history_list[num]}"
+    filePath="${filePath#"$_prefix"}"
+    if [[ -n "$filePath" ]]; then
+        echo "切换到 $filePath"
+        reset && get_history "$filePath"
+    else
+        echo "请选择正确的编号"
+    fi
 
 }
 
@@ -2384,9 +2457,11 @@ shell_note_grants() {
 # 本次与后续同路径访问不再询问;n / 空回车 / Ctrl+C → 拒绝。
 # 业界同款:Claude Code 的权限确认模式(越界访问弹确认,由用户裁决)。
 # 第二个参数为访问模式 r/rw(与 granted_files 的权限位一致,见下方说明)。
-# 命中"任何模式下都危险"的路径(密钥/系统配置)时升级为严格确认:必须输入 yes。
+# 命中硬墙路径时升级为严格确认:必须逐字输入 yes。这是**非 auto 档**下唯一的放行出口
+# (auto 档在调用点直接拒、根本不会走到这里),所以 hd_msg 只能写"两条出口",
+# 不能写"任何档位都不放开" —— 措辞与实际不符会让模型把"用户已放行"当成绕行信号。
 ask_path_grant() {
-    local p="$1" mode="${2:-r}" answer rc strict=0
+    local p="$1" mode="${2:-r}" answer strict=0
     if hard_deny_path "$p" "$mode"; then
         strict=1
         printf '\033[2K \033[1;31m⛔ 高危路径(规则 %s)\033[0m \033[2m%s\033[0m\n' "$hd_rule" "$p"
@@ -2399,15 +2474,13 @@ ask_path_grant() {
     else
         printf ' \033[1;31m是否放行?(y/n): \033[0m'
     fi
-    # 与 shell 工具危险命令确认同款轮询读取:Ctrl+C 当作拒绝
+    # 与 shell 工具危险命令确认同款读取(累积 + 先清残留,见 ask_read_line)。
+    # Ctrl+C 当作拒绝;残留按键必须先丢,否则上一条弹窗没吃完的 yes 会直接批掉这一条。
     stty -echoctl 2>/dev/null
-    answer=""
-    while :; do
-        IFS= read -r -t 0.2 answer
-        rc=$?
-        (( input_aborted )) && break
-        (( rc <= 128 )) && break
-    done
+    ask_drain_input
+    input_aborted=0
+    ask_read_line
+    answer="$ask_line"
     stty echoctl 2>/dev/null
     if (( input_aborted )); then
         input_aborted=0
@@ -2598,6 +2671,11 @@ hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credentia
 # tee 要在"行首或空白后"才算命令名(写成 [[:space:]]tee 会漏掉命令以 tee 开头的
 # 情况,如 `tee /etc/hosts < /tmp/x`)
 hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications)/'
+# 「丢弃型」重定向目标:写进 /dev 下这几个字符设备等于扔掉,不产生任何持久改动。
+# 与 hd_re_sys_redirect 的名单无关(那边刻意不含 /dev,所以 >/dev/null 不会撞 H11)。
+# 刻意不列 /dev/sd*、/dev/rdisk*、/dev/disk*:那是块设备,写进去是真毁数据(H4 管)。
+# 用双引号赋值是为了在同一串里同时容忍 2>"/dev/null" 与 2>'/dev/null' 两种引号形态。
+hd_re_dev_sink="[0-9]*>{1,2}&?[[:space:]]*[\"']?/dev/(null|zero|full|stdout|stderr|tty|fd/[0-9]+)"
 hd_re_write_verb='(^|[[:space:];&|])(rm|rmdir|mv|cp|install|rsync|tee|touch|mkdir|chmod|chown|chgrp|ln|dd|truncate|shred|patch|unzip|tar)([[:space:]]|$)|sed[[:space:]]+-i|perl[[:space:]]+-[a-z]*i|git[[:space:]]+(checkout|clean|reset|apply|stash|restore)([[:space:]]|$)'
 # ---------- 写目标提取(H12 的判据核心,与回归测试共用) ----------
 # 只列出"这条命令里真正可能成为写目标"的 token,每行一个。三条规则:
@@ -3024,6 +3102,47 @@ hard_deny_cmd() {
         for re in "$@"; do [[ "$c3" =~ $re ]] && return 0; done
         return 1
     }
+    # H5 专用「这条命令到底有没有写动作」判据。放在 hd_recheck 之后、H5 之前。
+    # 存在的原因:`[[ "$c" == *'>'* ]]` 是纯字面量子串匹配,把 fd 复制也算成了重定向,
+    # 于是 `ls -la ~/.ct 2>&1 | head` 这种**全程无写入**的只读排查被判 H5
+    # (拒绝理由写"禁止写入",用户看到的命令是 ls —— 自相矛盾)。这正是本文件
+    # 头部注释警告的反噬:误杀硬墙的代价是教模型加引号/拆命令去绕扫描器。
+    #
+    # 判据分两步抹除,抹完还剩 ">" 才算有写动作:
+    #   ① 丢弃型 sink(hd_re_dev_sink:> /dev/null 一类,写进去即消失,不是持久改动)
+    #   ② fd 复制(">&数字"、">-&")
+    # " >&foo" 这类非数字 word 在部分 shell 里会真的建文件,不脱,保留按写处理。
+    # `&>`/`&>>` 的字符顺序是 "&" 后跟 ">",不会被 ② 命中 → 真重定向照旧拦住
+    # (除非它的目标正是 /dev 下那几个丢弃型设备,那是 ① 的事)。
+    #
+    # 刻意**只收窄、不变精确**:不改成"提取写目标再比对是否 dotfile",因为那要把
+    # hd_write_targets 接进硬墙,而它是 fail-open 组件(历史上出过 `local s="$1"
+    # n=${#s}` 在 set -u 下让提取器恒返回空的事,见 test_hardwall.sh 头注释),
+    # 提取器一坏就等于放开整条 H5。这里原样保留 hd_re_write_verb 这一支,
+    # 保证"以前该拒的现在一条都不漏"(反例见 test_hardwall.sh T2 的 H5 正例)。
+    hd_has_write() {
+        # ${1-} 而不是 $1:hard_deny_cmd 全程在 set -u 下跑,漏传参数会让整条判据链
+        # 当场打死(现象是"一行输出都没有",极易误判成规则失效)。同 test_hardwall.sh
+        # 头注释记录的 `local s="$1" n=${#s}` 事故同源。
+        local s="${1-}"
+        # 0) 丢弃型 sink:`> /dev/null`、`2>"/dev/null"`、`&>/dev/null`、`>>/dev/zero`。
+        #    这类写不产生任何持久文件,拿它当"有写动作"的证据就会误杀只读排查 ——
+        #    实际撞到的是 `grep -oiE 'API_KEY' ~/.ct/config* 2>/dev/null`:dotfile 命中
+        #    (正则里含 ct)+ 残留裸 ">" 即判 H5,拒绝理由写着"禁止写入",命令却在读。
+        #    必须**连操作数一起**吃掉:只抹 /dev/null 会留下 ">" 让判据照样为真,
+        #    只抹 ">" 会把 /dev/null 留在串里(无害但下一步的 fd 复制正则错位)。
+        #    放在 fd 复制之前:两条循环都是"抹干净为止",顺序只影响中间态。
+        while [[ "$s" =~ $hd_re_dev_sink ]]; do
+            s="${s/"${BASH_REMATCH[0]}"/}"
+        done
+        # 1) fd 复制
+        while [[ "$s" =~ [0-9]+\>\&[0-9-] || "$s" =~ \>\&[0-9-] ]]; do
+            s="${s/"${BASH_REMATCH[0]}"/}"
+        done
+        [[ "$s" == *'>'* ]] && return 0
+        [[ "$1" =~ $hd_re_write_verb ]] && return 0
+        return 1
+    }
 
     # H1 提权
     if [[ "$c" =~ $hd_re_priv || "$c" =~ $hd_re_su ]]; then
@@ -3048,15 +3167,17 @@ hard_deny_cmd() {
     # H4 磁盘/分区级破坏
     if [[ "$c" =~ $hd_re_disk ]] &&
        { ! declare -f hd_recheck >/dev/null 2>&1 || hd_recheck "$hd_re_disk"; }; then
-        hd_rule="H4"; hd_msg="磁盘级破坏性操作无法回滚,一律拒绝。替代:换成对具体文件的普通操作"
+        hd_rule="H4"; hd_msg="磁盘级破坏性操作无法回滚,任何档位都不自动执行(auto 档直接拒;非 auto 档须用户本人逐字输入 yes)。替代:换成对具体文件的普通操作"
         return 0
     fi
     # H5 覆盖 dotfiles / shell 配置(持久改变用户环境,且不在 checkpoint 内)。
     # 只在"这条命令真的要写"时判:cat ~/.bashrc 这类读操作交回审批器,否则
     # auto 模式下连"帮我看我的 shell 配置为什么生效不了"这种排查都做不了,
     # 而且拒绝理由(禁止写入)与用户看到的命令(读)自相矛盾。
+    # "要不要写"由 hd_has_write 判 —— 它先抹掉 fd 复制(2>&1 等),别把这里的
+    # 判据换回裸的 [[ "$c" == *'>'* ]],那会重新误杀只读命令,原因见其注释。
     if [[ "$c" =~ $hd_re_dotfile || "$c" =~ $hd_re_dotfile_cfg ]] \
-       && { [[ "$c" == *'>'* ]] || [[ "$c" =~ $hd_re_write_verb ]]; }; then
+       && hd_has_write "$c"; then
         hd_rule="H5"; hd_msg="写入/删除主目录下的配置文件或凭据目录被禁止(持久改变环境且不可回滚)。替代:把配置写进工作目录内的文件,或把内容打印出来交给用户自行放置"
         return 0
     fi
@@ -3071,12 +3192,12 @@ hard_deny_cmd() {
     if [[ "$c" =~ $hd_re_secret_dir || "$c" =~ $hd_re_keychain || "$c" =~ $hd_re_keyfile || "$c" =~ $hd_re_shadow ]] &&
        { ! declare -f hd_recheck_msg >/dev/null 2>&1 ||
          hd_recheck_msg "$hd_re_secret_dir" "$hd_re_keychain" "$hd_re_keyfile" "$hd_re_shadow"; }; then
-        hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被禁止:其内容会进上下文并随请求发给服务端。任何档位都不放开(auto 直接拒,非 auto 也不自动跑),文件工具 read_file/list_dir 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
+        hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被拦:其内容会进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes,按回车/输入 y 都不算),放不放行由用户决定。换写法、拆分命令或重试都不会改变判定,也不要替用户作答;文件工具 read_file/list_dir 走 P1 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
         return 0
     fi
     # H7 改写发布历史(远端不可回滚,且会伤害协作者)
     if [[ "$c" =~ $hd_re_force_push || "$c" =~ $hd_re_history_rewrite ]]; then
-        hd_rule="H7"; hd_msg="强推/删远端分支/改写已发布历史/连忽略文件一起清理均不可逆,一律拒绝。替代:普通 git push;确需 --force-with-lease 或 git clean -fdx 请用户手动执行"
+        hd_rule="H7"; hd_msg="强推/删远端分支/改写已发布历史/连忽略文件一起清理均不可逆,任何档位都不自动执行(auto 档直接拒;非 auto 档须用户本人逐字输入 yes)。替代:普通 git push;确需 --force-with-lease 或 git clean -fdx 请用户手动执行"
         return 0
     fi
     # H8 关机重启 / 注销系统服务
@@ -3156,14 +3277,15 @@ hard_deny_path() {
     hd_rule=""; hd_msg=""
     np=$(norm_path "$p") || np="$p"
 
-    # P1 凭据类路径:读写都不放行(任何模式)。列目录也算读。
+    # P1 凭据类路径:读写都判硬墙,但放行出口只有"用户本人手输 yes"一条
+    # (auto 档不提问直接拒;非 auto 档在调用点升级为严格人工确认)。列目录也算读。
     # 与命令级 H6 同口径(改一侧必须同步另一侧,否则"shell 拦死、文件工具放行"就等于
     # 没有保护 —— 这正是本条存在的全部意义)。
     case "$np" in
         "$HOME/.ssh"*|"$HOME/.aws"*|"$HOME/.gnupg"*|"$HOME/.config/gh"*|\
         "$HOME/.config/gcloud"*|"$HOME/.config/azure"*|"$HOME/.azure"*|\
         "$HOME/.docker"*|"$HOME/.kube"*|"$HOME/.subversion"*|"$HOME/.ct/history"*|"$HOME/.ct/config"*)
-            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(它会被读进上下文并随请求发给服务端)。任何档位都不放开,与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
+            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(~/.ct/history 存对话正文、~/.ct/config 含接口凭据):它会被读进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定。换写法、换路径表达或重试都不改变判定,也不要替用户作答;与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
             return 0 ;;
     esac
     # 凭据**文件名**判定,不限位置:仓库根的项目级 `.npmrc` 同样常放 _authToken,
@@ -3174,11 +3296,11 @@ hard_deny_path() {
     case "${np##*/}" in
         .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
         id_rsa|id_dsa|id_ecdsa|id_ed25519)
-            hd_rule="P1"; hd_msg="凭据文件不可访问(任何位置都算,含仓库里的项目级 .npmrc):内容会进上下文并随请求发给服务端。与 shell 的 H6 同判,任何档位都不放开。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
+            hd_rule="P1"; hd_msg="凭据文件不可访问(按文件名判定,任何位置都算,含仓库里的项目级 .npmrc):内容会进上下文并随请求发给服务端。auto 档直接拒,非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定;换位置、换写法都不改变判定,与 shell 的 H6 同判。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
             return 0 ;;
     esac
     if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
-        hd_rule="P1"; hd_msg="私钥/证书文件不可访问。替代:请用户自己提供所需的值"
+        hd_rule="P1"; hd_msg="私钥/证书文件(.pem/.key/.p12/.pfx/id_rsa 等)不可访问,内容与凭据文件同判:auto 档直接拒,非 auto 档须用户本人逐字输入 yes 才放行。替代:请用户自己提供所需的值"
         return 0
     fi
 
@@ -3330,7 +3452,7 @@ auto_takes_shell() {
 # 被识别为拒绝(历史 bug:卡在 read 上,第二次 Ctrl+C 才生效)。
 confirm_cmd() {
     local cmd="$1" banner="$2" reason="$3" strict="${4:-0}"
-    local answer="" rc
+    local answer=""
     # 不在这里冲 tty 积压字节:提示要**先打**,而冲读会把刚打印的提示字节吃掉
     # (子命令 pty 回流的字节也在同一个输入队列里),屏幕上会留残字。
     # 调用方在进本函数前已经冲过一次(见 tool_run_and_parse 的粘贴注入防护)。
@@ -3344,12 +3466,11 @@ confirm_cmd() {
         printf ' \033[1;31m是否执行?(y/n): \033[0m'
     fi
     stty -echoctl 2>/dev/null
-    while :; do
-        IFS= read -r -t 0.2 answer
-        rc=$?
-        (( input_aborted )) && break
-        (( rc <= 128 )) && break
-    done
+    # 累积读取(修"分段敲 yes 被读成 es → 假拒绝")。这里**不加**冲读:理由见函数
+    # 开头注释(子命令 pty 回流字节与提示同队列),积压字节由调用方在进本函数前冲掉
+    # (见 tool_run_and_parse 的粘贴注入防护)。
+    ask_read_line
+    answer="$ask_line"
     stty echoctl 2>/dev/null
     if (( input_aborted )); then
         input_aborted=0
@@ -4435,15 +4556,12 @@ skill_save() {
     inp_msg "$body"
     inp_msg '────────────────────────'
     printf '\033[2m│\033[0m 是否保存该技能?(y/n): '
-    # 与历史选择同款轮询读取:Ctrl+C 当作拒绝,不会执行写入
+    # 与历史选择同款读取(累积 + 先清残留,见 ask_read_line):Ctrl+C 当作拒绝,不会执行写入
     stty -echoctl 2>/dev/null
-    answer=""
-    while :; do
-        IFS= read -r -t 0.2 answer
-        rc=$?
-        (( input_aborted )) && break
-        (( rc <= 128 )) && break
-    done
+    ask_drain_input
+    input_aborted=0
+    ask_read_line
+    answer="$ask_line"
     stty echoctl 2>/dev/null
     if (( input_aborted )); then
         input_aborted=0
