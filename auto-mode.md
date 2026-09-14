@@ -68,12 +68,15 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 | `auto_backup` | 2309 | 覆盖写前落备份 |
 | `is_granted` | 2298 | 外部路径授权名单命中判定（含子树；空名单提前返回，见第八节 bash 3.2 坑） |
 | `shell_note_grants` | 2332 | **人工 y 之后把外部路径落进名单**（缺口 B；`_sng_one` 内嵌其中，跟着一起被抽函数） |
-| `hard_deny_cmd` | 2906 | **硬墙 H1–H11** + H12 写目标扫描（`hd_recheck` 内嵌其中） |
-| `hard_deny_path` | 3043 | **路径红线 P1–P3** |
-| `auto_final_judge` | 3131 | 终审器（带 reason 复审 N） |
-| `auto_note_deny` / `auto_note_allow` | 2591 / 2597 | 连拒降级 / 放行配额计数 |
-| `auto_takes_shell` | 3197 | **单点判定**：auto 是否接管 shell 的 N |
-| `path_access` | 3248 | 文件工具越界入口（6 个调用点收敛到这里；次序 ①墙 ②名单 ③按模式） |
+| `hd_mask_readonly` | 2864 | 只读动词引号参数脱敏（H2/H3/H4 的二次确认用；配 `hd_is_readonly_verb`） |
+| `hd_is_msg_verb` / `hd_mask_msg` | 2932 / 2940 | **H6 专用**脱敏：只脱 `echo`/`printf` 的引号参数（通用白名单里的 cat/grep 等其引号参数就是文件，脱了等于给凭据墙开引号绕过口） |
+| `hard_deny_cmd` | 2999 | **硬墙 H1–H11** + H12 写目标扫描（`hd_recheck`、`hd_recheck_msg` 内嵌其中） |
+| `hard_deny_path` | 3154 | **路径红线 P1–P3**（P1 与 H6 成对同步；P2 内含临时目录豁免） |
+| `auto_final_judge` | 3256 | 终审器（带 reason 复审 N） |
+| `auto_note_deny` / `auto_note_allow` | 3303 / 3309 | 连拒降级 / 放行配额计数 |
+| `auto_takes_shell` | 3322 | **单点判定**：auto 是否接管 shell 的 N |
+| `path_access` | 3373 | 文件工具越界入口（6 个调用点收敛到这里；次序 ①墙 ②名单 ③读 ④显式名单 **④.5 临时目录** ⑤拒 ⑥人批） |
+| `auto_allow_hit` / `auto_tmp_write_ok` | 2511 / 2534 | 显式 `--allow*` 名单命中 / 临时目录写三态判定（0 放行 1 非临时 2 末段是符号链接必拒） |
 | `inject_auto` | 2738 | 把规则注入 `messages[0]`（压缩安全） |
 | `auto_checkpoint` | 2754 | git HEAD 或 rsync 快照 |
 | `auto_enable` | 2808 | 能力清单 + 签字 + 回滚点（tty 必需） |
@@ -106,7 +109,7 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 | H3 | `rm -rf ~` / `$HOME` / `/*` / `/usr` / `--no-preserve-root` | 一条命令毁所有 |
 | H4 | `dd of=/dev/*`、`mkfs`、分区 | 文件系统级 |
 | H5 | 写/删 `~/.bashrc` `.zshrc` `.ssh` `.aws` `.gnupg` `~/Library/LaunchAgents` | 持久改变环境，不可回滚 |
-| H6 | 读私钥 / `.env` / `~/.aws` / `.netrc` / `security dump-keychain` / `~/.ct/history` / `~/.ct/config` | 泄露即永久；内容会进上下文并随请求发给服务端 |
+| H6 | 访问凭据：私钥/凭据**目录**（`~/.ssh` `~/.aws` `~/.gnupg` `~/.docker` `~/.kube` `~/.subversion` `~/.config/{gh,gcloud,azure}` `~/.ct/{config,history}`）＋凭据**文件名（不限位置，含工作目录内的项目级文件）**：`.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `spnego-machine` `.git-credentials` `.pem/.key/.p12/.pfx` `id_*` ＋ `security dump-keychain` | 泄露即永久；内容会进上下文并随请求发给服务端。**与 P1 同口径**（改一侧必须同步另一侧，见第九节第 6 条）。**`.env` 不在本条**：工作目录内的 `.env` 属开发常规，只由外发规则 H10 兜 |
 | H7 | `git push --force`、`push :分支`、`filter-branch`、`clean -fdx`、`-no-verify` | 改写已发布历史，牵连他人 |
 | H8 | `shutdown` / `halt` / `poweroff` / `systemctl stop` | 会连带杀掉正在运行的 wchat 自己 |
 | H9 | `pkill` / `killall` / `kill -9 -1` / 对 `$$`、`ppid` 动手 | 同上（进程炸弹） |
@@ -118,9 +121,12 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 
 | 号 | 判据 |
 |---|---|
-| P1 | 读写凭据：`.ssh` `.gnupg` `.aws` `Keychains` 及 `id_rsa`/`.pem`/`.key` 等敏感名 |
+| P1 | 读写凭据：目录 `$HOME/.ssh` `.aws` `.gnupg` `.docker` `.kube` `.subversion` `.config/{gh,gcloud,azure}` `.azure` `.ct/{config,history}`；**文件名（任何位置，含仓库里的项目级文件）** `.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `.git-credentials` `spnego-machine` `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`；扩展名 `.pem` `.key` `.p12` `.pfx` | 与 H6 成对同步。旧版只按 `$HOME/` 前缀列，且 `[[ "$np" == id_rsa ]]` 拿整串比绝对路径是**死分支**（嵌在 `.ssh` 外的私钥全靠这条兜底）；`.npmrc`/`.netrc`/`.pypirc` 当时**完全不在名单里**，于是 shell 里 `cat ~/.npmrc` 恒拒、`read_file ~/.npmrc` 却直接放行 —— 没有真沙箱时，一侧放行就等于没有保护 |
+| （刻意代价） | 凭据按**文件名**命中，不区分是否真读内容 | `ls -l .npmrc`（只看元数据）、甚至命令文本里出现 `~/.npmrc` 都会撞 H6——**连搜自己的规则都会被拦**（改这条时请用不带点或拆开拼的写法，如 `grep npmrc`、`grep 'git.credits'`）。按"宁拒不误放"保留，锁在表里标 `[设计如此]` |
+| （刻意豁免） | `.env` 在工作目录内可读；目录外的 `id_rsa.pub` 可读 | 前者是开发常规、真正风险在外发（H10）；后者公钥不是机密，拦它只会逼模型绕路。但 `~/.ssh/` **目录墙优先**，其内的 `.pub` 两侧都拦 |
 | P2 | 写系统路径：`/etc /usr /bin /sbin /Library /System /private /opt /var /boot /dev`（工作目录内的写**排在它前面**） |
-| P3 | auto 下写工作目录之外且不在 `--allow-write` 名单（`/tmp`、`$TMPDIR` 豁免） |
+| P3 | auto 下写工作目录之外且不在 `--allow-write` 名单 |
+| 临时目录写 | `/private/tmp`、`/var/tmp`、`$TMPDIR`（物理前缀，同一份 `auto_tmp_prefixes` + 字面量兜底） | P2 里先豁免（编译器/heredoc 大量写它，拦下来只会卡死任务）；文件工具侧由 `auto_tmp_write_ok` 给同口径放行（以前 shell 能写、`write_file` 要人点名 = 口径分裂，只会把人逼去 heredoc）。**工具侧多一道 shell 做不到的检查：末段是符号链接一律拒** —— `norm_path` 只归一已存在的**父目录**、不解析末段链接，而落盘是 `> "$resolved"` 会跟随链接，判定看到 `/tmp/build.log` 而字节可以落在任何地方（1777 的 `/tmp` 里预放 `build.log -> ~/.npmrc` 即绕过 P1/P2）。写前仍落 `auto_backup`，审计标签 `auto_allow_tmp`（与 `auto_allow_rw` 区分、计入放行配额），**不写进授权名单**：缓存会让第二次写从第 1 步直接返回、跳过链接复检 |
 
 误杀代价按通道不对称,不能一概说"偏严即可":
 
@@ -293,13 +299,20 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
   审计落盘且不记命令输出。
 - 回归：`vision_layer_test.sh`（33 项）。
 - 仓库内轻量回归（不依赖网络与桩网关，`cd ~/bin && bash <文件>`）：
-  - `test_hardwall.sh` —— 硬墙族 H1~H4 + H12 写目标提取器 + `resolve_path` 表驱动 +
-    `shell_note_grants` 记账（T1~T7，当前 PASS=73 FAIL=0）。反表（只读命令不得误杀）
-    与正表（真破坏必须拦）**成对**出现，脱敏类改动必须两张表同时绿才算修好；
-    T6 专测"辅助函数缺失即照拒"，T7 专测"人工 y 之后必须收敛、且不得改变判定强度"。
+  - `test_hardwall.sh` —— 硬墙族 H1~H4/H6 + H12 写目标提取器 + `resolve_path` 归一 +
+    `shell_note_grants` 记账 + 凭据口径成对断言 + 临时目录写/符号链接（T1~T9，当前
+    PASS=136 FAIL=0；T9 共 22 条）。反表
+    （只读命令不得误杀）与正表（真破坏必须拦）**成对**出现，脱敏类改动必须两张表同时绿
+    才算修好；T6 专测"辅助函数缺失即照拒"，T7 专测"人工 y 之后必须收敛、且不得改变
+    判定强度"，T8 专测"同一个文件走 shell 与走文件工具必须同结论"，T9 专测"临时目录写
+    两侧同口径 + 末段是符号链接一律拒"（含用 `$TMPDIR` 里真建的链接做实证，以及
+    "path_access 拒绝时必须写回 `content`、且不许落盘到链接目标"两条）。
     T7 里三条不变量最值得抄：**记账前后同一命令的墙判定不许变**（`path_access` 的
     次序是 ①墙 ②名单 ③按模式，墙永远在名单前面，所以记账不可能放水）；`$HOME` 本身、
     `/`、`/dev/*`、URL 不许进名单；重复放行不许堆条目。
+    尾部有**断言总数守卫**（`EXPECT_TOTAL`）：`pass+fail` 不等于表内条数即报红。因为
+    对旧版本跑表时会出现"一行输出都没有"的断言（被测函数不存在 → command not found →
+    `ok`/`bad` 压根没被调用，既不红也不绿）——没有这道守卫，表就成了"看起来全绿"的假绿。
   - **bash 3.2 的 `set -u` 会把「展开空数组」判成 unbound variable 并当场打死整个脚本**
     （4.4 起才不报；本机 `/bin/bash` 是 3.2.57）。现象是一行输出都没有、退出码都拿不到，
     排查时极易误判成"被屏蔽了"。生产两处已修（`is_granted` 加 `${#arr[@]} -eq 0` 提前
@@ -307,8 +320,14 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
     同样中招：按名单 `eval` 抽顶层赋值要连小写 `auto_*` 一起抽（漏了 `auto_tmp_prefixes=()`
     就是这条），且空名单用例里自己展开 `"${granted_files[@]}"` 也要用 `+…` 形态。
     负对照（证明这张表有判别力，改硬墙后都要跑一次）：
-    `git show HEAD:wchat.sh > /tmp/hw.sh && bash test_hardwall.sh /tmp/hw.sh`
-    → 旧版红 16 项（T1 误杀 6 + T4 提取器 + T5 归一化）。
+    ```bash
+    git show HEAD:wchat.sh > /tmp/hw.sh && bash test_hardwall.sh /tmp/hw.sh   # 104/32
+    ```
+    前者=已含脱敏/归一化/记账/凭据那批修复的版本，32 红恰好全落在本次的临时目录断言
+    （T8 16 + T9 15 + 总数守卫 1）。对 `a0bcd52^`（脱敏之前）跑则是**没有汇总行**：旧版
+    `hard_deny_path` 在 `set -u` 下踩空变量，脚本在 T9 集成断言处当场猝死（前 109 条已
+    产生判定）——"根本没有总数"与"总数对不上"是同一类信号，都说明被测版本缺东西。
+    注意：这批改动提交后 `HEAD` 就成了正确版本（跑出 136/0），届时做负对照要换更早的 rev。
   - `test_pty_pager.sh` —— 关分页 env 与退出码（PASS=7）。
   - `test_history_render.sh` —— 历史渲染 ANSI 断言（PASS=7）。
 - 主套件基线：`unit` 当前失败 4 项，与 HEAD 版跑出来的是**同一批**（既有漂移，见第十节）。
@@ -328,6 +347,16 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
 3. `AUTO_SYS`（注入给模型的规则）若改变了模型该守的约定，同步改文案。
 4. `auto_test.sh` 的 `HD` / `NP` 表加用例（**正反都要**：新规则会不会误杀高频写法）。
 5. `bugList` 记一条（格式 `[v]序号. 现象<优先级>【done】根因+修复`）。
+6. **改凭据名单要成对改**：命令级 H6（`hd_re_secret_dir` / `hd_re_keyfile` / `hd_re_shadow`
+   / `hd_re_secret_ref`）与路径级 P1（`hard_deny_path` 的两个 case + 扩展名判断）必须同
+   名单。只改一侧就是制造"shell 拦死、文件工具放行"的口径分裂，等于没有保护；
+   `test_hardwall.sh` 的 T8 用成对断言钉这条（同一个文件两条链路必须同结论）。
+7. **H6 不许接通用的 `hd_recheck`**。那条脱敏走 `hd_is_readonly_verb` 白名单，里面有
+   `cat/head/tail/less/strings/grep/sed/awk` —— 这些动词的带引号参数**就是文件本身**，
+   照搬到凭据规则上，`cat '.npmrc'` 就变成放行，等于"加对引号即可绕过凭据墙"。
+   H6 只能用 `hd_recheck_msg`（只脱 `echo`/`printf` 的引号参数，参数永远不会当文件用；
+   也没收 `git`/`say`，它们带文件操作数）。缺 `hd_mask_msg` 时 `return 0` → 照拒，
+   与 `hd_recheck` 同一条 fail-closed 约束，且必须**嵌在 `hard_deny_cmd` 内部**定义。
 
 ---
 
@@ -358,19 +387,87 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
       「仅 `cd` 到工作目录外执行既有脚本、且无外部写删 → 判 Y」，并要求 `N` 的理由带规则
       编号（`N2:外部写入` / `N0:具体风险`），否则审计日志里无法复盘是哪条口径判的。
       表内两条断言锁着（缺任一即红）。
-- [ ] **把新函数加进主套件的抽函数名单**（`auto_test.sh` 第 29-33 行 `for fn in ...`）：
-      `hd_write_targets` `hd_split_words` `hd_mask_readonly` `hd_is_readonly_verb`
-      `shell_note_grants`（`_sng_one` 嵌在它内部，跟着一起被抽出）。
-      现状是套件按名单抽函数、抽不到就是"测了个寂寞"（第八节末尾自己写的警告）：
-      本轮 `hard_deny_cmd` 调 `hd_recheck` 而套件沙箱里没有它，H2/H3/H4 的 11 条正例
-      当场全变**假放行**（红 16 项才发现）。已把 `hard_deny_cmd` 改成"缺辅助函数即照拒"
-      的 fail-closed 形态（`hd_recheck` 也改成嵌在 `hard_deny_cmd` 内定义，跟着它一起被
-      抽出），但补齐名单才能真正覆盖脱敏与 H12 两条链。
-- [ ] 主套件 HEAD 起就红的 4 项（非本轮引入，负对照已坐实）：`工作目录内写未误判成越界`、
-      `高危 yes 算确认`、`yes 大小写不敏感`、`普通越界 y 即通过`。前三条是人工确认语义
-      与"以人工确认为主"改造后的口径漂移，需要决定改套件还是改实现。
+- [ ] **主套件 `auto_test.sh` 的抽函数名单**（`~/.cache/wchat-tests/auto_test.sh` 第 32-35 行
+      `for fn in ...`）：名单里**已有** `path_access` / `hard_deny_cmd` / `hard_deny_path` /
+      `auto_allow_hit`，缺的是 `auto_tmp_write_ok`（本次新增，`path_access` 第 4.5 步会调它）
+      和前几轮欠的 `hd_write_targets` `hd_split_words` `hd_mask_readonly` `hd_is_readonly_verb`
+      `hd_is_msg_verb` `hd_mask_msg` `shell_note_grants`。
+      **判断：不必把 `hd_*` 逐个搬过去**——硬墙族的正反表在仓库内 `test_hardwall.sh`（T1~T9），
+      两处各测一遍只会让口径漂移；但**必须补两样**：① `auto_tmp_write_ok` 一行（`path_access`
+      的调用链要用到，缺了临时目录写会静默退回"照拒"，用例集里没有该放的断言就看不见）；
+      ② 一道**装载完整性断言**——把"`hard_deny_cmd`/`path_access` 依赖哪些辅助函数"列成清单，
+      逐个 `declare -F` 检查，缺即红。现有的守卫是 `grep -c '() {' >= 15`，它只防"整体改名"，
+      防不住"名单不全"。为什么必须防：`hard_deny_cmd` 缺辅助时是 fail-closed（`command not
+      found` → 127 → 判不成"未命中"→ 照拒），于是所有"该拒"的用例**继续绿**，误杀回归被完全
+      掩盖——沉默的 fail-closed 比报错危险。该文件在工作目录外，`-auto=full` 下我改不了。
+      **成品已做好并实测**：`~/bin/.auto_test.patched.sh`（三处改动：① `unit` 段补 bash5
+      自举——原来 `BASH5` 只用在 e2e 驱动真脚本那一处，unit 漏了，这才是"3.2 下 4 项假红"
+      的真正来源；② 名单补 `auto_tmp_write_ok`；③ `grep -c '() {' >= 15` 换成"名单声明项
+      逐个校验，缺即红并指名"+ "名单外间接依赖缺失显式 WARN"）。落盘一条命令：
+      `cp ~/bin/.auto_test.patched.sh ~/.cache/wchat-tests/auto_test.sh`
+      实测五步：5.x 下 unit 全绿且 WARN 如实报出 7 个未装载的 `hd_*`；往名单里塞
+      `no_such_fn_xyz` → 守卫当场红"沙箱缺函数:no_such_fn_xyz…测试不可信"；3.2 入口跑副本
+      → 自举成功、4 项假红消失（`✅ 全部通过`）；3.2 入口跑**原件** → 4 项红复现；e2e 段
+      经自举后仍 `✅ 全部通过`（参数透传与 `STUB_DIR` 不受影响）。顺带：e2e 驱动的是磁盘上
+      的 `wchat.sh`，所以本次临时目录写的改动已经在 e2e 里跑过一遍真链路。
+- [x] **主套件"基线 4 项红"是假红，不是口径漂移**：`工作目录内写未误判成越界`、
+      `高危 yes 算确认`、`yes 大小写不敏感`、`普通越界 y 即通过`——同一个套件、同一份代码，
+      用 `/opt/homebrew/bin/bash`（5.3.15）跑 **✅ auto_test 全部通过**，用 `/bin/bash`
+      （3.2.57）跑才红这 4 项。根因是测试自身第 169 行的 `"$(case "$content" in *中文模式*)"`
+      写法：3.2 会把 `(*` 当成命令替换的收尾，5.x 才按预期解析。
+      **结论：跑表必须用 5.x**（`/opt/homebrew/bin/bash auto_test.sh`），别再拿 3.2 的红
+      当产品缺陷去"决定改套件还是改实现"。生产侧本来就在 5.x 上：`wchat -> wchat.sh` 的
+      shebang 是 `#!/bin/bash`（macOS 是 3.2），但脚本头部有 bash5 自举，找不到
+      `/opt/homebrew/bin/bash` 就直接报错退出（`wchat.sh:80`）——`ps` 里那些
+      `/opt/homebrew/bin/bash` 进程就是它自己。
+      因此本轮那些 `${arr[@]+…}`、`${#arr[@]} -eq 0` 提前返回的 3.2 兼容改动**不回滚**：
+      它们是 `test_hardwall.sh` 能在两个版本下都跑绿的前提（3.2 下 136/0、5.3 下 136/0
+      各实测一次），而且自举之前的那几十行确实由 3.2 执行。但**不必再为 3.2 新增兼容工作**。
 - [ ] `resolve_path` 对"目标恰好等于 WORK_ROOT"误判越界：**已修**（先把目标自身归一，
       再同时与基准本身及其子树比对；`list_dir` 传绝对路径 cwd 曾因此被拒），表 T5 覆盖。
+- [x] 凭据口径分裂（shell 的 H6 恒拒、文件工具的 P1 却放行）：**已按「一致 + 严格」修**
+      （回归 `test_hardwall.sh` T8 42 条，当时全表 114/0；补 T9 后全表 136/0。
+      当时对 `HEAD` 跑本表红 16 项全在 T8，现口径见第八节的负对照小抄）。
+      起因是一条 `npm config get registry; …; cat ~/.npmrc` 在 `-auto=full` 下被 H6 整条拒。
+      调查结论：整条拒 + auto 下不升级人工，都是**设计**（硬墙注释写明"AI 与人都无权批准"，
+      auto 分支直接 `continue`，只有非 auto 才要 `yes`）；但实现有四处 bug ——
+      ① `hd_re_secret_dir` 里 `.npmrc/.netrc/.pypirc` 是**裸词无锚定**，仓库根的项目级
+      `.npmrc`（常放 `_authToken`）连 `ls` 都不许；② H6 没接二次确认，`echo "不要 cat ~/.netrc"`
+      这类纯文本被误杀（同类假阳性在 H3 已修掉，属"扩 recheck 各加一行"的欠债兑现）；
+      ③ 路径侧 P1 根本不认 `.npmrc/.netrc/.pypirc/.git-credentials`，且 `[[ "$np" == id_rsa ]]`
+      拿整串比绝对路径是**死分支** —— 结果是 `read_file ~/.npmrc` 直接放行，H6 的全部立意
+      被这一条清空；④ `echo x > .npmrc` 撞的理由文案写着"**读取**凭据被禁止"，与命令自相矛盾
+      （H5 当年正是为此加了"真的要写才判"的限定）。
+      修法选择：**没有真沙箱、又跑在用户真实磁盘上，"一侧放行"就等于没有保护**，所以两侧
+      一起收紧而不是把 shell 放宽 —— P1 补凭据文件名单（不限位置）+ 目录补
+      `.config/{gcloud,azure}` + 修死分支；H6 接**只用 `echo/printf`** 的 `hd_recheck_msg`
+      （绝不能复用 `hd_recheck`：那份白名单含 cat/head/grep/awk/strings，它们的带引号参数
+      就是文件本身，照搬等于给出"加对引号即可绕过"的口）；文案改成"访问凭据文件…任何档位
+      都不放开，文件工具同判"。
+      刻意接受的不便：凭据**文件名出现在命令文本里就拦**（含 `ls -l .npmrc`），所以维护者
+      连 `grep '\.npmrc' wchat.sh` 都会被自己的墙拦下 —— 本轮实测被拦两次，改查这类规则时
+      要用不带点的模式（`grep npmrc`、`grep 'git.credits'`）。已锁进 T8 的 `[设计如此]` 断言。
+- [x] `write_file` 写 `/tmp` 被拒、而 shell 写 `/tmp` 畅通（口径分裂）：**已按 A+B 放行**
+      （`auto_tmp_write_ok` + `path_access` 第 4.5 步；回归 `test_hardwall.sh` T9 共 22 条，
+      全表 PASS=136/0；对 `HEAD` 跑 104/32）。
+      支持放行的理由是**它没有收紧任何东西**：`cat > /tmp/x` 在所有档位一直是通的
+      （P2 对临时目录先豁免），把文件工具关在门外只会把我推回 heredoc —— 而工具描述
+      明写"不要用 heredoc（引号转义极易出错）",等于用可靠性换一个不存在的安全收益。
+      但**没有照 P2 那样按目录前缀裸放行**：实测 `norm_path` 只归一已存在的**父目录**、
+      末段是符号链接时不解析（`/tmp/link -> /tmp/link.real` 归一后仍是 `link`），而
+      `tool_write_file` 落盘是 `jq -r .content > "$resolved"` 会跟随链接 —— 判定看到的
+      名字与字节真正落点可以完全不同。`/tmp`、`/var/tmp` 是 1777，同机任何人预放
+      `build.log -> ~/.npmrc`，"允许写 /tmp"立刻变成"允许写 `~/.npmrc`"，P1/P2 一起作废。
+      所以豁免只给真实文件，**末段是链接一律拒**（这条洞走 shell 今天仍在：shell 是文本层
+      判定，无法逐子句验链接；工具侧能验就先验上，别把两侧都留在漏的状态）。
+      配套：三档都放（与 shell 同档语义）；显式 `--allow-write` 名单排在这一步之前，
+      用户点名的授权不被隐式豁免抢优先级；写前仍 `auto_backup`；审计打 `auto_allow_tmp`
+      与 `auto_allow_rw` 区分并计入放行配额；**不写进 `grant_file`** —— 缓存进名单会让
+      第二次写从第 1 步直接返回、跳过链接复检。
+      顺带纠正一处直觉：`/tmp` 与 `$TMPDIR` 不等价，本机实测 `/private/tmp`、`/var/tmp`
+      是 `drwxrwxrwt`（1777，同机任何人可读、可抢注同名文件），`$TMPDIR`
+      （`/var/folders/.../T/`）是 `drwx------`（0700，只有我自己）。"缓存目录"该指后者，
+      含令牌的东西落 `/tmp` 就是本机广播。
 - [ ] 无 OS 级沙箱。bash 里做不到 seccomp/pledge，硬墙是正则+路径前缀。
       想再上一档只有 macOS `sandbox-exec`（本机已有）或 Linux `bwrap`，
       把"判错"变成"物理做不到"。建议等 auto 真出事再上。

@@ -2523,6 +2523,25 @@ auto_allow_hit() {
     return 1
 }
 
+# 临时目录的"写"豁免。前缀集合与 hard_deny_path 的 P2 豁免同源(同一批字面量 +
+# auto_tmp_prefixes),否则会出现"shell 能写 /tmp、文件工具要人点名"的口径分裂。
+# 返回:0=在临时目录内且是真实路径(可放行) 1=不在临时目录内 2=**末段是符号链接**。
+# 为什么单独判 2:norm_path 只对已存在的**父目录**做 cd+pwd -P,末段是链接时**不解析**
+# (实测 /tmp/link -> /tmp/link.real 归一后仍是 link),而 tool_write_file 落盘是
+# `> "$resolved"` 跟随链接 —— 判定看到的名字与字节真正落到的地方可以完全不同。
+# /tmp 与 /var/tmp 是 1777(同机任何人可预放 `build.log -> ~/.npmrc`),放行它等于
+# 把 P1/P2 全部绕过。P1 是**按文件名**判的,链接名救不了它,只能在这里拦。
+auto_tmp_write_ok() {
+    local np="$1" _tp
+    [[ -n "$np" ]] || return 1
+    for _tp in /tmp /private/tmp /var/tmp ${auto_tmp_prefixes[@]+"${auto_tmp_prefixes[@]}"}; do
+        [[ "$np" == "$_tp" || "$np" == "$_tp"/* ]] || continue
+        [[ -L "$np" ]] && return 2
+        return 0
+    done
+    return 1
+}
+
 # 落备份:auto 模式下覆盖任何已存在的文件前调用。放在 ~/.ct/auto/backup 下,
 # 不污染工作树(避免多出 .bak 被 git status 与 grep 命中)。
 auto_backup() {
@@ -2558,7 +2577,7 @@ hd_re_disk="$hd_p"'(dd[[:space:]][^;&|]*of=/dev/(rd|sd|nvme|disk|hd)|mkfs(\.[a-z
 hd_re_dotfile='(^|[[:space:];&|><]|-i[[:space:]]*|[[:alnum:]]-i)[[:space:]]*"?(~|/Users/[^/[:space:]]+|\$HOME)/\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|profile|gitconfig|global\.gitignore|vimrc|gvimrc|inputrc|tmux\.conf|screenrc|ct)([[:space:]/]|$)'
 hd_re_dotfile_cfg='(~|/Users/[^/[:space:]]+|\$HOME)/\.config/([[:alnum:]-]+/(config|credentials)|gh/hosts)'
 # 凭据目录单独一条,且判在 dotfile 之前:规则号要能区分"读密钥"与"改配置"
-hd_re_secret_dir='(~|/Users/[^/[:space:]]+|\$HOME)/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|(~|/Users/[^/[:space:]]+|\$HOME)/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|\.pypirc|(~|/Users/[^/[:space:]]+|\$HOME)/\.ct/(config|history)([[:space:]/]|$)'
+hd_re_secret_dir='(~|/Users/[^/[:space:]]+|\$HOME)/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|(~|/Users/[^/[:space:]]+|\$HOME)/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|_netrc|\.pypirc|\.htpasswd|\.pgpass|spnego-machine|(~|/Users/[^/[:space:]]+|\$HOME)/\.ct/(config|history)([[:space:]/]|$)'
 hd_re_keychain="$hd_p"'security[[:space:]]+(dump-keychain|find-(generic|internet)-password|unlock-keychain)|keychain-access'
 # 私钥类要区分"文件"与"属性名":写成 `\.key([[:space:]]|$)` 会把
 # `jq .key file`、`obj.key = 1` 判成读私钥。所以扩展名形态一律要求前面有 "/"
@@ -2575,7 +2594,7 @@ hd_re_upload="$hd_p"'(curl|wget|nc|ncat|scp|sftp|rsync|aws|gsutil)([[:space:]]|$
 hd_re_upload_arg='(-T[[:space:]]+|--upload-file|--data(-binary|-raw|-urlencode)?([[:space:]]|=)|-d[[:space:]]+|--form|-F[[:space:]]+|--post-data|(-X|--request)[[:space:]]+(POST|PUT))'
 # 敏感内容引用:三种形态都要覆盖 —— 内联读取 $(cat .env)、重定向/上传目标
 # (@file、<file)、以及 -T/--upload-file 后面直接跟的裸路径(~/.npmrc 这种)
-hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credential|\.netrc|\.npmrc)|[<@][^[:space:]]*(\.env|secret|token|password|passwd|credential|\.netrc|\.npmrc|\.p8|[[:graph:]]*\.(key|pem))|(^|[[:space:]/~])\.env([[:space:]]|$)|(^|[[:space:]/~.$])(\.npmrc|\.netrc|\.pypirc|\.git-credentials|id_rsa|id_ed25519|[[:graph:]]*/[[:alnum:]_.-]*\.(env|pem|p12|key))([[:space:]]|$))'
+hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credential|\.netrc|\.npmrc)|[<@][^[:space:]]*(\.env|secret|token|password|passwd|credential|\.netrc|\.npmrc|\.pypirc|\.htpasswd|\.pgpass|\.git-credentials|\.p8|[[:graph:]]*\.(key|pem))|(^|[[:space:]/~])\.env([[:space:]]|$)|(^|[[:space:]/~.$])(\.npmrc|\.netrc|\.pypirc|\.git-credentials|id_rsa|id_ed25519|[[:graph:]]*/[[:alnum:]_.-]*\.(env|pem|p12|key))([[:space:]]|$))'
 # tee 要在"行首或空白后"才算命令名(写成 [[:space:]]tee 会漏掉命令以 tee 开头的
 # 情况,如 `tee /etc/hosts < /tmp/x`)
 hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications)/'
@@ -2902,9 +2921,83 @@ hd_mask_readonly() {
     done
     printf '%s' "$out"
 }
+# 只脱「消息类动词」的带引号参数。为什么 H6 不能复用 hd_is_readonly_verb：
+# 那份白名单里有 cat/head/tail/less/strings/base64/grep/sed/awk —— 它们的带引号
+# 参数**就是文件操作数**。照搬到凭据规则上，`cat '.npmrc'`、`grep 'x' '~/.npmrc'`、
+# `awk '{print}' '.npmrc'` 会被一起脱成放行，等于给凭据墙开了个"加对引号就绕过"的
+# 洞。echo/printf 的参数永远不会被当文件读，才配得上脱敏。
+# 也没收 git/say：`git apply '.npmrc'`、`say -f '~/.npmrc'` 都带文件操作数。
+# 代价是 `git commit -m '别 cat ~/.npmrc'` 仍判 H6 —— 与 H3 那边「未加引号不脱敏」
+# 同一类刻意保守，锁在 test_hardwall.sh 表里。
+hd_is_msg_verb() {
+    case "${1##*/}" in
+        echo|printf) return 0 ;;
+    esac
+    return 1
+}
+# 与 hd_mask_readonly 同构：等长替换(不改变字符串形状,拼不出新的命中)、分界符原样
+# 保留、引号内遇到 `$(` 或反引号立刻停止脱敏(命令替换里的凭据路径必须照拦)。
+hd_mask_msg() {
+    local s="$1" out="" cmd="" ch q="" qm=0 sp=1 keep=0 i n nxt
+    n=${#s}
+    for ((i = 0; i < n; i++)); do
+        ch=${s:i:1}
+        nxt=""
+        (( i + 1 < n )) && nxt=${s:i+1:1}
+        if [[ -n "$q" ]]; then
+            if [[ "$ch" == "$q" ]]; then
+                if (( qm )); then out+=")"; else out+="$ch"; fi
+                q=""; qm=0
+                continue
+            fi
+            if (( qm )); then
+                if [[ "$ch" == '`' ]] || { [[ "$ch" == '$' ]] && [[ "$nxt" == '(' ]]; }; then
+                    qm=0; out+="$ch"; continue
+                fi
+                case "$ch" in
+                    ";"|"|"|"&"|$'\n'|"<"|">"|"$"|'`') out+="$ch" ;;
+                    *) out+=x ;;
+                esac
+            else
+                out+="$ch"
+            fi
+            continue
+        fi
+        case "$ch" in
+            "'"|'"')
+                q="$ch"
+                if (( keep == 1 )) && (( sp == 0 )); then
+                    qm=1; out+="("
+                else
+                    qm=0; out+="$ch"
+                fi
+                ;;
+            " "|$'\t')
+                if (( sp )) && [[ -n "$cmd" ]]; then
+                    if hd_is_msg_verb "$cmd"; then keep=1; else keep=0; fi
+                    cmd=""; sp=0
+                fi
+                out+="$ch"
+                ;;
+            ";"|"|"|"&"|$'\n'|"("|")"|"<"|">"|'`')
+                if (( sp )) && [[ -n "$cmd" ]]; then
+                    if hd_is_msg_verb "$cmd"; then keep=1; else keep=0; fi
+                    cmd=""
+                fi
+                keep=0; sp=1
+                out+="$ch"
+                ;;
+            *)
+                (( sp )) && cmd+="$ch"
+                out+="$ch"
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
 
 hard_deny_cmd() {
-    local c="$1" word c2=""
+    local c="$1" word c2="" c3=""
     hd_rule=""; hd_msg=""
     # 二次确认:整串命中后,再用「只读动词的带引号参数已脱敏」的同一串匹一次,仍命中
     # 才算真破坏性操作。只在整串已命中时才付这个字符循环的钱,常规命令零开销。
@@ -2919,6 +3012,16 @@ hard_deny_cmd() {
         [[ -n "$c2" ]] || c2=$(hd_mask_readonly "$c")
         local re
         for re in "$@"; do [[ "$c2" =~ $re ]] && return 0; done
+        return 1
+    }
+    # H6 的二次确认只能脱「消息类动词」(见 hd_mask_msg 注释:脱只读动词会把
+    # `cat '.npmrc'` 这类真读一起放掉)。约束与 hd_recheck 相同:
+    # 嵌在这里定义、缺 hd_mask_msg 时 return 0(视为仍命中)→ 照拒,绝不 fail-open。
+    hd_recheck_msg() {
+        declare -f hd_mask_msg >/dev/null 2>&1 || return 0
+        [[ -n "$c3" ]] || c3=$(hd_mask_msg "$c")
+        local re
+        for re in "$@"; do [[ "$c3" =~ $re ]] && return 0; done
         return 1
     }
 
@@ -2957,10 +3060,18 @@ hard_deny_cmd() {
         hd_rule="H5"; hd_msg="写入/删除主目录下的配置文件或凭据目录被禁止(持久改变环境且不可回滚)。替代:把配置写进工作目录内的文件,或把内容打印出来交给用户自行放置"
         return 0
     fi
-    # H6 读取密钥/凭据(读+外发链路的源头)。工作目录内的 .env 属开发常规,
+    # H6 访问密钥/凭据(读+外发链路的源头)。工作目录内的 .env 属开发常规,
     # 不在本条之列,由外发规则 H10 兜。
-    if [[ "$c" =~ $hd_re_secret_dir || "$c" =~ $hd_re_keychain || "$c" =~ $hd_re_keyfile || "$c" =~ $hd_re_shadow ]]; then
-        hd_rule="H6"; hd_msg="读取密钥/凭据/私钥被禁止(内容会进上下文并随请求发给服务端)。替代:需要某个值时请用户自己提供,不要读凭据文件"
+    # 刻意保守的两点(与路径侧 P1 配套,见 hard_deny_path):
+    #   1) `.npmrc`/`.netrc`/`.pypirc` 等按**文件名**命中,不限位置 —— 仓库里的项目级
+    #      .npmrc 同样常放 _authToken,所以工作目录内也不放过。代价:命令文本里出现
+    #      这些文件名就会被拦(含 `ls -l .npmrc` 这种只看元数据的形态)。
+    #   2) 只脱 echo/printf 的引号参数(hd_recheck_msg),不脱 cat/head/grep 的 ——
+    #      那些动词的引号参数就是文件本身,脱了等于"加对引号就能绕过凭据墙"。
+    if [[ "$c" =~ $hd_re_secret_dir || "$c" =~ $hd_re_keychain || "$c" =~ $hd_re_keyfile || "$c" =~ $hd_re_shadow ]] &&
+       { ! declare -f hd_recheck_msg >/dev/null 2>&1 ||
+         hd_recheck_msg "$hd_re_secret_dir" "$hd_re_keychain" "$hd_re_keyfile" "$hd_re_shadow"; }; then
+        hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被禁止:其内容会进上下文并随请求发给服务端。任何档位都不放开(auto 直接拒,非 auto 也不自动跑),文件工具 read_file/list_dir 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
         return 0
     fi
     # H7 改写发布历史(远端不可回滚,且会伤害协作者)
@@ -3046,13 +3157,27 @@ hard_deny_path() {
     np=$(norm_path "$p") || np="$p"
 
     # P1 凭据类路径:读写都不放行(任何模式)。列目录也算读。
+    # 与命令级 H6 同口径(改一侧必须同步另一侧,否则"shell 拦死、文件工具放行"就等于
+    # 没有保护 —— 这正是本条存在的全部意义)。
     case "$np" in
         "$HOME/.ssh"*|"$HOME/.aws"*|"$HOME/.gnupg"*|"$HOME/.config/gh"*|\
+        "$HOME/.config/gcloud"*|"$HOME/.config/azure"*|"$HOME/.azure"*|\
         "$HOME/.docker"*|"$HOME/.kube"*|"$HOME/.subversion"*|"$HOME/.ct/history"*|"$HOME/.ct/config"*)
-            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(它会被读进上下文并随请求发给服务端)。替代:请用户自己给出所需的值,或改读工作目录内的配置"
+            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(它会被读进上下文并随请求发给服务端)。任何档位都不放开,与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
             return 0 ;;
     esac
-    if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
+    # 凭据**文件名**判定,不限位置:仓库根的项目级 `.npmrc` 同样常放 _authToken,
+    # `$HOME` 之外放的 `.netrc`/私钥也一样。旧写法把 id_rsa 拿整串比(`[[ "$np" == id_rsa ]]`)
+    # 是条死分支 —— 绝对路径永不相等,嵌在 .ssh 之外的私钥全靠这一条才兜得住。
+    # 刻意不列 `.env`:工作目录内的 .env 属开发常规(H6 注释同口径),由外发规则 H10 兜。
+    # `.pub` 不在名单里:公钥不是机密,拦它只会逼模型去绕。
+    case "${np##*/}" in
+        .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
+        id_rsa|id_dsa|id_ecdsa|id_ed25519)
+            hd_rule="P1"; hd_msg="凭据文件不可访问(任何位置都算,含仓库里的项目级 .npmrc):内容会进上下文并随请求发给服务端。与 shell 的 H6 同判,任何档位都不放开。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
+            return 0 ;;
+    esac
+    if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
         hd_rule="P1"; hd_msg="私钥/证书文件不可访问。替代:请用户自己提供所需的值"
         return 0
     fi
@@ -3295,6 +3420,25 @@ path_access() {
         auto_audit path "$act" "$p" "" auto_allow_rw "full 档 + --allow-write 名单,已备份 ${auto_backup_count} 份"
         printf ' \033[2m🤖 auto(full) 放行越界写入(已备份):%s\033[0m\n' "$p"
         return 0
+    fi
+    # 4.5) 临时目录的写:auto 三档都放行(shell 侧在所有档都能写 /tmp,见 P2 豁免;
+    #      文件工具不同口径只会逼出 heredoc 绕行)。放在"显式名单"之后,保证用户
+    #      点名的授权(带 grant 与 rw 标记)优先级不被隐式豁免抢掉。
+    #      不做 grant_file 缓存:临时文件是一次性产物,缓存进名单会让第二次写从
+    #      第 1 步直接返回、**跳过下面的符号链接复检**。
+    if [[ "$mode" == "rw" && -n "$auto_mode" ]]; then
+        auto_tmp_write_ok "$np"; case $? in
+            0) auto_note_allow
+               auto_backup "$np"
+               auto_audit path "$act" "$p" "" auto_allow_tmp "临时目录写豁免(与 P2 同源),覆盖前已落备份 ${auto_backup_count} 份"
+               printf ' \033[2m🤖 auto 放行临时目录写入(已备份):%s\033[0m\n' "$p"
+               return 0 ;;
+            2) auto_note_deny
+               auto_audit path "$act" "$p" "TMP" auto_deny "临时目录内的符号链接不放开:判定看链接名、写盘跟随链接,等于绕过 P1/P2"
+               content="错误:${act}被拒绝:目标 $p 是符号链接。临时目录豁免只针对真实文件 —— 路径判定不解析末段链接,而落盘会跟随到任意目标(含 P1 保护的凭据文件)。替代:用一个不会被复用的新文件名,或直接写到工作目录内。这是代码级红线,换写法重试同一目标没有意义。"
+               printf ' ⛔ 临时目录写入被拒绝(末段是符号链接):%s\n' "$p"
+               return 1 ;;
+        esac
     fi
     if [[ "$mode" == "rw" && -n "$auto_mode" ]]; then
         # 5) auto 但不在名单里的越界写:read/sandbox 档到此为止

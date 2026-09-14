@@ -47,8 +47,9 @@ auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 # bash 3.2 下 `${arr[@]}` 展开空数组就是致命 unbound,数组意外为空时明确报 harness 问题
 # 并跳过 T7,别让调用方脚本当场猝死(那会让"哪里坏了"彻底看不出来)。
 [[ -n ${auto_tmp_prefixes[*]} ]] || { echo "harness: auto_tmp_prefixes 为空,跳过 T7" >&2; T7_SKIP=1; }
-for _fn in hd_is_readonly_verb hd_mask_readonly hd_split_words hd_write_targets hard_deny_cmd \
-           hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path; do
+for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_split_words hd_write_targets hard_deny_cmd \
+           hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
+           path_access; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
 done
 unset _fn
@@ -285,6 +286,136 @@ grep -qF 'N0:' "$SRC_ABS" \
 body=$(grep "^auth_sys_tail='" "$SRC_ABS" | sed "1s/^auth_sys_tail='//; 1s/'\$//")
 [[ ${#body} -gt 200 ]] || bad "auth_sys_tail 抽取异常" "长度 ${#body}，下面的单引号检查不可信"
 [[ "$body" != *"'"* ]] && ok "auth_sys_tail 内部无裸单引号" || bad "auth_sys_tail 含裸单引号" "提示词会被截断"
+
+# ================= T8 凭据口径:命令级 H6 与路径级 P1 必须同结论 =================
+# 立论:本机没有真沙箱,wchat 跑在用户真实磁盘上。这种前提下「一侧拦死、一侧放行」
+# 等于没有保护 —— 模型换个工具(read_file 代替 cat)就能把凭据读进上下文。所以两条
+# 链路的名单必须同步改;下面成对的断言钉的就是这条不变量。
+echo 'T8 凭据文件:H6(命令) 与 P1(路径) 同口径,脱敏只认 echo/printf'
+
+# --- 真读一律照拒,且**加引号不构成绕过**(这正是 H6 不能复用通用脱敏的全部理由:
+#     cat/head/grep/awk/strings 的带引号参数就是文件本身) ---
+expect H6 "cat 的引号参数就是文件"            "cat '.npmrc'"
+expect H6 "head 引号文件"                     "head -20 '~/.npmrc'"
+expect H6 "grep 的引号操作数是文件"           "grep \"token\" '~/.npmrc'"
+expect H6 "awk 引号程序+引号文件"             "awk '{print}' '~/.npmrc'"
+expect H6 "strings 引号私钥"                  "strings '~/.ssh/id_rsa'"
+expect H6 "命令替换里的凭据不许被脱敏"        'echo "$(cat ~/.npmrc)"'
+expect H6 "git 带文件操作数不脱敏"            "git apply '.npmrc'"
+expect H6 "家目录 npmrc"                      'cat ~/.npmrc'
+expect H6 "pypirc"                            'cat ~/.pypirc'
+expect H6 "htpasswd"                          'cat ~/.htpasswd'
+# --- 只有"参数永远不会当文件用"的动词才允许脱敏 ---
+expect NP "echo 消息里提到凭据文件名"         'echo "提醒：不要 cat ~/.npmrc"'
+expect NP "printf 消息里提到 netrc"           "printf '%s\n' '别读 .netrc'"
+# --- 刻意保留的严格代价:按文件名命中,不区分是否真读内容 ---
+expect H6 "[设计如此] ls 只看元数据也按名拦"  'ls -l .npmrc'
+expect H6 "[设计如此] git 消息里的文件名"     "git commit -m '别 cat ~/.npmrc'"
+expect H6 "[设计如此] 工作目录内的项目级 npmrc" 'cat ./.npmrc'
+
+pd() {
+    local want="$1" p="$2" m="${3:-r}" d="$4" got
+    if hard_deny_path "$p" "$m"; then got=deny; else got=allow; fi
+    if [[ "$got" == "$want" ]]; then ok "$d"; else bad "$d" "期望 $want 实际 $got${hd_rule:+($hd_rule)}"; fi
+}
+# 成对:同一个文件,两条链路必须给同一个答案
+for _f in .npmrc .netrc .pypirc .htpasswd .pgpass .git-credentials; do
+    pd deny "$WORK_ROOT/$_f" r "路径拒 工作目录内 $_f"
+    expect H6 "命令拒 cat 工作目录内 $_f" "cat $WORK_ROOT/$_f"
+done
+pd deny "$HOME/.npmrc" r           "路径拒 ~/.npmrc 读"
+pd deny "$HOME/.npmrc" rw          "路径拒 ~/.npmrc 写"
+pd deny "$HOME/.netrc" r           "路径拒 ~/.netrc"
+pd deny "$HOME/.config/gcloud/x" r "路径拒 ~/.config/gcloud(与 hd_re_secret_dir 同)"
+pd deny "$HOME/.config/azure/x" r  "路径拒 ~/.config/azure"
+pd deny "/srv/keys/id_rsa" r       "路径拒 任意位置私钥(旧写法拿整串比 id_rsa 是死分支)"
+pd deny "/srv/keys/api.key" rw     "路径拒 .key 写"
+pd deny "$HOME/.ssh/id_rsa.pub" r  "路径拒 .ssh 目录内一切(含公钥,目录墙既有设计)"
+expect H6 "命令同判:.ssh 目录内的公钥也拦"  'cat ~/.ssh/id_rsa.pub'
+pd allow "/srv/keys/id_rsa.pub" r  "路径放行 目录外的公钥(不是机密)"
+expect NP "命令同判:目录外公钥放行"         'cat /srv/keys/id_rsa.pub'
+pd allow "$WORK_ROOT/.env" r       "路径放行 工作目录内 .env(刻意豁免,外发由 H10 兜)"
+expect NP "命令同判:工作目录内 .env 放行"   "cat $WORK_ROOT/.env"
+pd allow "$WORK_ROOT/src/main.sh" r "路径放行 工作目录内普通文件"
+unset _f
+
+# ── T9 临时目录写豁免(与 P2 同源)+ 末段符号链接必拒 ──
+# 为什么有这一段:放行 /tmp 写之前,判定侧看到的是链接名、落盘却跟随链接(实测),
+# /tmp 与 /var/tmp 是 1777,同机任何人预放 `build.log -> ~/.npmrc` 就能把 P1/P2 一起
+# 绕过。豁免只能给"真实文件",这条必须钉住。
+echo
+echo "── T9 临时目录写豁免 / 符号链接 ──"
+# 生产在启动期把 TMPDIR 归一成物理前缀填进 auto_tmp_prefixes,harness 不跑那段循环
+# (上面只给了哨兵值),这里按同一口径补一次,否则 $TMPDIR 分支测不到。
+_tw_atp=$(cd "${TMPDIR:-/tmp}" 2>/dev/null && pwd -P) && auto_tmp_prefixes+=("$_tw_atp")
+tw() {
+    local want="$1" p="$2" d="$3" rc
+    auto_tmp_write_ok "$p"; rc=$?
+    if [[ "$rc" == "$want" ]]; then ok "$d"; else bad "$d" "期望 rc=$want 实际 rc=$rc"; fi
+}
+# 返回码:0=豁免内(放行) 1=不在豁免集合 2=末段是符号链接(必拒)
+tw 0 "/private/tmp/x"                  "豁免 /private/tmp 下文件(P2 归一后的真身)"
+tw 0 "/private/tmp/a/b/c.log"          "豁免 临时目录子路径"
+tw 0 "/private/tmp"                    "豁免 目录本身(它不是链接)"
+tw 2 "/tmp"                            "拒 直接写 /tmp:macOS 上它是 ->private/tmp 的链接(归一后不会长这样)"
+tw 1 "/tmpx/foo"                       "不放行 前缀相似的 /tmpx(glob 必须带 /*,写成 /tmp* 就漏)"
+tw 1 "/private/tmpx/foo"               "不放行 /private/tmpx"
+tw 1 "/var/folders/others/T/x"         "不放行 未归一化的 TMPDIR 形状路径(调用方须传 np)"
+tw 1 "$WORK_ROOT/a.sh"                 "不放行 工作目录内(那条路归 resolve_path)"
+tw 1 ""                                "不放行 空路径(fail-closed)"
+_tw_e2e=$(norm_path "/tmp/hw-t9-probe.txt")
+[[ "$_tw_e2e" == "/private/tmp/hw-t9-probe.txt" ]] && ok "归一化 /tmp/x -> /private/tmp/x(与 P2 同一口径)" || bad "归一化 /tmp/hw-t9-probe.txt" "结果意外:$_tw_e2e"
+tw 0 "$_tw_e2e"                        "工具侧对 /tmp 新建文件给放行(与 shell 同判)"
+pd allow "/private/tmp/build.log" rw    "P2 临时豁免仍在(没被新代码顶掉)"
+pd deny  "/tmp/.npmrc" rw               "P1 先于临时豁免:凭据名落到 /tmp 也拒"
+
+# 真符号链接(不是纸面断言)
+_tw_l="${_tw_atp}/hw-t9-link.$$"
+: > "${_tw_l}.real"
+ln -s "${_tw_l}.real" "${_tw_l}"
+ln -s "$HOME/.npmrc" "${_tw_l}-cred"
+ln -s "$WORK_ROOT/wchat.sh" "${_tw_l}-wr"
+tw 2 "$(norm_path "${_tw_l}")"         "拒 $TMPDIR 内的真符号链接"
+tw 2 "$(norm_path "${_tw_l}-cred")"    "拒 指向 P1 凭据的链接(依据是'是链接',与目标名无关)"
+tw 2 "$(norm_path "${_tw_l}-wr")"      "拒 指向工作目录内文件的链接(同 uid 意外链进来也拦)"
+
+# path_access 集成:桩掉记账/备份/人工确认,只验 4.5 那一步的三分支落点。
+# 必须走 path_access 才测得到"顺序":硬墙(①)→ 越界读(③)→ 名单(④)→ 临时豁免(④.5)。
+auto_note_allow() { :; }
+auto_note_deny() { :; }
+auto_backup() { :; }
+grant_file() { :; }
+auto_allow_hit() { return 1; }
+auto_audit() { AUDIT_TAG="$5"; }
+ask_path_grant() { ASKED=1; return 1; }
+auto_mode="full"; content=""; ASKED=0
+path_access "/private/tmp/hw-t9-probe.txt" rw "写入" >/dev/null 2>&1
+[[ $? -eq 0 ]] && ok "path_access 放行临时目录写(full 档不需 --allow-write)" || bad "auto 下临时目录写仍被拒(4.5 没生效)"
+[[ "$AUDIT_TAG" == "auto_allow_tmp" ]] && ok "记账用独立标签 auto_allow_tmp(与名单放行可区分)" || bad "4.5 放行未打标签" "AUDIT_TAG=$AUDIT_TAG"
+content=""; AUDIT_TAG=""
+path_access "$(norm_path "${_tw_l}-cred")" rw "写入" >/dev/null 2>&1
+[[ $? -ne 0 ]] && ok "path_access 拒符号链接" || bad "符号链接经 path_access 被放行了(漏洞)"
+[[ -z "$content" ]] && bad "拒绝时未写 content(会把上一条工具结果误当成本次结果回传)" || ok "拒绝时写回原因(非硬墙号,但说明是链接)"
+[[ -s "${_tw_l}.real" ]] && bad "链接被跟随后写进了真实目标" || ok "零落盘:链接目标文件未被改动"
+auto_mode=""; ASKED=0
+path_access "/private/tmp/hw-t9-probe.txt" rw "写入" >/dev/null 2>&1
+[[ "$ASKED" == "1" ]] && ok "非 auto 不受影响:仍走人工确认(没把隐式豁免插到人批之前)" || bad "非 auto 下跳过人工确认"
+rm -f "${_tw_l}" "${_tw_l}-cred" "${_tw_l}-wr" "${_tw_l}.real"
+unset _tw_atp _tw_e2e _tw_l
+
+# 断言总数守卫:pass+fail 必须等于表里的条数。少了就是有断言**一行输出都没产生**
+# (典型:被测版本里函数还不存在 → command not found → ok/bad 根本没被调用,既不红
+# 也不绿)。拿旧版本做负对照时这种现象一定出现(实测:改完 T9 后对 HEAD 跑本表 104/32,
+# 32 条红 = 13 条 rc=127"被测版本根本没这个函数" + 19 条语义红[T8 凭据口径 16 +
+# 临时目录 4.5 那步未生效 2 + 本守卫 1]);更早的 a0bcd52^ 则在 T9 集成断言处当场猝死、
+# 连汇总行都没有)。没有这道守卫,表会变成"看起来全绿"的假绿。
+# T1~T8=114 + T9 临时目录/符号链接=22。加断言时同步改这里。
+EXPECT_TOTAL=136
+total=$((pass + fail))
+if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
+    printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?)\n' "$total" "$EXPECT_TOTAL"
+    fail=$((fail + 1))
+fi
 
 printf '\nPASS=%d FAIL=%d\n' "$pass" "$fail"
 [[ $fail -eq 0 ]] || exit 1
