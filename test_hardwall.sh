@@ -49,7 +49,7 @@ auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 [[ -n ${auto_tmp_prefixes[*]} ]] || { echo "harness: auto_tmp_prefixes 为空,跳过 T7" >&2; T7_SKIP=1; }
 for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_split_words hd_write_targets hard_deny_cmd \
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
-           path_access; do
+           path_access _confirm_yes; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
 done
 unset _fn
@@ -411,7 +411,7 @@ _tw_l="${_tw_atp}/hw-t9-link.$$"
 ln -s "${_tw_l}.real" "${_tw_l}"
 ln -s "$HOME/.npmrc" "${_tw_l}-cred"
 ln -s "$WORK_ROOT/wchat.sh" "${_tw_l}-wr"
-tw 2 "$(norm_path "${_tw_l}")"         "拒 $TMPDIR 内的真符号链接"
+tw 2 "$(norm_path "${_tw_l}")"         "拒 ${_tw_atp} 内的真符号链接"
 tw 2 "$(norm_path "${_tw_l}-cred")"    "拒 指向 P1 凭据的链接(依据是'是链接',与目标名无关)"
 tw 2 "$(norm_path "${_tw_l}-wr")"      "拒 指向工作目录内文件的链接(同 uid 意外链进来也拦)"
 
@@ -520,12 +520,28 @@ if grep -q 'confirm_cmd .*"\$hd_msg" 1; then' "$SRC_ABS"; then
 else
     bad "硬墙确认调用点未传 strict=1" "文案承诺逐字 yes,实现却是宽松 y/Enter"
 fi
-# ④ 严格判据只能是 == "yes"(退化成 y 或空回车放行,②的文案立刻变假话)
-_yes=$(grep -c '\[\[ "${answer,,}" == "yes" \]\]' "$SRC_ABS")
-if [[ "$_yes" == "2" ]]; then
-    ok "两处严格判据均为逐字 yes(ask_path_grant + confirm_cmd)"
+# ④ 判据必须收敛到单一出口,且严格档仍只认 yes
+#    (两个人工确认点各写一份判据,就是这次"用户按提示输 yes 被记成主动否决"的温床:
+#     提示语已全局写"高危必须输入 yes",宽松档却只认单个 y —— 两处口径相反)
+#    按**函数体**判定而不是数全文出现次数:confirm_cmd 内部本就调用两次,写死数字是拍脑袋。
+_fn_body() {
+    awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS"
+}
+_b_apg=$(_fn_body ask_path_grant); _b_cc=$(_fn_body confirm_cmd)
+if [[ "$_b_apg" == *'_confirm_yes "$answer" "$strict"'* && "$_b_cc" == *'_confirm_yes "$answer" "$strict"'*
+      && "${_b_apg}${_b_cc}" != *'== "yes"'* ]]; then
+    ok "两处人工确认共用 _confirm_yes 单一判据出口(函数体内不再内联 == \"yes\")"
 else
-    bad "严格判据数量异常" "找到 ${_yes} 处,应为 2 处"
+    bad "人工确认判据未收敛到单一出口" "ask_path_grant/confirm_cmd 里缺 _confirm_yes 调用,或仍内联判据"
+fi
+if ! type _confirm_yes >/dev/null 2>&1; then
+    # 没有这道守卫,`_confirm_yes: command not found` 的非零退出会正好落进"预期拒"分支,
+    # 本条就空过了(实测发生过:T10/T12 在函数没装载时反而一片绿)。
+    bad "严格档不认 y/空/n/否" "harness 未装载 _confirm_yes,无法验证判据(拒绝空过)"
+elif _confirm_yes y 1 || _confirm_yes "" 1 || _confirm_yes n 1 || _confirm_yes 否 1; then
+    bad "严格档被降级(y/空回车/n/否 也算放行)" "高危确认与普通确认同档 = 手滑即放行,②的文案立刻变假话"
+else
+    ok "严格档仍只认 yes(y / 空回车 / n / 否 均不放行)"
 fi
 # ⑤ ask_path_grant 必须把 $mode 传下去:丢了 mode 就退化成 r,P2/P3(只在 rw 才命中)
 #    会从严格确认降级成普通 y/Enter —— 文案再准也没用。
@@ -541,7 +557,25 @@ if [[ "$_gate" == *'-n "$auto_mode"'* && "$_gate" == *"return 0"* ]]; then
 else
     bad "inject_auto 缺 auto_mode 门" "非 auto 也会注入恒拒话术 → 又成假话"
 fi
-unset _abs _n_p1 _ok_p1 _yes _gate
+unset _abs _n_p1 _ok_p1 _gate _b_apg _b_cc; unset -f _fn_body 2>/dev/null
+
+# ================= T12 确认答案判据:两档必须是包含关系 =================
+# 为什么进这张表(本轮实跑暴露):提示语已全局统一成"高危必须逐字输入 yes",用户照着
+# 敲 yes,却撞上只认单个 y 的宽松档(审批器判 N 后的人工确认),被记成"用户主动否决"——
+# 实测连拒两次,而回传给模型的文案把工具的判据问题写成了人的决定,我因此绕了两圈才
+# 定位。方向性风险:宽松档 ⊂ 严格档 时,口径越"严格"越容易误拒用户。
+# 不变量:宽松档认 y/yes,严格档只认 yes(刻意保留一秒摩擦);空回车/n 两档都拒。
+echo 'T12 _confirm_yes 判据(宽松 ⊇ 严格)'
+for _cy in "y:0:OK" "Y:0:OK" "yes:0:OK" "YES:0:OK" "yes:1:OK" "Y:1:NO" \
+           "y:1:NO" ":1:NO" ":0:NO" "n:0:NO" "no:1:NO" "maybe:0:NO"; do
+    IFS=: read -r _a _s _w <<< "$_cy"
+    # 未装载时判 MISSING(既不 OK 也不 NO)→ 12 条全红,不给空过的机会
+    if ! type _confirm_yes >/dev/null 2>&1; then _g=MISSING
+    elif _confirm_yes "$_a" "$_s"; then _g=OK; else _g=NO; fi
+    [[ "$_g" == "$_w" ]] && ok "判据 输入[${_a}] 严格档=${_s} → ${_w}" \
+                         || bad "判据 输入[${_a}] 严格档=${_s} 应为 ${_w}" "实得 ${_g}"
+done
+unset _cy _a _s _w _g
 
 # 断言总数守卫:pass+fail 必须等于表里的条数。少了就是有断言**一行输出都没产生**
 # (典型:被测版本里函数还不存在 → command not found → ok/bad 根本没被调用,既不红
@@ -550,9 +584,10 @@ unset _abs _n_p1 _ok_p1 _yes _gate
 # 临时目录 4.5 那步未生效 2 + 本守卫 1]);更早的 a0bcd52^ 则在 T9 集成断言处当场猝死、
 # 连汇总行都没有)。没有这道守卫,表会变成"看起来全绿"的假绿。
 # T1~T8=114 + T9 临时目录/符号链接=22 + H5 fd 复制收窄=9(T1 反例 4 + T2 正例 5)
-# + T10 弹窗输入读取=6 + T11 文案⇔行为结构守卫=6 + H5 sink 抹除=9(反例 5 + 正例 4)。
+# + T10 弹窗输入读取=6 + T11 文案⇔行为结构守卫=7(④拆成"判据单一出口"+"严格档不认 y")
+# + H5 sink 抹除=9(反例 5 + 正例 4) + T12 _confirm_yes 判据表=12。
 # 加断言时同步改这里。
-EXPECT_TOTAL=166
+EXPECT_TOTAL=179
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?)\n' "$total" "$EXPECT_TOTAL"

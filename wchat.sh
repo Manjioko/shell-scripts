@@ -2472,7 +2472,7 @@ ask_path_grant() {
     if (( strict )); then
         printf ' \033[1;31m确需放行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m'
     else
-        printf ' \033[1;31m是否放行?(y/n): \033[0m'
+        printf ' \033[1;31m是否放行?(y 或 yes,n/回车 = 拒绝): \033[0m'
     fi
     # 与 shell 工具危险命令确认同款读取(累积 + 先清残留,见 ask_read_line)。
     # Ctrl+C 当作拒绝;残留按键必须先丢,否则上一条弹窗没吃完的 yes 会直接批掉这一条。
@@ -2486,19 +2486,18 @@ ask_path_grant() {
         input_aborted=0
         printf '\r\033[2K\n'
     fi
-    # 严格模式只认 yes(与 confirm_cmd 同口径):让 y 也能过等于把高危路径
-    # 确认降级成普通确认,回车手滑就放行了
-    if (( strict )); then
-        [[ "${answer,,}" == "yes" ]] && { grant_file "$p" "$mode"; auto_audit path_grant "$mode" "$p" "$hd_rule" human_yes ""; return 0; }
-        auto_audit path_grant "$mode" "$p" "$hd_rule" human_no ""
-        return 1
-    fi
-    if [[ "$answer" == "y" || "$answer" == "Y" ]]; then
+    # 两档判据统一走 _confirm_yes。严格档**仍只认 yes**(输 y 不算):高危路径确认
+    # 刻意保留"再想一秒"的摩擦,这是设计;宽松档认 y 或 yes —— 提示语全局写着
+    # "高危必须输入 yes",用户在普通确认里顺手敲 yes 被当成"主动否决"是实测踩过的坑。
+    if _confirm_yes "$answer" "$strict"; then
         grant_file "$p" "$mode"
         auto_audit path_grant "$mode" "$p" "$hd_rule" human_yes ""
         return 0
     fi
-    auto_audit path_grant "$mode" "$p" "$hd_rule" human_no ""
+    local note=""
+    [[ -n "$answer" ]] && note="输入未匹配本档口径(收到 [$answer];本档要求 $(
+        ((strict)) && printf 'yes' || printf 'y 或 yes'))"
+    auto_audit path_grant "$mode" "$p" "$hd_rule" human_no "$note"
     return 1
 }
 
@@ -3446,8 +3445,24 @@ auto_takes_shell() {
     [[ -n "$auto_mode" && "$auto_mode" != "read" ]]
 }
 
+# 确认答案判据(唯一出口,别在调用方各写一份)。两档口径必须是**包含关系**:
+# 宽松档认 y/yes,严格档只认 yes —— 因为提示语已全局写着"高危必须逐字输入 yes",
+# 用户在普通确认里也会顺手敲 yes。(实测踩坑:宽松档原本只认单个 y,用户按口径
+#  输 yes 被连拒两次,回传文案还写成"用户主动否决",把工具判据问题说成人的决定。)
+# 空回车与 n/no 两档都算拒绝,且**不**接受 y 于严格档 —— 那是刻意保留的一秒摩擦。
+_confirm_yes() {
+    local a="${1,,}" strict="${2:-0}"
+    [[ "$a" == "yes" ]] && return 0
+    (( strict )) && return 1
+    [[ "$a" == "y" ]] && return 0
+    return 1
+}
+
+# confirm_cmd 拒绝时记下"为什么拒"(未匹配口径 vs 明确说不),供调用方回传给模型。
+confirm_note=""
+
 # 人工确认读取器(shell 命令专用)。$4=1 表示严格模式:必须输入 yes(硬墙命中
-# 时用),0 表示 y/n。返回 0 = 同意执行,1 = 拒绝。
+# 时用),0 表示宽松档(y 或 yes)。返回 0 = 同意执行,1 = 拒绝。
 # 沿用"短超时轮询读"策略:普通 read 不会被 SIGINT 打断,Ctrl+C 要能在 0.2s 内
 # 被识别为拒绝(历史 bug:卡在 read 上,第二次 Ctrl+C 才生效)。
 confirm_cmd() {
@@ -3460,29 +3475,44 @@ confirm_cmd() {
     printf ' \033[2m   命令:%s\033[0m\n' "$cmd"
     [[ -n "$reason" ]] && printf ' \033[2m   原因:%s\033[0m\n' "$reason"
     echo
-    if (( strict )); then
-        printf ' \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m'
-    else
-        printf ' \033[1;31m是否执行?(y/n): \033[0m'
-    fi
     stty -echoctl 2>/dev/null
-    # 累积读取(修"分段敲 yes 被读成 es → 假拒绝")。这里**不加**冲读:理由见函数
-    # 开头注释(子命令 pty 回流字节与提示同队列),积压字节由调用方在进本函数前冲掉
-    # (见 tool_run_and_parse 的粘贴注入防护)。
-    ask_read_line
-    answer="$ask_line"
+    # 累积读取(修"分段敲 yes 被读成 es → 假拒绝")+ 未识别可重敲一次。这里**不加**
+    # 冲读:理由见函数开头注释(子命令 pty 回流字节与提示同队列),积压字节由调用方
+    # 在进本函数前冲掉(见 tool_run_and_parse 的粘贴注入防护)。
+    local answer="" tries=0 aborted=0
+    while :; do
+        if (( strict )); then
+            printf ' \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m'
+        else
+            printf ' \033[1;31m是否执行?(y 或 yes,n/回车 = 拒绝): \033[0m'
+        fi
+        ask_read_line
+        answer="$ask_line"
+        (( input_aborted )) && break
+        _confirm_yes "$answer" "$strict" && break
+        [[ -z "$answer" ]] && break          # 空回车 = 拒绝,不重问(不给手滑第二次机会)
+        (( ++tries < 2 )) || break           # 未识别只给一次重敲机会,再错就按拒绝收
+        printf '\n \033[2m未识别的输入 [%s] —— 本档要求:%s。再敲一次(n/回车/其他 = 拒绝)\033[0m\n' \
+            "$answer" "$( ((strict)) && printf '逐字输入 yes' || printf 'y 或 yes' )"
+    done
     stty echoctl 2>/dev/null
     if (( input_aborted )); then
+        aborted=1
         input_aborted=0
         printf '\r\033[2K\n'
     fi
-    # 严格模式只认 yes:它的存在意义就是"这条要你再想一秒",让 y 也能过等于
-    # 把高危确认降级成和普通确认同一档(回车手滑就放行了)
-    if (( strict )); then
-        [[ "${answer,,}" == "yes" ]] && return 0
-        return 1
+    if _confirm_yes "$answer" "$strict"; then
+        confirm_note=""
+        return 0
     fi
-    [[ "$answer" == "y" || "$answer" == "Y" ]] && return 0
+    # 拒绝原因要如实:把"用户按提示输了字但判据不认"写成"用户主动否决",会让下一轮
+    # 的我以为你不想放行(实测因此绕了两圈),所以这里记下实收内容交给调用方回传。
+    case "${answer,,}" in
+        ""|n|no|否) confirm_note="" ;;
+        *) confirm_note="输入未匹配本档确认口径(收到 [$answer];本档要求 $(
+               ((strict)) && printf 'yes' || printf 'y 或 yes'))" ;;
+    esac
+    (( aborted )) && confirm_note="输入被中断(Ctrl+C/D),未采纳任何答案"
     return 1
 }
 
@@ -4555,7 +4585,7 @@ skill_save() {
     inp_msg '──────── 正文 ────────'
     inp_msg "$body"
     inp_msg '────────────────────────'
-    printf '\033[2m│\033[0m 是否保存该技能?(y/n): '
+    printf '\033[2m│\033[0m 是否保存该技能?(y 或 yes,n/回车 = 取消): '
     # 与历史选择同款读取(累积 + 先清残留,见 ask_read_line):Ctrl+C 当作拒绝,不会执行写入
     stty -echoctl 2>/dev/null
     ask_drain_input
@@ -4567,7 +4597,9 @@ skill_save() {
         input_aborted=0
         printf '\r\033[2K\n'
     fi
-    if [[ "$answer" != "y" ]]; then
+    # 判据与两处人工确认同一出口(宽松档认 y/yes,大小写不敏感)。原本是 != "y",
+    # 用户按"高危要输 yes"的口径敲 yes 会被当成取消 —— 同一族误判。
+    if ! _confirm_yes "$answer" 0; then
         inp_msg "已取消,未保存"
         return 0
     fi
@@ -4822,7 +4854,7 @@ tool_run_and_parse() {
                 # 回传给模型的信息要带上"为什么被拒":只说"用户拒绝"时模型只会
                 # 换一种等价写法再撞一次墙(实测反复 3~5 轮),带上审批理由它能
                 # 直接判断该缩小范围、换路径还是把命令交给用户。
-                content="用户拒绝执行命令: $command"$'\n'"拒绝时审批器的顾虑:${auth_reason:-用户主动否决}"$'\n'"请勿用等价写法重试同一条;换方案(缩小范围/只读先行/改在工作目录内),或把命令原样告知用户请他执行。"
+                content="用户拒绝执行命令: $command"$'\n'"拒绝时审批器的顾虑:${auth_reason:-${confirm_note:-用户主动否决}}"$'\n'"请勿用等价写法重试同一条;换方案(缩小范围/只读先行/改在工作目录内),或把命令原样告知用户请他执行。"
                 auto_audit shell "run_shell_command" "$cmd_one" "${hd_rule:-auth}" human_no "${auth_reason:-}"
             fi
         else
