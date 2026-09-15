@@ -1,8 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# 解释器:这里**故意不写死 /bin/bash**。Linux 上 bash 的位置随发行版不同(/usr/bin/bash,
+# Nix/Guix 甚至没有 /bin/bash),写死绝对路径等于换台机器就起不来;env 找到的若是 macOS
+# 自带的 3.2,由下面「bash 5 兜底」段 re-exec 到真正的 bash 5+(候选表见该段)。
+# 顺序不变量(自测台 vision_layer_test.sh 第 7 节硬断言):兜底必须在**任何** bash4+ 语法
+# (declare -A / ${v,,} / ${v^^} / mapfile / &>)之前执行完 —— bash 是逐条解析执行的,兜底
+# 之后再出现 3.2 语法才会报 bad substitution/invalid option,写在兜底之前就必然炸。
 
 # 该脚本支持 mimo-2.5 / deepseek-v4 / qwen3.8 等 OpenAI 兼容接口
 # (接口差异集中在三处:联网参数 WEB_SEARCH_PROVIDER、上下文窗口 TOKEN_THRESHOLD、
-#  图片请求形状 IMG_PROVIDER,各自的探测与差异点见对应配置段)
+#  图片链路开关 IMG_PROVIDER(auto|none,图片侧已无厂商探测),差异点见对应配置段)
 # 联网搜索(web_search 工具)按接口自适应:mimo / qwen(dashscope) 走各家原生
 # 联网参数,其余接口不注册该工具、模型自然回退通用 web_fetch(见「联网搜索」配置段)
 # ================切换模型需要改这里👇👇=======================
@@ -19,15 +25,74 @@ BASE_URL="${BASE_URL:-https://ws-h1sc9zrfrttu9ixx.cn-beijing.maas.aliyuncs.com/c
 # 能让"读脚本+外发"这条链路失效的做法。旧 key 已进 git 历史与 ~/.ct/history,
 # 建议到服务商后台轮换(轮换后只改 ~/.ct/config 即可)。
 API_KEY="${WCHAT_API_KEY:-}"
+# ---------- 鉴权头(勿删) ----------
+# 本脚本每一处请求都固定带两个头:标准的 `Authorization: Bearer $API_KEY`,外加一个
+# `-H "api-key: $API_KEY"`。后者**不是冗余**:它是小米 MiMo LLM(api.xiaomimimo.com)
+# 要求的兼容头,qwen/阿里云 compatible-mode 会忽略它。留着的目的就是——以后把 BASE_URL
+# 切回 mimo 时不用改代码(两家的图片/文字请求形状实测完全一致,鉴权头是少数差异之一,
+# 删掉它等于把这条兼容路堵死)。
+# 数量守恒由自测台盯:vision_layer_test.sh 第 8 节断言「带 Bearer 的鉴权点数 == 带
+# api-key 的鉴权点数」,谁当死代码清了会立刻红。新增调用点时两个头一起带上。
 #"deepseek-v4-flash"
 #"deepseek-v4-pro"
 # mimo-v2.5
 # mimo-v2.5-pro
-flash_model="qwen3.8-flash"
-pro_model="qwen3.8-flash"
+# 档位默认模型。可用环境变量 FLASH_MODEL / PRO_MODEL 覆盖(换厂商不必改代码)。
+# -stf/-stp 两个切档分支取的就是这两个变量本身,所以覆盖后运行时切档一并走新值;
+# 联网的 provider 探测也读 flash_model(按模型名前缀 mimo*/qwen* 兜底),只设环境变量
+# 时该判定同样生效。图片链路**不做厂商探测**(单端点,见「图片转述」节)。
+flash_model="${FLASH_MODEL:-qwen3.8-flash}"
+pro_model="${PRO_MODEL:-qwen3.8-flash}"
 # 图片转述用哪个模型见下方 VISION_MODEL(留空=用 flash_model)。主对话换成纯文字
 # 模型(deepseek 等)不影响读图;彻底关闭图片链路:环境变量 IMG_PROVIDER=none
 # ===============================👆👆========================
+
+# ---------- 配置集中区(所有"换厂商可能要动"的落点都在这里) ----------
+# 为什么集中:以前它们散在联网搜索/审批器/上下文压缩/图片转述四个小节里,换一家接口
+# 要翻四百行才能找齐。这里只放**赋值**;原理与实测依据的长注释留在各自小节(下面每行
+# 都标了指针,行号会漂所以不写行号)。
+#
+# ① 可用**同名环境变量**覆盖(启动时生效,改环境不改代码):
+#    FLASH_MODEL / PRO_MODEL   两个档位的默认模型(本次新加,以前只能改代码)
+#    BASE_URL                  接口地址。⚠ 只在启动时可设,脚本内视为不可变:联网的 provider
+#                              探测以它为准(图片侧已收掉探测),-stp 只换 model 不换 BASE_URL
+#    WCHAT_API_KEY → API_KEY   密钥;或写进 CT_CONFIG_FILE(默认 ~/.ct/config,须 0600)
+#                              请求头是双份:Bearer + api-key(后者为 mimo LLM 保留)
+#    CT_CONFIG_FILE            配置文件路径
+#    AUTH_MODEL                审批器模型(默认取 PRO_MODEL)→ 详解见「审批器」节
+#    WEB_SEARCH_PROVIDER       auto|mimo|qwen|none → 详解见「联网搜索」节
+#    WEB_SEARCH_TIMEOUT        联网子请求总超时(秒)
+#    VISION_MODEL              转述用视觉模型(留空=退回 FLASH_MODEL)→ 见「图片转述」节
+#    IMG_PROVIDER              图片链路开关 auto|none(原 mimo/openai 两个"形状家族"值
+#                              因探测无消费方已收掉,现等同 auto)→ 见「图片转述」节
+#    IMG_MAX_BYTES / IMG_MAX_SIDE / IMG_MAX_BATCH / IMG_BATCH_MAX_BYTES  图片配额四件套
+#    TOKEN_THRESHOLD           上下文压缩阈值 → 详解见「上下文压缩」节
+#    (以下属 auto 模式,留在「auto 模式」节,同样支持 env:MAX_TOOL_ROUNDS CMD_TIMEOUT
+#     AUTO_MAX_APPROVALS AUTO_DENY_STREAK AUTO_SNAPSHOT_MAX_KB AUTH_CTX_KEEP)
+# ② **不支持**环境变量覆盖(改了要走代码,且注释里都带实测依据,动手前先读那段):
+#    SKILL_DESC_MAX SKILL_MAX_INJECT(技能注入) KEEP_MSGS SUMMARY_PREFIX(压缩策略)
+#    TOOL_OUTPUT_MAX_LINES TOOL_OUTPUT_MAX_COL READ_MAX_CHARS GREP_MAX_MATCHES
+#    GREP_MAX_COL WEB_MAX_CHARS(工具输出裁剪) IMG_EXTS(按扩展名识别,不做内容嗅探)
+#    WIN THROTTLE DISP_COL PENDING_MAX OUT_HEAD_LINES OUT_BUF_SIZE(终端绘制时序)
+#    BG_SILENT_TIMEOUT INT_FORCE_TIMEOUT SSE_STALL_TIMEOUT(打断/停滞兜底)
+# ③ 派生量(**从环境设了也没用**,启动时会被重算):WORK_ROOT(=启动时的 pwd -P,它同时是
+#    硬墙的边界,刻意不放开) 由 CT_HOME 派生的 HISTORY_DIR SKILLS_DIR AUTO_DIR
+#    AUTO_AUDIT_LOG AUTO_BACKUP_DIR CLIP_DIR auto_session_id vision_model(=VISION_MODEL
+#    或 FLASH_MODEL) IMG_CAPABLE(=IMG_PROVIDER 是否为 none 的落地;图片侧已无探测,
+#    探测只剩联网的 WEB_SEARCH_PROVIDER) model(当前档,由
+#    -stf/-stp 与 flash_model/pro_model 决定) chat_title messages granted_files 等会话态
+# ------------------------------------------------------------------
+AUTH_MODEL="${AUTH_MODEL:-$pro_model}"                # 审批器/终审模型 → 「审批器」节
+WEB_SEARCH_PROVIDER="${WEB_SEARCH_PROVIDER:-auto}"    # 联网方式 → 「联网搜索」节(auto 时由该节探测改写)
+WEB_SEARCH_TIMEOUT="${WEB_SEARCH_TIMEOUT:-90}"        # 联网子请求超时(秒)
+VISION_MODEL="${VISION_MODEL:-}"                      # 转述视觉模型 → 「图片转述」节
+vision_model="${VISION_MODEL:-$flash_model}"          # 派生值(③类):留空即退回 flash_model
+IMG_PROVIDER="${IMG_PROVIDER:-auto}"                  # 图片链路开关 auto|none → 「图片转述」节(只当开关,不再探测)
+IMG_MAX_BYTES=${IMG_MAX_BYTES:-10485760}              # 单张上限(字节,base64 前)
+IMG_MAX_SIDE=${IMG_MAX_SIDE:-2048}                    # 压缩目标:最长边像素
+IMG_MAX_BATCH=${IMG_MAX_BATCH:-4}                     # 一次请求最多合并张数
+IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}  # 一次请求图片字节合计上限
+TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-100000}"          # 压缩阈值(按各家**实测**窗口,拿不准取小)→ 「上下文压缩」节
 
 # ---------- 本地配置文件 ~/.ct/config ----------
 # 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
@@ -63,22 +128,54 @@ fi
 # "invalid option" 但脚本不退出,工具调用参数收集全乱,现象极难归因。
 # 版本判断天然幂等:已经切到 5.x 再进来时条件为假,不会 exec 循环。
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
-    for brew_bash in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    # 候选表(每行一个,顺序即优先级):显式指定 → Apple Silicon brew → Intel brew →
+    # Linuxbrew → Linux 常见位置 → 把 PATH 整个扫一遍。
+    # 为什么要扫 PATH 而不是写死两个 mac 路径:① 本机 PATH 里 /bin 排在 /opt/homebrew 之前,
+    # env bash 仍会先撞上 3.2;② Linux 上 bash 5 的位置随包管理器而变。
+    # 用换行分隔 + while read,不用空格分词:这样允许路径里有空格。
+    bash_candidates=$(
+        {
+            printf '%s\n' "${WCHAT_BASH:-}" \
+                /opt/homebrew/bin/bash /usr/local/bin/bash \
+                "${HOME}/.linuxbrew/bin/bash" /usr/bin/bash /bin/bash
+            printf '%s\n' "${PATH//:/$'\n'}" | sed -e '/^$/d' -e 's|/*$|/bash|'
+        }
+    )
+    wchat_reexec_bash=""
+    while IFS= read -r brew_bash; do
+        [[ -n "$brew_bash" ]] || continue
         [[ -x "$brew_bash" ]] || continue
-        # 只在目标确实是 bash 5+ 时才切换:避免 /opt/homebrew/bin/bash 本身
-        # 仍是 3.x 时被 exec 成无限循环(每次都"找到一个新 bash"再切回去)。
-        # 版本号必须先落成变量再判断:写成 (( $(("$brew_bash" ...) >= 5 )) 时,
-        # "$((" 会被当成算术展开的开头(shellcheck SC1102),而且子进程输出非数字
-        # 会让整个 if 条件直接变成语法错误。
+        if [[ "$brew_bash" == "${BASH:-}" ]]; then
+            continue                       # 正在跑的就是它,exec 过去只是白换一个进程
+        fi
+        # 只在目标确实是 bash 5+ 时才切换:避免候选本身还是 3.x 时被 exec 成无限循环
+        # (每次都"找到一个新 bash"再切回去)。
+        # 版本号必须先落成变量再判断:写成 (( $(("$brew_bash" ...) >= 5 )) 时,"$((" 会被
+        # 当成算术展开的开头(shellcheck SC1102),而且子进程输出非数字会让整个 if 条件直接
+        # 变成语法错误。
         brew_bash_major="$("$brew_bash" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)"
         [[ "$brew_bash_major" =~ ^[0-9]+$ ]] || brew_bash_major=0
         if (( brew_bash_major >= 5 )); then
-            exec "$brew_bash" "$0" "$@"
+            wchat_reexec_bash="$brew_bash"
+            break
         fi
-    done
+    done <<<"$bash_candidates"
+    # exec 必须放在循环**外面**。`done <<<"$bash_candidates"` 这个 here-string 会把整个
+    # 循环体的 stdin 重定向成那串候选路径;在循环里 exec 过去,新进程继承的就是它 ——
+    # 终端没了,`[[ -t 0 ]]` 恒假。后果不是报错而是两处静默降级,且提示骗人:
+    #   auto_enable 判定"无交互终端"退回普通模式;输入组件判定又把 stdin 非 tty 报成
+    #   "缺 python3 + prompt_toolkit"(实测组件齐全),于是让人反复跑 setup.sh 也无用。
+    # 实测对照(同一 pty):循环内 exec → NOT-TTY;循环外 exec → TTY。
+    [[ -n "$wchat_reexec_bash" ]] && exec "$wchat_reexec_bash" "$0" "$@"
     # 找不到就别静默降级——后面的 declare -A 会以"工具参数错乱"这种难懂的方式失败
-    printf '⛔ 需要 bash 5.x(当前 %s,macOS 自带的是 3.2),且未找到 /opt/homebrew/bin/bash\n' "$BASH_VERSION" >&2
-    printf '   安装:brew install bash\n' >&2
+    case "${OSTYPE:-}" in
+        darwin*) bash_install_hint='brew install bash(Apple Silicon 在 /opt/homebrew/bin/bash,Intel 在 /usr/local/bin/bash)' ;;
+        linux*)  bash_install_hint='用发行版包管理器装 bash 5+:apt install bash / dnf install bash / pacman -S bash / apk add bash' ;;
+        *)       bash_install_hint='安装 bash 5+ 后重跑' ;;
+    esac
+    printf '⛔ 需要 bash 5.x:当前 %s(%s),候选表里没有可用的 bash 5+\n' "$BASH_VERSION" "${BASH:-unknown}" >&2
+    printf '   安装:%s\n' "$bash_install_hint" >&2
+    printf '   或显式指路:WCHAT_BASH=/path/to/bash5 %s\n' "$0" >&2
     exit 1
 fi
 
@@ -92,7 +189,7 @@ fi
 # 运行时 -stp/-stf 只切 model,不影响联网方式)。判定以域名为主、模型名兜底
 # (走代理时域名看不出血统)。新增一家接口 = 此处加一行 + 在 web_search_build_body
 # 加一个 case,发请求/解析/回传全部共用(见该函数注释)。
-WEB_SEARCH_PROVIDER="${WEB_SEARCH_PROVIDER:-auto}"   # 环境变量可强制指定 mimo|qwen|none
+# 联网方式(auto|mimo|qwen|none)的赋值见脚本头部「配置集中区」;这里保留探测逻辑。
 
 detect_web_search_provider() {
     case "$BASE_URL" in
@@ -108,7 +205,7 @@ detect_web_search_provider() {
 [[ "$WEB_SEARCH_PROVIDER" == "auto" ]] && WEB_SEARCH_PROVIDER=$(detect_web_search_provider)
 
 # 联网子请求总超时(秒):各家联网都是"搜完再答",实测 15~25s,留足余量
-WEB_SEARCH_TIMEOUT="${WEB_SEARCH_TIMEOUT:-90}"
+# (赋值见脚本头部「配置集中区」)
 
 
 # 保存当前对话的标题，默认空字符串，首次保存时由模型生成
@@ -309,8 +406,8 @@ auto_approvals=0
 auto_deny_streak=0
 
 # 权限审批用的模型。刻意与执行模型解耦:同一个模型给自己批条子容易自我说服。
-# 默认取 pro_model;换纯文字 pro 档时这里同步换即可,也可环境变量覆盖。
-AUTH_MODEL="${AUTH_MODEL:-$pro_model}"
+# 默认取 pro_model;换纯文字 pro 档时同步设 PRO_MODEL 或 AUTH_MODEL 即可。
+# (赋值见脚本头部「配置集中区」)
 # 送审上下文裁剪:保留 system + 最近 N 组问答。不裁剪会让 auth_message 无上限
 # 增长(判得越来越慢、越来越贵),更糟的是历史裁定会锚定后续判断(前面一串 Y,
 # 后面相似命令容易跟着 Y)。
@@ -354,7 +451,7 @@ last_prompt_tokens=0
 # 换模型/换网关时用环境变量覆盖,不必改代码:TOKEN_THRESHOLD=100000 wchat -st "..."
 # 取高了会怎样:超限表现为"请求失败 → retry_after_compact 按本地粗算判断是否压缩重发"
 # (见该函数),阈值过高会让它判成"不是上下文问题"而反复重试,所以拿不准就取小。
-TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-100000}"
+# (赋值见脚本头部「配置集中区」)
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
 # + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
@@ -389,37 +486,39 @@ WEB_MAX_CHARS=20000
 
 # ---------- 图片理解(多模态,转述架构)配置 ----------
 # 设计原则:用户发图(@/-img)与 AI 读图(read_image)都不把图片放进 messages——
+# ---------- 图片转述(单端点前提下的最小组合) ----------
 # 本地 base64 后单独调一次视觉接口,只把文字转述作为普通文本写入上下文。
 # 好处:messages/历史不膨胀、压缩不因图片频繁触发、图片 token 每张只付一次。
 #
-# 接口差异集中在三处,新增一家视觉接口不用碰链路其余部分:
-#   1) VISION_MODEL / IMG_PROVIDER(本节)——用哪个模型、按哪种请求形状
-#   2) vision_extra_fields()(转述请求章节)——该家专属字段的唯一落点
-#   3) 下面这几个 IMG_* 限额——都可用同名环境变量覆盖,换接口只改环境不改代码
+# 配置只有两项(赋值都在脚本头部「配置集中区」):
+#   1) VISION_MODEL —— 用哪个视觉模型。留空退回 flash_model;**只能填当前 BASE_URL
+#      这个端点上存在的模型名**(单端点,见下方边界)
+#   2) IMG_PROVIDER=none —— 彻底关闭图片链路(唯一有效值,详见下一段)
+#   (图片配额四件套 IMG_MAX_BYTES / IMG_MAX_SIDE / IMG_BATCH_MAX_BYTES 等也在集中区,
+#    它们控制体积与合并张数,与厂商无关)
+#
+# 边界(2026-08-03 定):图片/联网**不与主对话分厂商**。曾经存在过"请求形状家族"
+# (mimo/openai)与 detect_vision_provider 探测,但实测两家的图片请求形状**完全一致**
+# (该函数的两个分支输出一模一样),探测结果没有任何消费方 —— 属为"将来可能换家"预留
+# 的空转分叉,已收掉。要跨厂商挂图需要独立 URL + 独立密钥,而那会把单一 API_KEY 扩成
+# 密钥矩阵,直接冲击凭据面(H6/P1 名单、~/.ct/config 白名单、模型可见面脱敏),
+# 权衡后决定不做。若将来一定要做,正确形态是"厂商描述符"(一个名字带出 url+key+头形态),
+# 不是散加 IMG_URL/IMG_KEY/WEB_URL/WEB_KEY。
 
 # 转述用的视觉模型。留空 = 退回 flash_model(默认档)。与主对话模型解耦:
-# -stp/-stf 只切文字模型,不影响转述模型;想固定用某个视觉强的模型就设它
-VISION_MODEL="${VISION_MODEL:-}"
-vision_model="${VISION_MODEL:-$flash_model}"
+# -stp/-stf 只切文字模型,不影响转述模型;想固定用某个视觉强的模型就设 VISION_MODEL
 
-# 请求形状家族:auto|mimo|openai|none。
-# none = 明确不发图(手工关闭,或运行中收到"不支持图片"报错后自动降级)
-IMG_PROVIDER="${IMG_PROVIDER:-auto}"
+# 图片链路开关:auto|none。auto = 开(默认);none = 明确不发图(手工关闭,或运行中
+# 收到"不支持图片"报错后由 vision_disable 自动降级)。
+# 曾经还有 mimo/openai 两个"请求形状家族"取值,因探测结果无消费方已删除;现在再设成
+# 那两个值等同 auto(不再有任何分叉语义)。
+# (赋值见脚本头部「配置集中区」)
 
-# 域名为主、模型名兜底(与 detect_web_search_provider 同一理由:私有网关常把
-# https 终结在网关内部,按模型名猜会漏)。目前两家的图片请求形状实测一致,
-# 分支保留为扩展点;新增一家 = 在此加一行 case + 在 vision_extra_fields 加一分支
-detect_vision_provider() {
-    local url="${1,,}" m="${2,,}"
-    case "$url" in
-        *xiaomimimo.com*) echo mimo; return ;;
-    esac
-    case "$m" in
-        mimo*) echo mimo; return ;;
-    esac
-    echo openai
-}
-[[ "$IMG_PROVIDER" == "auto" ]] && IMG_PROVIDER=$(detect_vision_provider "$BASE_URL" "$vision_model")
+# 图片链路开关的落地:IMG_PROVIDER=none → IMG_CAPABLE=0,之后 describe_images 直接
+# 返回"不支持图片"的说明文本(见该函数),工具照常注册、只是不发图。
+# 无厂商探测:单端点前提下图片请求形状只有一种(实测各家一致),见上一段边界说明。
+# 另:旧版此处的 detect_vision_provider 用了 ${1,,}(bash 4 专有语法),在系统 bash 3.2
+# 下会 bad substitution —— 随探测一并消失,少一个版本耦合点。
 IMG_CAPABLE=1
 vision_disabled_reason=""
 [[ "$IMG_PROVIDER" == "none" ]] && IMG_CAPABLE=0
@@ -435,16 +534,10 @@ vision_disable() {
 # 单张与合计字节上限:base64 后约 1.37 倍。取各家最小公约(mimo 文档单张 50MB、
 # qwen maas 侧 10MB 量级),超限会 400 或静默截断,故按小的来;换大配额接口用
 # 环境变量放大即可。压缩后一般远低于此值,正常截图不会触发
-IMG_MAX_BYTES=${IMG_MAX_BYTES:-10485760}
-
 # 压缩目标:最长边像素。2048 → 约 4M 像素 ≈ 4k token,清晰度与费用的平衡点
-IMG_MAX_SIDE=${IMG_MAX_SIDE:-2048}
-
 # 一次转述请求最多合并的图片张数
-IMG_MAX_BATCH=${IMG_MAX_BATCH:-4}
-
 # 一次转述请求所有图片字节合计上限(约 4 张 × 10MB 再留 base64 余量)
-IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}
+# (IMG_MAX_BYTES / IMG_MAX_SIDE / IMG_MAX_BATCH / IMG_BATCH_MAX_BYTES 的赋值见脚本头部)
 
 # 支持的图片扩展名(按扩展名识别,不做内容嗅探——为便利牺牲准确性)
 IMG_EXTS="png jpg jpeg gif webp bmp"
@@ -1959,6 +2052,7 @@ compact_messages() {
     # 同步一次拿完。--max-time 兜底防卡死;失败时 summary 为空,走硬截断分支。
     # 请求体复用 compact_file 发送:curl -d 同样走参数列表,大请求体撞 ARG_MAX
     printf '%s' "$request_body" > "$compact_file"
+    # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
     summary=$(curl -s --max-time 120 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
@@ -2180,6 +2274,7 @@ auth_think() {
     printf '%s' "$request_body" > "$auth_file"
     printf ' \033[2m🛡 权限判断中…\033[0m'
     for attempt in 1 2; do
+        # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
         resp=$(curl -s --connect-timeout 10 --max-time 30 "$BASE_URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $API_KEY" \
@@ -3267,6 +3362,7 @@ auto_final_judge() {
     printf '%s' "$body" > "$rfile"
     printf ' \033[2m🛡 auto 终审中…\033[0m'
     for attempt in 1 2; do
+        # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
         resp=$(curl -s --connect-timeout 10 --max-time 30 "$BASE_URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $API_KEY" \
@@ -3547,6 +3643,8 @@ auto_enable() {
         else
             printf '\033[31m✗ auto 模式需要交互终端(Ctrl+C 是唯一急停手段),已按普通模式启动\033[0m\n' >&2
             printf '  无人值守跑单轮任务时改用:WCHAT_AUTO_ASSUME_YES=1 wchat -st "…"\n' >&2
+            printf '  若你确实在终端里直接运行:那是 stdin 被启动方式换掉了(管道/重定向/父进程 here-string),\n' >&2
+            printf '  与组件无关 —— 同一条判据在输入阶段会报"缺 prompt_toolkit",别被它带去反复跑 setup.sh\n' >&2
             auto_mode=""
             return 0
         fi
@@ -3910,6 +4008,7 @@ tool_web_search() {
     # 同步搜索最长 WEB_SEARCH_TIMEOUT 秒:静默期间给可见反馈(历史问题:全程无
     # 提示,分不清是搜索慢还是接口已死)。结束后 \r ESC[2K 清掉这行临时提示
     printf ' \033[2m🔍 联网搜索中…(最长 %s 秒,Ctrl+C 可中断)\033[0m' "$WEB_SEARCH_TIMEOUT"
+    # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
     resp=$(curl -s --connect-timeout 15 --max-time "$WEB_SEARCH_TIMEOUT" "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
@@ -3999,7 +4098,7 @@ tool_web_search() {
 # ========== 图片理解(多模态,转述架构) ==========
 # 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
 # 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉请求
-# (模型由 VISION_MODEL/flash_model 决定,形状由 IMG_PROVIDER 决定),
+# (模型由 VISION_MODEL/flash_model 决定;请求形状不按厂商分叉,见「图片转述」节),
 # 只把文字转述作为普通文本写入上下文,
 # 避免消息/历史膨胀、压缩频繁触发与图片 token 每轮重复计费。
 
@@ -4090,9 +4189,9 @@ im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null
     return 1
 }
 
-# ---------- 请求/响应形状(按 IMG_PROVIDER 分叉) ----------
-# 视觉请求的各家专属字段唯一落点。公共骨架(模型/messages/stream)不放这里,
-# 以免分支间复制。以 jq 对象片段形式返回,由 vision_build_body 拼进请求体。
+# ---------- 视觉请求体的字段落点 ----------
+# 公共骨架(模型/messages/stream)不放这里,以免与其它请求重复。以 jq 对象片段形式
+# 返回,由 vision_build_body 拼进请求体。
 #
 # 实测(2026-07-09,同一张 220px PNG,五种形状对撞):
 #   openai 家族(qwen maas compatible-mode):带 reasoning_effort 且
@@ -4104,11 +4203,10 @@ im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null
 #     省略以与上对齐。
 # 新增一家:在此加一个 case 分支即可,链路其它部分(压缩/批量/注册/提示)不动。
 vision_extra_fields() {
-    case "$IMG_PROVIDER" in
-        mimo)   printf ', thinking: {type:"disabled"}' ;;
-        openai) printf ', thinking: {type:"disabled"}' ;;
-        *)      printf '' ;;
-    esac
+    # 曾经这里按 IMG_PROVIDER 分 mimo/openai 两支,**实测两支内容完全相同**,故收敛为
+    # 无条件一份。新增真正有专属字段的厂商时,在这里加条件(而不是再开"形状家族")。
+    # 输出是 jq 对象片段(键可不加引号),由 vision_build_body 拼进请求体。
+    printf ', thinking: {type:"disabled"}'
 }
 
 # 组装转述请求体。$1=模型 $2=parts 文件(image_url 数组 JSON) $3=用户提示词
@@ -4138,8 +4236,8 @@ vision_parse_resp() {
 #     (exec 参数受 ARG_MAX 限制,macOS 仅约 1MB):parts 经 jq --rawfile
 #     从临时文件读入,请求体用 curl --data-binary @file 发送;
 #   - base64 字符集只有 [A-Za-z0-9+/=],手拼 JSON 字符串无需转义;
-#   - 视觉模型与请求形状解耦于主对话:模型取 vision_model(VISION_MODEL 空则
-#     退回 flash_model),形状取 IMG_PROVIDER,切文字模型(-stp/-stf)不影响转述。
+#   - 视觉模型与主对话解耦:模型取 vision_model(VISION_MODEL 空则退回 flash_model),
+#     切文字模型(-stp/-stf)不影响转述;但**始终打在同一个 BASE_URL 上**(单端点)。
 describe_images() {
     local -a files=("$@") cleanup=()
     local i n path new_path ext mime b64 parts sep tmpdir req_file resp err http_status
@@ -4155,7 +4253,7 @@ describe_images() {
     # 图没看成,不会假装读过图
     if (( ! IMG_CAPABLE )); then
         describe_failed=1
-        describe_result="当前视觉模型(${vision_model})不支持图片输入,原因:${vision_disabled_reason}(IMG_PROVIDER=${IMG_PROVIDER})。如需读图:设 VISION_MODEL 指向带视觉的模型,或把 IMG_PROVIDER 设为 openai/mimo"
+        describe_result="当前视觉模型(${vision_model})不支持图片输入,原因:${vision_disabled_reason}(IMG_PROVIDER=${IMG_PROVIDER})。如需读图:把 VISION_MODEL 指向**当前端点上**带视觉的模型(图片与主对话同一端点,不能跨厂商)"
         return 1
     fi
 
@@ -4243,6 +4341,7 @@ describe_images() {
     printf '%s' "$request_body" > "$req_file"
     # --data-binary @file:请求体从文件读,绕开命令行参数长度限制。
     # 状态码单独取:401/403 要区分 Key 失效与"模型不支持图片",只看 body 易误判
+    # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
     http_status=$(curl -s -o "$tmpdir/resp.json" -w '%{http_code}' \
         --connect-timeout 15 --max-time 180 "$BASE_URL" \
         -H "Content-Type: application/json" \
@@ -4391,6 +4490,7 @@ skill_save() {
         }')
         # 请求体复用 tmpf 发送(curl -d 同样撞 ARG_MAX)
         printf '%s' "$request_body" > "$tmpf"
+        # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
         resp=$(curl -s --connect-timeout 15 --max-time 120 "$BASE_URL" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $API_KEY" \
@@ -4834,6 +4934,7 @@ ask_ai() {
         # ——连接建立后若平均速率低于 1 字节/秒持续 SSE_STALL_TIMEOUT 秒,curl
         # 自行断开报 "curl: (28)"(进入 api_error,可见报错),防止无人干预时
         # 服务端静默挂死、read 无限 pending。
+        # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
         curl -sSN --connect-timeout 15 --retry 2 --retry-connrefused --retry-max-time 15 \
             --speed-time "$SSE_STALL_TIMEOUT" --speed-limit 1 \
             "$BASE_URL" \
@@ -5160,6 +5261,7 @@ overview() {
     # 同步一次拿完(标题失败只影响历史文件名,无需走 ask_ai 的重试链路);
     # 请求体复用 tmpf 发送,同样绕开命令行参数长度限制
     printf '%s' "$request_body" > "$tmpf"
+    # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
     resp=$(curl -s --connect-timeout 15 --max-time 60 "$BASE_URL" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer $API_KEY" \
@@ -5559,9 +5661,20 @@ normal_line() {
             "$auto_mode" "$auto_approvals"
     fi
 
-    # 输入组件缺失:提示安装后退出(单轮模式 -st 带内容不会走到这里)
-    if [[ -z "$PTK_HELPER" || ! -t 0 || ! -t 1 ]]; then
+    # 输入阶段的前置条件,三种原因**分开报**:以前合并成一条"缺组件",而真因往往是
+    # stdin/stdout 不是终端 —— 让人反复跑 setup.sh(实测踩过:组件齐全仍报缺组件)。
+    if [[ -z "$PTK_HELPER" ]]; then
         inp_msg "⚠️  缺少输入组件(python3 + prompt_toolkit),请先运行: bash setup.sh"
+        inp_msg "    当前 python3=$(command -v python3 || echo '(无)') helper=${PTK_HELPER:-'(未找到 input_helper.py)'}"
+        exit 1
+    fi
+    if [[ ! -t 0 ]]; then
+        inp_msg "⚠️  标准输入不是终端(被重定向、来自管道或定时任务),无法进入交互输入;组件本身正常。"
+        inp_msg "    单轮任务改用: wchat -st \"问题\";交互使用请直接在终端里运行,不要用 | < 或 nohup 接 stdin"
+        exit 1
+    fi
+    if [[ ! -t 1 ]]; then
+        inp_msg "⚠️  标准输出不是终端(输出被重定向到文件/管道),无法绘制输入框;组件本身正常。"
         exit 1
     fi
 
