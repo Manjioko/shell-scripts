@@ -105,28 +105,29 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 | 号 | 拦什么 | 为什么不能靠审批器 |
 |---|---|---|
 | H1 | `sudo` / `doas` / `su` | 提权后沙箱形同虚设 |
-| H2 | `curl … \| sh`、`bash <(curl …)`、`eval "$(wget …)"` | 内容不可预知，事后无法回滚 |
-| H3 | `rm -rf ~` / `$HOME` / `/*` / `/usr` / `--no-preserve-root` | 一条命令毁所有 |
+| H2 | `curl … \| sh`、`bash <(curl …)`、`eval "$(wget …)"`；**落盘再执行**：`curl -o <路径> <url> && bash <绝对路径>` | 内容不可预知，事后无法回滚。落盘分支原先写成 `-o <值>` 后**紧跟**执行段，而真实命令中间隔着 URL → 近乎永不命中；以前被"落盘那半会被 P2 拒"掩盖，**临时目录现在豁免了，组合不再被拆开**，所以这行是真修好。残留缺口（刻意）：不跨 `;` 连接（`curl -o /tmp/x.sh url; sh /tmp/x.sh` 仍漏）——放开 `;` 会让"同串里两件不相干的事"大面积误伤 |
+| H3 | `rm -rf ~` / `$HOME` / `/*` / `/usr` / `--no-preserve-root`；家目录父级 `/Users` 与 `/home` **同时列** | 一条命令毁所有。只写 `/Users` 时 Linux 上 `rm -rf /home`（删掉全部用户家目录）连 H3 都不命中，且 `/home` 刻意不在 P2 名单 → 掉到可被 `--allow-write` 放开的 P3。代价：`/home` 与 `/Users` 同为无边界前缀，`rm -rf /homebrew/x` 一并判 H3（锁在 T13 标 `[设计如此]`） |
 | H4 | `dd of=/dev/*`、`mkfs`、分区 | 文件系统级 |
-| H5 | 写/删 `~/.bashrc` `.zshrc` `.ssh` `.aws` `.gnupg` `~/Library/LaunchAgents` | 持久改变环境，不可回滚 |
-| H6 | 访问凭据：私钥/凭据**目录**（`~/.ssh` `~/.aws` `~/.gnupg` `~/.docker` `~/.kube` `~/.subversion` `~/.config/{gh,gcloud,azure}` `~/.ct/{config,history}`）＋凭据**文件名（不限位置，含工作目录内的项目级文件）**：`.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `spnego-machine` `.git-credentials` `.pem/.key/.p12/.pfx` `id_*` ＋ `security dump-keychain` | 泄露即永久；内容会进上下文并随请求发给服务端。**与 P1 同口径**（改一侧必须同步另一侧，见第九节第 6 条）。**`.env` 不在本条**：工作目录内的 `.env` 属开发常规，只由外发规则 H10 兜 |
+| H5 | 写/删 `~/.bashrc` `.zshrc` `.gitconfig` `.ssh` `.aws` `.gnupg` `~/Library/LaunchAgents`、`~/.config/<app>/config` | 持久改变环境，不可回滚。家目录的**绝对形态**统一由 `hd_home` 锚点提供：`~`／`$HOME`／`/Users/<name>`／`/home/<name>` 四写并集，H5/H6 共用它，所以"漏了某个平台"只可能发生在这一处（改完必须看 T13 的 5 条静态守卫是否还绿） |
+| H6 | 访问凭据：私钥/凭据**目录**（`~/.ssh` `~/.aws` `~/.gnupg` `~/.docker` `~/.kube` `~/.subversion` `~/.config/{gh,gcloud,azure}` `~/.ct/{config,history}`）＋凭据**文件名（只判信任边界外，见第九节第 6.1 条）**：`.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `spnego-machine` `.git-credentials` `.pem/.key/.p12/.pfx` `id_*` ＋ `security dump-keychain`；**他人家目录同样判**（`/home/bob/.ssh/…`——Linux 上锚点原先只有 `/Users`，文本层完全不命中，而路径侧 P1 靠 `$HOME` **只保护自己的家目录**，别人的密钥因此双侧漏判） | 泄露即永久；内容会进上下文并随请求发给服务端。**与 P1 同口径**（改一侧必须同步另一侧，见第九节第 6 条）。**`.env` 不在本条**：工作目录内的 `.env` 属开发常规，只由外发规则 H10 兜 |
 | H7 | `git push --force`、`push :分支`、`filter-branch`、`clean -fdx`、`-no-verify` | 改写已发布历史，牵连他人 |
 | H8 | `shutdown` / `halt` / `poweroff` / `systemctl stop` | 会连带杀掉正在运行的 wchat 自己 |
 | H9 | `pkill` / `killall` / `kill -9 -1` / 对 `$$`、`ppid` 动手 | 同上（进程炸弹） |
 | H10 | `curl --upload-file` / `-d @文件` 上送 `.env`、`*.key` | 外发，不可回滚 |
-| H11 | 重定向写入 `/etc` `/usr` `/bin` `/System` 等 | 持久改变系统，不在 checkpoint 覆盖范围 |
+| H11 | 重定向/`tee` 写入系统路径，名单是**两平台并集**：`/etc` `/usr` `/bin` `/sbin` `/System` `/Library` `/private` `/Applications` `/var/root` + `/proc` `/sys` `/run` `/boot` `/lib` `/lib64` `/srv` `/media` `/mnt` `/root` | 持久改变系统，不在 checkpoint 覆盖范围。`/root`（Linux 的 root 家）与 macOS 侧已有的 `/var/root` **成对**：漏掉它 `echo k > /root/.ssh/authorized_keys` 就只剩一条可放开的 P3。刻意**不含 `home`/`Users`**——用户目录按"两侧同为 P3"处理，写进这里会造成单侧加严（shell 撞 H11、文件工具只落 P3） |
 | （H12 层） | auto 下重定向/写动词的目标越界 | **规则号沿用 P1/P2/P3**，不复造第二套编号 |
 
 ### 文件路径 `hard_deny_path` → `P1..P3`
 
 | 号 | 判据 |
 |---|---|
-| P1 | 读写凭据：目录 `$HOME/.ssh` `.aws` `.gnupg` `.docker` `.kube` `.subversion` `.config/{gh,gcloud,azure}` `.azure` `.ct/{config,history}`；**文件名（任何位置，含仓库里的项目级文件）** `.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `.git-credentials` `spnego-machine` `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`；扩展名 `.pem` `.key` `.p12` `.pfx` | 与 H6 成对同步。旧版只按 `$HOME/` 前缀列，且 `[[ "$np" == id_rsa ]]` 拿整串比绝对路径是**死分支**（嵌在 `.ssh` 外的私钥全靠这条兜底）；`.npmrc`/`.netrc`/`.pypirc` 当时**完全不在名单里**，于是 shell 里 `cat ~/.npmrc` 恒拒、`read_file ~/.npmrc` 却直接放行 —— 没有真沙箱时，一侧放行就等于没有保护 |
-| （刻意代价） | 凭据按**文件名**命中，不区分是否真读内容 | `ls -l .npmrc`（只看元数据）、甚至命令文本里出现 `~/.npmrc` 都会撞 H6——**连搜自己的规则都会被拦**（改这条时请用不带点或拆开拼的写法，如 `grep npmrc`、`grep 'git.credits'`）。按"宁拒不误放"保留，锁在表里标 `[设计如此]` |
+| P1 | 读写凭据：目录 `$HOME/.ssh` `.aws` `.gnupg` `.docker` `.kube` `.subversion` `.config/{gh,gcloud,azure}` `.azure` `.ct/{config,history}`，**以及他人家目录下的同一份名单**（`/home/bob/.ssh`、`/Users/bob/.aws`——由 `hd_cred_subdirs` + `hd_foreign_cred_path` 提供，只认"家目录直属层级"、不碰自己的 `$HOME`）；**文件名（只判信任边界外：归一后落在 `$WORK_ROOT` 内的项目级 `.npmrc` 等按普通配置放行，见第九节第 6.1 条；`WORK_ROOT==$HOME` 或 `/` 时该豁免失效）** `.npmrc` `.netrc`/`_netrc` `.pypirc` `.htpasswd` `.pgpass` `.git-credentials` `spnego-machine` `id_rsa`/`id_dsa`/`id_ecdsa`/`id_ed25519`；扩展名 `.pem` `.key` `.p12` `.pfx` | 与 H6 成对同步。旧版只按 `$HOME/` 前缀列，且 `[[ "$np" == id_rsa ]]` 拿整串比绝对路径是**死分支**（嵌在 `.ssh` 外的私钥全靠这条兜底）；`.npmrc`/`.netrc`/`.pypirc` 当时**完全不在名单里**，于是 shell 里 `cat ~/.npmrc` 恒拒、`read_file ~/.npmrc` 却直接放行 —— 没有真沙箱时，一侧放行就等于没有保护 |
+| （刻意代价） | 凭据按**文件名**命中，不区分是否真读内容 | `ls -l ~/.npmrc`（只看元数据）、甚至命令文本里出现 `~/.npmrc` 都会撞 H6——**连搜自己的规则都会被拦**（改这条时请用不带点或拆开拼的写法，如 `grep npmrc`、`grep 'git.credits'`）。按"宁拒不误放"保留，锁在表里标 `[设计如此]` |
 | （刻意豁免） | `.env` 在工作目录内可读；目录外的 `id_rsa.pub` 可读 | 前者是开发常规、真正风险在外发（H10）；后者公钥不是机密，拦它只会逼模型绕路。但 `~/.ssh/` **目录墙优先**，其内的 `.pub` 两侧都拦 |
-| P2 | 写系统路径：`/etc /usr /bin /sbin /Library /System /private /opt /var /boot /dev`（工作目录内的写**排在它前面**） |
+| P2 | 写系统路径（**两平台并集**）：macOS 侧 `/System /Library /private /Applications /Volumes /var/root`、共用 `/etc /usr /bin /sbin /opt /dev`、Linux 侧 `/proc /sys /run /boot /lib /lib64 /srv /media /mnt /var /root`（`/root` 与 macOS 侧已有的 `/var/root` 成对，漏它等于让"写 root 的 authorized_keys"只剩一条可放开的 P3）（工作目录内的写**排在它前面**）。刻意**不列用户目录**：`/Users` 与 Linux 的 `/home` 同构，都不进 P2，越界写归 P3（否则同一动作两平台红线等级不同）。漏列的后果不是漏放而是**降级**——`写 /proc/sys` 会掉到 P3，而 P3 在 full 档 + `--allow-write` 下可放开，P2 永不放开 |
 | P3 | auto 下写工作目录之外且不在 `--allow-write` 名单 |
-| 临时目录写 | `/private/tmp`、`/var/tmp`、`$TMPDIR`（物理前缀，同一份 `auto_tmp_prefixes` + 字面量兜底） | P2 里先豁免（编译器/heredoc 大量写它，拦下来只会卡死任务）；文件工具侧由 `auto_tmp_write_ok` 给同口径放行（以前 shell 能写、`write_file` 要人点名 = 口径分裂，只会把人逼去 heredoc）。**工具侧多一道 shell 做不到的检查：末段是符号链接一律拒** —— `norm_path` 只归一已存在的**父目录**、不解析末段链接，而落盘是 `> "$resolved"` 会跟随链接，判定看到 `/tmp/build.log` 而字节可以落在任何地方（1777 的 `/tmp` 里预放 `build.log -> ~/.npmrc` 即绕过 P1/P2）。写前仍落 `auto_backup`，审计标签 `auto_allow_tmp`（与 `auto_allow_rw` 区分、计入放行配额），**不写进授权名单**：缓存会让第二次写从第 1 步直接返回、跳过链接复检 |
+| 临时目录写 | `/private/tmp`、`/var/tmp`、`/dev/shm`(仅 Linux)、`$TMPDIR`（物理前缀，同一份 `auto_tmp_prefixes` + 字面量兜底） | P2 里先豁免（编译器/heredoc 大量写它，拦下来只会卡死任务）；文件工具侧由 `auto_tmp_write_ok` 给同口径放行（以前 shell 能写、`write_file` 要人点名 = 口径分裂，只会把人逼去 heredoc）。**工具侧多一道 shell 做不到的检查：末段是符号链接一律拒** —— `norm_path` 只归一已存在的**父目录**、不解析末段链接，而落盘是 `> "$resolved"` 会跟随链接，判定看到 `/tmp/build.log` 而字节可以落在任何地方（1777 的 `/tmp` 里预放 `build.log -> ~/.npmrc` 即绕过 P1/P2）。这条防护与平台无关，新加的 `/dev/shm` 豁免同样带着它（同为 1777）。写前仍落 `auto_backup`，审计标签 `auto_allow_tmp`（与 `auto_allow_rw` 区分、计入放行配额），**不写进授权名单**：缓存会让第二次写从第 1 步直接返回、跳过链接复检 |
+| TMPDIR 接管 | 启动时若 `$TMPDIR` 缺失、不可用、或归一后就是 `/tmp`／`/var/tmp`，换成 `$HOME/.ct/tmp`（`chmod 700`）并 `export` | 自家有十余处 `mktemp "${TMPDIR:-/tmp}/…"`。macOS 上 `$TMPDIR` 天然是 0700 私有目录，**不插手**；Linux 上（容器/CI/非登录 ssh）`$TMPDIR` 经常根本没设 → 全部落到 1777 的 `/tmp`，而同机任何用户都能列举它、能对 1777 目录抢注文件名。落在这里的东西包括审批 prompt 全文、审计切片、会话正文、请求体 dump——含令牌的内容等于对本机广播，而**这是豁免链主动放行的一条外泄路径**（临时目录在 P2 里先豁免，路径墙不会拦），所以不是理论风险。只在缺失/公共时接管，改的是 `$TMPDIR` 一个变量而不是那十余个调用点，子进程（curl/npm/gradle 都尊重 `TMPDIR`）同步受益。**顺序硬约束**：接管必须判在 `auto_tmp_prefixes` 构建**之前**——晚一步就会出现"`$TMPDIR` 已是 `~/.ct/tmp`、豁免集合里还是 `/tmp`"，于是自家每次 `mktemp` 都撞 P2（P2 连 `--allow-write` 都放不开），等于自杀；这条顺序由 T13 的行号守卫钉住 |
 
 误杀代价按通道不对称,不能一概说"偏严即可":
 
@@ -351,6 +352,17 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
    / `hd_re_secret_ref`）与路径级 P1（`hard_deny_path` 的两个 case + 扩展名判断）必须同
    名单。只改一侧就是制造"shell 拦死、文件工具放行"的口径分裂，等于没有保护；
    `test_hardwall.sh` 的 T8 用成对断言钉这条（同一个文件两条链路必须同结论）。
+6.1. **信任边界的权威定义只有 `in_root_exempt()` 一处**（判据侧 `hard_deny_path` 的 P1、
+   链路侧 `path_access` 的第 1.5 步、命令侧 H6 的 `hd_creds_all_exempt` 三处共用它）。
+   规则：归一后落在 `$WORK_ROOT` 内的路径不触发凭据/系统写这三族墙——按文件名命中的那批
+   凭据分支只判边界外，于是项目级 `.npmrc` / `.netrc` 属普通配置文件，读写都放。两条例外：
+   ① `WORK_ROOT == $HOME` 或 `/` 时豁免整体失效（边界本身就是家目录/根，等于没边界）；
+   ② 末段是符号链接且真身在边界外时不豁免（`link_escapes_root()`，与"末段链接一律拒"同族）。
+   命令侧同口径：`cat .npmrc` 与 `read_file .npmrc` 必须同结论；`cat .npmrc ~/.npmrc` 这类
+   混合形态按最严判（有一条在边界外就整条拒）。
+   踩过的两个坑（都锁进 T8）：用 `grep -oE` 抠命中片段只剩 `.npmrc`，`cat ~/.npmrc` 就被误判
+   成边界内；带 `$()`/反引号的词去归一会拼出 `$PWD/$(cat ~/.npmrc)` 这种荒谬路径并判"边界内"
+   —— 所以只豁免整段就是字面路径的词，与 `shell_note_grants` 不敢记账的词同一集合。
 7. **H6 不许接通用的 `hd_recheck`**。那条脱敏走 `hd_is_readonly_verb` 白名单，里面有
    `cat/head/tail/less/strings/grep/sed/awk` —— 这些动词的带引号参数**就是文件本身**，
    照搬到凭据规则上，`cat '.npmrc'` 就变成放行，等于"加对引号即可绕过凭据墙"。
@@ -468,6 +480,109 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
       是 `drwxrwxrwt`（1777，同机任何人可读、可抢注同名文件），`$TMPDIR`
       （`/var/folders/.../T/`）是 `drwx------`（0700，只有我自己）。"缓存目录"该指后者，
       含令牌的东西落 `/tmp` 就是本机广播。
+- [x] 硬墙的 Linux 兼容三处（审 `#39/#42` 时顺出来的，同一块 `/tmp` 放行逻辑）：**已修**
+      - **①** `auto_tmp_prefixes` 的候选清单原本是 macOS 形状（`/tmp /var/tmp $TMPDIR`），
+        Linux 上事实上的第二个公共临时目录 `/dev/shm`（tmpfs + 1777，JVM/共享内存/构建工具
+        默认写它）不在其中 → 命中 P2 的 `/dev/*` 被**永久拒**（P2 连 `--allow-write` 都放不开），
+        正是注释里"拦下来只会把任务卡死"要避免的场景。修法：候选清单加 `/dev/shm`，
+        取舍交给 `cd` 失败即 `continue`（macOS 上不存在 → 不入集合 → 行为不变），
+        **不写 `uname` 分支**——分支意味着判据在非开发机上永远没被执行过。顺手补了数组去重
+        （Linux 上 `TMPDIR` 通常未设 → 回落到 `/tmp`，与第一项物理同路径）。
+      - **②** P2 系统路径名单只有 macOS 项，Linux 该有的 `/proc /sys /run /boot /lib /lib64
+        /srv /media /mnt /var` 一个没列。后果不是"漏放"而是**降级**：这些写入掉到 P3，而
+        P3 在 full 档 + `--allow-write` 命中时**可放开**，P2 永不放开——同一类"改内核参数/
+        覆盖系统库"的动作在 Linux 上比 macOS 低一整档，且拒绝文案还把人误导去加 `--allow-write`。
+        修法：名单补成两平台并集。刻意**不列 `/home`**（它在 Linux 上的角色 = macOS 的 `/Users`，
+        两边都不在 P2 名单里，越界写归 P3；单侧加严就是制造新的口径分裂）。
+        顺带纠正文档：P2 那行本来就写着含 `/var /boot`，是**代码落后于文档**，本次对齐。
+      - **③** T9 整段把 `/private/tmp` 当字面量期望值 → 只在 macOS 有意义，Linux 上必红三条
+        （`tw 2 "/tmp"`：Linux 的 `/tmp` 不是链接；归一化期望值：Linux 不加 `/private`），
+        其中两条还属"侥幸绿"（测的是本机根本不存在的目录，等于没测）。修法：先算本机
+        **物理真身** `$_tw_tmp` 再断言，并加一条元断言禁止表内再出现硬编码 `/private` 正例。
+      - 连带修的两个同类陷阱：① 表尾 `EXPECT_TOTAL=179` 也是平台绑定的（Linux 上 `/dev/shm`
+        真链接块多 2 条），改成按 `-d /dev/shm && -w /dev/shm` 推导，条件与 T9 里那个块逐字相同；
+        ② 新写的"用户目录不进 P2"断言最初用 `/home/other/x` 字面量，在 macOS 上**假红**——
+        `/home` 本身是指向 `/System/Volumes/Data/home` 的 firmlink（`ls -ldO` 带 hidden），
+        归一后命中 `/System/*` 判成 P2。改成从 `$HOME/..` 推导本平台用户目录父级。
+      - **验收**：新增 `T9b`（P2 名单两平台同构）+ T9 内 `/dev/shm` 分支与兜底守卫，共 35 条，
+        全部用 `pdn`（钉**规则号**）而不是 `pd`（只分 deny/allow）——② 的表现形式是"照样被拒、
+        只是号从 P2 变 P3"，二值断言根本看不出来。新表+新码 **214/0**；新表+`HEAD` 负对照
+        **203/11**（① 1 条 + ② 10 条）；`HEAD` 表+`HEAD` 码基线 **179/0**。
+        跑表**必须用 bash 5**（`/opt/homebrew/bin/bash test_hardwall.sh`）：`/bin/bash` 是 3.2，
+        会因 `read -t 0.2` 与 `${1,,}` 在 T10 假红 6 条，与判据无关。
+      - 本机无 docker，Linux 分支用**语义探针**实测而非推演：造一个"非链接、`pwd -P` 不改写"
+        的目录冒充 Linux 的 `/tmp` 喂进 `auto_tmp_write_ok`/`hard_deny_path`，确认
+        未改写的 `/tmp` 字面量确实被豁免（rc=0）、其中真链接仍 rc=2、`.npmrc` 仍归 P1。
+      - **下轮已修**（命令级正则两平台同构 + 私有临时目录，见下一条）。
+- [x] 命令级正则的 Linux 形状 + 公共临时目录外泄（④，同一批审出来的续集）：**已修**
+      - **家目录锚点抽成 `hd_home`/`hd_home_a`**：`~`／`$HOME`／`/Users/<name>`／
+        `/home/<name>` 四写并集，H5(`hd_re_dotfile`/`hd_re_dotfile_cfg`)、H6
+        (`hd_re_secret_dir`) 共用。之前只有 `/Users` → Linux 上读他人
+        `.aws/.config/gh/.kube/.ct/history` 文本层全漏，而 P1 靠 `$HOME` 只保护自己。
+        `/home/` **带尾斜杠**，不误伤 `/homeless`、`/homebrew` 下的普通读。
+      - `hd_re_wipe_root` 补 `/home`；`hd_re_sys_redirect` 补
+        `/proc /sys /run /boot /lib /lib64 /srv /media /mnt /root`（`/root` 与已有的
+        `var/root` 成对，漏它等于让"写 root 的 authorized_keys"只剩可放开的 P3）；
+        P2 名单同步补 `/root`。用户目录两侧**都不进** P2/H11，保持同构。
+      - **顺手抓到一条死正则**：`hd_re_dl_exec` 要求 `-o <值>` 后**紧跟**执行段,而真实
+        写法中间隔着 URL → 实测连表里老正例都判 NP。以前这漏放被"落盘那半会被 P2 拒"
+        掩盖着,**上一轮把临时目录豁免之后掩盖失效了**——"下载→写 /tmp→执行"能整条跑通。
+        放宽中间段为 `[^;&|]*`、末段收紧成"执行动词 + 绝对路径"(否则
+        `curl -o x.json api && npm ci && bash ./build.sh` 这种正常构建被永久拒)。
+      - **`+=` 追加形式是 harness 杀手**（我自己刚踩）：表的装载器是
+        `grep -E '^(hd_|auto_|AUTO_|WCHAT_)='`，`hd_re_dotfile+=` 里的 `+` 不在字符类内
+        → 该行**不被抽取** → 装载到的是半截正则 → 判据"看着存在"、线上永不命中，
+        而全表照样绿。已改单行拼接，并加一条静态守卫禁止任何顶层 `hd_*+=`。
+      - **静态守卫要断"设计不变式"，不是断字面量**：锚点抽成变量后，我最初那三条
+        "`hd_re_dotfile` 行含 `/home/`"当场报红（字面量只剩 `hd_home=` 一处有）。
+        改成 `hd_home` 含两平台 + 三条正则都引用 `$hd_home_a`（5 条），反而更贴近意图。
+      - **负对照 55/55 精确吻合**：新表+新码 **274/0**；新表+`HEAD` 码 **219/55**，
+        而 55 恰等于本轮新增断言条数（274−219）——每条都在旧码红、新码绿，没有一条
+        是"新旧都绿"的凑数断言。分账核对通过：`114+30+27+9+6+7+9+12=214`（旧总数），
+        `+T13 49 +T14 11 = 274`。
+      - **诚实记录的"侥幸绿"**：`cat /home/bob/.ssh/id_rsa` 在**旧码上也没红**——
+        它靠 `hd_re_keyfile` 里裸 `id_rsa` 那个分支命中，锚点修复对它无影响。真正
+        只有锚点能救的是 `.aws/credentials`、`.config/gh`、`.kube/config`、
+        `.ct/history` 四条（负对照里它们全红）。断言保留但标了注释，避免下轮误以为
+        "这条已经证明过了"。
+      - **本轮新增的残留缺口（刻意接受）**：① `hd_re_dl_exec` 不跨 `;`
+        （`curl -o /tmp/x.sh url; sh /tmp/x.sh` 仍漏），放开 `;` 会让同串里两件不相干
+        的事大面积误伤；② 同串"下载 + 跑任意绝对路径本地脚本"一并判 H2（误伤面，
+        标 `[设计如此]` 锁进表）；③ `/home` 与 `/Users` 同为无边界前缀，
+        `rm -rf /homebrew/x` 判 H3。
+      - **下轮已修**（文件工具侧他人凭据，见下一条）。
+- [x] 文件工具侧读**他人**凭据目录仍漏（上条记的"只剩一半"）：**已修**
+      - 判据 `hd_foreign_cred_path` + 共用名单 `hd_cred_subdirs`（12 项）。三条刻意约束：
+        **① 不碰自己的 `$HOME`**（那里由原有精确名单管——否则自己的工作目录常在 `$HOME`
+        下，`~/.config/<app>` 里放的项目配置会被永久拒）；**② 只认"家目录直属层级"**
+        （`/home/bob/proj/.ssh` 两侧都不拦，与命令级锚点同形——宁可一致地窄，不要一侧宽
+        一侧窄）；**③ 名单与命令级 H6 同源**，并由一条静态守卫断"路径侧每项都能在
+        `hd_re_secret_dir`/`hd_re_dotfile_cfg` 里找到"，防止以后一侧改名另一侧忘。
+      - **同一坑第二次踩：归一化会让"以前缀写死的判据"当场失配。** 最初写成
+        `case "$p" in /Users/*|/home/*)` —— 而 macOS 上 `/home` 是 firmlink，
+        `norm_path` 会把它归一成 `/System/Volumes/Data/home/...`，前缀匹配直接漏；
+        `/Users` 恰好不是 firmlink 才没暴露。改成**"包含 `/Users/` 或 `/home/` + 只剥一层
+        用户名"**，归一前后、两平台同时命中，并留两条 firmlink 形态断言钉住
+        （`/System/Volumes/Data/home/bob/.ssh`、`/System/Volumes/Data/Users/bob/.aws`）。
+        上一轮的 `/home` 假红、这一轮的前缀失配，是同一件事的两次表现：**判据里凡出现
+        写死的路径前缀，都要问一句"归一化之后它还在不在"**。
+      - **`pd` 与 `pdn` 参数顺序不同**（`pd <want> <路径> <mode> <说明>` vs
+        `pdn <want> <说明> <路径> <mode>`）：我按 `pdn` 的习惯写 `pd`，说明被当成路径、
+        恰好"放行" → 断言**绿灯**、label 打成 `r`。规律：**label 短得不成句的 PASS，
+        先怀疑参数错位**。已在断言旁注明两者签名相反。
+      - **存在性守卫必须排在成批 `hf` 之前**：`if 未定义函数` 返回假 → 所有**反例**
+        （期望 1）全部"通过"、所有正例全部红，18 条表象盖掉 1 条根因。负对照实测
+        确实如此（HEAD 码下 7 条反例"侥幸绿"）。
+      - `set -u` 下 `${#arr[@]}` 对**未定义**数组也是致命 unbound（旧版跑表会在守卫处
+        当场猝死，连汇总行都没有）→ 先 `[[ -n ${arr[@]+x} ]]` 再取长度。
+      - **验收**：新表+新码 **300/0**；新表+`HEAD` 码 **229/71**，且 71 可精确对账
+        = 上轮 55 + 本轮 16（11 条 hf 正例 + 3 条端到端 pdn + 存在性守卫 + 名单计数守卫）。
+        T15 的 26 条**不随平台变**（判据是"包含 + 剥一层"，不依赖本机有没有 `/home`），
+        所以 `EXPECT_TOTAL` 的 Linux 分支仍只有 `/dev/shm` 那 2 条。
+      - **刻意保留的差异**：① `list_dir /home/bob`（他人家目录**本身**）两侧都不拦——
+        它能枚举用户名但不直读机密，命令侧同样不命中，属"一致地窄"；② 路径侧名单多
+        `.azure` 一项（单向更严，静态守卫里显式跳过并注释）；③ 他人项目内的 `proj/.ssh`
+        两侧都不拦（见约束②）。
 - [ ] 无 OS 级沙箱。bash 里做不到 seccomp/pledge，硬墙是正则+路径前缀。
       想再上一档只有 macOS `sandbox-exec`（本机已有）或 Linux `bwrap`，
       把"判错"变成"物理做不到"。建议等 auto 真出事再上。

