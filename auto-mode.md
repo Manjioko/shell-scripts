@@ -420,9 +420,22 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
 
   - `test_pty_pager.sh` —— 关分页 env 与退出码（PASS=7）。
   - `test_history_render.sh` —— 历史渲染 ANSI 断言（PASS=7）。
-- 主套件基线：`unit` 当前失败 4 项，与 HEAD 版跑出来的是**同一批**（既有漂移，见第十节）。
-  判断标准是"不多不少这 4 项"，即视为本轮零新增回归。跑法（`REAL` 可指任意版本做对照）：
-  `REAL=/Users/jwan/bin/wchat.sh bash ~/.cache/wchat-tests/auto_test.sh unit </dev/null`
+- 主套件基线：**`unit` 稳定失败 6 项**，且改动前后是**同一批**（既有漂移，见第十节）。
+  2024 本轮实测名单（`REAL=<任意版本>` 两边差集为空 = 零新增回归；旧的"4 项"口径已过期）：
+  ```
+  ✗ 普通越界 y 即通过        ✗ 高危 yes 算确认        ✗ yes 大小写不敏感
+  ✗ deny[H5] echo x > ~/.bashrc      ✗ deny[H5] sed -i "s/a/b/" ~/.zshrc
+  ✗ path-ok /private/var/folders/...
+  ```
+  前三条来自伙伴那次"确认交互重写"（`d0c2fbc`）之后主套件的期望没跟着改；后三条是
+  H5 dotfile 口径与 macOS firmlink 归一。**判据不是数字，是名单**：改完 `wchat.sh` 跑
+  两遍做差集，只允许"减少"或"同一批"，多出来的一律当新增回归处理。跑法：
+  ```bash
+  REAL=$HOME/bin/wchat.sh        bash ~/.cache/wchat-tests/auto_test.sh unit </dev/null
+  git -C $HOME/bin show HEAD~2:wchat.sh > /tmp/base.sh
+  REAL=/tmp/base.sh              bash ~/.cache/wchat-tests/auto_test.sh unit </dev/null
+  ```
+  必须带 `</dev/null`（否则真 tty 下 `path_access` 会阻塞等回车）。
 - 抽函数沙箱注意：主循环在脚本顶层 `while`，整文件 `source` 会起 TUI；只能按
   函数名 `awk` 抽取，新增函数要同步加进 `for fn in ...` 列表，否则抽不到=测了
   个寂寞（已有数量断言兜底）。
