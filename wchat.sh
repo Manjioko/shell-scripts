@@ -3040,7 +3040,7 @@ hd_re_dl_exec='(curl|wget)[^;&|]*(-o[[:space:]]+|--output[[:space:]]+|-O[[:space
 # /Users 与 /home 在"所有用户主目录的父级"这个语义上同构,必须同时列:
 # 只写 /Users 时,Linux 上 `rm -rf /home`(删掉全部用户家目录)连 H3 都不命中,
 # 只会走路径侧,而 /home 刻意不在 P2 名单 → 掉到可被 --allow-write 放开的 P3。
-hd_re_wipe_root="$hd_p"'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[^;&|`$]*[[:space:]]*(/([[:space:]]|/?\*|$)|~/?$|~/|\$HOME(/|$)|/Users|/home|/System|/Library|/private|/etc|/usr|/var|/bin|/sbin|/opt)'
+hd_re_wipe_root="$hd_p"'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*[^;&|`$]*[[:space:]]*(/([[:space:]'\''"]|/?\*|$)|~/?$|~/|\$HOME(/|$)|/Users|/home|/System|/Library|/private|/etc|/usr|/var|/bin|/sbin|/opt)'
 hd_re_wipe_flag='rm[[:space:]].*--no-preserve-root'
 hd_re_disk="$hd_p"'(dd[[:space:]][^;&|]*of=/dev/(rd|sd|nvme|disk|hd)|mkfs(\.[a-z0-9]+|[^[:alnum:]]|$)|diskutil[[:space:]]+(erase|reformat|partitionDisk|ck)|fdisk|newfs|diskpart|chflags[[:space:]]+[^[:space:]]*[[:space:]]+/)'
 # 家目录的绝对形态:macOS 是 `/Users/<name>`,Linux 是 `/home/<name>`。
@@ -3500,6 +3500,14 @@ hd_mask_msg() {
 hard_deny_cmd() {
     local c="$1" word c2="" c3=""
     hd_rule=""; hd_msg=""; HD_SOFT=""
+    # C 阶段(2):H1–H11 统一改读"剔掉非执行类 heredoc 正文"的那一份。
+    # 只替换 c 一处、不在各分支分别处理:否则会出现"heredoc 里的叙述逃过 H3、却仍被
+    # H5/H6 按原文拦" —— 同一条命令换个规则号继续误拦,B 阶段已经吃过这个教训。
+    # fail-closed:助手缺席、或它没找到可剥的数据型 heredoc,一律保留原文照判。
+    HD_PAYLOAD=""
+    if declare -F hd_noncode_payload >/dev/null 2>&1 && hd_noncode_payload "$c"; then
+        c="$HD_PAYLOAD"
+    fi
     # HD_SOFT 与 hd_rule/hd_msg 同生命周期:留着上一条的 container,下一条普通写系统
     # 路径的命令就会在审计里被记成"降级放行";调用方若照它改出口,等于拿上一条的
     # 形状给这一条放行。判据函数必须无状态。
@@ -3952,6 +3960,51 @@ hd_h11_scan() {
     done <<< "$_raw"
     HD_CODE_OK=1
     return 1
+}
+
+
+# ── C 阶段(2):非执行类 heredoc 的正文不算代码 ─────────────────────────
+# 现场(本轮我自己撞的):git commit -F - <<'MSG' …正文里叙述了"rm 系统路径"… MSG
+# 被 H3 硬拒。那条命令实际只做 add/commit/push,零破坏性 —— 拦它的原因是**把说明文字
+# 当成了命令**。同类形状每天在写提交说明、issue 文本、测试样例时反复出现,收益比容器
+# 那条高得多(审计口径:H11 命中 16 次里含 docker 的只有 3 次)。
+#
+# 口径:白名单,不是黑名单。只有接收方明确"把正文当数据"的动词才剥正文;**默认一律
+# 当代码**(包括看不懂的形状),宁可继续误拦也不给硬墙开后门。
+# 为什么 sh/bash/python/awk/sed 都在"代码"一侧:`sh <<X` 的正文就是要执行的脚本。
+# 为什么 crontab/cat >/etc/cron.d/x 也在"代码"一侧:正文稍后由**系统**执行。
+# 为什么 ssh 也在"代码"一侧:`ssh host 'sh -s' <<X` 的正文会在别处真被执行,不能因为
+#   "不是本机执行"就当数据放过去。
+# 未覆盖(下一轮):`git commit -m "rm -rf /"` 这类**行内引号参数**里的叙述文本 ——
+# 它和 `bash -c '…'` 的载荷在形状上无法区分,后者是真执行,所以本轮不碰。
+hd_noncode_payload() {
+    local _raw="$1" _line _tag="" _data=0 _found=0 _out="" _drop=0
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        if (( _drop )); then
+            # <<- 的结束符可以带缩进:比较前剥掉行首空白
+            if [[ "${_line#"${_line%%[![:space:]]*}"}" == "$_tag" ]]; then
+                _drop=0; _out+="$_line"$'\n'
+            fi
+            continue
+        fi
+        _out+="$_line"$'\n'
+        # here-string <<< 不是 heredoc,别把它之后的行整段跳掉
+        if [[ "$_line" == *'<<'* && "$_line" != *'<<<'* ]] \
+           && [[ "$_line" =~ \<\<-?[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*) ]]; then
+            _tag="${BASH_REMATCH[1]}"; _data=0
+            case " $_line " in
+                *' git commit '*|*' git tag '*|*' tee '*|*' cat '*|*' echo '*|*' printf '*|*' cp '*|*' mv '*|*' touch '*)
+                    _data=1 ;;
+            esac
+            # 同一行里既有数据动词又有解释器/执行类动词 → 按解释器算(保守)
+            [[ "$_line" =~ (^|[[:space:]])(sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|php|awk|sed|eval|expect|ssh|su|sudo|crontab|at|batch|xargs|env|systemd-run)[[:space:]] ]] && _data=0
+            if (( _data )); then _drop=1; _found=1; fi
+        fi
+    done <<< "$_raw"
+    # 没找到可剥的数据型 heredoc → 返回 1,调用方保留原文(绝不用空串替换判据文本)
+    (( _found )) || return 1
+    HD_PAYLOAD="$_out"
+    return 0
 }
 
 
