@@ -3499,7 +3499,10 @@ hd_mask_msg() {
 
 hard_deny_cmd() {
     local c="$1" word c2="" c3=""
-    hd_rule=""; hd_msg=""
+    hd_rule=""; hd_msg=""; HD_SOFT=""
+    # HD_SOFT 与 hd_rule/hd_msg 同生命周期:留着上一条的 container,下一条普通写系统
+    # 路径的命令就会在审计里被记成"降级放行";调用方若照它改出口,等于拿上一条的
+    # 形状给这一条放行。判据函数必须无状态。
     # 二次确认:整串命中后,再用「只读动词的带引号参数已脱敏」的同一串匹一次,仍命中
     # 才算真破坏性操作。只在整串已命中时才付这个字符循环的钱,常规命令零开销。
     # 两条硬约束:
@@ -3674,6 +3677,14 @@ hard_deny_cmd() {
         if [[ "$HD_H11_LINE" =~ $hd_re_sys_redirect_wide ]]; then _hw_f="${BASH_REMATCH}"; fi
         # 行号给人看:多行命令(python3 - <<PY ... PY)只给片段说不清是哪一行写的。
         hd_note_hit "第${HD_H11_NUM}行 ${_hw_f}"
+        # 出口降级:判据已命中、规则号与命中片段都已进 hd_msg,这里只改出口。
+        # return 1 **不是放行**,是"退回层② 交审批器/人工"—— auto 档不再恒否。
+        # 助手缺席时 if 条件为假 → 保持硬拒(fail-closed),这条与 hd_recheck_msg 同口径。
+        if hd_container_exec_seg "$HD_H11_LINE" "$_hw_f"; then
+            HD_SOFT="container"
+            hd_msg="${hd_msg} [容器形状降级:疑似容器内写、宿主挂载未检查;未放行,改交审批/人工]"
+            return 1
+        fi
         return 0
     fi
 
@@ -3943,6 +3954,54 @@ hd_h11_scan() {
     return 1
 }
 
+
+# ─── C 阶段(1):容器形状的 H11 —— 只降级出口,不放宽判据 ───────────────────
+# 现场:docker exec hwtest2 sh -c 'printf ... > /etc/apk/repositories' 被 H11 硬拒。
+# 那写的是**容器里**的文件,宿主毫发无损 —— 但 H11 是纯文本判据,分不清执行地。
+# 审计口径(203 行、H11 命中 16 次):含 docker 的只有 3 次,带 heredoc 的有 13 次,
+# 所以**主要痛点不是 docker**。这里只做最小收敛:判据照旧命中(规则号/片段照旧),
+# 只把出口从"代码级红线恒否"降为"退回层② 交审批器/人工"。
+# 为什么**不做成"docker exec 直接放行"**(用户一度倾向的方案):
+#   ① 目标容器可能是 docker run 时 -v 挂了宿主目录(极端是 /:/host)起的,exec 时
+#      看不到挂载信息,容器里写宿主挂载点就是宿主被写;
+#   ② 最现实的误放不需要恶意:docker exec 与宿主写用 ; 串在同一条命令里 —— 下面按
+#      **段**定位就是为这一条(测试里钉着,想改宽必须先动那条断言)。
+# 拿不准一律保持硬墙:宁可多问一次审批,不能少拦一次。
+HD_SOFT=""
+hd_container_exec_seg() {   # <命中行> <命中片段> → 0=片段确实在 exec 段内且无宿主挂载痕迹
+    local _line="$1" _frag="$2" _tail="" _seg="" _cd
+    # 1) 必须有 exec 类动词,否则与容器无关
+    if [[ "$_line" =~ (docker|podman|nerdctl)[[:space:]]+exec[[:space:]] ]] \
+       || [[ "$_line" =~ kubectl[[:space:]]+exec[[:space:]] ]] \
+       || [[ "$_line" =~ (docker-compose|compose)[[:space:]]+exec[[:space:]] ]]; then
+        _tail="${_line#*exec }"                      # 取 exec 之后的部分
+    else
+        return 1
+    fi
+    # 2) 段边界:exec 之后遇到 ; | & 说明写目标属于**另一条**命令,不降级。
+    #    引号里的 ; 会提前把段截断 —— 那只会"少降级"(仍走硬墙),方向保守,不追。
+    # %% 匹配"最长后缀",于是切在**第一个**分隔符处 —— 正是段边界。
+    # 不必把引号放进切集:载荷里没有 ; | & 时整段都在段内;载荷里带 ; 时会提前截断,
+    # 结果是"少降级"(仍走硬墙),方向保守,符合本函数口径。
+    _seg="${_tail%%[;\|&]*}"
+    [[ -n "$_seg" && "$_seg" == *"$_frag"* ]] || return 1
+    # 3) 同一条命令里有挂载/特权痕迹 → 容器内路径可能直接落到宿主:不降级
+    if [[ "$_line" =~ (docker|podman|nerdctl)[[:space:]]+run ]] \
+       || [[ "$_line" == *" -v "* || "$_line" == *"--volume"* || "$_line" == *"--mount"* \
+            || "$_line" == *"--privileged"* ]]; then
+        return 1
+    fi
+    # 4) 命中路径像宿主挂载点 → 不降级
+    case "$_frag" in
+        */host*|*/mnt/*|*/Volumes/*|*'$HOME'*|*"~/"*) return 1 ;;
+    esac
+    # 5) 宿主凭据目录一律不降级。名单**复用 hd_cred_subdirs**(单一出处):在这儿抄一份
+    #    的后果是它永远比原件旧,新加的凭据目录照样会被当成"容器里随便写"。
+    for _cd in ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"}; do
+        case "$_frag" in *"/$_cd"/*|*"/$_cd") return 1 ;; esac
+    done
+    return 0
+}
 
 # 拦截理由必须带上**本次真命中的坐标**。人在确认卡上、模型在 tool 结果里,能依据的就
 # 只有这一句;此前 H1-H11 与 P1/P2 全是裸模板,连"哪个路径、哪一段"都不给。实测后果:
@@ -5521,6 +5580,13 @@ tool_run_and_parse() {
                 # 不会放低任何墙:P1/P2 与 $HOME、/ 这类过宽目录都被显式跳过。
                 shell_note_grants "$command"
             else
+                # 层① 判据命中但出口被降级(容器形状)→ 必须留痕:审计里看不见
+                # "曾经像硬墙",事后就无法判断这条降级判据是不是放宽过头了。
+                # 降级不等于放行:下面层② 仍会审它,auto 档审批器判 N 还要交人工。
+                if [[ -n "$HD_SOFT" ]]; then
+                    auto_audit shell "run_shell_command" "$cmd_one" "H11" "soft_${HD_SOFT}" "${hd_msg:-}"
+                    printf ' ⚠️  硬墙判据命中但降级(%s):不直接执行,交审批/人工确认\n' "$HD_SOFT"
+                fi
                 # ---------- 层②:审批器(auth_think) ----------
                 # auth_think 同步执行,结果经全局 auth_verdict 传回(Y/N)+ auth_reason;
                 # 返回 2=判断服务不可用 → 降级人工确认。绝不伪造"用户拒绝":

@@ -1330,6 +1330,7 @@ unset _bg_blk _bg_msg
 # + T17 tty 中继应答过滤=30(应答丢弃类 + 真按键保留类 + 分片重组 + 粘贴保护 + TTL 老化 + 静态接线守卫)。
 # + T18 bg_leak 提示文案守卫=2(不再谎报 &/不要求重跑 + 必须给出不必重跑的事实)。
 # + T20 H11 扫描前脱敏=13(放行类 4 + 反向必拦 4 + 行号/留痕/两处 fail-safe/已知缺口)。
+# + T21 容器形状降级=11(出口/判据/文案三查 + 四条不越界 + 无状态/缺席/接线守卫)。
 # 加断言时同步改这里。
 #
 # 但**不能只写一个数**:本表有按平台分支的断言(① /dev/shm 是否存在、③ /tmp 是否是
@@ -1344,7 +1345,7 @@ unset _bg_blk _bg_msg
 # 本轮(从主套件移表):auto_test.sh 的 HD 表里那 2 条 H5 在它自己环境里判不出(该套件
 # 刻意不装 hd_split_words/hd_write_targets 提取链,缺链即 MISSED 放行),命令原文已移进
 # 本表 T3。两条都是纯路径/正则判据、与平台无关 → macOS 347→349,Alpine 349→351。
-EXPECT_TOTAL=381                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+EXPECT_TOTAL=392                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # ============ T19 审批器理由解析 + 拦截理由带坐标(这两条都在"给人看的那一句"上) ============
 # 案 4 现场:提示词(auth_sys_tail 补充口径)强制判 N 回「N编号:原因」——整行**没有空格**;
 # 而旧解析写的是"剥掉第一个空格分隔的 token",规范格式下首个 token 就是整行,理由被连字
@@ -1454,6 +1455,58 @@ got=$(unset -f hd_h11_scan 2>/dev/null
       command_not_found_handle() { return 127; }
       deny_rule 'echo x > /etc/hosts')
 if [[ "$got" == "H11" ]]; then ok "扫描器缺失时照拒(退回粗判据,不静默放行)"; else bad "扫描器缺失时照拒(退回粗判据,不静默放行)" "被判[$got],应 H11"; fi
+
+# ── T21 C 阶段(1):容器形状的 H11 只降级出口,不放宽判据 ──────────────────
+echo "T21 容器形状降级(只改出口,判据照旧命中)"
+# 探针:同时看"出口"(返回值)、"判据是否仍命中"(hd_rule)、"降级标记"(HD_SOFT)、
+# "文案是否承认没放行"。只看返回值会把"判据被悄悄删掉"当成通过 —— 那正是这次改动
+# 最不能犯的错:降级的是出口,不是判定。
+_soft_probe() {   # → <出口>:<规则号>|<HD_SOFT>|<文案含"未放行"?>
+    local _o _r=""
+    hd_rule=""; hd_msg=""; HD_SOFT=""
+    if hard_deny_cmd "$1"; then _r="${hd_rule:-HIT}"; else _r="软:${hd_rule}"; fi
+    case "$hd_msg" in *"未放行"*) _m=是 ;; *) _m=否 ;; esac
+    printf '%s|%s|%s' "$_r" "${HD_SOFT}" "$_m"
+}
+_p=$(_soft_probe 'docker exec hwtest2 sh -c "printf x > /etc/apk/repositories"')
+if [[ "$_p" == "软:H11|container|是" ]]; then
+    ok "容器内写:出口降级(交审批/人工)且判据仍命中 H11"
+else bad "容器内写:出口降级(交审批/人工)且判据仍命中 H11" "[$_p] 应为 软:H11|container|是"; fi
+case "$_p" in "软:H11|"*) ok "降级不改判据:hd_rule 仍是 H11(审计可回溯)";; *) bad "降级不改判据:hd_rule 仍是 H11(审计可回溯)" "[$_p]";; esac
+case "$_p" in *"|"是) ok "降级文案承认没放行(不得写成已豁免)";; *) bad "降级文案承认没放行(不得写成已豁免)" "[$_p]";; esac
+# 最现实的误放路径:docker exec 与宿主写用 ; 串在同一条命令里(命令不按 ; 切分、整条一起判)
+expect H11 '不越界:docker exec 之后的 ; 段里的宿主写照旧硬拒' 'docker exec hwtest2 true; echo x > /etc/hosts'
+# 带挂载痕迹时不得降级。**不钉具体规则号**:宿主挂载点里的 /etc 是 `/host/etc/...`,
+# 不以 /etc/ 开头,H11 结构上根本不可能命中,实际是 auto 档越界写 P3 接住的 ——
+# 断言钉"没有降级"这个我自己该守的不变量,比钉"必须出某个规则号"更稳也更诚实。
+_p5=$(_soft_probe 'docker run -v /tmp/hw:/host alpine sh -c "echo x > /host/etc/cron.d/e"')
+case "$_p5" in
+    "软:"*|*container*) bad "不越界:同条命令含 -v 挂载痕迹时不降级" "[$_p5] 被降级了" ;;
+    *) ok "不越界:同条命令含 -v 挂载痕迹时不降级(仍硬拒,由越界写规则接住)" ;;
+esac
+# kubectl 同族也要认(只认 docker 等于把 k8s 用户排除在外)
+_p2=$(_soft_probe 'kubectl exec web-0 -- sh -c "cat > /etc/ssl/app.conf"')
+if [[ "$_p2" == "软:H11|container|是" ]]; then ok "kubectl exec 同样降级"; else bad "kubectl exec 同样降级" "[$_p2]"; fi
+# 与容器无关的宿主写:绝不能被降级判据顺带走
+_p3=$(_soft_probe 'echo x > /etc/hosts')
+if [[ "$_p3" == "H11||否" ]]; then ok "无容器语境的宿主写照旧硬拒(不被顺带降级)"; else bad "无容器语境的宿主写照旧硬拒(不被顺带降级)" "[$_p3]"; fi
+# 谓词级:宿主凭据目录形态即便在 exec 段内也不降级
+if hd_container_exec_seg 'docker exec c sh -c "cat > /data/.ssh/id_rsa"' '> /data/.ssh/id_rsa'; then
+    bad "容器内凭据路径不降级" "被判可降级"
+else ok "容器内凭据路径不降级(挂进容器的宿主凭据是真宿主)"; fi
+# 无状态:上一条降级的形状不得留在下一条普通命令上
+_soft_probe 'docker exec c sh -c "echo > /etc/apk/keep"' >/dev/null
+_p4=$(_soft_probe 'echo x > /etc/hosts')
+[[ "$_p4" == "H11||否" ]] && ok "HD_SOFT 每次调用重置(判据函数无状态)" || bad "HD_SOFT 每次调用重置(判据函数无状态)" "[$_p4]"
+# 助手缺席时保持硬拒:降级是"少拦一点"的方向,缺席绝不能自动生效
+_p5=$(unset -f hd_container_exec_seg 2>/dev/null
+      command_not_found_handle() { return 127; }
+      _soft_probe 'docker exec hwtest2 sh -c "printf x > /etc/apk/repositories"')
+[[ "$_p5" == "H11|"* ]] && ok "降级助手缺席时照旧硬拒(fail-closed)" || bad "降级助手缺席时照旧硬拒(fail-closed)" "[$_p5]"
+# 静态守卫:调用点必须真的留痕。降级一旦"审计不记",事后就无法判断它放宽过头
+if grep -q 'auto_audit shell "run_shell_command" "$cmd_one" "H11" "soft_' "$SRC_ABS"; then
+    ok "降级在调用点有审计留痕(接线守卫)"
+else bad "降级在调用点有审计留痕(接线守卫)" "源码里找不到 soft_ 审计调用"; fi
 
 # 已知缺口(C 阶段前不修,写成断言钉住,免得下轮误当"B 已做完"):H5/H6 这类"整条
 # 命令扫一遍"的规则仍读原文,注释里的凭据路径照撞 H6。方向保守(多拦不误放),但理由
