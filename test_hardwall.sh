@@ -58,7 +58,7 @@ ok()  { echo "  PASS $1"; pass=$((pass + 1)); }
 bad() { echo "  FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 
 # ---- 抽代码:顶层 hd_* 赋值 + 被测函数(到行首 } 止),不跑脚本主体 ----
-# 配置段:hard_deny_path / H12 依赖 AUTO_* 与 WCHAT_* 变量,不装载会在 set -u 下踩空
+# 配置段:hard_deny_path / hard_deny_cmd 依赖 AUTO_* 与 WCHAT_* 变量,不装载会在 set -u 下踩空
 # → 整条判据链返回"未命中"(与套件第 35 行注释警告的是同一类假绿)。
 # 但先要预设它引用的父变量:${CT_HOME} 未定义时 eval 会把整个测试脚本当场打死
 # (set -u + 非交互 shell = 直接退出,现象是"一行输出都没有",别误判成规则失效)。
@@ -76,6 +76,13 @@ auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 # 数组意外为空说明**上面那个哨兵没生效**(装载环节坏了),这时明确报 harness 问题并跳过
 # T7,别让被测函数在空数组上跑出看不出所以然的红。
 [[ -n ${auto_tmp_prefixes[*]} ]] || { echo "harness: auto_tmp_prefixes 为空,跳过 T7" >&2; T7_SKIP=1; }
+# 兜底:凡是源码里的顶层 hd_*() 助手,一律自动装载(下面显式名单之外的新助手也进来)。
+# 加显式名单的时代已经踩过两次:产品新增 hd_h11_scan 忘登记 → 表里判成
+# "命令不存在:[hd_h11_scan]",50 条一起红,红得像硬墙炸了,其实只是装载器缺一个名字。
+# 函数名带数字(hd_h11_scan)也更容易被"^[a-z_]+" 这类正则漏掉,所以这里显式允许数字。
+for _fn in $(grep -oE '^hd_[a-z_0-9]+\(\)' "$SRC_ABS" | sed 's/()//'); do
+    eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
+done
 for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_split_words hd_write_targets hard_deny_cmd \
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
            path_access _confirm_yes _ct_tmp_is_public auto_private_tmpdir hd_foreign_cred_path \
@@ -1322,6 +1329,7 @@ unset _bg_blk _bg_msg
 # + T16 文件工具链路裁决=2(工作根==HOME 时目录内写:该放的放、该拦的带规则号拦)。
 # + T17 tty 中继应答过滤=30(应答丢弃类 + 真按键保留类 + 分片重组 + 粘贴保护 + TTL 老化 + 静态接线守卫)。
 # + T18 bg_leak 提示文案守卫=2(不再谎报 &/不要求重跑 + 必须给出不必重跑的事实)。
+# + T20 H11 扫描前脱敏=13(放行类 4 + 反向必拦 4 + 行号/留痕/两处 fail-safe/已知缺口)。
 # 加断言时同步改这里。
 #
 # 但**不能只写一个数**:本表有按平台分支的断言(① /dev/shm 是否存在、③ /tmp 是否是
@@ -1336,7 +1344,7 @@ unset _bg_blk _bg_msg
 # 本轮(从主套件移表):auto_test.sh 的 HD 表里那 2 条 H5 在它自己环境里判不出(该套件
 # 刻意不装 hd_split_words/hd_write_targets 提取链,缺链即 MISSED 放行),命令原文已移进
 # 本表 T3。两条都是纯路径/正则判据、与平台无关 → macOS 347→349,Alpine 349→351。
-EXPECT_TOTAL=368                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+EXPECT_TOTAL=381                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # ============ T19 审批器理由解析 + 拦截理由带坐标(这两条都在"给人看的那一句"上) ============
 # 案 4 现场:提示词(auth_sys_tail 补充口径)强制判 N 回「N编号:原因」——整行**没有空格**;
 # 而旧解析写的是"剥掉第一个空格分隔的 token",规范格式下首个 token 就是整行,理由被连字
@@ -1371,7 +1379,6 @@ msg_of() {   # <命令> <档位(空=普通模式)> → 拦截理由;放行返回
 has_hit() {   # <理由> → 0 表示带 (命中: …) 且片段含期望子串
     local m="$1" want="$2"
     case "$m" in *"(命中:"*"") ;; *) return 1 ;; esac
-    case "$m" in *"(命中: ${2}"* | *"(命中: ${2}"*) ;; *) : ;; esac
     [[ "$m" == *"命中:"* && "$m" == *"$2"* ]]
 }
 _m=$(msg_of 'echo x > /etc/hosts' '')
@@ -1403,6 +1410,56 @@ got=$(unset -f hd_note_hit 2>/dev/null
       deny_rule 'echo x > /etc/hosts')
 eval "$_keep"
 [[ "$got" == "H11" ]] && ok "坐标助手缺失时仍照拒(它是附加信息,不得变成 fail-open)" || bad "坐标助手缺失时仍照拒" "被判[$got],应 H11"
+# ══════════════════════════════════════════════════════════════════
+# T20 H11 扫描前脱敏:注释与 heredoc 正文不是"要执行的写"
+#     审计现场:一条 python3 - <<PY 里带着 "# 追加到 hosts 文件: echo >> /etc/hosts",
+#     模型只是照抄了自己刚写的注释,却被 H11 拦下(5 次 H11 命中全是这一类误拦)。
+# ══════════════════════════════════════════════════════════════════
+echo "T20 H11 脱敏:注释/heredoc 正文不参与判定,但真写照样拦"
+_h1='python3 - <<PYEOF
+import socket
+# 追加到 hosts 文件: echo "1.2.3.4 example.com" >> /etc/hosts
+print("done")
+PYEOF'
+_h2=$(printf 'sh <<-OUT\n\t# 缩进正文里的写 > /etc/cron.d/evil\n\tOUT')
+[[ "$(deny_rule 'echo hi # > /etc/hosts')" == "NP" ]] \
+    && ok "放行:行尾 # 注释里的写" || bad "放行:行尾 # 注释里的写" "被判[$(deny_rule 'echo hi # > /etc/hosts')]"
+[[ "$(deny_rule '# echo x > /etc/hosts')" == "NP" ]] \
+    && ok "放行:整行注释" || bad "放行:整行注释"
+[[ "$(deny_rule "$_h1")" == "NP" ]] \
+    && ok "放行:heredoc 正文(审计真实误拦原文)" || bad "放行:heredoc 正文" "被判[$(deny_rule "$_h1")]"
+[[ "$(deny_rule "$_h2")" == "NP" ]] \
+    && ok "放行:<<- 带缩进的 heredoc 正文" || bad "放行:<<- 带缩进的 heredoc 正文" "被判[$(deny_rule "$_h2")]"
+# 反向三条:脱敏只能剥"不会执行的部分",剥错方向就是给硬墙开后门
+expect H11 '字符串内的 # 不作注释起点(剥了就等于放行 echo z > /etc/adjtime)' \
+    'bash -c '"'"'grep "#" /etc/hosts; echo z > /etc/adjtime'"'"''
+expect H11 '写在注释之前,后面才是注释' 'echo x > /etc/hosts # 尾巴注释'
+expect H11 '未闭合引号不许崩、按原样拦(保守多拦不误放)' 'echo "abc > /etc/hosts'
+expect H11 'here-string <<< 不当 heredoc(否则其后所有行被整段跳掉)' \
+    'tee /etc/x.dropped <<< "a > /etc/y"'
+# 行号:多行命令光给片段说不清是哪一行写的
+_m=$(msg_of "$(printf 'echo a\n# 正常说明\ncat x > /etc/hosts')" '')
+if has_hit "$_m" "第3行"; then ok "H11 理由带行号(多行命令说清哪一行)"; else bad "H11 理由带行号(多行命令说清哪一行)" "[$_m]"; fi
+# 豁免必须留痕:静默放过一条"看起来要写 /etc"的命令,和静默拦一条正常命令一样糟
+hd_h11_scan 'echo hi # > /etc/hosts'
+if [[ "$HD_H11_EXEMPT" == *"剥掉注释"* ]]; then ok "豁免留痕(现场能判断为何放行)"; else bad "豁免留痕(现场能判断为何放行)" "[豁免字段为空]"; fi
+# 脱敏助手缺失时必须退回原样判定 —— 少个函数绝不能变成放行
+got=$(unset -f hd_strip_noncode 2>/dev/null
+      command_not_found_handle() { return 127; }
+      deny_rule 'echo x > /etc/hosts')
+if [[ "$got" == "H11" ]]; then ok "脱敏助手缺失时照拒(fail-safe,不是 fail-open)"; else bad "脱敏助手缺失时照拒(fail-safe,不是 fail-open)" "被判[$got],应 H11"; fi
+
+# 扫描器整个缺席时必须退回粗判据:缺函数 ≠ 没有写
+got=$(unset -f hd_h11_scan 2>/dev/null
+      command_not_found_handle() { return 127; }
+      deny_rule 'echo x > /etc/hosts')
+if [[ "$got" == "H11" ]]; then ok "扫描器缺失时照拒(退回粗判据,不静默放行)"; else bad "扫描器缺失时照拒(退回粗判据,不静默放行)" "被判[$got],应 H11"; fi
+
+# 已知缺口(C 阶段前不修,写成断言钉住,免得下轮误当"B 已做完"):H5/H6 这类"整条
+# 命令扫一遍"的规则仍读原文,注释里的凭据路径照撞 H6。方向保守(多拦不误放),但理由
+# 必须说得出 —— 所以断言的是"仍然拦",不是"放行"。
+expect H6 '已知:注释里的凭据路径仍按 H6 拦(脱敏未覆盖 H5/H6)' 'grep -r passwd /etc # 只是举例 cat /etc/passwd'
+
 # Linux(Alpine 3.20 / root 容器 / :ro 挂载)已实跑:**349 条**,与下面的推导一致。
 # 差值只有一处来源:T9 的 /dev/shm 真符号链接块 —— 门控成立时产生 **2 条**判定,
 # 不成立时走 `echo "  SKIP …"`,而 **SKIP 不产生判定**,所以 Linux 净 +2、不是直觉的 +3。

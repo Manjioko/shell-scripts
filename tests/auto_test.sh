@@ -50,7 +50,7 @@ for fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_
           ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
           save_history parse_options auto_tmp_write_ok \
           in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
-          hd_note_hit \
+          hd_note_hit hd_h11_scan hd_strip_noncode \
           ask_drain_input ask_read_line _confirm_yes tty_strip_responses; do
     # ↑ 这份抽函数名单必须跟着产品长:hard_deny_path/hard_deny_cmd 新调的函数漏在这里时,
     #   sandbox.sh 里就是 command not found → 判据链走 fail-closed 兜底 → 规则号变成另一个,
@@ -69,7 +69,7 @@ for _fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny
            ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
            save_history parse_options auto_tmp_write_ok \
            in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
-           hd_note_hit \
+           hd_note_hit hd_h11_scan hd_strip_noncode \
            ask_drain_input ask_read_line _confirm_yes tty_strip_responses; do
     grep -q "^${_fn}() {" "$W/sandbox.sh" \
         || { echo "沙箱缺函数:$_fn —— 名单与被测脚本已不一致,本次测试不可信"; return 1; }

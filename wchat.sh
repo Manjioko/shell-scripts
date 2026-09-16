@@ -3654,13 +3654,26 @@ hard_deny_cmd() {
         return 0
     fi
     # H11 重定向写系统路径
-    if [[ "$c" =~ $hd_re_sys_redirect ]]; then
+    # 扫描器被裁剪/改名时必须**退回粗判据**,不能让它缺席等于 H11 缺席:
+    # `if hd_h11_scan "$c"` 遇到函数不存在会以 rc=127 走 else —— 现象是"整条 H11 静默
+    # 失效"(fail-open),比多拦几条命令严重一个量级。与下面 H12 对 hd_write_targets
+    # 的兜底同源;主套件 sandbox.sh 是按名单搬函数的,名单不全就是真实存在的场景。
+    _hd_h11_hit=0
+    if declare -F hd_h11_scan >/dev/null 2>&1; then
+        hd_h11_scan "$c" && _hd_h11_hit=1
+    else
+        [[ "$c" =~ $hd_re_sys_redirect ]] && _hd_h11_hit=1
+        HD_H11_NUM=0; HD_H11_HIT="${hd_re_sys_redirect:+${BASH_REMATCH}}"; HD_H11_LINE="$c"
+        HD_CODE="$c"; HD_CODE_OK=1
+    fi
+    if (( _hd_h11_hit )); then
         hd_rule="H11"; hd_msg="重定向写入系统路径被禁止。替代:写到工作目录内或 /tmp"
-        # 兜底顺序不能反:[[ =~ ]] 失败会**清空** BASH_REMATCH,所以先存主命中片段,
+        # 兜底顺序不能反:[[ =~ ]] 失败会**清空** BASH_REMATCH,所以先存主判据片段,
         # 宽松版匹配不上时退回它(宁可片段短一点,也不能显示"命中: 空")。
-        local _hw_f="${BASH_REMATCH}"
-        if [[ "$c" =~ $hd_re_sys_redirect_wide ]]; then _hw_f="${BASH_REMATCH}"; fi
-        hd_note_hit "${_hw_f}"
+        local _hw_f="${HD_H11_HIT}"
+        if [[ "$HD_H11_LINE" =~ $hd_re_sys_redirect_wide ]]; then _hw_f="${BASH_REMATCH}"; fi
+        # 行号给人看:多行命令(python3 - <<PY ... PY)只给片段说不清是哪一行写的。
+        hd_note_hit "第${HD_H11_NUM}行 ${_hw_f}"
         return 0
     fi
 
@@ -3684,6 +3697,9 @@ hard_deny_cmd() {
                 return 0
             fi
         fi
+        # HD_CODE_OK 由上面的 H11 扫描置位(H11 在 H12 之前,一定已扫过);
+        # 万一将来有人调整顺序,这里自己补扫一次,绝不因"没扫过"退回原文。
+        [[ "$HD_CODE_OK" == "1" ]] || hd_h11_scan "$c"
         while IFS= read -r word; do
             [[ -z "$word" ]] && continue
             word="${word%[;,)]}"                                 # 去尾部标点
@@ -3704,7 +3720,7 @@ hard_deny_cmd() {
                 hd_msg="${hd_msg}(命中目标: ${word})"
                 return 0
             fi
-        done < <(hd_write_targets "$c")
+        done < <(hd_write_targets "$HD_CODE")
     fi
     return 1
 }
@@ -3841,6 +3857,92 @@ hd_creds_all_exempt() {
     (( hit )) || return 1                                        # 一个都没抠出来 = 判不了 → 不豁免
     return 0
 }
+
+# ─── H11 扫描前脱敏(注释与 heredoc 正文不是"要执行的写")──────────────────
+# 结果走全局而非 stdout:用 $(...) 取的话,函数一旦缺失/改名,命令替换只留下空串,
+# 命中片段随之消失 —— 那是 fail-open。硬墙绝不能因为"少个函数"变成放行。
+# 调用约定:返回非 0 = "没脱敏成",调用方必须按原样送去判定。
+HD_STRIP=""
+hd_strip_noncode() {
+    # _n 必须单独一条 local:${#_s} 和 _s= 写在同一条 local 里时,**所有**参数先整体
+    # 展开再赋值,那会儿 _s 还是外层的(未设)→ _n=0 → 循环一次不跑 → 返回空串。
+    # 现象是"整行被吞掉、H11 全线不触发",而函数看起来完全正确 —— 只能靠 declare -f
+    # 加手工调用才查得出来。这条规律对 Bash 3.2/4.x/5.x 一致,不是 macOS 特有。
+    local _s="$1" _out="" _prev="" _ch _i=0 _inq=""
+    local _n=${#_s}
+    while (( _i < _n )); do
+        _ch="${_s:_i:1}"
+        if [[ -n "$_inq" ]]; then
+            # 字符串内部原样保留:awk '{print > "/etc/passwd"}' 的写就在引号里,
+            # 那是 awk 自己的重定向、真会落盘,剥掉它等于给硬墙开后门。
+            _out+="$_ch"
+            [[ "$_ch" == "$_inq" ]] && _inq=""
+        elif [[ "$_ch" == '"' || "$_ch" == "'" ]]; then
+            _inq="$_ch"; _out+="$_ch"
+        elif [[ "$_ch" == '\' ]]; then
+            _out+="$_ch"; _i=$((_i + 1))
+            if (( _i < _n )); then _out+="${_s:_i:1}"; _prev="${_s:_i:1}"; fi
+        elif [[ "$_ch" == '#' ]]; then
+            # 只有 # 前是行首或空白才算注释起点,否则 a#b、URL 片段被吃掉一半。
+            if [[ -z "$_prev" || "$_prev" == " " || "$_prev" == $'\t' ]]; then
+                HD_STRIP="$_out"; return 0
+            fi
+            _out+="$_ch"
+        else
+            _out+="$_ch"
+        fi
+        _prev="$_ch"; _i=$((_i + 1))
+    done
+    HD_STRIP="$_out"
+    return 0
+}
+
+# 逐行扫。命中返回 0,给出 HD_H11_NUM(第几行)/ HD_H11_LINE(脱敏后的行)/
+# HD_H11_HIT(主判据片段)。剥完注释就不再命中的记进 HD_H11_EXEMPT 供审计取证 ——
+# 静默放过一条"看起来要写 /etc"的命令,和静默拦一条正常命令一样糟,得留得下证据。
+# HD_CODE:整条命令剥掉注释与 heredoc 正文后的"会执行的部分";HD_CODE_OK=1 表示
+# 本函数已完整跑完(没提前 return)。H12 拿它去喂 hd_write_targets —— 脱敏必须
+# **一处做、多处用**:只给 H11 脱敏而写目标提取仍扫原文的话,heredoc 里那行
+# `echo >> /etc/hosts` 会改由 H12/P2 拦下,现象是"换了个规则号继续误拦"。
+HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CODE_OK=0
+hd_h11_scan() {
+    HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CODE_OK=0
+    local _raw="$1" _line="" _num=0 _heredoc=0 _tag="" _stripped="" _frag=""
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        _num=$((_num + 1))
+        # 攒代码文本:只有含 # 的行才付逐字符剥注释的代价,其余原样收下
+        if [[ "$_line" == *'#'* ]]; then
+            if hd_strip_noncode "$_line"; then HD_CODE+="$HD_STRIP"$'\n'; else HD_CODE+="$_line"$'\n'; fi
+        else
+            HD_CODE+="$_line"$'\n'
+        fi
+        if (( _heredoc )); then
+            # <<- 的结束符可以带缩进,比较前剥掉行首空白
+            if [[ "${_line#"${_line%%[![:space:]]*}"}" == "$_tag" ]]; then _heredoc=0; fi
+            continue
+        fi
+        # 先用主判据筛一遍:绝大多数命令行不含重定向,只有"像写系统路径"的行才付
+        # 得起逐字符剥注释的代价 —— 这段每个工具调用都要跑,慢不得。
+        if [[ "$_line" =~ $hd_re_sys_redirect ]]; then
+            _frag="${BASH_REMATCH}"
+            if hd_strip_noncode "$_line"; then _stripped="$HD_STRIP"; else _stripped="$_line"; fi
+            if [[ "$_stripped" =~ $hd_re_sys_redirect ]]; then
+                HD_H11_NUM=$_num; HD_H11_HIT="${BASH_REMATCH}"; HD_H11_LINE="$_stripped"
+                return 0
+            fi
+            HD_H11_EXEMPT="第${_num}行的 ${_frag} 剥掉注释后不再命中(写在 # 之后,不会执行)"
+        fi
+        # here-string <<< 不是 heredoc,别把它之后的行整段跳掉
+        if [[ "$_line" == *'<<'* && "$_line" != *'<<<'* ]]; then
+            if [[ "$_line" =~ \<\<-?[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*) ]]; then
+                _tag="${BASH_REMATCH[1]}"; _heredoc=1
+            fi
+        fi
+    done <<< "$_raw"
+    HD_CODE_OK=1
+    return 1
+}
+
 
 # 拦截理由必须带上**本次真命中的坐标**。人在确认卡上、模型在 tool 结果里,能依据的就
 # 只有这一句;此前 H1-H11 与 P1/P2 全是裸模板,连"哪个路径、哪一段"都不给。实测后果:
