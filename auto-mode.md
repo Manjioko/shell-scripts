@@ -390,10 +390,33 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
     3. `cjk_adj` 用 `[「」，]` 计数，C locale 下 grep 报错 → 计数落成空 → `(( n == 0 ))` 成立
        → 放过了产品里一处真崩溃：`"$name。"` 被 bash 当成变量名 `name。`（bash 认 ≥0x80 的字节
        为名字字符），`set -u` 下 `read_skill` 传错名字会当场猝死而不是打印"技能不存在"。
-    所以跑这张表的判据是 **`PASS=347 FAIL=0` 且 stderr 一行都没有**：
+    所以跑这张表的判据是 **`FAIL=0` 且 stderr 一行都没有**：
     `bash test_hardwall.sh >out 2>err; wc -l < err` 不为 0 就别当绿。
-    macOS 实跑 347；Linux 按 `+3`（T15 的 /dev/shm 真符号链接块）与 `+1`（T15b 影子豁免）
-    推导为 351，仍待 Alpine 实跑校准（本机 docker.io 拉镜像 TLS 超时）。
+    **实跑基线（两边都已测）**：macOS `PASS=347`；Alpine 3.20（root、`:ro` 挂载）`PASS=349`。
+    差 2 的来源只有一处：T9 的 `/dev/shm` 真链接块门控成立时产生 2 条判定，不成立时走
+    `echo "  SKIP …"`——**SKIP 不产生判定**，所以是净 `+2`。我第一版按"if 分支里数了几条"
+    推成 `+3`，实跑红在"执行 349 应为 351"上。校准平台增量时必须**连 else 分支一起数**。
+  - Alpine 实跑另暴露三条"只在开发机上绿"的断言（都已修，写法记下来别再犯）：
+    1. **往当前目录写文件**（TTL 转发文件用 `$WORK_ROOT/…`）：容器里 `:ro` 挂载当场
+       `Read-only file system`，且连带 `t17fd: unbound` 让表猝死。现在这类临时文件一律
+       `mktemp` 自带；同时沙箱判定新增一支——`[[ ! -w "$PWD" ]]` 时把工作根挪到
+       `$HOME/.hw-workroot.$$`（与"脚本目录就是家目录"复用同一套挪动逻辑）。
+    2. **命令文本里写 `$HOME`**（`deny_rule "grep -n 'rm ' $HOME/.ct/auto/audit.log"`）：
+       root 容器下它变成 `/root/.ct/…`，`/root` 在 P2 名单里，规则号整个换掉（H3→NP、
+       P3→H11）。判"敏感"要用两平台同源的锚点（`/opt/hw/…` 靠系统名单敏感、恒 H3），
+       判"越界写"要用**不存在的顶层路径**（`/data/hw/…` 恒 P3）。这条与夹具第 9 条同源。
+    3. **`~ 下非隐藏写`的正确规则号本身随布局变**：HOME 若在系统名单内（root 容器
+       `/root`），它是 P2（不可放开），不是 macOS 的 P3/放行。表里加了 `HW_HOME_SYS`
+       探针——**直接问被测函数**（临时把 `WORK_ROOT` 挪开再调 `hard_deny_path`），
+       绝不在测试里抄第二份系统路径名单（名单一改就静默漂移）。
+  - 端到端（真终端）用 `tty_e2e_check.sh`，不联网、不改文件：
+    ```bash
+    bash tty_e2e_check.sh /Users/jwan/bin/wchat.sh      # 必须在 Ghostty/iTerm 里跑
+    ```
+    A 段自动判"应答泄漏"（向真终端发 DA1/DA2/DSR/kitty 查询，看剥离后还剩什么）；
+    B 段判"误吞按键"（按上/下/Ctrl-R/Esc，期望序列还在）。两条都要 PASS，`SKIP B`
+    表示你没按键、不构成结论。非 tty 下直接拒跑（exit 2）——管道里跑它会同时得到
+    假绿 A 与假红 B。
 
   - `test_pty_pager.sh` —— 关分页 env 与退出码（PASS=7）。
   - `test_history_render.sh` —— 历史渲染 ANSI 断言（PASS=7）。

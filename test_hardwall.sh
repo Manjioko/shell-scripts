@@ -130,7 +130,13 @@ _hw_root_in_p2_exempt() {
     done
     return 1
 }
-if [[ "$PWD" == "$HOME" || "$PWD" == "/" ]]; then
+if [[ ! -w "$PWD" ]]; then
+    # 只读挂载(CI/容器里以 :ro 挂脚本目录)或以别人的账号跑时,CWD 根本写不了东西;
+    # 而本表有若干用例要**在工作根里建文件**(TTL 转发文件、T10 的 ./data 等),
+    # 不挪走就是当场 "Read-only file system" + 变量未绑定,现象像产品坏了。
+    HW_SANDBOX="$HOME/.hw-workroot.$$"
+    _hw_why="当前目录不可写(只读挂载或权限),工作根必须挪到可写位置"
+elif [[ "$PWD" == "$HOME" || "$PWD" == "/" ]]; then
     HW_SANDBOX="$PWD/.hw-workroot.$$"
     _hw_why="脚本目录就是家目录"
 elif _hw_root_in_p2_exempt; then
@@ -146,6 +152,18 @@ if [[ -n "$HW_SANDBOX" ]]; then
     echo "harness: ${_hw_why},工作根挪到 ${HW_SANDBOX}(理由见上一段注释)"
 fi
 WORK_ROOT="$PWD"
+
+# 本机 HOME 是不是**本身**就落在 P2 系统路径名单里?容器里以 root 跑时 HOME=/root,
+# 而名单含 /root(钉 `echo k > /root/.ssh/authorized_keys` 那类提权),于是"~ 下非隐藏写"
+# 在 macOS 上是 P3/放行、在 Alpine root 上是 P2 —— 同一句产品代码,两种正确答案。
+# 判据不抄第二份名单(名单一改就漂移),改成**问被测函数自己**;WORK_ROOT 临时挪到一个
+# 无关的不存在目录,是为了排除"目录内豁免"对这次探测的干扰。
+_hw_wr_save="$WORK_ROOT"; WORK_ROOT="/hw-probe-nonexistent-workroot"
+hard_deny_path "$HOME/hw-home-layout-probe" rw >/dev/null 2>&1; _hw_hr="$hd_rule"
+WORK_ROOT="$_hw_wr_save"; unset _hw_wr_save
+if [[ "$_hw_hr" == "P2" ]]; then HW_HOME_SYS=1; else HW_HOME_SYS=0; fi
+unset _hw_hr
+echo "harness: HOME=$HOME 在系统路径名单内=$HW_HOME_SYS(root 容器下 ~ 下写的正确规则号随之不同)"
 
 deny_rule() {   # 打印命中的规则号,放行则打印 NP
     local out
@@ -313,12 +331,17 @@ r=$(resolve_path "$WORK_ROOT/../jwan/x" 2>/dev/null); [[ -z "$r" || "$r" == "$WO
 echo 'T6 辅助函数缺失时必须照拒(不得静默放行)'
 export auto_mode=1 AUTO_SHELL_PATHS=1
 if (( HAS_MASK )); then
-    r=$( (unset -f hd_mask_readonly 2>/dev/null; deny_rule "grep -n 'rm ' $HOME/.ct/auto/audit.log") )
+    # 路径不能写 $HOME:root 容器里它变成 /root/.ct/…,实测两平台结论不同
+    # (macOS 缺掩码=H3,Alpine 缺掩码=NP)——不是产品变了,是 /root 命中另一条分支。
+    # /opt/hw/hw.md 两边都靠"P2 系统名单"变得敏感,缺掩码恒 H3,与 HOME 布局无关。
+    r=$( (unset -f hd_mask_readonly 2>/dev/null; deny_rule "grep -n 'rm ' /opt/hw/hw.md") )
     [[ "$r" == H3 ]] && ok "缺 hd_mask_readonly → H3 仍照拒" || bad "缺 hd_mask_readonly" "被判 ${r},应 H3"
     r=$( (unset -f hd_recheck 2>/dev/null; deny_rule "rm -rf ~") )
     [[ "$r" == H3 ]] && ok "缺 hd_recheck → H3 仍照拒" || bad "缺 hd_recheck" "被判 ${r},应 H3"
 fi
-r=$( (unset -f hd_write_targets 2>/dev/null; deny_rule "echo x >> $HOME/Documents/note.md") )
+# 同上:用不存在的顶层路径(本表夹具惯例)。$HOME/Documents 在 macOS 得 P3、
+# 在 root 容器得 H11(命中 /root 重定向名单),而 /data/hw/hw-note.md 两边恒 P3。
+r=$( (unset -f hd_write_targets 2>/dev/null; deny_rule "echo x >> /data/hw/hw-note.md") )
 [[ "$r" == P3 ]] && ok "缺 hd_write_targets → 含重定向一律拦(沿用 P3 号)" || bad "缺 hd_write_targets" "被判 ${r},应 P3"
 # 端到端 P3 判定不在本表重复断言:本 harness 只按名字抽函数,配置段是 grep 拼出来的,
 # hard_deny_path 的完整依赖(授权位/档位/审计)凑不齐 —— 在这里断言只会得到假红。
@@ -680,7 +703,11 @@ pdn P3 "写 $_tw_users/other 是 P3 不是 P2(本平台用户目录)" "$_tw_user
 # 对方平台的字面量形态也不许被误升成 P2(Linux 上 /Users 不存在 → 归一保留字面量;
 # macOS 上 /home 会被 firmlink 改写,故只测 /Users 不测 /home,见上一条)
 pdn P3 "写 /Users/other 是 P3 不是 P2(macOS 用户目录形态)"  "/Users/other/x" rw
-pdn P3 "写 ~ 下非隐藏文件是 P3(越界写)"                "$HOME/Documents/note.md" rw
+if (( HW_HOME_SYS )); then
+    pdn P2 "写 ~ 下非隐藏文件按 P2(本机 HOME 本身在系统路径名单内,比 P3 高一档且不可放开)" "$HOME/Documents/note.md" rw
+else
+    pdn P3 "写 ~ 下非隐藏文件是 P3(越界写)"                "$HOME/Documents/note.md" rw
+fi
 # 家目录里的隐藏配置仍是 P2(永不可放开):新名单不得把它顶成 P3 而松一档
 pdn P2 "写 ~/.config/foo 是 P2(dotfile 判据)"           "$HOME/.config/foo" rw
 pdn P2 "写 ~/.zshrc 是 P2"                              "$HOME/.zshrc" rw
@@ -693,7 +720,11 @@ pdn P2 "写 ~/.zshrc 是 P2"                              "$HOME/.zshrc" rw
 # 目录内放行 —— 与这里 pd allow 同结论。链路层那 2 条钉在表末尾 T16(判据与链路分开钉:
 # 上一轮的教训就是判据全绿而链路空转,只测一头等于没测)。
 _wr_probe="$WORK_ROOT"; WORK_ROOT="$HOME"
-pd allow "$HOME/Documents/note.md" rw "[设计如此] WORK_ROOT==HOME 时 ~ 下非隐藏写按目录内放行(与 resolve_path 同口径)"
+if (( HW_HOME_SYS )); then
+    pd deny "$HOME/Documents/note.md" rw "[设计如此] WORK_ROOT==HOME 且 HOME 本身是系统路径(root 容器)→ 按 P2 拒,in_root_exempt 的『工作根==HOME 时收回豁免』优先"
+else
+    pd allow "$HOME/Documents/note.md" rw "[设计如此] WORK_ROOT==HOME 时 ~ 下非隐藏写按目录内放行(与 resolve_path 同口径)"
+fi
 pdn P2 "WORK_ROOT==HOME 时 ~/.zshrc 仍是 P2(第 3553 行的例外没被目录内特权顶掉)" "$HOME/.zshrc" rw
 WORK_ROOT="$_wr_probe"; unset _wr_probe
 # --- ② 只扩写侧:读侧口径不许被顺带收紧(现状除 P1 凭据外读系统路径不拦) ---
@@ -1082,9 +1113,21 @@ content=""
 _t16f="$HOME/hw-t16-probe.md"
 _t16d="HOME=$HOME WORK_ROOT=$WORK_ROOT 归一=$(resolve_path "$_t16f" 2>/dev/null || echo '<失败>') norm=$(norm_path "$_t16f" 2>/dev/null || echo '<失败>')"
 if path_access "$_t16f" rw "写入" >/dev/null 2>&1; then
-    ok "链路:WORK_ROOT==HOME 时 ~ 下非隐藏写放行(与 T9b 的 pd allow 同结论)"
+    if (( HW_HOME_SYS )); then
+        bad "链路:HOME 本身是系统路径却放行了 ~ 下写" "$_t16d — P2 名单含 $HOME 却被目录内特权顶掉,root 容器里等于能写系统路径"
+    else
+        ok "链路:WORK_ROOT==HOME 时 ~ 下非隐藏写放行(与 T9b 的 pd allow 同结论)"
+    fi
 else
-    bad "链路:WORK_ROOT==HOME 时 ~ 下非隐藏写被拒:$(printf '%s' "${content:-}" | head -c 150)" "$_t16d — 判据说放行、链路说拒绝,收特权时把目录内豁免一起吃掉了"
+    if (( HW_HOME_SYS )); then
+        # root 容器:正确结论是"拒,且报的是 P2 这条墙",不是归一化失败
+        case "$content" in
+            *P2*) ok "链路:HOME 本身在系统路径名单内 → ~ 下非隐藏写按 P2 拒(与 T9b 同结论,报的是墙不是归一故障)" ;;
+            *)    bad "链路:root 容器下 ~ 下写被拒但没报 P2:$(printf '%s' "${content:-}" | head -c 150)" "$_t16d — 现象像归一化/装载故障,而不是墙" ;;
+        esac
+    else
+        bad "链路:WORK_ROOT==HOME 时 ~ 下非隐藏写被拒:$(printf '%s' "${content:-}" | head -c 150)" "$_t16d — 判据说放行、链路说拒绝,收特权时把目录内豁免一起吃掉了"
+    fi
 fi
 content=""
 if path_access "$HOME/.zshrc" rw "修改" >/dev/null 2>&1; then
@@ -1168,7 +1211,7 @@ else
     bad "tty 粘贴未结束时状态位" "被测版本没有 tty_strip_responses(负对照在此应为红)"
 fi
 # --- ⑤ TTL:判不动的尾部超时后必须转发,不能吞 ---
-_t17f="$WORK_ROOT/hw-t17-tick.txt"
+_t17f="$(mktemp "${TMPDIR:-/tmp}/hw-t17-tick.XXXXXX")"   # 自带临时文件:不依赖 CWD 可写,也不依赖别处定义的变量
 if declare -f tty_hold_tick >/dev/null 2>&1; then
     : > "$_t17f"
     exec {t17fd}<>"$_t17f"
@@ -1182,7 +1225,7 @@ if declare -f tty_hold_tick >/dev/null 2>&1; then
         bad "tty TTL 到期后没把滞留字节吐出去" "文件内容=[$(cat "$_t17f" 2>/dev/null | printf '%q')] 期望 $(printf '%q' "${_E}[A")"
     fi
     exec {t17fd}<&-
-    rm -f "$_t17f"
+    rm -f "$_t17f"   # 上面 mktemp 出来的
 else
     bad "tty TTL 老化函数" "harness 未装载 tty_hold_tick(转发策略没实现,现象原样存在)"
     ok "tty TTL 到期后原样转发(宁漏一条应答也不吞按键)"  # 占位:缺函数时也必须产生判定,防空过
@@ -1242,16 +1285,16 @@ unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
 # firmlink 形态断言)。
 # 条数不再依赖"本表叫什么名字":自我检查一律走 HW_SELF(见文件开头),改名/软链跑同样数。
 EXPECT_TOTAL=347                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
-# Linux(Alpine)本轮**没能实跑**:本机 Docker 无本地镜像且 docker.io 拉取 TLS 超时,
-# 所以下面这两处增量是按"门控块的判据逐字对齐"静态推导出来的,不是记忆里的数 ——
-# 谁在 Alpine 上跑出别的总数,以实跑为准改这两行,并把这句注释删掉。
-#   +3  T15 的 /dev/shm 真符号链接块(门控 `[[ -d /dev/shm ]]`,macOS 上走 echo SKIP 不产生判定)
-#   +1  T15b 的影子豁免断言(门控 `[[ -d /dev/shm && -w /dev/shm ]]`)
+# Linux(Alpine 3.20 / root 容器 / :ro 挂载)已实跑:**349 条**,与下面的推导一致。
+# 差值只有一处来源:T9 的 /dev/shm 真符号链接块 —— 门控成立时产生 **2 条**判定,
+# 不成立时走 `echo "  SKIP …"`,而 **SKIP 不产生判定**,所以 Linux 净 +2、不是直觉的 +3。
+# (本轮第一次推导就把它记成 +3,实跑红在"执行 349,应为 351"上;这类"条件块的 else
+#  到底产生几条判定"必须数 else 分支,不能只看 if 分支有几条断言。)
+# 不加项:T15b 的 HOME=/home/* 影子豁免在 root 容器(HOME=/root)下不成立,实测确认。
 # 不随平台变的(别误加):T13 的 Linux 锚点断言是无条件的(测的是正则本身);
 # T15 他人家目录那 26 条在两边都执行;T16 的 2 条走"临时把 WORK_ROOT 设成 $HOME",与布局无关。
 # T17 的 30 条同样与平台无关:测的是 tty 字节流状态机与三处接线的静态存在性,不读任何路径。
-[[ -d /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 3))
-[[ -d /dev/shm && -w /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 1))
+[[ -d /dev/shm && -w /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 2))
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?),或按平台分支的条数与 EXPECT_TOTAL 的推导条件不一致\n' "$total" "$EXPECT_TOTAL"
