@@ -1,0 +1,9 @@
+# 一次性诊断脚本,不是回归资产(留在仓库目录里方便随手复跑,但不进版本库):
+#   g6.sh / old_vs_new.sh —— 当年对比新旧实现的手工探针
+#   vision_probe.sh / vision_probe2.sh —— 视觉层单点取样
+# 真正的回归资产是 auto_test.sh + stub_gateway.py + vision_e2e.sh + vision_layer_test.sh
+__pycache__/
+g6.sh
+old_vs_new.sh
+vision_probe.sh
+vision_probe2.sh
