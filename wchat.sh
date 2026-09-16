@@ -2503,12 +2503,57 @@ auth_add_message() {
 # 返回值:0=拿到判定  2=判断服务不可用(调用方降级人工确认)
 #         130=被 Ctrl+C 打断(同步 curl 与主 shell 同前台进程组,
 #             SIGINT 直接杀掉 curl,trap 置 input_aborted)
+# ---------- 审批器回复解析(纯函数,必须可离线测) ----------
+# 提示词(auth_sys_tail 的补充口径)强制要求判 N 时回「N编号:原因」——**整行没有空格**。
+# 而旧解析写的是"剥掉第一个空格分隔的 token":规范格式下首个 token 就是整行,
+# 于是理由被连字吃干、恒为空,界面只剩兜底模板。等于把"给人看的那一句依据"主动销毁,
+# 再用一句同义反复冒充它。实测六种输入的对照见 test_hardwall.sh T19。
+# 三条口径:①首字符定 Y/N,其余一律 N(fail-closed,沿用旧规);②编号必须保住
+# (它是提示词里 N 列表的序号,人靠它知道撞了哪一条);③模型违规没写 N 前缀时,
+# 整行当理由留下 —— 丢掉一段看不懂的文本,也比编一句确定的假理由好。
+auth_parse_verdict() {
+    local line code rest
+    av_verdict=""; av_code=""; av_reason=""
+    line=$(printf '%s' "${1-}" | head -n 1 | tr -d '\r')
+    case "$line" in
+        [Yy]*) av_verdict="Y"; return 0 ;;
+    esac
+    av_verdict="N"
+    if [[ "$line" =~ ^[Nn][[:space:]]*([0-9]+)[[:space:]]*[:：-]?(.*)$ ]]; then
+        av_code="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^[Nn][[:space:]]*[:：-]?(.*)$ ]]; then
+        rest="${BASH_REMATCH[1]}"
+    else
+        rest="$line"
+    fi
+    rest="${rest#"${rest%%[![:space:]]*}"}"
+    av_reason="${rest:0:80}"
+    return 0
+}
+
+# 人工确认卡上给**人**看的那一句。理由缺失时必须直说缺失,再补上代码自己算得出的
+# 坐标(疑似写目标 + 工作目录),让人至少知道该看命令的哪一段 —— 不许拿模板冒充理由。
+auth_confirm_note() {
+    local t tg
+    if [[ -n "${auth_reason:-}" ]]; then
+        t="${auth_code:+N${auth_code}:}${auth_reason}"
+    else
+        t="审批器判 N,但没有给出理由(它按规范该回「N编号:原因」)"
+    fi
+    if declare -f hd_write_targets >/dev/null 2>&1; then
+        tg=$(hd_write_targets "${1-}" 2>/dev/null | head -4 | tr '\n' ' ')
+        [[ -n "${tg// /}" ]] && t="$t｜疑似写目标:${tg:0:120}"
+    fi
+    printf '%s｜工作目录:%s' "${t:0:220}" "${WORK_ROOT:-?}"
+}
+
 auth_think() {
     local cmd=$1
     local reason="${2:-}"
     local request_body resp verdict vraw attempt auth_file
     auth_verdict=""
     auth_reason=""
+    auth_code=""; auth_raw=""
     # 补一行模型自述理由:审批器判据里有规则(动机是否来自外部内容)必须看到意图
     # 才可能判对,以前只喂命令文本,等于让它猜 —— read 档又不跑终审,猜错就直接
     # 打断用户。理由标注为不可信、只用于那一条判断,不作为放行依据(放行依据仍然
@@ -2552,17 +2597,17 @@ auth_think() {
     rm -f "$auth_file"
     printf '\r\033[2K'
     [[ -z "$verdict" ]] && return 2
-    # 格式约定见上方审查提示词:"Y" 或 "N <不超过20字的理由>"。
-    # 只认首字符决定 Y/N(模型偶发多话/输出违规一律按 N 走人工, fail-closed);
-    # N 的理由回传给主模型,让它知道"为什么被拒"才能换路,否则只会反复撞同一堵墙。
+    # 格式约定见上方审查提示词:"Y" 或「N编号:原因」。解析交给 auth_parse_verdict
+    # (顶层纯函数,回归表能离线钉住;理由回传给主模型,让它知道为什么被拒才能换路)。
     vraw="$verdict"
-    verdict=$(printf '%s' "$verdict" | tr -d '\r' | head -n 1 | tr -d '[:space:]')
-    case "$verdict" in
-        Y*|y*) auth_verdict="Y" ;;
-        *)     auth_verdict="N"
-               auth_reason=$(printf '%s' "$vraw" | head -n 1 | sed -E 's/^[^ ]+[[:space:]]*(:|：|-)?[[:space:]]*//; s/^[[:space:]]+//')
-               auth_reason="${auth_reason:0:80}" ;;
-    esac
+    auth_raw=$(printf '%s' "$vraw" | head -n 1 | tr -d '\r')
+    auth_parse_verdict "$auth_raw"
+    auth_verdict="$av_verdict"; auth_reason="$av_reason"; auth_code="$av_code"
+    # 理由丢失必须留下取证痕迹:以前只记已解析的 auth_reason,一旦解析口径与提示词
+    # 脱节(本次就是),审计里看到的是"没理由",审批器**实际回了什么**永久丢失。
+    if [[ "$auth_verdict" == "N" && -z "$auth_reason" ]]; then
+        auto_audit shell "run_shell_command" "${cmd:0:200}" "auth" noreason "判N未解析出理由｜原文:${auth_raw:0:120}"
+    fi
     # 送审链里存"原始回复"(含理由),保持与提示词约定的多轮格式一致
     auth_add_message "$(printf '%s' "$vraw" | head -n 1)" "assistant"
     return 0
@@ -3038,7 +3083,14 @@ hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credentia
 # `echo k > /root/.ssh/authorized_keys` 这种最典型的提权写法)。
 # 刻意**不含 home/Users**:用户目录按"两侧同为 P3"的口径处理,写进这里会造成
 # 单侧加严(同一动作在 shell 侧撞 H11、在工具侧只落 P3)。
+# 展示用的宽松版:同样的判据,末尾多吃 [[:graph:]]* 把完整路径取出来。
+# 主 regex 到目录前缀就结束(>/etc/),人在确认卡上看到"命中: > /etc/"还得自己
+# 猜是哪个文件;_wide 只是给它多缀一段 [[:graph:]]* 取到完整路径,只为文案服务,
+# **不参与判定** —— 判定仍以 hd_re_sys_redirect 为准。两条名单必须同步改(改一条
+# 忘另一条,现象就是本表"分支全带坐标"或 H11 正例成片红;上一轮我就把这条赋值
+# 整个改了名,主判据变量当场消失,H11 全线不触发,14 条一起红)。
 hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
+hd_re_sys_redirect_wide='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/[[:graph:]]*'
 # 「丢弃型」重定向目标:写进 /dev 下这几个字符设备等于扔掉,不产生任何持久改动。
 # 与 hd_re_sys_redirect 的名单无关(那边刻意不含 /dev,所以 >/dev/null 不会撞 H11)。
 # 刻意不列 /dev/sd*、/dev/rdisk*、/dev/disk*:那是块设备,写进去是真毁数据(H4 管)。
@@ -3518,6 +3570,7 @@ hard_deny_cmd() {
     # H1 提权
     if [[ "$c" =~ $hd_re_priv || "$c" =~ $hd_re_su ]]; then
         hd_rule="H1"; hd_msg="提权命令(sudo/doas/su)在任何模式下都不自动执行。替代:把命令原样告诉用户请他在终端执行,或改用不需要提权的方案(装到用户目录、改工作目录内的配置)"
+        hd_note_hit
         return 0
     fi
     # H2 下载即执行(管道喂给解释器)——prompt 注入的头号靶子:网页/README 里
@@ -3526,6 +3579,7 @@ hard_deny_cmd() {
        { ! declare -f hd_recheck >/dev/null 2>&1 ||
          hd_recheck "$hd_re_pipe_exec" "$hd_re_proc_sub" "$hd_re_dl_exec"; }; then
         hd_rule="H2"; hd_msg="下载后直接执行远程脚本被禁止。替代:先只下载(wget -O /tmp/x.sh),用 read_file 读一遍内容,确认无恶意后请用户手动执行"
+        hd_note_hit
         return 0
     fi
     # H3 不可逆大范围删除(根/家目录/系统目录)
@@ -3533,12 +3587,14 @@ hard_deny_cmd() {
        { ! declare -f hd_recheck >/dev/null 2>&1 ||
          hd_recheck "$hd_re_wipe_root" "$hd_re_wipe_flag"; }; then
         hd_rule="H3"; hd_msg="指向根目录/家目录/系统目录的删除被禁止(不可逆,且不在 checkpoint 覆盖范围)。替代:只删工作目录内的目标路径,并先 ls 确认清单"
+        hd_note_hit
         return 0
     fi
     # H4 磁盘/分区级破坏
     if [[ "$c" =~ $hd_re_disk ]] &&
        { ! declare -f hd_recheck >/dev/null 2>&1 || hd_recheck "$hd_re_disk"; }; then
         hd_rule="H4"; hd_msg="磁盘级破坏性操作无法回滚,任何档位都不自动执行(auto 档直接拒;非 auto 档须用户本人逐字输入 yes)。替代:换成对具体文件的普通操作"
+        hd_note_hit
         return 0
     fi
     # H5 覆盖 dotfiles / shell 配置(持久改变用户环境,且不在 checkpoint 内)。
@@ -3550,6 +3606,7 @@ hard_deny_cmd() {
     if [[ "$c" =~ $hd_re_dotfile || "$c" =~ $hd_re_dotfile_cfg ]] \
        && hd_has_write "$c"; then
         hd_rule="H5"; hd_msg="写入/删除主目录下的配置文件或凭据目录被禁止(持久改变环境且不可回滚)。替代:把配置写进工作目录内的文件,或把内容打印出来交给用户自行放置"
+        hd_note_hit
         return 0
     fi
     # H6 访问密钥/凭据(读+外发链路的源头)。工作目录内的 .env 属开发常规,
@@ -3568,32 +3625,42 @@ hard_deny_cmd() {
        # 缺失判据函数时 `!{...}` 为真 → 照拒(fail-closed,与 T6 "缺辅助函数必须照拒"同规)
        ! { declare -f hd_creds_all_exempt >/dev/null 2>&1 && hd_creds_all_exempt "$c"; }; then
         hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被拦:其内容会进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes,按回车/输入 y 都不算),放不放行由用户决定。换写法、拆分命令或重试都不会改变判定,也不要替用户作答;文件工具 read_file/list_dir 走 P1 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
+        hd_note_hit
         return 0
     fi
     # H7 改写发布历史(远端不可回滚,且会伤害协作者)
     if [[ "$c" =~ $hd_re_force_push || "$c" =~ $hd_re_history_rewrite ]]; then
         hd_rule="H7"; hd_msg="强推/删远端分支/改写已发布历史/连忽略文件一起清理均不可逆,任何档位都不自动执行(auto 档直接拒;非 auto 档须用户本人逐字输入 yes)。替代:普通 git push;确需 --force-with-lease 或 git clean -fdx 请用户手动执行"
+        hd_note_hit
         return 0
     fi
     # H8 关机重启 / 注销系统服务
     if [[ "$c" =~ $hd_re_power ]]; then
         hd_rule="H8"; hd_msg="电源与系统服务级操作被禁止(会连带杀掉正在运行的本程序)。替代:用 kill 精确结束本任务启动的子进程 PID"
+        hd_note_hit
         return 0
     fi
     # H9 杀本程序依赖的宿主进程:wchat 跑在 bash 里、渲染靠 python、开发服务常在
     # node 进程里,pkill node/bash 会把自己的运行环境直接干掉。
     if [[ "$c" =~ $hd_re_killhost ]]; then
         hd_rule="H9"; hd_msg="批量杀进程/杀宿主环境/进程炸弹会连带终止本程序(它正跑在被杀的 shell 里)。替代:先 ps 定位目标 PID,再精确 kill 该 PID"
+        hd_note_hit
         return 0
     fi
     # H10 外发敏感内容:上传动作与凭据类内容同时出现才判(单独任一都太常见)
     if [[ "$c" =~ $hd_re_upload && "$c" =~ $hd_re_upload_arg && "$c" =~ $hd_re_secret_ref ]]; then
         hd_rule="H10"; hd_msg="把密钥/凭据/.env 一类内容外发被禁止。替代:只提交用户明确要求的非敏感数据"
+        hd_note_hit
         return 0
     fi
     # H11 重定向写系统路径
     if [[ "$c" =~ $hd_re_sys_redirect ]]; then
         hd_rule="H11"; hd_msg="重定向写入系统路径被禁止。替代:写到工作目录内或 /tmp"
+        # 兜底顺序不能反:[[ =~ ]] 失败会**清空** BASH_REMATCH,所以先存主命中片段,
+        # 宽松版匹配不上时退回它(宁可片段短一点,也不能显示"命中: 空")。
+        local _hw_f="${BASH_REMATCH}"
+        if [[ "$c" =~ $hd_re_sys_redirect_wide ]]; then _hw_f="${BASH_REMATCH}"; fi
+        hd_note_hit "${_hw_f}"
         return 0
     fi
 
@@ -3775,6 +3842,23 @@ hd_creds_all_exempt() {
     return 0
 }
 
+# 拦截理由必须带上**本次真命中的坐标**。人在确认卡上、模型在 tool 结果里,能依据的就
+# 只有这一句;此前 H1-H11 与 P1/P2 全是裸模板,连"哪个路径、哪一段"都不给。实测后果:
+# 三条被拦命令从对话记录里完全诊断不出来,只能造探针去问判据本体(审计里 5 次 H11
+# 命中、5 次全是误拦,现场却看不出真凶是注释里抄来的一个例子)。
+# **传参优先**:路径类判据一律显式给归一后的 $np —— case/前缀分支里 BASH_REMATCH 是
+# 上一次成功匹配留下的陈旧值,拿它冒充"命中"就是编一句确定的假理由(与
+# auth_parse_verdict 注释批评的是同一件事)。只有"紧跟一条成功 =~ 的 if 分支"才省略参数。
+# 片段取自命令文本本身(整条命令本来就已回显、也已进审计 target 字段),不新增泄露面;
+# 截 80 字,防止长正则把整段脚本抄进日志。
+hd_note_hit() {
+    local f="${1-${BASH_REMATCH-}}"
+    [[ -n "$f" ]] || return 0
+    case "${hd_msg-}" in *"(命中:"*) return 0 ;; esac
+    hd_msg="${hd_msg}(命中: ${f:0:80})"
+    return 0
+}
+
 hard_deny_path() {
     local p="$1" mode="${2:-r}" np
     hd_rule=""; hd_msg=""
@@ -3785,6 +3869,7 @@ hard_deny_path() {
     # 链接落到 ~/.ssh/...,等于用一条链接穿过整份名单(临时目录那条 TMP 红线同形)。
     if in_root_exempt "$np" && link_escapes_root "$np"; then
         hd_rule="LINK"; hd_msg="这个路径是符号链接,真实落点在工作目录外:路径判定看链接名、读写跟随链接真身,目录内豁免对它不成立(否则一条链接就能穿过整份凭据/dotfile 名单)。auto 档直接拒,非 auto 档须用户本人逐字输入 yes。替代:让用户把真实文件放进工作目录,或直接给出边界外的真实路径(那条会按它自己的规则重新判定)。换链接、换路径写法都不改变判定"
+        hd_note_hit "$np"
         return 0
     fi
 
@@ -3797,6 +3882,7 @@ hard_deny_path() {
         "$HOME/.config/gcloud"*|"$HOME/.config/azure"*|"$HOME/.azure"*|\
         "$HOME/.docker"*|"$HOME/.kube"*|"$HOME/.subversion"*|"$HOME/.ct/history"*|"$HOME/.ct/config"*)
             hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(~/.ct/history 存对话正文、~/.ct/config 含接口凭据):它会被读进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定。换写法、换路径表达或重试都不改变判定,也不要替用户作答;与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
+            hd_note_hit "$np"
             return 0 ;;
     esac
     # 他人家目录下的凭据目录(与上面那份 $HOME 名单同源,见 hd_foreign_cred_path)。
@@ -3805,6 +3891,7 @@ hard_deny_path() {
     # 用户以为是自己被误伤,转而去加 --allow-write(而 P1 根本放不开),白费一轮。
     if hd_foreign_cred_path "$np"; then
         hd_rule="P1"; hd_msg="另一个用户家目录下的凭据/会话目录(如 /home/<user>/.ssh、/Users/<user>/.aws)不可访问:不是本会话的工作目录,也不是你本人的配置。内容会进上下文并随请求发给服务端。判定与档位无关:auto 档直接拒,非 auto 档须用户本人逐字输入 yes。--allow-write 与换路径表达都放不开这条(P1 在任何名单判定之前),与 shell 的 H6 同判。替代:请用户自己贴出所需的值,或由用户在自己的终端里操作"
+        hd_note_hit "$np"
         return 0
     fi
     # 凭据**文件名**判定:只对**边界外**的路径生效(见上面 in_root_exempt 的权威定义)。
@@ -3823,10 +3910,12 @@ hard_deny_path() {
             .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
             id_rsa|id_dsa|id_ecdsa|id_ed25519)
                 hd_rule="P1"; hd_msg="工作目录外的凭据文件不可访问(按文件名判定:.npmrc/.netrc/.pypirc/.pgpass/.git-credentials/私钥等):内容会进上下文并随请求发给服务端。auto 档直接拒,非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定;换位置、换写法都不改变判定,与 shell 的 H6 同判。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
+                hd_note_hit "$np"
                 return 0 ;;
         esac
         if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
             hd_rule="P1"; hd_msg="工作目录外的私钥/证书文件(.pem/.key/.p12/.pfx/id_rsa 等)不可访问,内容与凭据文件同判:auto 档直接拒,非 auto 档须用户本人逐字输入 yes 才放行。替代:请用户自己提供所需的值"
+            hd_note_hit "$np"
             return 0
         fi
     fi
@@ -3878,11 +3967,13 @@ hard_deny_path() {
             /var|/var/*|\
             /root|/root/*)
                 hd_rule="P2"; hd_msg="写入系统路径被禁止(持久改变环境,且不在 checkpoint 覆盖范围)。替代:写到工作目录内或 /tmp。注意 --allow-write 放不开这条(P2 在越界名单判定之前就已拒绝,名单只对'工作目录外的普通路径'生效且仅 full 档),确需改系统文件请用户自己执行"
+                hd_note_hit "$np"
                 return 0 ;;
         esac
         case "$np" in
             "$HOME"|"$HOME"/.[a-zA-Z]*|"$HOME"/.[a-zA-Z]*/*)
                 hd_rule="P2"; hd_msg="写入主目录顶层或隐藏配置目录(~/.xxx)被禁止。替代:写到工作目录内或 /tmp,把要落的内容打印出来交给用户自行放置"
+                hd_note_hit "$np"
                 return 0 ;;
         esac
         if [[ -n "$auto_mode" ]]; then
@@ -5366,8 +5457,8 @@ tool_run_and_parse() {
                         ai_auth="Y"
                     else
                         auto_note_deny
-                        auto_audit shell "run_shell_command" "$cmd_one" "final" auto_deny "${auto_judge_reason:-} / ${auth_reason:-}"
-                        content="错误:auto 终审拒绝执行[初审:${auth_reason:-无}] [终审:${auto_judge_reason:-无详细理由}]:$command"$'\n'"这是 AI 裁决不是用户拒绝。请换方案(改路径、缩小范围、只读先行),或把命令告知用户请他执行;不要用等价写法重试同一条。"
+                        auto_audit shell "run_shell_command" "$cmd_one" "final" auto_deny "${auto_judge_reason:-} / ${auth_code:+N${auth_code}:}${auth_reason:-无}｜原文:${auth_raw:-无}"
+                        content="错误:auto 终审拒绝执行[初审:${auth_code:+N${auth_code}:}${auth_reason:-无}] [终审:${auto_judge_reason:-无详细理由}]:$command"$'\n'"这是 AI 裁决不是用户拒绝。请换方案(改路径、缩小范围、只读先行),或把命令告知用户请他执行;不要用等价写法重试同一条。"
                         add_message "$content" "tool" "$fn_id"
                         printf ' ⛔ auto 终审拒绝:%s\n' "${auto_judge_reason:-未提供理由}"
                         echo
@@ -5380,7 +5471,7 @@ tool_run_and_parse() {
             if [[ "$hd_approved" != "1" && "$ai_auth" == "N" ]]; then
                 # 非 auto(或 auto 已降级):审批器判 N → 人工确认。理由一并展示,
                 # 人才能判断该放行还是让模型换路(以前只给命令,人是在盲签)。
-                if confirm_cmd "$command" "⚠ 该命令需人工确认" "${auth_reason:-审批器判定为越界/破坏性操作}" 0; then
+                if confirm_cmd "$command" "⚠ 该命令需人工确认" "$(auth_confirm_note "$cmd_one")" 0; then
                     answer="y"
                     # 缺口 B:人已看过整条命令并放行,不记账的话下次同一条命令、以及随后
                     # 对同一目录的 read_file/grep 还要重新问人(文件侧 y 是记账的,shell 漏了)。
@@ -5419,7 +5510,7 @@ tool_run_and_parse() {
                 # 换一种等价写法再撞一次墙(实测反复 3~5 轮),带上审批理由它能
                 # 直接判断该缩小范围、换路径还是把命令交给用户。
                 content="用户拒绝执行命令: $command"$'\n'"拒绝时审批器的顾虑:${auth_reason:-${confirm_note:-用户主动否决}}"$'\n'"请勿用等价写法重试同一条;换方案(缩小范围/只读先行/改在工作目录内),或把命令原样告知用户请他执行。"
-                auto_audit shell "run_shell_command" "$cmd_one" "${hd_rule:-auth}" human_no "${auth_reason:-}"
+                auto_audit shell "run_shell_command" "$cmd_one" "${hd_rule:-auth}" human_no "${auth_code:+N${auth_code}:}${auth_reason:-}｜原文:${auth_raw:-无}"
             fi
         else
             # 文件类工具:打印一行参数预览后直接执行。

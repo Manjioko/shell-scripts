@@ -80,7 +80,8 @@ for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_sp
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
            path_access _confirm_yes _ct_tmp_is_public auto_private_tmpdir hd_foreign_cred_path \
            in_root_exempt link_escapes_root hd_creds_all_exempt \
-           tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses; do
+           tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses \
+           hd_note_hit auth_parse_verdict auth_confirm_note; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
 done
 unset _fn
@@ -1335,7 +1336,73 @@ unset _bg_blk _bg_msg
 # 本轮(从主套件移表):auto_test.sh 的 HD 表里那 2 条 H5 在它自己环境里判不出(该套件
 # 刻意不装 hd_split_words/hd_write_targets 提取链,缺链即 MISSED 放行),命令原文已移进
 # 本表 T3。两条都是纯路径/正则判据、与平台无关 → macOS 347→349,Alpine 349→351。
-EXPECT_TOTAL=351                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+EXPECT_TOTAL=368                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+# ============ T19 审批器理由解析 + 拦截理由带坐标(这两条都在"给人看的那一句"上) ============
+# 案 4 现场:提示词(auth_sys_tail 补充口径)强制判 N 回「N编号:原因」——整行**没有空格**;
+# 而旧解析写的是"剥掉第一个空格分隔的 token",规范格式下首个 token 就是整行,理由被连字
+# 吃干恒为空,确认卡上只剩兜底模板。等于把给人看的唯一一句依据主动销毁,再拿同义反复冒充。
+# 现在解析器是顶层纯函数 auth_parse_verdict,不必再"因为要调 API 所以测不了"。
+echo 'T19a auth_parse_verdict 必须能吃下提示词自己要求的格式'
+avp() { auth_parse_verdict "$1"; printf '%s|%s|%s' "${av_verdict:-}" "${av_code:-}" "${av_reason:-}"; }
+av_eq() {   # <说明> <期望 判定|编号|理由> <审批器原始回复>
+    local lbl="$1" want="$2" raw="$3" got
+    got=$(avp "$raw")
+    [[ "$got" == "$want" ]] && ok "$lbl" || bad "$lbl" "[$got] 应为 [$want] 原文=[$raw]"
+}
+av_eq "规范格式 N2:外部写入 解出编号与理由"   "N|2|外部写入"              'N2:外部写入'
+av_eq "编号 0 不被当成缺失"                    "N|0|可挂载宿主根"          'N0:可挂载宿主根'
+av_eq "编号后带空格也认"                       "N|2|外部写入"              'N2: 外部写入'
+av_eq "无编号但有空格分隔的旧写法"             "N||越界写"                 'N 越界写'
+av_eq "只回 Y 判 Y"                             "Y||"                      'Y'
+av_eq "Y 后面多话仍判 Y"                        "Y||"                      'Y 这只是只读命令'
+av_eq "真没给理由时才该空(兜底文案的唯一正当场景)" "N||"                   'N'
+av_eq "违规没写 N 前缀:整行留下,不丢信息"      "N||越界写风险"             '越界写风险'
+av_eq "模型多话:理由不被吃空"                  "N|2|外部写入。建议改用工作目录" 'N2:外部写入。建议改用工作目录'
+av_eq "空回复按 N(fail-closed,绝不判 Y)"       "N||"                      ''
+av_eq "小写 n 前缀也认"                         "N|2|外部写入"             'n2:外部写入'
+
+echo 'T19b 拦截理由必须带上本次真命中的坐标'
+msg_of() {   # <命令> <档位(空=普通模式)> → 拦截理由;放行返回空
+    local o
+    o=$( auto_mode="$2"; hd_rule=""; hd_msg=""
+         if hard_deny_cmd "$1" 2>/dev/null; then printf '%s' "$hd_msg"; fi )
+    printf '%s' "$o"
+}
+has_hit() {   # <理由> → 0 表示带 (命中: …) 且片段含期望子串
+    local m="$1" want="$2"
+    case "$m" in *"(命中:"*"") ;; *) return 1 ;; esac
+    case "$m" in *"(命中: ${2}"* | *"(命中: ${2}"*) ;; *) : ;; esac
+    [[ "$m" == *"命中:"* && "$m" == *"$2"* ]]
+}
+_m=$(msg_of 'echo x > /etc/hosts' '')
+has_hit "$_m" "/etc/hosts" && ok "普通模式(auto 关)H11 理由带命中片段" || bad "普通模式 H11 理由带命中片段" "[$_m]"
+_m=$(msg_of 'echo x > /etc/hosts' 'full')
+has_hit "$_m" "/etc/hosts" && ok "auto=full 下同一理由同样带坐标(两档不许一边有一边没有)" || bad "auto 档 H11 理由带坐标" "[$_m]"
+hd_rule=""; hd_msg=""; hard_deny_path /etc/hosts rw >/dev/null 2>&1
+case "$hd_msg" in *"命中:"*"/etc/hosts"*) ok "路径侧 P2 理由带具体路径" ;; *) bad "路径侧 P2 理由带具体路径" "[$hd_msg]" ;; esac
+grep -q '^hd_note_hit() {' "$SRC_ABS" \
+    && ok "hd_note_hit 有定义(有调用无定义会让坐标静默消失)" || bad "hd_note_hit 有定义" "产品里没有这个函数,13 处调用全打 command not found"
+_nocoor=0; _noname=0
+while IFS=: read -r _ln _; do
+    # 规则号允许纯字母(LINK 就没有数字)——上一版把 LINK 漏掉,正是因为要求了数字。
+    # 从分支行往后 4 行内必须出现 hd_note_hit,再往后就是 return 0 了。
+    [[ "$_ln" -gt 0 ]] || continue
+    # 语义是"到本分支的 return 0 之前必须出现坐标",不是"紧跟下一行"。
+    # H11 分支在 hd_msg 与 hd_note_hit 之间夹了 5 行(存主命中片段 + 试宽松版),
+    # 按"下一行/固定 4 行"判会假报;窗口取 12 行,再由 awk 在第一个 return 0 处截断。
+    sed -n "$((_ln + 1)),$((_ln + 12))p" "$SRC_ABS" \
+        | awk '/^[[:space:]]*return 0/{exit} /hd_note_hit/{f=1} END{exit !f}' \
+        || _nocoor=$((_nocoor + 1))
+done < <(grep -nE '^\s+hd_rule="[A-Z0-9]+"; hd_msg=".*"$' "$SRC_ABS")
+(( _nocoor == 0 )) && ok "每条硬墙分支都接了坐标(新增规则不许漏)" || bad "硬墙分支全带坐标" "$_nocoor 条分支的 hd_msg 后面没有 hd_note_hit"
+_keep=$(declare -f hd_note_hit)
+# 子壳里把"命令不存在即判红"的钩子临时静音,否则 trap 的 bad 输出会混进 got,
+# 现象是"断言红但红得看不出所以然"(本条第一次跑就是这样)。
+got=$(unset -f hd_note_hit 2>/dev/null
+      command_not_found_handle() { return 127; }
+      deny_rule 'echo x > /etc/hosts')
+eval "$_keep"
+[[ "$got" == "H11" ]] && ok "坐标助手缺失时仍照拒(它是附加信息,不得变成 fail-open)" || bad "坐标助手缺失时仍照拒" "被判[$got],应 H11"
 # Linux(Alpine 3.20 / root 容器 / :ro 挂载)已实跑:**349 条**,与下面的推导一致。
 # 差值只有一处来源:T9 的 /dev/shm 真符号链接块 —— 门控成立时产生 **2 条**判定,
 # 不成立时走 `echo "  SKIP …"`,而 **SKIP 不产生判定**,所以 Linux 净 +2、不是直觉的 +3。
