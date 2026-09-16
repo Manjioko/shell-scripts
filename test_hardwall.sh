@@ -256,6 +256,11 @@ expect H3 "命令替换里的删除"    "echo \$(rm -rf ~/x)"
 expect H3 "链式命令后段是删除"  "echo hi > /tmp/a && rm -rf ~"
 expect H3 "整段未加引号"        "rm -rf ~/Documents"
 # H5 收窄的反面对照:上面 4 条放行之后,真写入一条都不许跟着漏掉。
+# 再下面两条原文本挂在主套件 auto_test.sh 的 HD 表里。那里刻意不装 hd_split_words/
+# hd_write_targets 提取链(怕两处各测一遍口径漂移),而 H5 缺该链时判成 MISSED(放行),
+# 在那套环境里测不出真相 —— 移进本表由全套装载来判,命令原文一字未改。
+expect H5 "重定向写 bashrc(主套件原样)"     "echo x > ~/.bashrc"
+expect H5 "sed -i 写 zshrc(主套件原样)"     "sed -i \"s/a/b/\" ~/.zshrc"
 expect H5 "追加写 zshrc"                        "echo 'export A=1' >> ~/.zshrc"
 expect H5 "真重定向覆盖 zshrc"                  "cat /tmp/x > ~/.zshrc"
 expect H5 "bash 的 &>> 双流追加是真重定向"      "mycmd &>> ~/.zshrc"
@@ -777,12 +782,18 @@ askrl_case "EOF 无换行保留内容"            "yes" "1" "printf 'yes'"
 # ⑤ 非交互喂 /dev/null:必须**当场返回**而不是空等(旧写法靠 rc<=128 break,
 #    新写法的 _rc>128 判据一旦写反就是弹窗永久卡死)
 askrl_case "stdin 关闭立即返回空"          ""    "1" "cat /dev/null"
-# ⑥ 冲读:提前到达的按键必须被丢掉(它属于上一个弹窗,不该自动批掉下一个)
+# ⑥ 非 tty(stdin 是管道/文件):drain 必须**跳过**,把内容原样留给 ask_read_line。
+#    这里原先断言的是"读到空"—— 那正是主套件第 6 节三条 y/yes 红掉的根因:管道喂进来的
+#    yes 被当成上一个弹窗的残留清掉,函数读到空即判拒,于是任何脚本化确认永远进不去,
+#    而且不对称地只红"该放行"的断言(该拒的四条照样绿),看起来像"产品改了确认语义"。
+#    真终端侧"清残留、防上一条弹窗的按键自动批准下一条"由 pty 用例(--hardwall-ask-line)
+#    单独钉住:两侧各有各的钉,不许再互相冒充。
 if (( HAS_ASKRL )); then
     out6=$( { printf 'yes\n'; } | { ask_drain_input; ask_read_line; printf '%s' "$ask_line"; } )
-    [[ -z "$out6" ]] && ok "drain 丢掉提前到达的按键" || bad "drain 未清残留" "读到[$out6]"
+    [[ "$out6" == "yes" ]] && ok "非 tty:drain 跳过,答案留给本次确认" \
+                           || bad "非 tty:drain 跳过,答案留给本次确认" "读到[$out6]"
 else
-    bad "drain 丢掉提前到达的按键" "被测版本没有 ask_drain_input"
+    bad "非 tty:drain 跳过,答案留给本次确认" "被测版本没有 ask_drain_input"
 fi
 unset out6
 
@@ -1284,7 +1295,10 @@ unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
 # 判据是"包含 /Users/ 或 /home/ + 剥一层用户名",归一前后都命中(所以专门留了两条
 # firmlink 形态断言)。
 # 条数不再依赖"本表叫什么名字":自我检查一律走 HW_SELF(见文件开头),改名/软链跑同样数。
-EXPECT_TOTAL=347                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+# 本轮(从主套件移表):auto_test.sh 的 HD 表里那 2 条 H5 在它自己环境里判不出(该套件
+# 刻意不装 hd_split_words/hd_write_targets 提取链,缺链即 MISSED 放行),命令原文已移进
+# 本表 T3。两条都是纯路径/正则判据、与平台无关 → macOS 347→349,Alpine 349→351。
+EXPECT_TOTAL=349                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # Linux(Alpine 3.20 / root 容器 / :ro 挂载)已实跑:**349 条**,与下面的推导一致。
 # 差值只有一处来源:T9 的 /dev/shm 真符号链接块 —— 门控成立时产生 **2 条**判定,
 # 不成立时走 `echo "  SKIP …"`,而 **SKIP 不产生判定**,所以 Linux 净 +2、不是直觉的 +3。
