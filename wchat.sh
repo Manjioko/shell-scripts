@@ -136,8 +136,11 @@ if [[ -z "$API_KEY" ]]; then
     exit 1
 fi
 
-# 切到 Homebrew bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑;且下面的
-# declare -A 关联数组是 bash 4+ 语法,3.2 上会直接失败）
+# 切到 bash 5.x（readline 8.x 原生支持括号粘贴 + 中文编辑;下面的 declare -A 也要 4+）。
+# 口径:**本脚本只支持 bash 5.x**,不做多版本兼容 —— 遇到 5.x 才有的语法一律直接用,
+# 不要再写"为了 3.2 换个写法"的绕行(本轮已删掉 is_granted 里那条空数组绕行)。
+# 但**这段 re-exec 不是兼容层,是"单一版本"的执行机制**:本机 PATH 里第一个 bash 就是
+# /bin/bash 3.2,删掉它脚本会在 declare -A 处静默错乱(见下面几行的旧事故),必须保留。
 #
 # 判据必须用 BASH_VERSINFO,不要用自定义开关变量:旧实现 export
 # BREW_BASH_CHECKED=1 当"只 exec 一次"的守卫,该变量会被子进程与嵌套调用继承
@@ -795,7 +798,12 @@ ask_read_line() {
         IFS= read -r -t 0.2 ask_chunk
         _rc=$?
         (( input_aborted )) && return 1
-        ask_line="$ask_line$ask_chunk"
+        # 终端对子进程查询的应答(OSC 10/11、DA、 kitty 标志…)也会落进这个 fd。
+        # 以前它被当成答案字符拼进来:答案变成一长串转义序列、按"非 y"拒 ——
+        # 不泄密,但用户看着像"我按了 y 它不理"。过一遍应答过滤器,只拼真要的部分。
+        # 未收全的片段留在 tty_hold 里等下一个 chunk(下次调用接着扫),不会丢按键。
+        tty_strip_responses "$ask_chunk"
+        ask_line="$ask_line$tty_fwd"
         (( _rc == 0 )) && return 0
         # _rc==1:stdin 已关闭(非交互跑批、-q 单轮、测试喂 /dev/null)——
         # 有什么用什么,绝不再空等,否则整个弹窗会卡死成永久循环。
@@ -902,8 +910,11 @@ get_history() {
     local full_text=""
     local msg_content role reasoning tool_calls tool_call_id _tcid _tcnm _tname _rest _key
     # tool_call_id → 工具名 的查表串("id 名字" 一行一条)。
-    # 不用 declare -A:macOS 自带 /bin/bash 是 3.2,不支持关联数组,而本脚本开了
-    # set -e —— 一句 `declare -A` 失败就会把整个 -l 加载流程直接中止。
+    # 这里用"一行一条 id 名字"的查表串而不是 declare -A,是**历史遗留**:当年要兼容
+    # macOS 自带的 3.2。现在脚本统一 bash 5.x(见开头 re-exec 段),这个理由已经不成立,
+    # 属于该清理但没清的东西 —— 它不是多版本分支(不会走两套逻辑),只是表达啰嗦。
+    # 要改就在有 e2e 覆盖(工具调用多轮历史回灌)的前提下改,别顺手改:这里错了的表现是
+    # 工具结果与调用对不上号,模型会拿到错位的上下文。
     local tc_map=""
     while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
@@ -1353,6 +1364,142 @@ kill_tree() {
     kill "$pid" 2>/dev/null
 }
 
+# ---------- 终端应答过滤(命令窗口的 tty 中继) ----------
+# 为什么需要:run_with_window 里我们代读 tty 并把字节转发进子命令 stdin。落在 tty 输入队列
+# 里的字节不全是人敲的 —— 终端对转义**查询**的**应答**也进同一个队列。实测形态(Ghostty):
+#   ESC ] 11 ; rgb:2828/2c2c/3434 ESC \     (25 字节,查询默认背景色的应答)
+# 发起查询的是**子进程**(gh / vim / mdcat / bubbletea 系;本机 PATH 上 19 个可执行文件内嵌
+# 这条查询),我们自己的代码从不发查询(表里 T17 有静态守卫钉住这条)。应答落到我们手里后有
+# 两条坏出口:①被当按键转发给下一个子命令 = 静默注入假按键(比打印出来更糟);②我们让出 tty
+# 之后被 shell 的 readline 以 caret 形式回显到屏幕上 = 用户看到的 "^[]11;rgb:…^[\\"。
+#
+# 策略(区分"确定的应答"与"判不动的东西"):
+#   ① 能完整识别的应答序列(OSC/DCS 应答、DSR 光标报告、DA1/DA2、kitty 键盘标记、DECRPM)→ 丢;
+#   ② 真实按键(方向键 ESC[A、F 键 ESC[15~ / ESCOP、Alt+x、含 ESC[13u 这种带数字的 CSI 键)→ 原样转发;
+#   ③ 读到一半判不动的尾部 → 存 tty_hold 等下一片,超过 TTY_HOLD_MAX 个轮询周期仍不完整就
+#      **转发出去而不是丢弃** —— 吞掉用户按键比漏放一条应答更糟;真应答几乎总在一个 RTT 内
+#      整段到达,跨片只可能出现在"人正在打字"的时候。
+#   ④ bracketed paste 区间(ESC[200~ … ESC[201~)内**一律不过滤**:粘贴正文里的 ESC]… 是数据
+#      不是应答,剥它就是篡改用户粘贴。
+# 全部只用 bash 内建(这个函数在 0.01s 轮询循环里跑,fork 不得分)。
+TTY_HOLD_MAX=3
+# CSI 的参数/中间字节区间:ECMA-48 的 0x30-0x3F 与 0x20-0x2F(final byte 是 0x40-0x7E)
+TTY_RE_CSI_PI='[0-9:;<=>? -/]'
+tty_hold=""; tty_hold_age=0; tty_paste=0; tty_fwd=""
+
+tty_strip_init() { tty_hold=""; tty_hold_age=0; tty_paste=0; tty_fwd=""; }
+
+# 入参 $1 = 新读到的字节。出参:tty_fwd = 可转发的字节;tty_hold = 判不动、待下片的尾部。
+# 为什么要这个过滤器:子进程(gh / vim / mdcat / git 的进度条…)会向终端发**查询**
+# 问"你的背景色是什么/你支持哪些能力",Ghostty 之类的终端**必定回一条应答**,而应答写的是
+# 控制 tty —— 也就是我们 `3<&0` 喂给子命令 stdin 的那个 fd。中继以前把这串当"用户按键"
+# 原样转发,于是:窗口内 echo 关着时它混进答案里(按 y 不理),窗口退出后它被 shell 的
+# readline 回显成 `^[]11;rgb:3333/3333/3333^[`(用户报的现象就是这个)。应答本身不是数据,
+# 任何转发都只是噪声,所以整段丢掉。
+#
+# 判定分三类:① 明确应答形态(下面 case 里逐条列)→ 丢;② 明确按键形态(方向键/F 键/
+# Alt+字符/粘贴标记)→ 转发;③ 未收全(分片到达)→ 留在 tty_hold 等下一片,绝不当成
+# 按键转发出去。**误吞按键比漏一条应答严重得多**,所以每条 case 都写成"只有确认是应答
+# 才丢",默认落到转发那一支。
+tty_strip_responses() {
+    # 注意:不能写成 `local s=... n=${#s}` —— 同一行 local 的后面那个词看不到前面刚赋的
+    # 变量(set -u 下当场 unbound 而死,报错还会指向装载这个函数的 eval 行,极难定位)。
+    local s="${tty_hold}${1}"
+    local n=${#s} out="" i=0 st c t2 p f j
+    tty_hold=""; tty_fwd=""
+    [[ -n "$s" ]] || return 0
+    while (( i < n )); do
+        c="${s:i:1}"
+        if (( tty_paste )); then                       # ④ 粘贴区间:原样透传,只等结束标记
+            if [[ "${s:i:6}" == $'\e[201~' ]]; then
+                tty_paste=0; out+=$'\e[201~'; i=$((i+6))
+            else
+                out+="$c"; i=$((i+1))
+            fi
+            continue
+        fi
+        if [[ "$c" != $'\e' ]]; then out+="$c"; i=$((i+1)); continue; fi
+
+        t2="${s:i+1:1}"
+        case "$t2" in
+        '')                                             # 串尾只剩一个 ESC:可能是方向键的前半
+            tty_hold=$'\e'; return 0 ;;
+        ']'|'P'|'X'|'^'|'_')                            # OSC / DCS:找 BEL 或 ST(ESC \) 终止符
+            j=$((i+2)); f=0
+            while (( j < n )); do
+                if [[ "${s:j:1}" == $'\a' ]]; then f=1; break; fi
+                if [[ "${s:j:2}" == $'\e\\' ]]; then f=2; break; fi
+                j=$((j+1))
+            done
+            if (( f == 0 )); then tty_hold="${s:i}"; return 0; fi   # ③ 未终止
+            i=$(( j + f ))                                          # 按键流里不该有 OSC/DCS → 丢
+            continue ;;
+        '[')                                            # CSI:收参数/中间字节直到 final byte
+            st=$i; j=$((i+2)); p=""; f=""
+            while (( j < n )); do
+                f="${s:j:1}"
+                [[ "$f" == $'\e' ]] && break            # 没终止就来了新 ESC → 判不动,整体等下片
+                if [[ "$f" =~ $TTY_RE_CSI_PI ]]; then p+="$f"; j=$((j+1)); continue; fi
+                break                                   # 0x30-0x3F 与 0x20-0x2F 收完,这里该是 final
+            done
+            if (( j >= n )) || [[ "$f" == $'\e' ]]; then tty_hold="${s:i}"; return 0; fi   # ③
+            i=$((j+1))
+            # final byte 是 0x40-0x7E;不是(控制字符等)就算这个 CSI 异常中断 —— 把已收部分
+            # 原样转发,从 f 这个字节重新判(它可能是 \r 这样的真按键),别把用户输入吃掉。
+            if [[ "$f" != [@-~] ]]; then
+                out+="${s:st:j-st}"; i=$j; continue
+            fi
+            case "$f" in
+            R)  [[ "$p" == *[0-9]* ]] && continue                                  # DSR 光标报告
+                ;;                                                                 # ESC[R(无参数)= F8,是按键
+            c)  [[ "$p" == \?* || "$p" == \>* ]] && continue                        # DA1/DA2 应答
+                ;;
+            u)  [[ "$p" == *\?* ]] && continue                                      # kitty 键盘标记应答
+                ;;                                                                  # ESC[13u 这类是按键,保留
+            y)  [[ "$p" == *'$'* ]] && continue                                     # DECRPM 应答
+                ;;
+            '~')  [[ "$p" == "200" ]] && { tty_paste=1; }                           # 粘贴开始:连同标记一起转发
+                ;;
+            esac
+            out+="${s:st:i-st}"; continue ;;
+        'O')                                            # SS3:ESC O <final>(ESCOP = F1)
+            if (( i + 3 > n )); then tty_hold="${s:i}"; return 0; fi
+            out+="${s:i:3}"; i=$((i+3)); continue ;;
+        *)                                              # Alt/meta 键:ESC + 一个字符
+            out+="$c$t2"; i=$((i+2)); continue ;;
+        esac
+    done
+    tty_fwd="$out"
+    return 0
+}
+
+# 命令窗口收尾:把 tty 里已排队的应答吃掉,别让它飘到下一个读者(输入助手 / shell 提示符)。
+# 只在**整段都是应答**时才吃;混着真按键就把整段退回 tty_hold 交给下一轮,宁可不扔也不吞按键。
+tty_drain_responses() {
+    local d="" rounds=0
+    while (( rounds < 3 )); do
+        d=""
+        IFS= read -r -t 0.02 -N 4096 d || true
+        [[ -n "$d" ]] || break
+        tty_strip_responses "$d"
+        if [[ -n "$tty_fwd" ]]; then tty_hold="${tty_fwd}${tty_hold}"; return 0; fi
+        rounds=$((rounds+1))
+    done
+    return 0
+}
+
+# 判不动的尾部按轮询周期老化:超过 TTY_HOLD_MAX 还没等齐下一片,就**原样转发**。
+# 方向是"宁漏一条应答,也不吞用户按键"——真应答都在毫秒级整段到达,走不到这条;
+# 走到这条的多半是人正敲到一半的转义键。$1 = 目标 fd(子命令 stdin)。
+tty_hold_tick() {
+    tty_hold_age=$((tty_hold_age + 1))
+    (( tty_hold_age > TTY_HOLD_MAX )) || return 0
+    local k=${tty_hold//$'\n'/$'\r'}
+    printf '%s' "$k" >&"$1"
+    tty_hold=""; tty_hold_age=0
+    return 0
+}
+
 # 窗口模式运行命令
 run_with_window() {
     local cmd="$1"
@@ -1518,7 +1665,7 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 
     # 关本地回显:用户按键由子命令的 pty 回显(行提示原样回、菜单 UI 重画)
     # 后经输出 FIFO 画到窗口,避免 tty 与 pty 双重回显;ISIG 仍开,Ctrl+C 不受影响
-    if [[ -t 0 ]]; then tty_save=$(stty -g); stty -echo; fi
+    if [[ -t 0 ]]; then tty_save=$(stty -g); stty -echo; tty_strip_init; fi
 
     last_data=${EPOCHREALTIME/./}
     cmd_start_us=$last_data      # 单命令墙钟超时(CMD_TIMEOUT 秒)的起点
@@ -1533,14 +1680,26 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
         rc=$?
         # 代读 tty:把用户按键(含方向键等转义序列)转发进子命令 stdin。
         # read -N 临时切非规范模式,无换行的字节也能立即取到
+        # **必须过 tty_strip_responses**:tty 上 arriving 的不只是按键,还有终端对子进程
+        # 转义查询的应答(OSC 11 背景色等)。不过滤就是把应答当假按键注入子命令,或者在我们
+        # 让出 tty 之后被 shell 回显成 "^[]11;rgb:…^[\\"(用户实报现象)。
         if [[ -n "$tty_save" ]]; then
             key=""
             IFS= read -r -t 0.01 -N 4096 key
             if [[ -n "$key" ]]; then
-                # 真实终端的 Enter 发 \r,本 tty 的 ICRNL 已转成 \n;raw 模式 UI
-                # (vite/clack 等)只认 \r,还原后发送(规范模式侧 pty 会再转回 \n)
-                key=${key//$'\n'/$'\r'}
-                printf '%s' "$key" >&"$in_fd"
+                tty_hold_age=0
+                tty_strip_responses "$key"
+                [[ -n "$tty_hold" ]] && tty_hold_age=1
+                key="$tty_fwd"
+                if [[ -n "$key" ]]; then
+                    # 真实终端的 Enter 发 \r,本 tty 的 ICRNL 已转成 \n;raw 模式 UI
+                    # (vite/clack 等)只认 \r,还原后发送(规范模式侧 pty 会再转回 \n)
+                    key=${key//$'\n'/$'\r'}
+                    printf '%s' "$key" >&"$in_fd"
+                fi
+            elif [[ -n "$tty_hold" ]]; then
+                # 判不动的尾部:老化到 TTL 就原样转发(策略见 tty_hold_tick 的注释)
+                tty_hold_tick "$in_fd"
             fi
         fi
         if [[ -n "$chunk" ]]; then
@@ -1638,6 +1797,9 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
     # 恢复回显与原 INT trap，关闭两个 FIFO 端并清理临时目录；
     # 同时恢复 job control 原状态(见上方 set -m 注释:泄漏会让全脚本
     # 异步子进程的信号语义永久偏离启动初始态)
+    # 收尾先吃掉 tty 里已排队的终端应答:子进程(gh/vim 等)发完查询就退了,应答会留在
+    # 输入队列里,下一个读者(输入助手、甚至退出后的 shell readline)就会把它显示出来。
+    [[ -n "$tty_save" ]] && tty_drain_responses
     [[ -n "$tty_save" ]] && stty "$tty_save"
     [[ -n "$old_trap" ]] && eval "$old_trap" || trap - INT
     (( monitor_was_on )) || set +m
@@ -2372,7 +2534,7 @@ auth_think() {
     case "$verdict" in
         Y*|y*) auth_verdict="Y" ;;
         *)     auth_verdict="N"
-               auth_reason=$(printf '%s' "$vraw" | head -n 1 | sed -E 's/^[^ ]+[[:space:]]*[:：-]?[[:space:]]*//; s/^[[:space:]]+//')
+               auth_reason=$(printf '%s' "$vraw" | head -n 1 | sed -E 's/^[^ ]+[[:space:]]*(:|：|-)?[[:space:]]*//; s/^[[:space:]]+//')
                auth_reason="${auth_reason:0:80}" ;;
     esac
     # 送审链里存"原始回复"(含理由),保持与提示词约定的多轮格式一致
@@ -2464,10 +2626,10 @@ grant_file() {
 # 目录授权含其子树(用户放行 ~/.config 就是放行整棵 ~/.config,不再逐文件追问)。
 is_granted() {
     local p="$1" mode="${2:-r}" canon g gmode gpath
-    # bash 3.2 + set -u 下 `"${granted_files[@]}"` 展开**空数组**是致命 unbound variable
-    # （4.4 起才不报），现象是整个 wchat 无声猝死。空名单语义就是"什么都没授权",
-    # 提前返回 1 既避开雷又完全等价。同文件别处用 ${#arr[@]} 守,这里沿用同一约定。
-    [[ ${#granted_files[@]} -eq 0 ]] && return 1
+    # 空名单 = 什么都没授权:下面的 for 零次循环、末尾 return 1,语义已自洽。
+    # (这里原先有一条 [[ ${#granted_files[@]} -eq 0 ]] && return 1 的提前返回,
+    #  是当年为 macOS 自带 bash 3.2 下 set -u 展开空数组会 unbound 而加的绕行;
+    #  本脚本统一跑 bash 5+,该雷不存在,已按"不留多版本兼容"的口径删除。)
     if [[ -d "$(dirname "$p")" ]]; then
         canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || canon=""
     else
@@ -2878,9 +3040,11 @@ hd_re_write_verb='(^|[[:space:];&|])(rm|rmdir|mv|cp|install|rsync|tee|touch|mkdi
 # (grep … | wc -m | sed 's/^/  /'),被拦时提示「命中目标: /」。
 # 已知取舍:空引号 token("" 表示一个空参数)会被丢弃,权限判据不吃空参数,可接受。
 hd_words=()
-# 段内是否出现 "" / '' 这类空参数。数组表达不了空元素(bash 3.2 下空元素还会连带
-# 踩 set -u 的未绑定坑),所以只用这个标志位告知调用方"本段切词位置不可靠",由它
-# 决定保守处理,而不是让后面的 token 顶到前面错位。
+# 段内是否出现 "" / '' 这类空参数 —— 与 bash 版本无关,是**切词位置**的问题:空参数
+# 落进 hd_words 后,下游按位置取"命令名/参数"的判据就会错位(后面的 token 顶到前面),
+# 而误错位的方向不可控。所以只置这个标志位告知调用方"本段位置不可靠",由它保守处理。
+# (原注释把这件事记成"3.2 数组表达不了空元素",不准;真正能不能收空元素另说,
+#  位置错位这条理由独立成立。见第十节:值得连带回归后再评估要不要改回收空元素。)
 hd_empty_token=0
 hd_split_words() {
     hd_words=()
@@ -3111,7 +3275,8 @@ hd_write_targets() {
 #   - 只读动词白名单之外的动词不脱敏 → sh -c "rm -rf ~/x"    照旧命中
 #   - 引号里仍保留分界符 ; | & 换行  → 脱敏后的内容不可能拼出新的命中
 #   - 只认"段首命令位置"的动词        → echo x; rm -rf ~/y   的 rm 仍算命令
-# bash 3.2 兼容:不用 nameref / 关联数组 / mapfile(本表函数会被测试 eval 出来跑)。
+# 本段函数不许用 nameref / 关联数组 / mapfile:硬墙表是用 awk 按函数名把这里 eval 出去跑的,
+# 复合结构会破坏抽取边界 —— 测到的就不是产品里那份判据了(与 bash 版本无关)。
 hd_is_readonly_verb() {
     case "${1##*/}" in
         grep|rg|ag|sed|awk|echo|printf|cat|head|tail|sort|uniq|cut|wc|tr|comm|cmp|diff|file|column|iconv|base64|md5|shasum|jq|yq|less|more|man|strings|git) return 0 ;;
@@ -4840,7 +5005,7 @@ tool_read_skill() {
     [[ -z "$name" ]] && { content="错误:技能名(name)不能为空"; return 0; }
     [[ "$name" == *"/"* || "$name" == *".."* ]] && { content="错误:非法技能名: $name"; printf ' ⛔ 非法技能名:%s\n' "$name"; return 0; }
     path="$SKILLS_DIR/$name/SKILL.md"
-    [[ -f "$path" ]] || { content="错误:技能不存在: $name。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
+    [[ -f "$path" ]] || { content="错误:技能不存在: ${name}。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
     total_chars=$(wc -m < "$path" | tr -d ' ')
     if (( total_chars > READ_MAX_CHARS )); then
         out=$(LC_ALL=C awk -v max="$READ_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; print}' "$path")
@@ -5698,9 +5863,9 @@ overview() {
         # 去"标题是/标题为"等前缀与成对引号、去首尾空白与尾部标点
         title=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
         title=$(printf '%s' "$title" | head -n 1 \
-            | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-                  -e 's/^.*标题[是为如]//' -e 's/^[:：]//' \
-                  -e 's/^[「『"“]//' -e 's/[」』"”。！!，,。、]*$//')
+            | sed -E -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+                  -e 's/^.*标题(是|为|如)//' -e 's/^(:|：)//' \
+                  -e 's/^(「|『|"|“)//' -e 's/(」|』|"|。|！|!|，|,|、)*$//')
         # 超长截断(后续 save_history 还会再做文件名特殊字符清洗)
         (( ${#title} > 40 )) && title="${title:0:40}"
     fi

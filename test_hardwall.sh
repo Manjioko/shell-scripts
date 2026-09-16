@@ -63,27 +63,42 @@ bad() { echo "  FAIL $1${2:+ — $2}"; fail=$((fail + 1)); }
 # 但先要预设它引用的父变量:${CT_HOME} 未定义时 eval 会把整个测试脚本当场打死
 # (set -u + 非交互 shell = 直接退出,现象是"一行输出都没有",别误判成规则失效)。
 : "${CT_HOME:=$HOME/.ct}"
-# 本机 /bin/bash 是 3.2：`set -u` 下展开**空数组**直接报 unbound variable 并终止脚本
-# （bash 4.4+ 才不报）。被测的 hard_deny_path 里有 "${auto_tmp_prefixes[@]}"，其元素由
-# 启动期的循环填充，harness 不跑那个循环 → 空数组 → 调用处当场打死。故在 eval 之后
-# （必须之后，否则被装载的 () 覆盖）给一个不存在的哨兵前缀让数组非空。
+# 被测的 hard_deny_path 里有 "${auto_tmp_prefixes[@]}"，其元素由产品**启动期的循环**填充，
+# harness 只 eval 函数不跑启动循环 → 数组为空 → 依赖它的 T7 整段 SKIP、少 3 条判定
+# （总数守卫会红，但红得像"被测版本缺东西"）。所以给一个不存在于真机的哨兵前缀，
+# 让被测分支真的走到而不是空转。放在 eval **之后**（否则被装载下来的 `xxx=()` 覆盖）。
 granted_files=()
 # 小写 auto_* 必须一起装载：`auto_tmp_prefixes=()` 漏了就在 hard_deny_path 里踩
 # unbound variable 当场打死脚本。但带命令替换的行（auto_session_id="$(date …)"）
 # 要排除——测试进程不该执行被测脚本里那些有副作用的语句。
-eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
+eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
 auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
-# bash 3.2 下 `${arr[@]}` 展开空数组就是致命 unbound,数组意外为空时明确报 harness 问题
-# 并跳过 T7,别让调用方脚本当场猝死(那会让"哪里坏了"彻底看不出来)。
+# 数组意外为空说明**上面那个哨兵没生效**(装载环节坏了),这时明确报 harness 问题并跳过
+# T7,别让被测函数在空数组上跑出看不出所以然的红。
 [[ -n ${auto_tmp_prefixes[*]} ]] || { echo "harness: auto_tmp_prefixes 为空,跳过 T7" >&2; T7_SKIP=1; }
 for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_split_words hd_write_targets hard_deny_cmd \
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
            path_access _confirm_yes _ct_tmp_is_public auto_private_tmpdir hd_foreign_cred_path \
-           in_root_exempt link_escapes_root hd_creds_all_exempt; do
+           in_root_exempt link_escapes_root hd_creds_all_exempt \
+           tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
 done
 unset _fn
 echo "harness: 已装载 $(declare -F | wc -l | tr -d ' ') 个函数(为 0 说明抽取全失败,下面的红都是假象)"
+# 对齐产品顶层(1382 行)的 tty_* 状态初始化:过滤器读的是全局态,harness 只抽大写常量
+# (TTY_HOLD_MAX / TTY_RE_CSI_PI),小写状态变量不抽 —— 少了这一行,set -u 下
+# ask_read_line 里的过滤会当场 unbound,而报错位置指向装载时的 eval 行,极难对上。
+tty_strip_init
+
+# 调用不存在的命令/函数,原本只往 stderr 打一行、断言静默不产生判定 —— 而 EXPECT_TOTAL
+# 是带着这条丢失校准出来的,表照样全绿(本轮就抓到一次:`pd` 定义在调用之后,那条
+# "工作根内 .npmrc 放行"从没执行过)。所以把"命令不存在"直接判红,这类问题当场暴露。
+# 确实要探测外部命令的个别用例,设 HW_CNF_OK=1 放行那一次(用完自动复位,不会掩护下一次)。
+command_not_found_handle() {
+    if [[ "${HW_CNF_OK:-0}" == 1 ]]; then HW_CNF_OK=0; return 127; fi
+    bad "命令不存在:[$1]" "调用了未定义的函数或不存在的命令 —— 常见于函数定义写在调用之后、或改名漏改"
+    return 127
+}
 type hard_deny_cmd >/dev/null 2>&1 || { echo "没能从 $SRC_ABS 抽出 hard_deny_cmd"; exit 1; }
 type resolve_path  >/dev/null 2>&1 || { echo "没能从 $SRC_ABS 抽出 resolve_path"; exit 1; }
 HAS_MASK=0; type hd_mask_readonly >/dev/null 2>&1 && HAS_MASK=1
@@ -386,7 +401,10 @@ fi
 # ---- 结构守卫 ----
 # bash 把「$var 紧跟全角标点」整串当变量名的一部分，set -u 下直接 unbound variable
 # 炸掉后续所有断言(本节测试自己就红过一次:「$want」)。新增代码一律 ${var} 形式。
-cjk_adj() { grep -vE '^[[:space:]]*#' "$1" | grep -cE '\$[a-zA-Z_][a-zA-Z0-9_]*[「」，、（）]' || true; }
+# 用「交替」而不是字符类 [「」，]:字符类里的多字节字符在 LC_ALL=C 下会被按字节拆开,
+# grep 直接报 "brackets not balanced" → 计数落成空 → 本守卫永远 0 命中假绿(实装时就这样
+# 放过了 wchat.sh 里一处真崩溃:$name。被 bash 判成变量名 name\xe3\x80\x82)。
+cjk_adj() { grep -vE '^[[:space:]]*#' "$1" | grep -cE '\$[a-zA-Z_][a-zA-Z0-9_]*(「|」|，|、|（|）|：|；|！|？|。)' || true; }
 n=$(cjk_adj "$SRC_ABS")
 (( n == 0 )) && ok "wchat.sh 无 \$var 紧贴全角标点" || bad "wchat.sh 有 ${n} 处 \$var 紧贴全角标点" "set -u 下会 unbound variable"
 # 不加 -f 条件判断:这条断言以前按字面量文件名找自己,改名跑时被整个跳过 → 少一条判定
@@ -433,7 +451,6 @@ expect H6 "[设计如此] ls 只看元数据也按名拦"  "ls -l '$HOME/.npmrc'
 expect H6 "[设计如此] git 消息里的文件名"     "git commit -m '别 cat ~/.npmrc'"
 # 新口径的正向断言:边界内的项目级凭据文件当作普通配置,**两条链路同一个答案**。
 # 这是本轮真正要钉的不变量(工具链 read_file 与命令链 cat 不允许一个放一个拒)。
-pd allow "$WORK_ROOT/.npmrc" r       "路径放行 工作根内项目级 .npmrc(新口径:边界内不是密钥)"
 expect NP "命令同判:cat 工作根内 .npmrc 放行"  "cat ./.npmrc"
 
 pd() {
@@ -441,6 +458,7 @@ pd() {
     if hard_deny_path "$p" "$m"; then got=deny; else got=allow; fi
     if [[ "$got" == "$want" ]]; then ok "$d"; else bad "$d" "期望 $want 实际 $got${hd_rule:+($hd_rule)}"; fi
 }
+pd allow "$WORK_ROOT/.npmrc" r       "路径放行 工作根内项目级 .npmrc(新口径:边界内不是密钥)"
 # 成对:同一个文件,两条链路必须给同一个答案。信任边界=工作根,于是每个凭据名都要
 # 两侧各测一遍 —— 边界内两条链都放、边界外(家目录形态)两条链都拒。
 # 只测一侧就是本轮那个漏洞的温床:工具链与命令链各自演化,一个放一个拒,
@@ -626,7 +644,7 @@ unset _tw_atp _tw_e2e _tw_l _tw_s
 echo
 echo 'T9b 系统路径 P2 名单两平台同构(Linux 侧不得降级为 P3)'
 # 复用 T9 桩好的 auto_allow_hit(恒"不在 --allow-write 名单"),让 P3 分支可达;
-# 不桩的话真函数在 bash 3.2 + set -u 下展开空数组会当场 unbound(见本表 37-40 行)。
+# 不桩的话这里会拿空数组去跑被测函数,分支根本不执行、断言空过(见本表开头的哨兵注释)。
 auto_mode="full"
 # --- 基准:macOS 侧既有项,防止新增行写错把整片 case 挤失效 ---
 pdn P2 "写 /etc/hosts 是 P2"                            "/etc/hosts" rw
@@ -1080,6 +1098,124 @@ else
 fi
 WORK_ROOT="$_wr_probe"; unset _wr_probe _t16f _t16d; auto_mode=0
 
+# ================= T17 tty 中继:终端应答不得被当按键转发 =================
+# 为什么有这一段(用户实报现象):跑 `wchat -dp`(与调试无关,只是模型档)时,屏幕偶尔冒出
+#   ^[]11;rgb:2828/2c2c/3434^[\
+# 那是终端(Ghostty)对 **OSC 11 背景色查询的应答**,25 字节 = ESC ] 11 ; rgb:… ESC \;
+# caret 形式说明它是被**回显**的,不是谁打印的。实测证据:
+#   · wchat.sh 全文不含任何会招应答的查询(grep \e]/[6n 零命中),prompt_toolkit 也没有;
+#   · 本机 PATH 上 19 个可执行文件内嵌 `]11;?`(gh、vim 系、mdcat、codex、opencode、tmux…)
+#     —— 查询由**子进程**发起;
+#   · 子进程与我们在**同一个 tty** 上(实测 test -t 0 为真、tty=/dev/ttys003),应答落到我们
+#     的读循环里。旧中继把 tty 读到的**所有字节**当"用户按键"转发 → 应答要么变成假按键注入
+#     下一个子命令(比打印出来更糟),要么在我们让出 tty 后被 shell readline 回显到屏幕。
+# 锁的不变式:中继必须区分"人敲的键"与"终端的应答",且**判不动时宁转发不吞按键**。
+_E=$'\e'; _BEL=$'\a'; _CR=$'\r'
+_fn17() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS"; }
+_ts() {   # <说明> <期望转发> <期望滞留> <输入片段…>(多个片段=分多次到达)
+    local lbl="$1" wf="$2" wh="$3" acc="" i
+    shift 3
+    if ! declare -f tty_strip_responses >/dev/null 2>&1; then
+        # 缺函数时也必须产生判定,否则整段空过(表里 T6 同一条教训)
+        bad "tty $lbl" "harness 未装载 tty_strip_responses(被测版本没有这个函数)"
+        return 0
+    fi
+    tty_strip_init
+    for i in "$@"; do tty_strip_responses "$i"; acc+="$tty_fwd"; done
+    if [[ "$acc" == "$wf" && "$tty_hold" == "$wh" ]]; then ok "tty $lbl"; else
+        bad "tty $lbl" "实得 转发=[$(printf '%q' "$acc")] 滞留=[$(printf '%q' "$tty_hold")];期望 转发=[$(printf '%q' "$wf")] 滞留=[$(printf '%q' "$wh")]"
+    fi
+}
+# --- ① 五类应答必须整段丢弃 ---
+_ts "OSC11 背景色应答(ST 终止)丢弃"      "" "" "${_E}]11;rgb:2828/2c2c/3434${_E}\\"
+_ts "OSC11 背景色应答(BEL 终止)丢弃"      "" "" "${_E}]11;rgb:2828/2c2c/3434${_BEL}"
+_ts "OSC10 前景色应答丢弃"                "" "" "${_E}]10;rgb:ffff/ffff/ffff${_E}\\"
+_ts "OSC4 调色板应答丢弃"                 "" "" "${_E}]4;11;rgb:2828/2c2c/3434${_E}\\"
+_ts "DSR 光标位置报告丢弃"                "" "" "${_E}[24;1R"
+_ts "DA1 终端属性应答丢弃"                "" "" "${_E}[?62;1;6c"
+_ts "kitty 键盘标记应答丢弃"              "" "" "${_E}[?0u"
+_ts "DECRPM 模式应答丢弃"                 "" "" "${_E}[?12;2\$y"
+_ts "DCS(XTVERSION)应答丢弃"              "" "" "${_E}P>| xterm-ghostty${_E}\\"
+# --- ② 真按键一类都不许误伤(误吞按键比漏放应答更糟) ---
+_ts "方向键 Up 原样转发"                  "${_E}[A" "" "${_E}[A"
+_ts "Ctrl+Up 原样转发"                    "${_E}[1;5A" "" "${_E}[1;5A"
+_ts "F5(ESC[15~)原样转发"                 "${_E}[15~" "" "${_E}[15~"
+# 增强键盘(kitty protocol)的**真按键**事件必须转发:形态是 ESC[<码>;<修饰>u,
+# 与「标志应答」只差一个 ? 前缀。谁要是图省事写成「参数含 ; 的 CSI u 就算应答」,
+# 方向键 / Ctrl 组合会被整批静默吞掉 —— 而那种改法在上面这些「应答丢弃」用例里全绿。
+_ts "kitty 带修饰按键保留"                  "${_E}[13;27u" "" "${_E}[13;27u"
+_ts "kitty 单码按键保留"                   "${_E}[13u"    "" "${_E}[13u"
+_ts "kitty 按键形态 ESC[13u 原样(不带 ?)"  "${_E}[13u" "" "${_E}[13u"
+_ts "F8(ESC[R 无参数)原样,别当 DSR"       "${_E}[R" "" "${_E}[R"
+_ts "SS3 F1(ESCOP)原样转发"               "${_E}OP" "" "${_E}OP"
+_ts "Alt+f(ESC+字符)原样转发"             "${_E}f" "" "${_E}f"
+_ts "普通文本加回车原样转发"              "abc${_CR}" "" "abc${_CR}"
+# --- ③ 混合与分片(plan A 的核心) ---
+_ts "应答夹在按键中间:只留按键"           "qz" "" "q${_E}]11;rgb:2828/2c2c/3434${_E}\\z"
+_ts "OSC 分三片:丢净应答并留按键"         "q" "" "${_E}]11;rgb:2828" "/2c2c/3434${_E}\\" "q"
+_ts "半截 DSR 两片补全后整段丢弃"          "" "" "${_E}[24;" "1R"
+_ts "半截 OSC 滞留不转发(等下片)"          "" "${_E}]11;rgb:2" "${_E}]11;rgb:2"
+_ts "串尾只剩一个 ESC 滞留(可能是方向键)"  "" "${_E}" "${_E}"
+# --- ④ bracketed paste:粘贴正文里的 ESC]… 是数据,剥它就是篡改用户输入 ---
+_t17p="${_E}[200~a${_E}]11;rgb:1/1/1${_E}\\b${_E}[201~"
+_ts "粘贴区间内不过滤(整段原样)"          "$_t17p" "" "${_E}[200~a${_E}]11;rgb:1/1/1${_E}\\b" "${_E}[201~"
+if declare -f tty_strip_responses >/dev/null 2>&1; then
+    tty_strip_init; tty_strip_responses "${_E}[200~abc"
+    if (( tty_paste == 1 )); then ok "tty 粘贴未结束时状态位保持(后续字节仍按数据处理)"; else
+        bad "tty 粘贴未结束时状态位" "tty_paste=$tty_paste,应为 1 —— 状态丢了就会开始剥粘贴正文"
+    fi
+else
+    bad "tty 粘贴未结束时状态位" "被测版本没有 tty_strip_responses(负对照在此应为红)"
+fi
+# --- ⑤ TTL:判不动的尾部超时后必须转发,不能吞 ---
+_t17f="$WORK_ROOT/hw-t17-tick.txt"
+if declare -f tty_hold_tick >/dev/null 2>&1; then
+    : > "$_t17f"
+    exec {t17fd}<>"$_t17f"
+    tty_strip_init; tty_hold="${_E}[A"; tty_hold_age=0
+    for _n17 in $(seq "$TTY_HOLD_MAX"); do tty_hold_tick "$t17fd"; done
+    if [[ ! -s "$_t17f" ]]; then ok "tty TTL 到期前不转发滞留字节(继续等下一片)"; else
+        bad "tty TTL 到期前就转发了" "TTY_HOLD_MAX=$TTY_HOLD_MAX 周期内已写出内容,等于没做分片等待"
+    fi
+    tty_hold_tick "$t17fd"
+    if [[ "$(cat "$_t17f" 2>/dev/null)" == "${_E}[A" ]]; then ok "tty TTL 到期后原样转发(宁漏一条应答也不吞按键)"; else
+        bad "tty TTL 到期后没把滞留字节吐出去" "文件内容=[$(cat "$_t17f" 2>/dev/null | printf '%q')] 期望 $(printf '%q' "${_E}[A")"
+    fi
+    exec {t17fd}<&-
+    rm -f "$_t17f"
+else
+    bad "tty TTL 老化函数" "harness 未装载 tty_hold_tick(转发策略没实现,现象原样存在)"
+    ok "tty TTL 到期后原样转发(宁漏一条应答也不吞按键)"  # 占位:缺函数时也必须产生判定,防空过
+fi
+# --- ⑥ 静态守卫:三处齐备 + 不主动发查询 ---
+_rb=$(_fn17 run_with_window)
+if [[ "$_rb" == *'tty_strip_responses "$key"'* && "$_rb" == *'tty_drain_responses'* && "$_rb" == *'tty_hold_tick'* ]]; then
+    ok "tty 中继三处齐备:strip + 窗口收尾 drain + TTL tick(缺一处应答就有出口)"
+else
+    bad "tty 中继不完整" "run_with_window 里缺 strip/drain/tick 之一,应答仍会漏进按键流或飘到 shell"
+fi
+# 守卫必须**先自证有牙**,再判源码。上一版这里三个毛病挤在一行:
+#   ① `-e "${_E}[6n"` 里的 `[6n` 被 grep 当成未闭合字符类 → 报 "brackets ([ ]) not balanced" 退出 2;
+#   ② `-e "${_E}11;?"` 漏了 `]`(拼错),本来就永远匹配不上;
+#   ③ `if grep ...; then bad; else ok; fi` 把"grep 自身出错"和"确实没匹配"都归进 else
+#      → 这条守卫从头到尾没判过任何东西,而表一直是绿的。
+# 所以:判据一律定长匹配(-F),并且先拿必然命中的植桩样本验一次;验不出来就说明判据坏了,
+# 这条红优先修 —— 它意味着下面所有静态守卫都可以照样空过。
+_q11="${_E}]11;?${_E}\\"; _q6="${_E}[6n"; _qu="${_E}[?u"
+if printf '%s\n' "planted ${_q11} ${_q6} ${_qu}" | LC_ALL=C grep -qaF \
+        -e ']11;?' -e "${_q11}" -e '[6n' -e "${_q6}" -e '[?u' -e "${_qu}"; then
+    # 真实源码:剔掉整行注释(注释里写"别再发 \e]11;?"是教育,不是行为)
+    if grep -vE '^[[:space:]]*#' "$SRC_ABS" | LC_ALL=C grep -qaF \
+            -e ']11;?' -e "${_q11}" -e '[6n' -e "${_q6}" -e '[?u' -e "${_qu}"; then
+        bad "本程序主动发了会招应答的查询" "源码里出现查询串字面量;将来加查色/查光标必须同时做应答配对与 drain,否则中继剥不干净"
+    else
+        ok "本程序不主动发查询(应答只可能来自子进程,由中继负责剥离)"
+    fi
+else
+    bad "查询串守卫自身失效" "植桩样本都匹配不到 = 判据写坏了(-F 没生效或模式串拼错);先修这条,否则静态守卫整类都在空过"
+fi
+unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
+
 # 断言总数守卫:pass+fail 必须等于表里的条数。少了就是有断言**一行输出都没产生**
 # (典型:被测版本里函数还不存在 → command not found → ok/bad 根本没被调用,既不红
 # 也不绿)。拿旧版本做负对照时这种现象一定出现(实测:改完 T9 后对 HEAD 跑本表 104/32,
@@ -1093,6 +1229,7 @@ WORK_ROOT="$_wr_probe"; unset _wr_probe _t16f _t16d; auto_mode=0
 # + T13 命令级正则两平台同构=49(行为 36 + 静态守卫 13) + T14 私有 TMPDIR 接管=11
 # + T15 他人家目录凭据=26(判据本体 19 + 端到端 4 + harness/同源守卫 3)
 # + T16 文件工具链路裁决=2(工作根==HOME 时目录内写:该放的放、该拦的带规则号拦)。
+# + T17 tty 中继应答过滤=30(应答丢弃类 + 真按键保留类 + 分片重组 + 粘贴保护 + TTL 老化 + 静态接线守卫)。
 # 加断言时同步改这里。
 #
 # 但**不能只写一个数**:本表有按平台分支的断言(① /dev/shm 是否存在、③ /tmp 是否是
@@ -1104,7 +1241,7 @@ WORK_ROOT="$_wr_probe"; unset _wr_probe _t16f _t16d; auto_mode=0
 # 判据是"包含 /Users/ 或 /home/ + 剥一层用户名",归一前后都命中(所以专门留了两条
 # firmlink 形态断言)。
 # 条数不再依赖"本表叫什么名字":自我检查一律走 HW_SELF(见文件开头),改名/软链跑同样数。
-EXPECT_TOTAL=316                                       # macOS 本机实跑值(工作根=脚本目录布局,T16 那 2 条无条件执行)
+EXPECT_TOTAL=347                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # Linux(Alpine)本轮**没能实跑**:本机 Docker 无本地镜像且 docker.io 拉取 TLS 超时,
 # 所以下面这两处增量是按"门控块的判据逐字对齐"静态推导出来的,不是记忆里的数 ——
 # 谁在 Alpine 上跑出别的总数,以实跑为准改这两行,并把这句注释删掉。
@@ -1112,6 +1249,7 @@ EXPECT_TOTAL=316                                       # macOS 本机实跑值(�
 #   +1  T15b 的影子豁免断言(门控 `[[ -d /dev/shm && -w /dev/shm ]]`)
 # 不随平台变的(别误加):T13 的 Linux 锚点断言是无条件的(测的是正则本身);
 # T15 他人家目录那 26 条在两边都执行;T16 的 2 条走"临时把 WORK_ROOT 设成 $HOME",与布局无关。
+# T17 的 30 条同样与平台无关:测的是 tty 字节流状态机与三处接线的静态存在性,不读任何路径。
 [[ -d /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 3))
 [[ -d /dev/shm && -w /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 1))
 total=$((pass + fail))
