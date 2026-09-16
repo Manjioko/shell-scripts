@@ -350,7 +350,8 @@ r=$( (unset -f hd_write_targets 2>/dev/null; deny_rule "echo x >> /data/hw/hw-no
 [[ "$r" == P3 ]] && ok "缺 hd_write_targets → 含重定向一律拦(沿用 P3 号)" || bad "缺 hd_write_targets" "被判 ${r},应 P3"
 # 端到端 P3 判定不在本表重复断言:本 harness 只按名字抽函数,配置段是 grep 拼出来的,
 # hard_deny_path 的完整依赖(授权位/档位/审计)凑不齐 —— 在这里断言只会得到假红。
-# 该链路由主套件负责且当前为绿:REAL=... bash ~/.cache/wchat-tests/auto_test.sh unit
+# 该链路由主套件负责且当前为绿:bash ~/bin/tests/auto_test.sh unit(老路径 ~/.cache/wchat-tests
+# 已改为其符号链接,两种写法都还能跑)
 # 里 deny[P3] echo x >> /外部 已覆盖。本表只保证"提取器能提到目标"(T4)与"缺提取器照拒"。
 echo "  SKIP 装载齐全的端到端 P3(归属主套件;本表 T4 + 上一条已覆盖两端)"
 # 「工作目录内写不得误判成越界」这条**不在本表断言**:装载不齐时它必然返回 NP,是假绿。
@@ -1270,6 +1271,41 @@ else
 fi
 unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
 
+# bg_leak 提示文案(bugList 46)。判据只看"主体已退出/成僵尸 + 静默满 BG_SILENT_TIMEOUT",
+# 从没读过命令文本;旧文案却断言"检测到命令使用了 & 后台符号",还给出一条**错的处置**——
+# 让我们"改用 run_in_background=true 重新启动"。可主体早就跑完、输出已完整回传,重跑纯属
+# 白烧一轮工具调用(auto 模式下尤其贵,实测模型照它做过一次,拿回同一份数据)。
+# 现在钉两件事:①不许再断言判据没测的东西、不许要求重跑;②必须把"不必重跑"讲明白。
+# 抽分支正文**不能**在第一个 fi/else 处退出(分支里有嵌套 if,写错就会只抽到前半截而假绿,
+# 上一版就是这么错的),所以记下 elif 自己的缩进,只在同缩进的 elif/else/fi 处收手。
+_bg_blk=$(awk '
+    !s && /^[[:space:]]*elif[[:space:]]*\(\([[:space:]]*bg_leak[[:space:]]*\)\)[[:space:]]*;?[[:space:]]*then[[:space:]]*$/ {
+        s=1; match($0, /^[[:space:]]*/); ind=substr($0, 1, RLENGTH); next }
+    s && (index($0, ind "elif")==1 || index($0, ind "else")==1 || index($0, ind "fi")==1) { exit }
+    s { print }' "$SRC_ABS" | grep -vE '^[[:space:]]*#')
+_bg_msg=""    # 非空 = 判据自身不可信,两条一起红(不能让它静默假绿)
+if ! printf 'planted 使用了 & 重新启动\n' | LC_ALL=C grep -qaF -e '使用了 &' -e '重新启动'; then
+    _bg_msg="判据自身失效:植桩样本都匹配不到(-F 没生效?)"
+elif ! printf '%s' "$_bg_blk" | LC_ALL=C grep -qaF 'window_output'; then
+    _bg_msg="没抽到 bg_leak 分支正文(被改名、缩进变了或抽取写错了),无从判"
+fi
+if [[ -n "$_bg_msg" ]]; then
+    bad "bg_leak 提示不再谎报 &、不再要求重跑" "$_bg_msg"
+    bad "bg_leak 提示讲明输出已完整不必重跑" "$_bg_msg"
+else
+    if printf '%s' "$_bg_blk" | LC_ALL=C grep -qaF -e '使用了 &' -e '重新启动'; then
+        bad "bg_leak 提示不再谎报 &、不再要求重跑" "文案仍在谎报"使用了 &",或还要求"重新启动""
+    else
+        ok "bg_leak 提示不再谎报 &、不再要求重跑"
+    fi
+    if printf '%s' "$_bg_blk" | LC_ALL=C grep -qaF '不需要重跑'; then
+        ok "bg_leak 提示讲明输出已完整不必重跑"
+    else
+        bad "bg_leak 提示讲明输出已完整不必重跑" "没写"不需要重跑",模型会把已经跑完的命令再跑一遍"
+    fi
+fi
+unset _bg_blk _bg_msg
+
 # 断言总数守卫:pass+fail 必须等于表里的条数。少了就是有断言**一行输出都没产生**
 # (典型:被测版本里函数还不存在 → command not found → ok/bad 根本没被调用,既不红
 # 也不绿)。拿旧版本做负对照时这种现象一定出现(实测:改完 T9 后对 HEAD 跑本表 104/32,
@@ -1284,6 +1320,7 @@ unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
 # + T15 他人家目录凭据=26(判据本体 19 + 端到端 4 + harness/同源守卫 3)
 # + T16 文件工具链路裁决=2(工作根==HOME 时目录内写:该放的放、该拦的带规则号拦)。
 # + T17 tty 中继应答过滤=30(应答丢弃类 + 真按键保留类 + 分片重组 + 粘贴保护 + TTL 老化 + 静态接线守卫)。
+# + T18 bg_leak 提示文案守卫=2(不再谎报 &/不要求重跑 + 必须给出不必重跑的事实)。
 # 加断言时同步改这里。
 #
 # 但**不能只写一个数**:本表有按平台分支的断言(① /dev/shm 是否存在、③ /tmp 是否是
@@ -1298,7 +1335,7 @@ unset _E _BEL _CR _t17p _t17f _rb _n17 t17fd; unset -f _ts _fn17 2>/dev/null
 # 本轮(从主套件移表):auto_test.sh 的 HD 表里那 2 条 H5 在它自己环境里判不出(该套件
 # 刻意不装 hd_split_words/hd_write_targets 提取链,缺链即 MISSED 放行),命令原文已移进
 # 本表 T3。两条都是纯路径/正则判据、与平台无关 → macOS 347→349,Alpine 349→351。
-EXPECT_TOTAL=349                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+EXPECT_TOTAL=351                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # Linux(Alpine 3.20 / root 容器 / :ro 挂载)已实跑:**349 条**,与下面的推导一致。
 # 差值只有一处来源:T9 的 /dev/shm 真符号链接块 —— 门控成立时产生 **2 条**判定,
 # 不成立时走 `echo "  SKIP …"`,而 **SKIP 不产生判定**,所以 Linux 净 +2、不是直觉的 +3。

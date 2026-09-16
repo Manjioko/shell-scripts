@@ -1867,8 +1867,27 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
         window_output+=$'\n(命令已被用户中断。若后台仍有残留进程,可用 ps 查询并清理。)'
     elif (( bg_leak )); then
         printf '\033[2m└─ 命令主体已结束,但输出管道仍被后台进程占用,已停止等待 ─┘\033[0m\n'
-        # 告诉模型:疑似用 & 启动了长驻服务,应改用 run_in_background=true
-        window_output+=$'\n(检测到命令使用了 & 后台符号,输出管道被后台进程占用。若为长驻服务,请改用 run_in_background=true 参数重新启动。)'
+        # 只报**测到的事实**。这里原先写"检测到命令使用了 & 后台符号",可判据从没读过命令
+        # 文本(bugList 46):主体已退出/成僵尸 + 静默满 BG_SILENT_TIMEOUT 就触发,完全没有
+        # & 的命令(`sleep 60; docker exec … tail -2 …`)照样撞上这句话。更坏的是它建议
+        # "重新启动":主体早跑完、输出已完整回传,重跑纯属白烧一轮工具调用(auto 下更贵,
+        # 实测模型照着做过一次,拿到的是同一份数据)。持有者清单是这次补的——查这类泄漏
+        # 靠的就是"谁还攥着写端"这一行,而不是靠猜。
+        local _bg_pgid="" _bg_holders=""
+        _bg_pgid=$(ps -o pgid= -p "$cmd_pid" 2>/dev/null | tr -d " ")
+        if [[ -n "$_bg_pgid" ]]; then
+            _bg_holders=$(ps -axo pgid=,pid=,stat=,args= 2>/dev/null \
+                | awk -v g="$_bg_pgid" -v me="$cmd_pid" \
+                      '$1==g && $2!=me && $3 !~ /Z/ {printf "  · pid %s %s\n", $2, substr($0, index($0,$4))}' \
+                | head -3)
+        fi
+        window_output+=$'\n(命令主体已结束,但其后 '"$((BG_SILENT_TIMEOUT/1000000))"' 秒内输出管道再无数据,已停止等待。上面已收到的内容是完整的,不需要重跑。'
+        if [[ -n "$_bg_holders" ]]; then
+            window_output+=$'\n仍与它同进程组、还活着的进程(很可能就是攥着写端的):\n'"$_bg_holders"
+        else
+            window_output+=$'\n(未取到持有者清单:该进程已被回收,或写端握在本命令进程组之外——典型是 docker exec 客户端退出后连接还在 Docker 侧进程手里。)'
+        fi
+        window_output+=$'\n若本来就想起长驻服务,下次改用 run_in_background=true(走后台通道,不占这条输出管道);若外部程序的连接残留导致,忽略本提示即可。)'
     elif (( interrupted )); then
         printf '\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n' "$total"
         # 告诉模型命令是被用户中断的，而不是自然跑完
