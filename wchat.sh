@@ -3836,7 +3836,7 @@ hard_deny_cmd() {
        # 全命令里命中的凭据路径**都**落在工作根内才脱开;有一条在外部或归一不了就照拒。
        # 缺失判据函数时 `!{...}` 为真 → 照拒(fail-closed,与 T6 "缺辅助函数必须照拒"同规)
        ! { declare -f hd_creds_all_exempt >/dev/null 2>&1 && hd_creds_all_exempt "$c"; }; then
-        hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被拦:其内容会进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes,按回车/输入 y 都不算),放不放行由用户决定。换写法、拆分命令或重试都不会改变判定,也不要替用户作答;文件工具 read_file/list_dir 走 P1 同判。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
+        hd_rule="H6"; hd_msg="访问密钥/凭据文件(.npmrc/.netrc/.pypirc/私钥/凭据目录等)被拦:其内容会进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes,按回车/输入 y 都不算),放不放行由用户决定。换写法、拆分命令或重试都不会改变判定,也不要替用户作答;文件工具 read_file/list_dir 走 P1 同判。另:若这条命令同时也在**写**该文件(如 cp/mv 的落点是凭据或系统路径),写入本身就是拦点(H11/P2 口径),不是只有"内容进上下文"这一条理由。替代:请用户自己贴出所需的值;要查 registry 之类非敏感项用 npm config get registry(它不会把 token 打出来)"
         hd_note_hit
         return 0
     fi
