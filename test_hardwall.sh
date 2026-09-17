@@ -71,7 +71,7 @@ granted_files=()
 # 小写 auto_* 必须一起装载：`auto_tmp_prefixes=()` 漏了就在 hard_deny_path 里踩
 # unbound variable 当场打死脚本。但带命令替换的行（auto_session_id="$(date …)"）
 # 要排除——测试进程不该执行被测脚本里那些有副作用的语句。
-eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
+eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|HD_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
 auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 # 数组意外为空说明**上面那个哨兵没生效**(装载环节坏了),这时明确报 harness 问题并跳过
 # T7,别让被测函数在空数组上跑出看不出所以然的红。
@@ -1853,6 +1853,36 @@ else
     fail=$((fail + 1)); echo "  FAIL 两份受保护前缀名单漂移,重定向版能拦的形态提取版可能漏"
 fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 15))       # T29 的 15 条(14 条 expect + 1 条结构锁)
+
+# ══════════════════════════════════════════════════════════════════
+# T30 装载完整性:硬墙入口在 set -u 下不得踩到未装载的常量
+# 起因(第十二轮的坑):新常量写成大写 HD_H11_SYS_PREFIXES 时,harness 的配置抽取只认
+# hd_/auto_/AUTO_/WCHAT_/TTY_,它**不被装载**;函数体一引用就在 set -u 下报错,而报错
+# 被 $( ) 吞掉,现象是"提取器永远提不出目标"—— 8 条新向量红、5 条反锁全绿、旧 486 条
+# 零红,看着完全像判据写错了,查了一个小时才发现是装载缺口。
+# 同一族的第二次现场:resolve_path 依赖 WORK_ROOT,harness 里也没有它。
+# 所以这条不查名字(命名白名单永远会漏新前缀),查**行为**:把每个硬墙入口真调一遍,
+# 收 stderr,出现 unbound variable 就是装载器缺东西,当场报出来。
+# ══════════════════════════════════════════════════════════════════
+echo 'T30 装载完整性:硬墙入口不得踩未装载常量'
+_hw_e=$( ( set +e
+           hd_h11_scan 'mv /tmp/x /usr/local/bin/y' >/dev/null
+           hd_h11_dest_hit 'mv /tmp/x /usr/local/bin/y' >/dev/null
+           hd_h11_norm '/tmp/../var/log/z' >/dev/null
+           hd_h11_prot '/var/log/z' >/dev/null
+           hard_deny_cmd 'cp a /usr/bin/b' >/dev/null
+           hard_deny_path '/etc/hosts' w >/dev/null
+           hd_write_targets 'cp a /usr/bin/b' >/dev/null
+           hd_noncode_payload 'git commit -m x' >/dev/null
+           hd_mask_readonly 'grep x notes.md' >/dev/null
+         ) 2>&1 )
+if [[ "$_hw_e" != *unbound\ variable* ]]; then
+    pass=$((pass + 1)); echo "  ok   九个硬墙入口都没踩未装载常量"
+else
+    fail=$((fail + 1))
+    printf '  FAIL harness 缺常量:%s\n' "$(printf '%s\n' "$_hw_e" | grep -am1 'unbound variable' | cut -c1-72)"
+fi
+EXPECT_TOTAL=$((EXPECT_TOTAL + 1))
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then

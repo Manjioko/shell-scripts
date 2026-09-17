@@ -44,8 +44,14 @@ esac
 _WCHAT_LIB_ONLY=1 . "$SRC" >/dev/null || true      # 顶层代码的提示声丢掉,报错留在 stderr
 declare -F hard_deny_cmd >/dev/null || { echo "⛔ !NOFUNC hard_deny_cmd 没装载(来源:$SRC_ARG)—— 下面任何一行都不许采信" >&2; exit 3; }
 echo "══ 来源 $SRC_ARG  形状 $(grep -cvE '^[[:space:]]*(#|$)' "$VEC") 条"
+# 断言总数守卫(第十二轮加,与回归表的 EXPECT_TOTAL 同口径)。
+# 起因:升级 EOF 那条形状为断言后,输出是"19 通过 / 0 不符",而文件里有 20 条带期望行 ——
+# 少掉的那条不是判错,是**根本没跑**。原因是 `while read` 在末行无换行时直接丢行:
+# 产品码 hd_h11_scan 里写的正是 `while ... read -r _line || [[ -n "$_line" ]]`,
+# 这个装置反而漏了。没有这条守卫,以后任何"行被跳过"都会以"全绿"的形态出现。
+_exp=$(awk -F'|' '$1 != "" && $1 !~ /^[ \t]*#/ && NF >= 2 && $2 != "" {n++} END {print n+0}' "$VEC")
 same=0; diffn=0; miss=0
-while IFS='|' read -r want cmd; do
+while IFS='|' read -r want cmd || [[ -n "$cmd" ]]; do
     [[ -n "$cmd" ]] || continue
     # 注释行必须在这里跳过:注释里也可能出现 `|`(我就写过 "RULE|"),而下面把"期望列为空"
     # 当作"只要现象"正常打印 —— 不早退的话,一条注释会被当成一个命令形状混进结果里。
@@ -63,3 +69,9 @@ while IFS='|' read -r want cmd; do
 done < "$VEC"
 [ "$miss" -gt 0 ] && echo "⚠️ 有 $miss 条判据内部出错,别按上面的行数下结论"
 echo "── 符合期望 $same / 不符 $diffn"
+if (( same + diffn + miss != _exp )); then
+    echo "⛔ 断言行 $_exp 条,实际判定 $((same + diffn + miss)) 条 —— 有断言被静默跳过(检查读循环与文件末行)"
+    exit 4
+fi
+if (( diffn > 0 || miss > 0 )); then exit 1; fi
+exit 0

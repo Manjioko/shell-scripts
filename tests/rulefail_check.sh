@@ -161,7 +161,7 @@ for i in "${!SAMPLES[@]}"; do
         if [[ -z "$feat" || "$MSG" == *"$feat"* ]]; then
             ok "$HIT_RULE 话术说的是它自己管的事(含「${feat:-未要求}」)"
         else
-            bad "$HIT_RULE 话术与规则不配对" "样例[$label] 期望提到「$feat」,实得[$MSG]"
+            bad "$HIT_RULE 话术与规则不配对" "样例[$label] 期望提到「${feat}」,实得[$MSG]"
         fi
         # 反向检查:该带坐标的规则不能只给一句抽象话
         case "$HIT_RULE" in
