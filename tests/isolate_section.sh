@@ -62,7 +62,18 @@ trap 'rm -f "$TMP"' EXIT
 } > "$TMP" || { echo "生成副本失败"; exit 2; }
 
 echo "isolate: $TAG 段 = 表第 ${START}-${END} 行(装载器取 1-${HEAD_END})"
-bash "$TMP" "$SRC_ARG"
+OUT="$(bash "$TMP" "$SRC_ARG" 2>&1)"; rc=$?
+printf '%s\n' "$OUT"
 rc=$?
-[[ $rc -eq 0 ]] || echo "isolate: 本段单独跑就有问题(rc=$rc),与用例顺序无关"
+# 三档结论。第二档是今天挣出来的:我把副本改放进 $TMPDIR 后,装载器按 dirname $0 去找
+# wchat.sh 找不到,段里一条判定都没跑出来 —— 而装置当时说的是"本段单独跑就有问题"。
+# "跑不出汇总行"是**不可判定**,不是红。把工具自己的故障报成被测对象的结论,正是本文件
+# 开头警告的那件事,所以这一档必须由代码保证而不是靠我记得。
+if grep -qF "ISO $TAG " <<< "$OUT"; then
+    [ $rc -eq 0 ] && echo "isolate: 本段独立绿(与用例顺序无关)" \
+                  || echo "isolate: 本段有 fail,是真结论(与用例顺序无关)"
+else
+    echo "isolate: 不可判定 —— 没跑到汇总行(rc=$rc),副本没能执行到本段末尾,别拿它下结论"
+    rc=4
+fi
 exit $rc
