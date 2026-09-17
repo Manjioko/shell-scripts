@@ -1916,6 +1916,34 @@ else
     printf '  FAIL harness 缺常量:%s\n' "$(printf '%s\n' "$_hw_e" | grep -am1 'unbound variable' | cut -c1-72)"
 fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 1))
+EXPECT_TOTAL=$((EXPECT_TOTAL + 6))   # 第十七轮 T31 的 6 条(数段内 expect 行得来;原 expect_tgt 那条双引号参数在 set -u 下炸掉整个 harness,已删)
+
+# T28(第十七轮):字符串字面量里的散文不得被当成写操作数。
+# 起因是实测代价:本轮我连续三笔指令被自家判定整条拒绝 ——
+#   `git commit -m "语料 ~/.ct/auto/audit.log 108 条"` 撞上 `cat >>` 被判 H5;
+#   `printf '...~/.ssh/id_ed25519...' > /tmp/p18.txt` 被判 H6(凭据名那类是 H6 有意
+#     的"引用即纳入判定面",不在此列放宽);
+#   `grep -an T27 x.sh | sed 's/^/>>/'` 被判 **P2 写入系统路径**,命中目标是单个 `/`
+#     —— 提取器把 sed 替换串里的 `>` 当重定向、把紧随的 `/` 当写目标,整条命令一个
+#     文件都没写。严重到"含此类文本的测试试剂写不出来",故钉成断言。
+# 试剂一律用 .bashrc(dot-class 且不在凭据名单),避免与 H6 的有意口径混判。
+# T30(第十七轮):字符串字面量里的散文不得被当成写操作数。
+# ⚠ 结论与原假设相反,**盘上判据本来不误拦**,这 6 条当场全绿:本轮我连被自家拦三次
+#   (`git commit -m "…~/.ct/auto/audit.log…"` 撞 H5、`printf '…~/.ssh/id_ed25519…' > /tmp/x`
+#   撞 H6、`grep … | sed 's/^/>>/'` 撞 P2 且命中目标是单个 `/`),都出自**会话上下文里那份
+#   与磁盘不同源的旧判定器副本**(它引用了盘上并不存在的 hd_has_cred_name/hd_t1/hd_t3,
+#   也没有 hd_noncode_payload/hd_mask_msg 这两层剔除)。⇒ 撞墙不能归因产品,修法=重启会话
+#   让它装载 HEAD 的规则;上一轮我说的"H5 拒绝不带命中坐标"因此撤回(盘上 H5 调 hd_note_hit)。
+#   这 6 条留作回归锁:将来谁把剔除层改坏,这里立刻红。
+# 试剂用 .bashrc(dot-class 且不在凭据名单):凭据名"引用即纳入判定面"是 H6 的有意口径。
+expect NP 'T31 dot 路径只在提交说明字符串里,真正写目标是 /tmp → 放行' 'git commit -m "语料 ~/.bashrc 108 条说明" tests/x.sh > /tmp/a18.log'
+expect NP 'T31 printf 字符串内含 dot 路径,重定向到 /tmp → 放行' 'printf "关于 ~/.bashrc 的说明" > /tmp/b18.log'
+expect NP 'T31 真实被撞形状:多段命令,散文含 dot 路径 + 写 /tmp 与工作目录 → 放行' 'ls -la tests/; printf note > /tmp/c18.log; git commit -m "语料 ~/.bashrc 108 条" tests/x.sh'
+expect H5 'T31 反向锁:dot 路径确实是重定向目标 → 照旧拦(放宽不许顺带放水)' 'echo x > ~/.bashrc'
+# 注:hd_t1= 这个"惰性操作数记号"只存在于会话上下文那份旧判定器副本里,盘上判定器不认
+# (实测被判 NP)。反向锁必须用盘上真实写形状,否则锁的是空气。
+expect H5 'T31 反向锁:写动词直接带 dot 配置路径 → 照旧拦' 'touch ~/.bashrc'
+expect H5 'T31 反向锁:mv 的落点是 dot 配置 → 照旧拦' 'mv wchat.sh ~/.bashrc'
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
