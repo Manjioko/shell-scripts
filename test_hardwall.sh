@@ -1622,6 +1622,38 @@ expect H6 '已知:注释里的凭据路径仍按 H6 拦(脱敏未覆盖 H5/H6)' 
 # T17 的 30 条同样与平台无关:测的是 tty 字节流状态机与三处接线的静态存在性,不读任何路径。
 [[ -d /dev/shm && -w /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 2))
 # ══════════════════════════════════════════════════════════════════
+# T24 检索动词的「模式位」不参与 H6(hd_mask_search_pat)
+# 口径边界都在那个函数的注释里,这里只钉"哪一格能脱、哪一格不能":
+#   能脱 = grep/rg/ag 的第一个非选项参数、-e/-g/--include/--exclude/--glob/--regexp 的取值
+#   不能脱 = 文件操作数(位置在后面)、-f/--file 的取值(那是模式文件,真会被打开)、
+#            -- 之后的全部、rg --pre 的取值(它是个外部程序)、引号内含 $( 或反引号的、
+#            非检索动词(cat/head 等一概不动)、sed/awk(整段不碰)
+# 关键认识(上一轮我把这条想错了):脱敏消掉的是**命中本身**,不是"命中后再降级",
+# 所以这些 FP 在无授权词时同样不判 H6 —— 与 hd_mask_msg 对 echo/printf 的行为一致。
+# 已知缺口(不由本组断言覆盖,别误以为已修):凭据正则里 `\.aws`/`\.ssh` 等几支要求
+# $HOME 前缀,于是 cwd 在家目录时 `cat .aws/credentials` 这类相对路径从来不匹配。
+# ══════════════════════════════════════════════════════════════════
+echo 'T24 检索动词模式位不参与 H6'
+expect NP  "在源码里搜 .npmrc 这个词本身(模式位)"   "grep -n '\\.npmrc' wchat.sh"
+expect NP  "管道尾部 grep 凭据裸词(变异常量:关掉模式位必须打红)"  "bash test_hardwall.sh 2>&1 | grep -c '\\.pgpass'"
+expect NP  "双引号模式位同样按数据对待(M1 必须打红)"      'grep -E "~/.ssh/id_rsa" README.md'
+expect NP  "模式里带 | 交替也不误伤"                 "grep -n 'hd_re_credential|\\.npmrc' wchat.sh"
+expect NP  "--include 的取值是通配不是文件"          "grep -rn --include='*.netrc' pat ."
+expect NP  "-e 的取值是模式位"                       "grep -e '~/.npmrc' pat"
+expect NP  "rg 的 -g 是通配"                         "rg -g '*.npmrc' pat ."
+expect H6  "真读凭据:cat 不是检索动词"               "cat '~/.npmrc'"
+expect H6  "grep 尾部的引号参数是文件操作数"         "grep 'x' '~/.npmrc'"
+expect H6  "裸操作数照拦(模式位已脱也不影响)"        "grep -E 'ssh' ~/.ssh/config"
+expect H6  "-f 的取值是模式文件,必须真拦"            "grep -f '~/.npmrc' pat"
+expect H6  "模式位脱过之后 -f 仍按操作数处理"        "grep -e 'x' -f '~/.npmrc'"
+expect H6  "-- 之后全是操作数"                       "grep -- '~/.npmrc' pat"
+expect H6  "rg --pre 是外部程序,不脱"                "rg --pre='cat ~/.ssh/id_rsa' pat ."
+expect H6  "sed/awk 整段不参与本轮脱敏"              "sed -n '1,5p' '~/.npmrc'"
+expect H6  "多段里另一段真读凭据,照拦"               "grep 'x' wchat.sh; cat ~/.npmrc"
+expect H6  "模式位里有命令替换就不许脱"              'grep "$(cat ~/.npmrc)" x'
+EXPECT_TOTAL=$((EXPECT_TOTAL + 17))
+
+# ══════════════════════════════════════════════════════════════════
 # T25 re-exec 的 $0 前提:bash -c 装载必须响亮失败,不许静默空输出
 # 上一轮的实测事故 —— 用 `bash -c 'source ./wchat.sh …'` 跑 16 条判据向量,全部返回空串,
 # 现象像"判据崩了",实际是主脚本第 190 行 `exec bash5 "$0" "$@"` 里 $0 不是脚本:

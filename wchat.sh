@@ -3449,6 +3449,9 @@ hd_mask_readonly() {
 # 也没收 git/say：`git apply '.npmrc'`、`say -f '~/.npmrc'` 都带文件操作数。
 # 代价是 `git commit -m '别 cat ~/.npmrc'` 仍判 H6 —— 与 H3 那边「未加引号不脱敏」
 # 同一类刻意保守，锁在 test_hardwall.sh 表里。
+# 补充:上面这条否决的是"把只读动词的引号参数**整体**当数据",并没有覆盖同一工具的
+# 「位置语义」—— grep 家族头部的模式位不是操作数,那一格改由 hd_mask_search_pat 单独脱,
+# 尾部操作数一格都不动。两条合起来才是当前口径,别照上面那条再去扩。
 hd_is_msg_verb() {
     case "${1##*/}" in
         echo|printf) return 0 ;;
@@ -3516,6 +3519,113 @@ hd_mask_msg() {
     printf '%s' "$out"
 }
 
+# 检索类动词「模式位」脱敏(hd_mask_msg 的补充,只服务 H6/H3/H4 的二次确认口径)。
+# hd_mask_msg 刻意不收 grep/sed/awk,理由写在那份注释里:它们的**尾部**带引号参数就是
+# 文件操作数 —— `grep x "$HOME/.ssh/id_rsa"` 会真把那个文件打开并把命中行送进上下文。
+# 但同一族的**头部**参数不是操作数:grep 家族的第一个非选项参数、-e/--regexp 的值、
+# --include/--exclude/--glob 的取值,永远只被当正则/通配文本使用,不会被读。
+# 真实流量里 H6 的误拦几乎全属这一类(在源码里检索 ".npmrc" / "credentials" 这个词本身),
+# 所以只放这一格,一格以外都不动:
+#   grep -n '\.npmrc' wchat.sh   → 模式位脱掉,文件位 wchat.sh 干净 → 不再误拦
+#   grep 'x' '.npmrc'            → 第二个引号参数是操作数,一个字不脱 → 照拦
+#   grep -f '~/.npmrc' x         → -f 的取值是"模式文件",真会被打开 → 照拦
+#   rg --pre='cat ~/.ssh/id_rsa' → --pre 不在取值白名单里 → 照拦
+#   grep -- '~/.npmrc'           → -- 之后全是操作数 → 照拦
+# sed/awk 不做:程序位常是整段脚本,且 awk 的第二个参数可能是 var=value 赋值也可能是
+# 文件,分错一格就是漏拦。
+# 引号内出现 $( 或反引号立刻停止脱敏(那是要真执行的);替换保持 1:1 等长,
+# 并把 . / ~ 等一并拍平成 x,拼不出新的命中。
+hd_is_search_verb() {
+    case "${1##*/}" in
+        grep|egrep|fgrep|rg|ag) return 0 ;;
+    esac
+    return 1
+}
+hd_mask_search_pat() {
+    local s="${1-}" out="" w="" ch q="" qm=0 sp=1 i n nxt vs=0 patused=0 dd=0 pending="" msk
+    [[ -n "$s" ]] || { printf '%s' "$s"; return 0; }
+    n=${#s}
+    for ((i = 0; i < n; i++)); do
+        ch=${s:i:1}
+        nxt=""
+        (( i + 1 < n )) && nxt=${s:i+1:1}
+        if [[ -n "$q" ]]; then
+            if [[ "$ch" == "$q" ]]; then q=""; qm=0; out+="$ch"; continue; fi
+            if (( qm )); then
+                if [[ "$ch" == '`' ]] || { [[ "$ch" == '$' ]] && [[ "$nxt" == '(' ]]; }; then
+                    qm=0; out+="$ch"; continue
+                fi
+                case "$ch" in
+                    ";"|"|"|"&"|$'\n'|"<"|">"|'$'|'`') out+="$ch" ;;
+                    *) out+=x ;;
+                esac
+            else
+                out+="$ch"
+            fi
+            continue
+        fi
+        case "$ch" in
+            "'"|'"')
+                # 进引号这一刻定脱不脱:段内检索动词 + 未过 -- + (模式位可脱)
+                q="$ch"; qm=0; msk=0
+                if (( vs == 1 )) && (( dd == 0 )); then
+                    if [[ -n "$w" ]]; then
+                        # 选项自带取值(--include='*'、-e'pat'):只认这几个取文本值的
+                        case "$w" in
+                            -e|-g|--include=*|--exclude=*|--exclude-dir=*|--glob=*|--regexp=*) msk=1 ;;
+                        esac
+                    elif [[ "$pending" == "pat" ]]; then
+                        msk=1; pending=""
+                    elif (( patused == 0 )); then
+                        msk=1
+                    fi
+                    if (( msk == 1 )); then
+                        patused=1; qm=1; out+="("
+                        continue
+                    fi
+                fi
+                out+="$ch"
+                sp=0
+                ;;
+            " "|$'\t')
+                if [[ -n "$w" ]]; then
+                    if (( vs == 0 )); then
+                        hd_is_search_verb "$w" && vs=1
+                    elif [[ "$w" == "--" || "$w" == "-f" || "$w" == "--file" ]]; then
+                        # `--` 之后全是操作数;grep/rg 一旦带 -f/--file,模式来自文件,
+                        # 余下非选项参数**全部是文件操作数**(不会再有模式位),所以同一处理。
+                        dd=1
+                    elif [[ "${w:0:1}" == "-" ]]; then
+                        case "$w" in
+                            -e|-g|--include|--exclude|--exclude-dir|--glob|--regexp) pending="pat" ;;
+                            *) pending="" ;;
+                        esac
+                    else
+                        patused=1; pending=""
+                    fi
+                    w=""
+                fi
+                sp=1
+                out+="$ch"
+                ;;
+            ";"|"|"|"&"|$'\n'|"("|")"|"<"|">"|'`')
+                if [[ -n "$w" ]]; then
+                    if (( vs == 0 )); then hd_is_search_verb "$w" && vs=1; fi
+                    w=""
+                fi
+                # 分隔符 = 下一段重新开始;脱敏状态全部复位
+                vs=0; patused=0; dd=0; pending=""; sp=1
+                out+="$ch"
+                ;;
+            *)
+                (( sp == 1 )) && { w="$ch"; sp=0; } || { [[ -n "$w" ]] && w+="$ch"; }
+                out+="$ch"
+                ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 hard_deny_cmd() {
     local c="$1" word c2="" c3=""
     hd_rule=""; hd_msg=""; HD_SOFT=""
@@ -3550,7 +3660,12 @@ hard_deny_cmd() {
     # 嵌在这里定义、缺 hd_mask_msg 时 return 0(视为仍命中)→ 照拒,绝不 fail-open。
     hd_recheck_msg() {
         declare -f hd_mask_msg >/dev/null 2>&1 || return 0
-        [[ -n "$c3" ]] || c3=$(hd_mask_msg "$c")
+        [[ -n "$c3" ]] || {
+            c3=$(hd_mask_msg "$c")
+            # 再过一道「检索动词模式位」脱敏(见 hd_mask_search_pat)。助手缺席时保留
+            # 上一轮结果 —— 少脱一格 = 更严,与这条链的 fail-closed 方向一致。
+            declare -F hd_mask_search_pat >/dev/null 2>&1 && c3=$(hd_mask_search_pat "$c3")
+        }
         local re
         for re in "$@"; do [[ "$c3" =~ $re ]] && return 0; done
         return 1
