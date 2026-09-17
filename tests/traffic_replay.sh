@@ -96,7 +96,15 @@ while IFS=$'\037' read -r tool rule0 verdict0 tier0 flag0 cmd; do
     got=$( auto_mode="${tier0:-full}"
            if hard_deny_cmd "$cmd" >/dev/null 2>&1; then printf '%s' "${hd_rule:-HIT}"
            else printf 'ALLOW'; fi )
-    [[ -n "$got" ]] || got=ALLOW
+    if [[ -z "$got" ]]; then
+        # 判定器崩溃 ≠ 放行。实测:真实语料里 `cd "$PWD" && python3 .real_check.py …`
+        # 这一条会让判定链中途退出(装载区带着 set -e,函数内有不受 if 保护的失败命令),
+        # 子 shell 死掉 → got 为空 → 上一版把空值当成 ALLOW,于是"崩溃"被记成"放宽方向漂移"。
+        # 这是最危险方向的假绿:判不出来的东西必须单独计数、不参与对账。
+        jerr=$(( ${jerr:-0} + 1 ))
+        printf '  [判定崩溃] %s\n' "${cmd:0:70}"
+        continue
+    fi
     # 历史侧只认形如 H*/P* 的规则号;`final` 之类是事件标记,不是判定。
     if [[ "$rule0" =~ ^[HP][0-9]+$ ]]; then was="$rule0"; else was="ALLOW"; fi
     WAS_HIST["$was"]=$(( ${WAS_HIST["$was"]:-0} + 1 ))
@@ -146,8 +154,11 @@ fi
 echo "── 历史认领分布:"; for k in "${!WAS_HIST[@]}"; do printf '   %-6s %s\n' "$k" "${WAS_HIST[$k]}"; done | sort
 echo "── 当前判定分布:"; for k in "${!GOT_HIST[@]}"; do printf '   %-6s %s\n' "$k" "${GOT_HIST[$k]}"; done | sort
 
-printf '\n一致 %d / 放宽可疑 %d / 收紧或换号 %d / 总计 %d / 有损未参与 %d / 基线外新语料 %d\n' \
-    "$same" "$drift_relax" "$drift_tighten" "$idx" "${lossy:-0}" "$NEW_CMD"
+printf '\n一致 %d / 放宽可疑 %d / 收紧或换号 %d / 总计 %d / 有损未参与 %d / 基线外新语料 %d / 判定崩溃 %d\n' \
+    "$same" "$drift_relax" "$drift_tighten" "$idx" "${lossy:-0}" "$NEW_CMD" "${jerr:-0}"
+if (( ${jerr:-0} )); then
+    printf '⚠ 有 %d 条命令让判定器崩溃(未参与对账)。崩溃不是放行,必须单独查根因。\n' "${jerr:-0}"
+fi
 if (( NOBASE )); then
     printf '结论:无基线可比,按 fail-closed 退出 1。\n'
     exit 1
