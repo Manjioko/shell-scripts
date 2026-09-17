@@ -399,9 +399,12 @@ model="$flash_model"
 # 原为注释掉的 10(auto 模式实施前)——人工模式下人能看到刷屏并 Ctrl+C,上限形同
 # 虚设;auto 模式去掉了"人看着"这一环,必须真正生效,否则 bugList #35
 # ("模型连调 11 轮 read_image")这类循环会无限烧 token 并反复执行破坏性命令。
-# 25 = 正常复杂任务(读文件+改代码+跑测试+迭代)够用,又能在明显失控时收手。
+# (下面原写"25 = 正常复杂任务够用",这个说法坐不住:赋值处已给出实测修正。)
 # 取环境变量覆盖,不必改代码:MAX_TOOL_ROUNDS=60 wchat -auto -st "..."
-MAX_TOOL_ROUNDS="${MAX_TOOL_ROUNDS:-25}"
+MAX_TOOL_ROUNDS="${MAX_TOOL_ROUNDS:-250}"   # 原为 25:实测一轮正经任务(读+改+测+迭代)就常撞顶,
+# 逼出"预算耗尽草草收尾"的坏行为。失控防护不靠这个数字,靠 AUTO_DENY_STREAK(连续被拦即熔断)与
+# AUTO_MAX_APPROVALS(自动放行总次数上限);本值只是最后兜底的总闸。临时试值用 env,不必改代码:
+# MAX_TOOL_ROUNDS=60 wchat -auto -st "..."(见上面 403 行原说明)
 
 # ---------- auto 模式(敏感权限全自动)配置 ----------
 # 设计原则(与实现一一对应,改代码前先看这段):
@@ -2868,11 +2871,20 @@ auto_judge=""; auto_judge_reason=""
 auto_audit() {
     local event="$1" tool="$2" target="$3" rule="$4" verdict="$5" reason="$6"
     mkdir -p "$AUTO_DIR" 2>/dev/null || return 0
+    # target 上限 400 → 1200(实测依据):审计日志 119 条 shell 行里 **71 条正好卡在 400**,
+    # 那就是被掐掉的真截断,回放对账因此只剩二十几条可信语料(语料有损率 6 成)。1200 足以
+    # 覆盖绝大多数单行命令;仍保留封顶而不设无限,是因为 heredoc 之类的 target 可以到几十 KB,
+    # 一行日志撑爆自己、也让 jq 检索变贵。日志体积用户明确表示不在意。
+    # trunc/tlen 是这次真正的补丁:只看长度分不清"恰好等于上限被掐"和"本来就这个长度"——
+    # 上一轮下游按 200 猜上限,把 22 条**完整**命令误判成有损排除掉,同时又没抓住 400 这条真线。
+    # 现在给确定信号:截断与否由写盘这端说,不由读盘那端猜。
+    local at_len=${#target} at_trunc=false
+    (( at_len > 1200 )) && at_trunc=true
     jq -nc --arg ts "$(date '+%Y-%m-%dT%H:%M:%S%z')" --arg sess "$auto_session_id" \
         --arg tier "$auto_mode" --arg ev "$event" --arg tool "$tool" \
-        --arg target "${target:0:400}" --arg rule "$rule" --arg v "$verdict" \
-        --arg reason "${reason:0:200}" \
-        '{$ts,$sess,$tier,$ev,$tool,$target,$rule,verdict:$v,$reason}' \
+        --arg target "${target:0:1200}" --arg rule "$rule" --arg v "$verdict" \
+        --arg reason "${reason:0:200}" --argjson trunc "$at_trunc" --argjson tlen "$at_len" \
+        '{$ts,$sess,$tier,$ev,$tool,$target,$rule,verdict:$v,$reason,$trunc,$tlen}' \
         >> "$AUTO_AUDIT_LOG" 2>/dev/null
 }
 
