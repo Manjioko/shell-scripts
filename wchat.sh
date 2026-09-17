@@ -3117,8 +3117,14 @@ hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credentia
 # **不参与判定** —— 判定仍以 hd_re_sys_redirect 为准。两条名单必须同步改(改一条
 # 忘另一条,现象就是本表"分支全带坐标"或 H11 正例成片红;上一轮我就把这条赋值
 # 整个改了名,主判据变量当场消失,H11 全线不触发,14 条一起红)。
-hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
-hd_re_sys_redirect_wide='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/[[:graph:]]*'
+hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
+hd_re_sys_redirect_wide='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/[[:graph:]]*'
+# 本轮实测(见 tests/probe_shapes.sh 的 E 组)补进来的三类:`echo x >> /var/log/app.log`
+# 原先整条放行 —— `>>` 本来就在操作符分支里,漏的是前缀名单只有 var/root,不含 var/log、
+# var/spool/cron(crontab 落盘处,写了就是持久改环境)、var/db(系统状态库)。
+# **刻意不写 `var`**:那样会把 /var/tmp 与 /var/folders(macOS 的 TMPDIR 家族)一起圈进来,
+# 而它们正是 H11 自己那句"替代:写到 /tmp"要人去写的地方;表的 575 行也专门守着
+# "/var/folders 形状不算受保护"这一条。加宽名单要一条一条给,别按前缀一刀切。
 # 「丢弃型」重定向目标:写进 /dev 下这几个字符设备等于扔掉,不产生任何持久改动。
 # 与 hd_re_sys_redirect 的名单无关(那边刻意不含 /dev,所以 >/dev/null 不会撞 H11)。
 # 刻意不列 /dev/sd*、/dev/rdisk*、/dev/disk*:那是块设备,写进去是真毁数据(H4 管)。

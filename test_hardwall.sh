@@ -1799,6 +1799,23 @@ expect NP "追加写进无关绝对路径"                          'cat ~/.bash
 
 EXPECT_TOTAL=$((EXPECT_TOTAL + 30))       # T27 的 30 条(数段内 ^expect 行数得来,不是心算)
 
+# ══════════════════════════════════════════════════════════════════
+# T28 H11 写路径名单补 var 侧三类(实测驱动,见 tests/probe_shapes.sh E 组)
+# 起因:探"抽象目标证明器"该不该做时,顺手量了 H11 的现状,发现它不是我以为的"太严",
+# 而是有明确漏拦 —— `echo x >> /var/log/app.log` 整条放行(`>>` 在操作符分支里,漏的是
+# 前缀名单)。补的是名单,不是机制;机制侧的另外两类漏拦(`..` 穿越、mv/cp/truncate 的
+# **目标操作数**压根不进 H11 视野)本轮没动,原因写在 wchat.sh 的 H11 注释区。
+# 反锁那条同样重要:/var 不能整体加宽,否则 /var/tmp 与 TMPDIR 家族一起撞墙,而 H11 的
+# 拒绝话术正让人"改写到 /tmp"。
+# ══════════════════════════════════════════════════════════════════
+echo 'T28 H11 写路径名单:补 var/log 与 var/spool/cron、var/db'
+expect H11 "追加写系统日志(原先整条放行)"        'echo x >> /var/log/app.log'
+expect H11 "写 crontab 落盘目录(写了即持久生效)"  'cat a > /var/spool/cron/crontabs/root'
+expect H11 "写 /var/db 系统状态库"                 'printf x > /var/db/y'
+expect NP  "反锁:/var/tmp 不属受保护路径"          'echo x > /var/tmp/keep.txt'
+expect P2  "反锁:/var/folders(TMPDIR 家族)不撞墙" 'echo x > /var/folders/zz/zyxv/T/tmpfile.txt'
+EXPECT_TOTAL=$((EXPECT_TOTAL + 5))
+
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?),或按平台分支的条数与 EXPECT_TOTAL 的推导条件不一致\n' "$total" "$EXPECT_TOTAL"
