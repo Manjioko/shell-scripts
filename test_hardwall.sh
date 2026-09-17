@@ -278,11 +278,12 @@ expect H5 "cp 到 dotfile + 2>&1 仍拦"           "cp /tmp/x ~/.vimrc 2>&1"
 expect H5 "同串里既有 sink 又有真追加"          "cat ~/.bashrc > /dev/null; echo hi >> ~/.bashrc"
 expect H5 "sed -i 写 dotfile 且带 2>/dev/null"  "sed -i.bak 's/a/b/' ~/.tmux.conf 2>/dev/null"
 expect H5 "cp 到 dotfile 全_output_丢_sink"     "cp /tmp/x ~/.zshrc >/dev/null 2>&1"
-# 刻意保守(非缺陷):dotfile 只读、但同串确实往别处写了 —— 现口径是"命令里有写动作
-# 且串里出现 dotfile"就拦,不改成"写目标本身是 dotfile"才拦(那要把 fail-open 的
-# hd_write_targets 接进硬墙,提取器一坏等于放开整条 H5,见 hd_has_write 注释)。
-# 代价就是这条误杀;修好(改走方案②)时这条会红,提醒同步改注释与 hd_has_write。
-expect H5 "[设计如此] 读 dotfile 同时写 /tmp"   "cat ~/.bashrc > /tmp/o.txt 2>/dev/null"
+# 这条曾经是"刻意保守"的代价(口径 = 命令里有写动作且串里出现 dotfile 就拦,不做目标
+# 关联),注释里写着预约:"修好(改走方案②)时这条会红"。本轮方案②落地(见 T27 与 wchat.sh
+# 的 hd_redir_targets_all_clean),它如期变红并按预约翻成放行 —— 只读 dotfile + 写到无关的
+# 绝对路径,不再构成 H5。**向量保留而不是删掉**:它是"预约被执行过"的物证,删了之后就没人
+# 知道这条判定为什么朝这个方向。凭据类的 cat ~/.config/gh/... 转由 H6 拦(T27 有对应断言)。
+expect NP "[预约兑现] 读 dotfile 同时写 /tmp"   "cat ~/.bashrc > /tmp/o.txt 2>/dev/null"
 
 # ================= 脱敏器自身的行为约束 =================
 echo 'T3 hd_mask_readonly 只收窄匹配域'
@@ -1748,6 +1749,55 @@ expect NP  "域名里的 .aws 不被要求斜杠的那支误命中"      'curl -
 expect NP  ".config/nginx/ 不在 gh/gcloud/azure 名单内"  'cat .config/nginx/app.conf'
 expect H6  "./.ssh/ 显式相对形态同样在覆盖内"            'cd ~ && cat ./.ssh/id_rsa'
 expect NP  "无 cd 时 ./.ssh/id_rsa 属边界内文件,豁免照旧" 'cat ./.ssh/id_rsa'
+
+# ================= T27 H5 的"写目标 ↔ dotfile 命中"关联(方案②,兑现 T2 的预约) =================
+# 口径:重定向不再"只要有 > 就算写证据"。**只有每一个 > 的目标都能证明是干净的绝对非 dot
+# 路径**,才认为这条命令没有"与 dotfile 相关的写动作"。所有证明不了的情形(相对目标、变量、
+# ~、.. 穿越、双斜杠、引号不闭合、取不到目标)一律照旧拦 —— fail-closed 是这段的立场,
+# 收窄只发生在能证明的那一侧。写动词那一支完全没动(T2 的 8 条 H5 正例仍全绿)。
+# 为什么不用 hd_write_targets:它是给审批器"展示"用的 fail-open 组件,接到放行侧坏一次
+# 就是整条 H5 静默失效。见 wchat.sh 里 hd_redir_targets_all_clean 的注释。
+echo 'T27 H5 写目标关联:能证明无关才放行'
+# ── 收窄侧:只读 dotfile + 写到无关的绝对路径,不该再被 H5 打断
+expect NP "只读列目录 + 写 /tmp(本轮真实打断测量那条)" 'ls -la ~/.ct/ > /tmp/r9.txt'
+expect NP "读 dotfile 同时写 /tmp(原[设计如此]预约兑现)" 'cat ~/.bashrc > /tmp/o.txt'
+expect NP "sed 无 -i 是预览,输出写 /tmp"                "sed 's/a/b/' ~/.bashrc > /tmp/preview.txt"
+expect NP "目标在工作根而工作根在 HOME 内"               'cat ~/.bashrc > /Users/jwan/bin/out.txt'
+expect NP "目标带双引号"                                 'cat ~/.bashrc > "/tmp/q.txt"'
+expect NP "目标带单引号"                                 "cat ~/.bashrc > '/tmp/q2.txt'"
+expect NP "> 后无空格"                                   'cat ~/.bashrc >/tmp/nospace.txt'
+expect NP "两个 > 目标都干净"                            'cat ~/.bashrc > /tmp/a.txt && echo 2 > /tmp/b.txt'
+expect NP "sink 抹完已无残留 >"                          'cat ~/.bashrc > /dev/null'
+expect H6 "凭据目录的读转移给 H6,不留在 H5"             'cat ~/.config/gh/hosts.yml > /tmp/registry.txt'
+expect H11 "系统路径的写转移给 H11"                      'cat ~/.bashrc > /etc/x'
+# ── 反向锁:证明不了落点的,一条都不放
+expect H5 "相对目标(落点随 PWD 变)"                    'cat ~/.bashrc > out.txt'
+expect H5 "相对点文件(cwd=HOME 时就是写 dotfile)"       'cat ~/.bashrc > .bashrc'
+expect H5 "目标是变量"                                   'cat ~/.bashrc > $OUT'
+expect H5 "目标是 $HOME 展开后的 dotfile"                'cat ~/.bashrc > $HOME/.zshrc'
+expect H5 "绝对路径带 .. 穿越"                           'cat ~/.bashrc > /tmp/../.bashrc'
+expect H5 "他人家目录的点文件"                           'cat ~/.bashrc > /home/bob/.bashrc'
+expect H5 "自己家目录的点目录(工具状态目录)"             'cat ~/.bashrc > ~/.ct/auto/x'
+expect H5 "双斜杠开头(归一化不了)"                      'cat ~/.bashrc > //tmp/x'
+expect H5 "中段双斜杠"                                   'cat ~/.bashrc > /tmp/x//y'
+expect H5 "复合命令里有一个可疑目标"                     'cat ~/.bashrc > /tmp/a.txt; echo x >> ~/.zshrc'
+expect H5 "干净重定向 + 写动词把内容搬回 dotfile"        'cat ~/.bashrc > /tmp/a.txt && cp /tmp/a.txt ~/.bashrc'
+expect H5 "直接重定向进 dotfile"                         'echo x > ~/.bashrc'
+expect H5 "tee 写 dotfile(动词支未受本轮影响)"           'tee ~/.bashrc < /tmp/in'
+expect H5 "引号不闭合的形状按可疑处理"                   'cat ~/.bashrc > "/tmp/unclosed.txt'
+# ── 收窄时顺手删掉了 hd_has_write 的两个旧分支(`[|&]2>&1` 一条、`hd_re_other_redirect*` 循环
+# 一条),这 5 条是它们各自管过的形状。**删分支不能只删不写**:下面每条都是实测值,
+# 记录"旧版一律 H5 → 新版由谁接手",将来有人把 helper 改回去会在这里撞红而不是静默迁移。
+#   · `2>&1` 那支没有文件目标可查,无法跟着收窄变精确;实测凭据/密钥路径由 H6 接管,
+#     而 `~/.ct/` 下的纯读变成放行 —— 后者正是这轮要修的误拦,前者是更准的理由。
+#   · other_redirect(`>>`)含 `>`,天然被残留 `>` 那一支覆盖,追加进 dotfile 必须照拦。
+expect H6 "2>&1 无目标可查:密钥路径交给 H6"              'tail -f ~/.ssh/authorized_keys 2>&1'
+expect H6 "同上,私钥"                                   'head -20 ~/.ssh/id_ed25519 2>&1'
+expect NP "2>&1 + 只读自家工具配置,不再误判写动作"        'grep x ~/.ct/config.yaml 2>&1'
+expect H5 "追加写进 dotfile(>> 也走同一判据)"             'echo hi >> ~/.ct/note.txt'
+expect NP "追加写进无关绝对路径"                          'cat ~/.bashrc >> /tmp/log.txt'
+
+EXPECT_TOTAL=$((EXPECT_TOTAL + 30))       # T27 的 30 条(数段内 ^expect 行数得来,不是心算)
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
