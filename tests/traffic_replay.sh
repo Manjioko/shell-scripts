@@ -59,7 +59,15 @@ for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
     # 落盘后换行被抹平 —— 于是"被拦的那一段"可能压根没进日志,或被第一个 # 当成注释吞掉。
     # 拿这种行去对账会把语料失真报成"判据放宽"(首跑就报了 60 条,全是这个形状)。
     # 所以:截断到 200 的、含换行的、含 # 的一律标 LOSSY,只做统计不参与对账。
-    flag = "LOSSY" if ("\n" in tgt or "#" in tgt or len(tgt) >= 200) else "OK"
+    # 原因要分开记:只有知道"截断占几条、换行占几条",才谈得上改不改日志格式(第 3 件事)。
+    rs = []
+    if len(tgt) >= 200:
+        rs.append("trunc")
+    if "\n" in tgt:
+        rs.append("nl")
+    if "#" in tgt:
+        rs.append("hash")
+    flag = "OK" if not rs else "LOSSY:" + ",".join(rs)
     print(u.join([t, o.get("rule") or "", o.get("verdict") or "",
                   o.get("tier") or "full", flag, tgt.replace(u, " ").replace("\n", " ")]))
 PY
@@ -76,6 +84,7 @@ fi
 declare -F hard_deny_cmd >/dev/null 2>&1 || fail_hard "hard_deny_cmd 未装载,回放无意义" 1
 
 pass=0; drift_relax=0; drift_tighten=0; same=0; idx=0
+declare -A LOSSY_H=()   # 有损原因直方图(set -u 下必须先声明,否则计数踩空)
 # 基线:漂移本身不可怕(历史日志是**旧版本**判的,必然有差),可怕的是"新引入的漂移"。
 # 所以把当前漂移集合固化成基线文件,只有基线之外的新漂移才让闸门红。
 # 生成/更新:GEN=1 bash tests/traffic_replay.sh   对比:直接跑(无基线则红着提示)
@@ -94,7 +103,13 @@ while IFS=$'\037' read -r tool rule0 verdict0 tier0 flag0 cmd; do
     [[ -n "${cmd:-}" ]] || continue
     idx=$((idx + 1))
     # 有损行不参与对账,但必须报数:否则"全部一致"是筛出来的假绿。
-    if [[ "$flag0" == LOSSY ]]; then lossy=$(( ${lossy:-0} + 1 )); continue; fi
+    if [[ "$flag0" == LOSSY* ]]; then
+        # 只按"有没有 LOSSY 前缀"判,原因逗号列表原样进直方图:截断/换行/# 三类各自的条数
+        # 决定了改日志格式能换回多少覆盖率(不分类就没法判断值不值)。
+        lossy=$(( ${lossy:-0} + 1 ))
+        LOSSY_H["${flag0#LOSSY:}"]=$(( ${LOSSY_H["${flag0#LOSSY:}"]:-0} + 1 ))
+        continue
+    fi
     hd_rule=""; hd_msg=""
     # 判定必须关在子 shell 里:hard_deny_cmd 内部有不受 if 保护的失败命令,一旦在
     # set -u 下踩到未定义变量就把 shell 当场打死(实测装载残缺时一条 `cd "$PWD" && …`
@@ -165,6 +180,10 @@ echo "── 当前判定分布:"; for k in "${!GOT_HIST[@]}"; do printf '   %-6
 
 printf '\n一致 %d / 放宽可疑 %d / 收紧或换号 %d / 总计 %d / 有损未参与 %d / 基线外新语料 %d / 判定崩溃 %d\n' \
     "$same" "$drift_relax" "$drift_tighten" "$idx" "${lossy:-0}" "$NEW_CMD" "${jerr:-0}"
+if (( ${#LOSSY_H[@]} )); then
+    echo "── 有损原因(一条行可同时命中多类):"
+    for k in "${!LOSSY_H[@]}"; do printf '   %-14s %s\n' "$k" "${LOSSY_H[$k]}"; done | sort -k2 -rn
+fi
 if (( ${jerr:-0} )); then
     printf '⚠ 有 %d 条命令让判定器崩溃(未参与对账)。崩溃不是放行,必须单独查根因。\n' "${jerr:-0}"
 fi
