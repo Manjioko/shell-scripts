@@ -3234,6 +3234,8 @@ hd_write_targets() {
         t="${t/"${BASH_REMATCH[0]}"/}"
     done
     t="${t//|&/ }"
+    # (原此处有一行 flat="${flat//$'\n'/$'\n'}",把换行换成换行的空操作,意图是折叠续行
+    #  却写成了自替换。折叠已由 hd_fold_lines 在判定入口统一做掉,此处不再需要。)
     # 命令边界:&& || | ; 换行。旧版只切 | 与 ;,&& 不切段,导致整条链的操作数
     # 混在同一段里判定(一段里有 cp 就把另一段的无关 token 也当写目标)。
     local flat="${t//&&/$'\n'}"
@@ -3641,6 +3643,38 @@ hd_mask_search_pat() {
     printf '%s' "$out"
 }
 
+# 命令边界归一:判定串里的换行有两种语义 —— `\` + 换行是同一条命令的续行,裸换行是
+# 两条命令。正则的中间段(如 `[^;&|$]*`)两种都吃,于是
+#   rm -f /tmp/a /tmp/b
+#   /opt/homebrew/bin/bash x
+# 被当成「把下一行要执行的路径也删了」(H3 误拦,本轮写验证脚本时自踩)。
+# 折法:`\`+换行 → 空格(续行照旧是一条,`rm -rf \` + `/usr` 仍命中),裸换行 → `;`
+# (正则本来就在 `;` 处停,`reboot` + 换行 + `rm -rf /` 两条仍各自命中)。
+# 结果写进 HD_FOLDED;无换行的输入原样透传,不给常规命令付复制的钱。
+# 必须接在 hd_noncode_payload 之后:heredoc 定界靠换行,先折就解析不出来了。
+HD_FOLDED=""
+hd_fold_lines() {
+    local _s="$1" _line _out=""
+    HD_FOLDED="$_s"
+    [[ "$_s" == *$'\n'* ]] || return 0
+    # 含 heredoc 的一律不折:正文里的换行是数据不是命令边界,折成 `;` 会把数据行
+    # 并进命令行(实测把 `解释器 heredoc 被误剥` 等 4 条既有锁打成新误拦)。
+    # 代价很明白:带 heredoc 的多行命令仍可能跨行桥接(旧行为),不因此放水。
+    if [[ "$_s" == *'<<'* ]]; then return 0; fi
+    while IFS= read -r _line || [[ -n "$_line" ]]; do
+        if [[ "$_line" == *\\ ]]; then
+            _out+="${_line%\\} "
+        else
+            _out+="$_line"$'\n'
+        fi
+    done <<<"$_s"
+    # 不删换行,只在每个换行**前**补一个 `;`:边界符让正则的中间段停下来,而行结构
+    # 保持原样 —— H11 的「第 N 行」坐标要对着原文数(实测删换行会把坐标全说成第1行)。
+    _out="${_out%$'\n'}"
+    HD_FOLDED="${_out//$'\n'/$';\n'}"
+    return 0
+}
+
 hard_deny_cmd() {
     local c="$1" word c2="" c3=""
     hd_rule=""; hd_msg=""; HD_SOFT=""
@@ -3651,6 +3685,11 @@ hard_deny_cmd() {
     HD_PAYLOAD=""
     if declare -F hd_noncode_payload >/dev/null 2>&1 && hd_noncode_payload "$c"; then
         c="$HD_PAYLOAD"
+    fi
+    # 同上 fail-closed:助手缺席就保留原文(顶多退回跨换行桥接的误拦,不会放水)。
+    if declare -F hd_fold_lines >/dev/null 2>&1; then
+        hd_fold_lines "$c"
+        c="$HD_FOLDED"
     fi
     # HD_SOFT 与 hd_rule/hd_msg 同生命周期:留着上一条的 container,下一条普通写系统
     # 路径的命令就会在审计里被记成"降级放行";调用方若照它改出口,等于拿上一条的

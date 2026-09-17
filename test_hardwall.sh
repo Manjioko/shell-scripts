@@ -185,6 +185,15 @@ expect() {
     got=$(deny_rule "$cmd")
     if [[ "$want" == NP ]]; then
         [[ "$got" == NP ]] && ok "$lbl" || bad "$lbl" "被判 $got,应放行 | cmd=$cmd"
+    elif [[ "$want" == *"|"* ]]; then
+        # `H3|P2` 形式:断的是"必须被某条硬墙拦住",不押具体规则号。
+        # 写死规则号的断言会把"换个规则号继续拦"误判成回归(B 阶段教训,本轮又踩一次),
+        # 而认领者本来就可能随中间段规整而变;只有"不许放行"才是硬墙的真正不变量。
+        local _w
+        for _w in ${want//|/ }; do
+            [[ "$got" == "$_w" ]] && ok "$lbl" && return 0
+        done
+        bad "$lbl" "被判 $got,应 $want 之一 | cmd=$cmd"
     else
         [[ "$got" == "$want" ]] && ok "$lbl" || bad "$lbl" "被判 $got,应 $want | cmd=$cmd"
     fi
@@ -1847,12 +1856,20 @@ expect NP  "反锁:sed 只读系统文件"          'sed -n "1,5p" /etc/hosts'
 expect NP  "反锁:rsync 目标在未保护目录"    'rsync -av ./src /var/tmp/mirror'
 expect NP  "反锁:落点是变量,证明不了"       'echo x > "$TMPDIR/out.log"'
 expect NP  "反锁:落点由变量拼出,证明不了"    'cp /tmp/x "${HOME}/bin/y"'
+# ── 命令边界归一(第十三轮):裸换行是两条命令,`\`+换行才是一条 ────────────
+# 前两条是本轮写验证脚本时被 H3 真拦下的形状(命中串把下一行要执行的路径当成了删除目标);
+# 后两条证明折叠没走过头:续行仍算一条命令、换行后的真删仍要拦。
+expect NP  "反锁:裸换行后的执行路径不算 rm 的操作数" $'rm -f /tmp/a /tmp/b\n/opt/homebrew/bin/bash x'
+expect NP  "反锁:换行分开的两条命令不并操作数"     $'chmod +x setup.sh\nrm -rf ./build'
+expect H3  "续行:反斜杠 + 换行仍是一条命令"        $'rm -rf \\\n/usr'
+expect 'H3|P2'  "换行后的独立真删照拦(断的是不许放行,不押规则号)"                 $'reboot\nrm -rf /'
 if [[ "$hd_re_sys_redirect" == *"($hd_h11_sys_prefixes)"* && "$hd_re_sys_redirect_wide" == *"($hd_h11_sys_prefixes)/[[:graph:]]*"* ]]; then
     pass=$((pass + 1)); echo "  ok   两份受保护前缀名单一致(重定向版 = 目标提取版)"
 else
     fail=$((fail + 1)); echo "  FAIL 两份受保护前缀名单漂移,重定向版能拦的形态提取版可能漏"
 fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 15))       # T29 的 15 条(14 条 expect + 1 条结构锁)
+EXPECT_TOTAL=$((EXPECT_TOTAL + 4))        # 第十三轮 命令边界归一的 4 条
 
 # ══════════════════════════════════════════════════════════════════
 # T30 装载完整性:硬墙入口在 set -u 下不得踩到未装载的常量
