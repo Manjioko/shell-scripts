@@ -3117,8 +3117,8 @@ hd_re_secret_ref='(\$\(cat[^)]*(\.env|key|secret|token|password|passwd|credentia
 # **不参与判定** —— 判定仍以 hd_re_sys_redirect 为准。两条名单必须同步改(改一条
 # 忘另一条,现象就是本表"分支全带坐标"或 H11 正例成片红;上一轮我就把这条赋值
 # 整个改了名,主判据变量当场消失,H11 全线不触发,14 条一起红)。
-hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
-hd_re_sys_redirect_wide='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/[[:graph:]]*'
+hd_re_sys_redirect='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private/etc|private/usr|private/bin|private/sbin|private/System|private/Library|private/var/root|private/var/log|private/var/spool/cron|private/var/db|private/Applications|private/proc|private/sys|private/run|private/boot|private/lib|private/lib64|private/root|private/srv|private/media|private/mnt|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/'
+hd_re_sys_redirect_wide='(>>?|(^|[[:space:]])tee([[:space:]]+-a)?[[:space:]]+)[[:space:]]*/(etc|usr|bin|sbin|System|Library|private/etc|private/usr|private/bin|private/sbin|private/System|private/Library|private/var/root|private/var/log|private/var/spool/cron|private/var/db|private/Applications|private/proc|private/sys|private/run|private/boot|private/lib|private/lib64|private/root|private/srv|private/media|private/mnt|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)/[[:graph:]]*'
 # 本轮实测(见 tests/probe_shapes.sh 的 E 组)补进来的三类:`echo x >> /var/log/app.log`
 # 原先整条放行 —— `>>` 本来就在操作符分支里,漏的是前缀名单只有 var/root,不含 var/log、
 # var/spool/cron(crontab 落盘处,写了就是持久改环境)、var/db(系统状态库)。
@@ -4261,7 +4261,7 @@ HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CO
 # 名单刻意与 hd_re_sys_redirect 分开存(那个变量的赋值不接收量代换 —— 上一轮我改名
 # 让主判据当场消失、H11 全线不触发、14 条一起红)。两份名单由表里的结构锁断言保证
 # 同步,不靠人记。
-hd_h11_sys_prefixes='etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt'
+hd_h11_sys_prefixes='etc|usr|bin|sbin|System|Library|private/etc|private/usr|private/bin|private/sbin|private/System|private/Library|private/var/root|private/var/log|private/var/spool/cron|private/var/db|private/Applications|private/proc|private/sys|private/run|private/boot|private/lib|private/lib64|private/root|private/srv|private/media|private/mnt|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt'
 
 # 字面归一化 a/../b → b。**不跟随符号链接**,所以 /etc 的 symlink(本机没有)与
 # /tmp -> /private/tmp(macOS 有)这类穿越提不出来;那是已知边界,不是本函数的缺陷,

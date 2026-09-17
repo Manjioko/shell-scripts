@@ -1856,6 +1856,13 @@ expect NP  "反锁:sed 只读系统文件"          'sed -n "1,5p" /etc/hosts'
 expect NP  "反锁:rsync 目标在未保护目录"    'rsync -av ./src /var/tmp/mirror'
 expect NP  "反锁:落点是变量,证明不了"       'echo x > "$TMPDIR/out.log"'
 expect NP  "反锁:落点由变量拼出,证明不了"    'cp /tmp/x "${HOME}/bin/y"'
+# ── /private 名单精确化(第十四轮)────────────────────────────────────────
+# 旧名单里有裸 token `private`,而 macOS 上 /tmp 的真身就是 /private/tmp(`cd /tmp &&
+# pwd -P` 天天产出这种路径),于是出现自相矛盾:写 /private/tmp/x 撞 H11,理由却是
+# 「替代:写到 /tmp」。改成与顶层同构的 private/* 家族,var 仍只覆盖 root/log/spool/db。
+expect H11 "macOS 真身路径:写 /private/etc/hosts 仍拦"  'echo x > /private/etc/hosts'
+expect NP  "反锁:/private/tmp 是公共临时目录(/tmp 真身)" 'echo x > /private/tmp/keep.txt'
+expect NP  "反锁:/private/var/tmp 同为公共临时目录"      'echo x > /private/var/tmp/keep.txt'
 # ── 命令边界归一(第十三轮):裸换行是两条命令,`\`+换行才是一条 ────────────
 # 前两条是本轮写验证脚本时被 H3 真拦下的形状(命中串把下一行要执行的路径当成了删除目标);
 # 后两条证明折叠没走过头:续行仍算一条命令、换行后的真删仍要拦。
@@ -1870,6 +1877,7 @@ else
 fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 15))       # T29 的 15 条(14 条 expect + 1 条结构锁)
 EXPECT_TOTAL=$((EXPECT_TOTAL + 4))        # 第十三轮 命令边界归一的 4 条
+EXPECT_TOTAL=$((EXPECT_TOTAL + 3))        # 第十四轮 /private 名单精确化的 3 条
 
 # ══════════════════════════════════════════════════════════════════
 # T30 装载完整性:硬墙入口在 set -u 下不得踩到未装载的常量
