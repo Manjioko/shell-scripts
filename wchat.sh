@@ -3077,7 +3077,16 @@ hd_home_a="(~|${hd_home}|\\\$HOME)"
 hd_re_dotfile='(^|[[:space:];&|><]|-i[[:space:]]*|[[:alnum:]]-i)[[:space:]]*"?'"$hd_home_a"'/\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|profile|gitconfig|global\.gitignore|vimrc|gvimrc|inputrc|tmux\.conf|screenrc|ct)([[:space:]/]|$)'
 hd_re_dotfile_cfg="$hd_home_a"'/\.config/([[:alnum:]-]+/(config|credentials)|gh/hosts)'
 # 凭据目录单独一条,且判在 dotfile 之前:规则号要能区分"读密钥"与"改配置"
-hd_re_secret_dir="$hd_home_a"'/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|'"$hd_home_a"'/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|_netrc|\.pypirc|\.htpasswd|\.pgpass|spnego-machine|'"$hd_home_a"'/\.ct/(config|history)([[:space:]/]|$)'
+# 最后三段是**相对路径形态**(不带 ~/$HOME/他人家目录前缀),刻意追加在末尾:
+# 前面已有 3 个捕获组,新增组只能排在后面 —— 判据里读 ${BASH_REMATCH} 的地方按位置取值,
+# 打乱既有分组编号是静默错。两个方向都有实测代价,所以两头都加了限定:
+#   要求紧跟一个 `/`:相对凭据目录真正泄漏的是"穿过它取文件"(.ssh/id_rsa、.aws/credentials),
+#     带斜杠同时天然排掉 `s3.aws.amazonaws.com` 这类域名(点号后面不是斜杠)。
+#     代价是 `ls .ssh`(只列目录)不命中 —— 按设计留给提示层,不是漏拦。
+#   要求左侧是 `./` 或非`/`非字母数字:否则 `/root/.ssh/authorized_keys` 会被这段抢成 H6,
+#     而它该由 H11(写特权路径)判定 —— 实测这条把一条既有断言打红了。绝对路径的非家目录
+#     形态留给 H11/P 侧,不在本轮范围内改口。
+hd_re_secret_dir="$hd_home_a"'/\.(ssh|aws|gnupg|subversion|docker|kube)([[:space:]/]|$)|'"$hd_home_a"'/\.config/(gh|gcloud|azure)([[:space:]/]|$)|\.npmrc|\.netrc|_netrc|\.pypirc|\.htpasswd|\.pgpass|spnego-machine|'"$hd_home_a"'/\.ct/(config|history)([[:space:]/]|$)|(\./|[^/[:alnum:]])\.(ssh|aws|gnupg|subversion|docker|kube)/|(\./|[^/[:alnum:]])\.config/(gh|gcloud|azure)/|(\./|[^/[:alnum:]])\.ct/(config|history)'
 hd_re_keychain="$hd_p"'security[[:space:]]+(dump-keychain|find-(generic|internet)-password|unlock-keychain)|keychain-access'
 # 私钥类要区分"文件"与"属性名":写成 `\.key([[:space:]]|$)` 会把
 # `jq .key file`、`obj.key = 1` 判成读私钥。所以扩展名形态一律要求前面有 "/"
@@ -3977,14 +3986,84 @@ link_escapes_root() {
 # 是无锚点分支,抠出来就只剩 `.npmrc`,拿它去归一会得到 `$WORK_ROOT/.npmrc`,于是
 # `cat ~/.npmrc` 被当成边界内相对路径放行 = fail-open。必须按**词**取上下文。
 hd_creds_all_exempt() {
-    local c="$1" w re t hit=0 m
+    local c="$1" w re t hit=0 m i n v nx tgt r
     declare -f resolve_path   >/dev/null 2>&1 || return 1       # 归一能力缺失 → 不豁免
     declare -f in_root_exempt >/dev/null 2>&1 || return 1       # 边界谓词缺失 → 不豁免(T6 同源做法)
     declare -f hd_split_words >/dev/null 2>&1 || return 1       # 分词缺失 → 整串不可信,不豁免
     hd_split_words "$c"
-    for w in ${hd_words[@]+"${hd_words[@]}"}; do
-        w="${w//\"/}"; w="${w//\'/}"
+    n=${#hd_words[@]}
+    # relbase:相对路径的解析基准。空 = 按当前工作目录(= WORK_ROOT)算,与改动前逐字一致。
+    # 哨兵 HD_CD_OUT = 命令里出现过"证明不了留在工作根内"的 cd/pushd(含无参 cd、cd ~、
+    # cd "$D"、cd ..、popd),此时**其后的相对凭据词一律不豁免**。
+    # 为什么非要有这一段:in_root_exempt 的豁免本意是给"项目级 .npmrc"这类同目录配置,
+    # 而它按 PWD 归一 —— 于是 `cd ~ && cat .npmrc` 实际读 ~/.npmrc,却被归一成
+    # $WORK_ROOT/.npmrc 判成"边界内"放走。实测这条今天(改前)确实是放行,而且是 DENY
+    # 类规则里唯一一条"加个 cd 就降级成读文件"的路径。绝对路径的凭据词完全不走这段,
+    # 所以本改动只影响"命中的是相对路径 且 命令里 cd 过"这一小块,误拦面天然有界。
+    local HD_CD_OUT='<cd-基准不可知或已在根外>'
+    local relbase=""
+    for (( i = 0; i < n; i++ )); do
+        w="${hd_words[i]}"; w="${w//\"/}"; w="${w//\'/}"
         [[ -n "$w" ]] || continue
+        # ── 先处理改基准的动词。同一趟扫描按位置走:`cat .npmrc && cd ~` 里的 cd 在
+        #    凭据词之后,不该回头影响已经解析过的词(拆成两趟就会把这条搞反)。
+        # 识别动词要剥掉粘连的标点:实测分词器把 `cd;` 当成一个词、子 shell 写成 `(cd`,
+        # 扫不到就是 fail-open。这里刻意不写 [[ == \(..* ]] 那种方括号模式 —— 反斜杠在
+        # POSIX 方括号里的语义各家不一致,写错的表现正是本墙最贵的那种:"看着有、静默不命中"。
+        # 所以先用便宜的子串筛选(绝大多数词一次比较就过),只对极少数候选词付 tr 的代价。
+        if [[ "$w" == *cd* || "$w" == *pushd* || "$w" == *popd* || "$w" == *builtin* || "$w" == *command* ]]; then
+            v=$(printf '%s' "$w" | tr -d '();,&|<>$`' 2>/dev/null) || v=""
+        else
+            v=""
+        fi
+        [[ "$v" == popd ]] && { relbase="$HD_CD_OUT"; continue; }
+        if [[ "$v" == cd || "$v" == pushd ]]; then
+            # `builtin cd ~` / `command cd ~` 同样是回家目录,前缀词一并认,别让它逃过本段
+            local pw=""
+            (( i > 0 )) && pw=$(printf '%s' "${hd_words[i - 1]}" | tr -d '();,&|<>$`' 2>/dev/null)
+            if [[ "$pw" == builtin || "$pw" == command ]]; then relbase="$HD_CD_OUT"; continue; fi
+            nx=""
+            if (( i + 1 < n )); then
+                tgt="${hd_words[i + 1]}"; tgt="${tgt//\"/}"; tgt="${tgt//\'/}"
+                case "$tgt" in
+                    '&&'|'||'|';'|'|'|'&'|'<'|'>'|'>>'|'2>&1') nx="" ;;   # 紧跟分隔符 = 无参 cd = 回家目录
+                    *) nx="$tgt" ;;
+                esac
+            fi
+            [[ "$v" == pushd ]] && nx="${nx%%>*}"       # pushd /tmp >/dev/null:目标取第一段
+            tgt="$nx"
+            case "$tgt" in
+                '')        tgt="$HOME" ;;                                # 裸 cd
+                '~')       tgt="$HOME" ;;
+                '~/'*)     tgt="$HOME/${tgt#'~'/}" ;;                    # 模式加引号:阻止 ~ 被二次展开
+                '${HOME}'|'$HOME') tgt="$HOME" ;;
+                '$PWD'|'${PWD}')
+                    # 还没 cd 过时,$PWD 就是判据所在的当前目录(= WORK_ROOT),这个特判是
+                    # 精确等式不是猜测;而 `cd ~ ; cd $PWD` 里 $PWD 是 cd 之后的值,判据
+                    # 看不见 → 转哨兵。不给 `$(pwd)` 开口子:命令替换的结果一律不可知,
+                    # 开了就是"换成 $(pwd) 就绕过 cd 语境"。
+                    if [[ -z "$relbase" ]]; then tgt="$WORK_ROOT"; else tgt=""; fi ;;
+                '-'|'--')  tgt="" ;;              # cd - 去 OLDPWD(判据看不见那个值)、cd -- 同理 → 不猜。实测漏了这条时 `cd - && cat .npmrc` 被当成"cd 进根内一个叫 - 的名字"而放行,洞还在
+                '~'*|*'$'*) tgt="" ;;                                     # ~other 是别人的家目录、变量值不可知 → 不猜
+                *['`'*?'()|;&<>']*|*'\'*) tgt="" ;;                       # 含元字符 = 不是字面路径
+            esac
+            if [[ -z "$tgt" ]]; then relbase="$HD_CD_OUT"; continue; fi
+            # 基准一旦不可知就**粘住**:后面的相对 cd 不许把状态洗回"根内已证明"。
+            # 漏了这条时 `cd ~ ; cd sub && cat .npmrc` 会重新解析成 $WORK_ROOT/sub 而放行,
+            # 但真实 cwd 是 ~ 下的 sub —— 我没有跟踪 OLDPWD 与多级相对跳转的能力,只能保守。
+            if [[ "$tgt" != /* ]]; then
+                [[ "$relbase" != "$HD_CD_OUT" ]] || continue
+                [[ -z "$relbase" ]] || tgt="$relbase/$tgt"
+            fi
+            # resolve_path 只在**工作根内**成功(它末尾的 || return 1 是既有语义),所以
+            # "归一成功"本身就等于"仍在根内",不必再问一遍 in_root_exempt。实测边界:
+            #   cd sub / cd 根内某个还没建的名字 → 成功(末段允许不存在)→ 基准仍在根内
+            #   cd .. / cd /tmp / cd ~ / cd -    → 失败或不可知 → 哨兵,其后相对凭据词不豁免
+            r=$(resolve_path "$tgt" 2>/dev/null) || r=""
+            if [[ -n "$r" ]]; then relbase="$r"; else relbase="$HD_CD_OUT"; fi
+            continue
+        fi
+        # ── 凭据词判定(与改动前同一套)
         m=0
         for re in "${hd_re_secret_dir:-}" "${hd_re_keyfile:-}" "${hd_re_keychain:-}" "${hd_re_shadow:-}"; do
             [[ -n "$re" ]] || continue
@@ -4004,6 +4083,13 @@ hd_creds_all_exempt() {
         t="${w//\$\{HOME\}/$HOME}"; t="${t//\$HOME/$HOME}"; t="${t/#\~/$HOME}"; t="${t%/}"
         [[ "$t" != *'~'* ]] || return 1            # ~ 只在开头有意义;出现在中间 = 没展成绝对路径 = 不豁免
         [[ -n "$t" ]] || return 1
+        # 相对凭据词按**当前位置的基准**归一:命令里 cd 过根外或不可知的目录时,这条
+        # 词根本不是"项目级同目录配置",而是 `~/.npmrc` 那一类真凭据 —— 不豁免。
+        # 绝对路径的词不走这段,所以 cd 只影响相对形态(收紧方向,误拦面有界)。
+        if [[ "$t" != /* ]]; then
+            [[ "$relbase" != "$HD_CD_OUT" ]] || return 1
+            [[ -z "$relbase" ]] || t="$relbase/$t"
+        fi
         t=$(resolve_path "$t" 2>/dev/null) || return 1           # 归一不了 = 不知道 = 不算边界内
         in_root_exempt "$t" || return 1
     done

@@ -1710,12 +1710,60 @@ else
     printf '  SKIP T25 全部 4 条:本机 /bin/bash 已是 %s.x,不触发版本兜底分支\n' "${sys_bash_major:-?}"
 fi
 
+# ─────────────────────────────────────────────────────────────────────────
+# T26:H6 的两处收口 —— 相对路径形态的凭据目录、以及「cd 串语境下的相对基准」
+#
+# 为什么单独一段:in_root_exempt 的"工作根内凭据文件豁免"本意是给项目级 .npmrc
+# 这类同目录配置(与 package.json 同类,拦它只换来假安全感),但它按**当前 PWD** 归一。
+# 于是命令里只要有 `cd ~`,相对凭据路径就被归成工作根内的文件放走 —— 实测改前
+# `cd ~ && cat .npmrc`、`cd /tmp && cat .npmrc`、`cd "$D" && cat .npmrc`、
+# `cd - && cat .npmrc` 四条全部放行(表里跑出来的,不是推测)。这是 DENY 类规则里
+# 唯一一条"前面加个 cd 就能把读凭据降级成读项目配置"的路径。
+# 另一半:`.ssh/`、`.aws/` 这类**相对目录形态**以前压根不命中(判据要求 ~/$HOME 前缀),
+# 所以只修基准没用 —— 没命中谈不上豁免。两处必须同时改,任一单独改都几乎无效。
+echo "T26 H6 相对凭据目录形态 + cd 串语境基准"
+EXPECT_TOTAL=$((EXPECT_TOTAL + 25))   # 数字由向量行数反推,不心算(上一轮心算少 2 被总数守卫逮到)     # 13 条收紧 + 12 条反向锁(其中 2 条是"同一形态的另一种分隔符")
+expect H6  "cd ~ 之后读相对 .npmrc 不再是项目级"        'cd ~ && cat .npmrc'
+expect H6  "cd $HOME 同形态(变量写法)"                  'cd $HOME && cat .npmrc'
+expect H6  "cd /tmp 之后 head 相对凭据文件"              'cd /tmp && head -1 .npmrc'
+expect H6  "cd 目标是变量:不可知就不豁免"                'cd "$D" && cat .npmrc'
+expect H6  "cd - 去 OLDPWD:值判据看不见"                'cd - && cat .npmrc'
+expect H6  "cd ~ ; cd sub 不许把基准洗回根内"            'cd ~ ; cd sub && cat .npmrc'
+expect H6  "同上,但用 && 分隔的第二个 cd(独立形态)"     'cd ~ && cd src && cat .npmrc'
+expect H6  "popd 之后目录不可知"                         'popd && cat .npmrc'
+expect H6  "builtin cd ~ 逃不过动词识别"                 'builtin cd ~ && cat .npmrc'
+expect H6  "pushd 也算改基准(含 >/dev/null 尾巴)"       'pushd /tmp >/dev/null && cat .npmrc'
+expect H6  "相对目录形态 .ssh/ 私钥 + cd"                'cd ~ && cat .ssh/id_rsa'
+expect H6  "相对目录形态 .aws/ 凭据 + cd"                'cd ~ && cat .aws/credentials'
+expect H6  "相对形态 .config/gh/ hosts + cd"             'cd ~ && cat .config/gh/hosts'
+expect H6  "相对形态 .ct/history(对话正文)+ cd"        'cd ~ && cat .ct/history'
+expect NP  "无 cd 时项目级 .npmrc 仍按原设计放行"        'cat .npmrc'
+expect NP  "cd $PWD(还没 cd 过)等价工作根,不误伤"       'cd $PWD && cat .npmrc'
+expect H6  "cd ~ 之后再 cd $PWD:$PWD 已是根外值"        'cd ~ ; cd $PWD && cat .npmrc'
+expect NP  "cd 根内一个还没建的名字:仍在边界内"          'cd src/build-tmp && cat .npmrc'
+expect NP  "cd 写在凭据词之后不追溯(必须同一趟按位置扫)" 'cat .npmrc && cd ~'
+expect NP  "cd 语境不许反过来吃掉 T24 的模式位豁免"      'cd ~ && grep -n "\.npmrc" wchat.sh'
+expect NP  "ls .ssh 不带斜杠:按设计留给提示层,不在 H6"  'ls .ssh'
+expect NP  "域名里的 .aws 不被要求斜杠的那支误命中"      'curl -s https://s3.aws.amazonaws.com/b/x -o /tmp/y'
+expect NP  ".config/nginx/ 不在 gh/gcloud/azure 名单内"  'cat .config/nginx/app.conf'
+expect H6  "./.ssh/ 显式相对形态同样在覆盖内"            'cd ~ && cat ./.ssh/id_rsa'
+expect NP  "无 cd 时 ./.ssh/id_rsa 属边界内文件,豁免照旧" 'cat ./.ssh/id_rsa'
+
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?),或按平台分支的条数与 EXPECT_TOTAL 的推导条件不一致\n' "$total" "$EXPECT_TOTAL"
     fail=$((fail + 1))
 fi
 
+# 机器可读汇总:必须是**无色彩**的单行、固定字段名。上一轮的收尾复核里
+# `grep '^PASS='` 取不到东西 —— 那行带 ANSI 前缀,行首不是 P。靠"能不能 grep 到结论"
+# 来判断套件是否跑完,本身就是一次没被钉住的假设;这里把它钉成一条纯文本行。
+# 带 src sha:本轮真实踩过更隐蔽的一次 —— 变异脚本被 120s 墙钟打断,finally 里的还原没
+# 执行,源码停在突变态,下一次全表跑就红了一条"判据 bug",而只看数字完全分不出被测的
+# 到底是哪份代码。把 sha 打进结果行,两次运行结论不同时,第一眼就能看到是源码变了。
+_hw_src_sha=$(sha256sum "$SRC_ABS" 2>/dev/null | cut -c1-12); [[ -n "$_hw_src_sha" ]] || _hw_src_sha='<无sha256sum>'
+printf 'RESULT total=%d pass=%d fail=%d expect=%d src=%s\n' "$total" "$pass" "$fail" "$EXPECT_TOTAL" "$_hw_src_sha"
+unset _hw_src_sha
 printf '\nPASS=%d FAIL=%d\n' "$pass" "$fail"
 [[ $fail -eq 0 ]] || exit 1
 exit 0
