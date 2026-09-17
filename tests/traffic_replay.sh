@@ -23,11 +23,18 @@ fail_hard() { printf '  BAD  %s\n' "$1"; exit "${2:-1}"; }
 [[ -r "$LOG" ]] || fail_hard "语料不可读:$LOG(没有真实流量就不许报'回放全绿')" 1
 [[ -r "$SRC" ]] || fail_hard "被测版本不可读:$SRC" 1
 
-# 装载:复用硬墙表的前 95 行(它负责从 SRC 抽常量+函数,含 HD_* 族)。
-# 这段范围是表自身在用的,复用它可以避免"自己另写一套装载 → 静默缺常量"的老坑。
+# 装载:复用硬墙表开头的装载区(它负责从 SRC 抽常量+函数,含 HD_* 族)。
+# ⚠ 范围**不能写死行号**:判定链依赖的常量铺在 harness 前 160 行里,而 WORK_ROOT="$PWD"
+#   在第 162 行 —— 上一版只取 1,95p,于是任何碰"工作目录边界"的命令都会在 set -u 下
+#   当场打死判定器(实测 `cd "$PWD" && python3 x.py <会话历史目录> 2>&1 | head -1` 报
+#   "WORK_ROOT: unbound variable")。我那 3 条"判定崩溃"全是这个装载残缺造成的,
+#   不是产品漏洞 —— 报"崩溃"没错,但根因在自己身上。
+# 改成按标记行推:取到 harness 自己给 WORK_ROOT 赋值的那一行为止;标记不见了就红着退出。
+LOAD_END=$(grep -n '^WORK_ROOT="\$PWD"' test_hardwall.sh | head -1 | cut -d: -f1)
+[[ -n "$LOAD_END" ]] || fail_hard "harness 里找不到 WORK_ROOT 赋值行,装载范围无从推定(别退回写死行号)" 1
 LOADER=$(mktemp "${TMPDIR:-/tmp}/tr-loader.XXXXXX") || fail_hard "mktemp 失败" 1
 trap 'rm -f "$LOADER"' EXIT
-sed -n '1,95p' test_hardwall.sh > "$LOADER" || fail_hard "装载片段抽取失败" 1
+sed -n "1,${LOAD_END}p" test_hardwall.sh > "$LOADER" || fail_hard "装载片段抽取失败" 1
 
 ROWS=$(mktemp "${TMPDIR:-/tmp}/tr-rows.XXXXXX") || fail_hard "mktemp 失败" 1
 trap 'rm -f "$LOADER" "$ROWS"' EXIT
@@ -89,8 +96,10 @@ while IFS=$'\037' read -r tool rule0 verdict0 tier0 flag0 cmd; do
     # 有损行不参与对账,但必须报数:否则"全部一致"是筛出来的假绿。
     if [[ "$flag0" == LOSSY ]]; then lossy=$(( ${lossy:-0} + 1 )); continue; fi
     hd_rule=""; hd_msg=""
-    # 判定必须关在子 shell 里:装载片段带着 set -e,而 hard_deny_cmd 内部有不受 if
-    # 保护的失败命令(实测一条 awk 多行命令就把主 shell 直接终止,汇总全丢)。
+    # 判定必须关在子 shell 里:hard_deny_cmd 内部有不受 if 保护的失败命令,一旦在
+    # set -u 下踩到未定义变量就把 shell 当场打死(实测装载残缺时一条 `cd "$PWD" && …`
+    # 就终止了主 shell,汇总全丢)。表只开 `set -uo pipefail`(第 21 行)——
+    # 我上一轮注释写的"带着 set -e"是错归因,顺手改回来,别让它继续误导下一个人。
     # 表里的 deny_rule() 一直是这么做的 —— 照它抄,不另创口径。
     # 口径:hard_deny_cmd **rc=0 表示拦住**;rc!=0 是放行。
     got=$( auto_mode="${tier0:-full}"
