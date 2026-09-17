@@ -57,6 +57,15 @@ for fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_
     #   现象像'产品漏拦'而不像'名单漏抽'(本轮 H5 两条 + path-ok 一条就是这么红的)。
     awk -v name="$fn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
 done
+# 自动补齐硬墙族的全部顶层函数 —— 上面那份手工名单已经**两次漏登记**(hd_note_hit /
+# hd_h11_scan / hd_strip_noncode 那批是上一轮补的,这轮的 hd_container_exec_seg 与
+# hd_noncode_payload 又漏了)。漏了不会报错:sandbox 里 command not found → 判据链走
+# fail-closed 兜底 → 规则号变成另一个,现象像"产品漏拦",而套件照样全绿。
+# 与其靠人记住名单,不如按"扫出来的全集"补。已随区域整段搬过的不重复追加。
+for _hn in $(grep -oE '^hd_[a-z0-9_]*\(\) \{' "$REAL" | sed 's/() {//'); do
+    grep -q "^${_hn}() {" "$W/sandbox.sh" 2>/dev/null || \
+        awk -v name="$_hn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
+done
 curl() { echo "NETWORK-LEAK" >&2; return 99; }   # 桩:被测路径不该触网
 stty() { :; }
 inp_msg() { :; }

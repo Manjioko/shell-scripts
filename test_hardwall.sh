@@ -1402,7 +1402,48 @@ case "$_h" in
     *) bad "FAIL-OPEN:串联载荷里的破坏性命令被放过了" "[$_h]" ;;
 esac
 
-EXPECT_TOTAL=401                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
+# ── T23 第二轮 B:测试装载口(不再靠 stdin EOF 的巧合)──────────────────
+echo "T23 装载口 _WCHAT_LIB_ONLY"
+if grep -q '_WCHAT_LIB_ONLY' wchat.sh; then
+    ok "主脚本里实现了装载口(此前只有本表注释在声称它有)"
+else
+    bad "装载口缺失" "本表会退回'跑 REPL 撞到 EOF 才算完'的巧合,主流程一走错误分支就整表消失"
+fi
+_g=$(grep -n '_WCHAT_LIB_ONLY' wchat.sh | head -1 | cut -d: -f1)
+_p=$(grep -n '^parse_options "\$@"' wchat.sh | head -1 | cut -d: -f1)
+if (( _g > 0 && _p > 0 && _g < _p )); then
+    ok "口在 parse_options 之前(参数解析带建目录/写文件副作用,那不算只装载)"
+else
+    bad "口的位置不对" "口=$_g parse_options=$_p —— 必须早于参数解析"
+fi
+# 真判据:把 stdin 接成一条**永不 EOF** 的管道。有口 → source 立刻返回并打出标记;
+# 没口 → REPL 卡在 read 上等输入,轮询超时后拿不到标记。这才是"没跑主流程"的直接证据,
+# 比 grep 到那行代码强(代码在但位置错、或被前面的 exit 抢先,都照样是假绿)。
+_t23out="/tmp/hw_libonly.$$.out"; : > "$_t23out"
+( sleep 30 | ( _WCHAT_LIB_ONLY=1 source ./wchat.sh >/dev/null 2>&1; printf 'LOADED\n' ) > "$_t23out" 2>/dev/null ) &
+_t23pid=$!
+_t23got=""
+for _t23i in 1 2 3 4 5 6 7 8 9 10; do
+    grep -q LOADED "$_t23out" 2>/dev/null && { _t23got=1; break; }
+    sleep 0.3
+done
+kill $_t23pid 2>/dev/null; wait $_t23pid 2>/dev/null
+rm -f "$_t23out"
+if [[ -n "$_t23got" ]]; then
+    ok "stdin 永不 EOF 时仍能装载完成(说明真没跑 REPL,不靠 EOF 退出)"
+else
+    bad "装载口没生效" "source 卡在 REPL 的输入读取上 —— 本表历史上就是靠 EOF 才返回的"
+fi
+# 口之后判据链必须可用:位置放太早(函数还没定义完)会装载出半套工具,
+# 表现是"该拦的照拦、降级与脱敏静默失效",极难从结果反推。
+if ( _WCHAT_LIB_ONLY=1 source ./wchat.sh >/dev/null 2>&1
+    declare -F hard_deny_cmd hd_h11_scan hd_noncode_payload >/dev/null 2>&1 ); then
+    ok "走装载口后 hard_deny_cmd / hd_h11_scan / hd_noncode_payload 都可用"
+else
+    bad "装载口位置太早或函数没定义完" "口之后取不到完整判据链,后面所有断言都不可信"
+fi
+
+EXPECT_TOTAL=405                                       # macOS 本机实跑值(含 T17 tty 中继 30 条;另:复活了一条从未执行的 pd 断言)
 # ============ T19 审批器理由解析 + 拦截理由带坐标(这两条都在"给人看的那一句"上) ============
 # 案 4 现场:提示词(auth_sys_tail 补充口径)强制判 N 回「N编号:原因」——整行**没有空格**;
 # 而旧解析写的是"剥掉第一个空格分隔的 token",规范格式下首个 token 就是整行,理由被连字
