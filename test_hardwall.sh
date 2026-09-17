@@ -1814,7 +1814,45 @@ expect H11 "写 crontab 落盘目录(写了即持久生效)"  'cat a > /var/spoo
 expect H11 "写 /var/db 系统状态库"                 'printf x > /var/db/y'
 expect NP  "反锁:/var/tmp 不属受保护路径"          'echo x > /var/tmp/keep.txt'
 expect P2  "反锁:/var/folders(TMPDIR 家族)不撞墙" 'echo x > /var/folders/zz/zyxv/T/tmpfile.txt'
-EXPECT_TOTAL=$((EXPECT_TOTAL + 5))
+EXPECT_TOTAL=$((EXPECT_TOTAL + 5))        # T28 的 5 条
+
+# ══════════════════════════════════════════════════════════════════
+# T29 H11 判定侧的写目标提取(第十一轮)
+# 起因:形状试金石量完 36 种形状,确认 H11 的真缺陷是**漏拦**不是误拦 —— 旧判据只认
+# 重定向符号与 tee,`mv /tmp/x /usr/local/bin/y`(往 PATH 目录放二进制)、
+# `truncate -s 0 /var/log/app.log`(清空系统日志)、`> /tmp/../etc/passwd`(字面 .. 破
+# 前缀锚定)整条放行,而审批卡的**展示**侧早就能把这些目标提出来:判定比展示瞎。
+# 反锁那几条是本轮真正的风险所在:cp 的**源**、sed 的只读形态、证明不了的落点(变量/
+# 引号拼接)都不许撞墙 —— 在硬墙一侧做 fail-closed,代价是 `> out.log` 这类天天跑的命令
+# 全被拒,比原来的漏拦更糟。
+# 最后一条是结构锁:两份受保护前缀名单(重定向版正则 / 目标提取版)必须逐字相同。
+# 不靠人记 —— 上一轮改名让主判据消失、H11 全线不触发、14 条一起红,就是同类漂移。
+# ══════════════════════════════════════════════════════════════════
+echo 'T29 H11 判定侧写目标提取:补漏拦 + 锁住只读侧'
+expect H11 "mv 目标在 PATH 目录"          'mv /tmp/x /usr/local/bin/y'
+expect H11 "install 装二进制到 /usr/local" 'install -m 755 build/cli /usr/local/bin/cli'
+expect H11 "truncate 清空系统日志"         'truncate -s 0 /var/log/app.log'
+expect H11 "dd of= 写 /var/db"            'dd if=/dev/zero of=/var/db/x bs=1 count=1'
+expect H11 "ln -sf 在 /usr/local/bin 建链接" 'ln -sf /tmp/x /usr/local/bin/node'
+expect H11 "mv 把 /etc 下的文件搬走(源侧也是破坏)" 'mv /etc/hosts /tmp/bak'
+# 归属优先:下面两条虽然目标提取也命中,但 H1(提权)、H6(凭据串)在规则序列里排在前面,
+# 实测就是这个顺序。期望写成"实际认领者"才有守护价值 —— 写成 H11 会把表的红当成判据坏了,
+# 而真实情况只是顺序问题(同类现象上一轮记过:`cp /tmp/x ~/.npmrc` 由 H6 认领,话术讲的是
+# "内容进上下文",命令其实在写,这是下一轮要处理的话术错位)。
+expect H1  "sudo 包装后的 cp 写 /usr/bin(H1 提权先认领)" 'sudo cp /tmp/x /usr/bin/y'
+expect H6  "字面 .. 穿越到 /etc/passwd(H6 先认领)"      'echo x > /tmp/../etc/passwd'
+expect H11 "字面 .. 穿越到 /var/log(归一化真守在这条)"   'echo x > /tmp/../var/log/app.log'
+expect NP  "反锁:cp 从系统目录读出来看"     'cp /usr/share/doc/readme.md .'
+expect NP  "反锁:sed 只读系统文件"          'sed -n "1,5p" /etc/hosts'
+expect NP  "反锁:rsync 目标在未保护目录"    'rsync -av ./src /var/tmp/mirror'
+expect NP  "反锁:落点是变量,证明不了"       'echo x > "$TMPDIR/out.log"'
+expect NP  "反锁:落点由变量拼出,证明不了"    'cp /tmp/x "${HOME}/bin/y"'
+if [[ "$hd_re_sys_redirect" == *"($hd_h11_sys_prefixes)"* && "$hd_re_sys_redirect_wide" == *"($hd_h11_sys_prefixes)/[[:graph:]]*"* ]]; then
+    pass=$((pass + 1)); echo "  ok   两份受保护前缀名单一致(重定向版 = 目标提取版)"
+else
+    fail=$((fail + 1)); echo "  FAIL 两份受保护前缀名单漂移,重定向版能拦的形态提取版可能漏"
+fi
+EXPECT_TOTAL=$((EXPECT_TOTAL + 15))       # T29 的 15 条(14 条 expect + 1 条结构锁)
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then

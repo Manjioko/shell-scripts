@@ -4202,6 +4202,122 @@ hd_strip_noncode() {
 # **一处做、多处用**:只给 H11 脱敏而写目标提取仍扫原文的话,heredoc 里那行
 # `echo >> /etc/hosts` 会改由 H12/P2 拦下,现象是"换了个规则号继续误拦"。
 HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CODE_OK=0
+# ── H11 判定侧的「写目标」提取(第十一轮新增)──────────────────────────
+# 起因:用形状试金石量完 36 种形状后确认,H11 的真实缺陷**不是误拦而是漏拦**。
+# hd_h11_scan 只跑 hd_re_sys_redirect 一条正则,而那条正则的三支全都要求**重定向符号
+# 或 tee**,于是下面四类整条放行:
+#   mv /tmp/x /usr/local/bin/y            往 PATH 目录放二进制
+#   install -m 755 build/cli /usr/local/bin/cli
+#   truncate -s 0 /var/log/app.log        清空系统日志(销毁痕迹)
+#   echo x > /tmp/../etc/passwd           字面 .. 破掉 /etc 的前缀锚定
+# 而审批卡的**展示**侧(hd_write_targets)早就能按动词提出这些目标 —— 判定比展示瞎,
+# 就是本轮要闭合的差。
+#
+# 方向口径(必须写死,否则下一句就会做错):证明不了落点时**一律不算命中**,与 H5 的
+# "提不出就不拦"表面相同、理由完全不同 —— H5 的"不拦"是交回软规则链继续走,H11 的
+# "不拦"是给硬墙留缺口,所以这里只提"能证明是绝对路径且在受保护前缀下"的操作数。
+# 若在这里做 fail-closed(提不出目标就拒),`> out.log`、`> "$TMPDIR/x"` 这类最常见的
+# 写法会全撞墙,那是比漏拦更大的代价;提不出目标的形状交给审批文案说明"不可证明"。
+#
+# 名单刻意与 hd_re_sys_redirect 分开存(那个变量的赋值不接收量代换 —— 上一轮我改名
+# 让主判据当场消失、H11 全线不触发、14 条一起红)。两份名单由表里的结构锁断言保证
+# 同步,不靠人记。
+hd_h11_sys_prefixes='etc|usr|bin|sbin|System|Library|private|var/root|var/log|var/spool/cron|var/db|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt'
+
+# 字面归一化 a/../b → b。**不跟随符号链接**,所以 /etc 的 symlink(本机没有)与
+# /tmp -> /private/tmp(macOS 有)这类穿越提不出来;那是已知边界,不是本函数的缺陷,
+# 也不影响单调性:归一化只会让 /etc 这类前缀更容易命中,不会让它更容易溜走。
+hd_h11_norm() {
+    local _p="$1" _g=0
+    while [[ "$_p" == */../* && $_g -lt 32 ]]; do
+        _p="${_p/\/[^\/]*\/..\//\/}"
+        _g=$((_g + 1))
+    done
+    [[ "$_p" == */.. ]] && _p="${_p%/..}"
+    printf '%s' "$_p"
+}
+
+# 绝对路径是否落在受保护前缀下(用上面那份名单,逐个 case 不拼正则:硬墙表是按函数名
+# eval 出去跑的,拼正则的转义层数在这里最容易出错)。
+hd_h11_prot() {
+    local _p="$1" _x
+    [[ "$_p" == /* ]] || return 1
+    local IFS='|'
+    for _x in $hd_h11_sys_prefixes; do
+        case "$_p" in "/$_x"/*) return 0 ;; esac
+    done
+    return 1
+}
+
+# 从一行里提出"能证明写进受保护路径"的操作数,提出就打印它,提不出返回 1。
+# 动词按段首识别,段边界取 ; | & ( ) 与换行(> 刻意不算边界:它是目标的前导,不是分句)。
+# 取哪一侧操作数分两种:
+#   mv / truncate —— 任意绝对操作数。mv 的**源**被搬走同样是破坏(/etc/hosts 消失),
+#     只查末位会漏;truncate 的全部参数都是被清空的对象。
+#   cp / install / rsync / ln —— 只有末位是写入目标。否则 cp /usr/share/doc/x . 这种
+#     "从系统目录读出来看"会被误拦,那类命令每天都在跑。
+# 刻意不收的动词:sed。`sed -n '1,5p' /etc/hosts` 是纯读,与 `sed -i ... /etc/hosts`
+# 在按空格分词的层面无法区分,收进来是用高频误拦换低频漏拦,不划算;原位改系统文件这条
+# 仍由重定向版正则与 H3 族兜着(实测:被拒的是重定向版正则的功劳,别把它当覆盖)。
+hd_h11_dest_hit() {
+    local _flat="$1" _seg _w _verb _i _n _p _redir
+    _flat="${_flat//[$;|&()]/$'\n'}"
+    while IFS= read -r _seg; do
+        [[ "$_seg" == */*/* ]] || continue
+        local -a _W=()
+        read -ra _W <<< "$_seg"
+        _verb=""; _redir=0; _n=${#_W[@]}
+        for ((_i = 0; _i < _n; _i++)); do
+            _w="${_W[_i]}"
+            _w="${_w%\"}"; _w="${_w#\"}"; _w="${_w%\'}"; _w="${_w#\'}"
+            [[ -n "$_w" ]] || continue
+            # 重定向符后面那一个操作数**无条件**按写入目标算,与动词无关、不看位置:
+            # 这一支是 `echo x > /tmp/../etc/passwd` 唯一的出路 —— 重定向版正则要求紧跟
+            # `>` 的字面路径以受保护前缀开头,带 .. 的写法它看不见;而 echo/printf 这类
+            # 动词又不在搬运动词表里。旧版把 of= 放在 "-*" 分支里也是同类错位:dd 的
+            # 操作数是 KEY=VALUE,根本不带横杠,那条分支永远走不到(写向量时才暴露)。
+            if [[ "$_w" == ">" || "$_w" == ">>" || "$_w" == ">&" || "$_w" == ">|" ]]; then
+                _redir=1
+                continue
+            fi
+            if (( _redir )); then
+                _redir=0
+                _p="$(hd_h11_norm "$_w")"
+                hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; }
+                continue
+            fi
+            if [[ "$_w" == of=* ]]; then
+                _p="$(hd_h11_norm "${_w#of=}")"
+                hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; }
+            fi
+            if [[ "$_w" == -* ]]; then
+                continue
+            fi
+            if [[ -z "$_verb" ]]; then
+                case "${_w##*/}" in
+                    cp|mv|install|rsync|ln|truncate|dd) _verb="${_w##*/}" ;;
+                    # 包装动词不结束段查找:sudo/env/time 只是转手,真正的搬运动词在它后面。
+                    # 不认识的一律当"这段不是搬运动词",绝不当成目标 —— 反着写就会把
+                    # `./scripts/mv_log.sh /var/log/x` 的相对参数判成写入。
+                    sudo|doas|command|env|time|nohup|exec|nice|ionice|timeout|xargs) continue ;;
+                    *) _verb="NO" ;;
+                esac
+                continue
+            fi
+            [[ "$_verb" != NO ]] || continue
+            [[ "$_w" == /* ]] || continue
+            _p="$(hd_h11_norm "$_w")"
+            case "$_verb" in
+                mv|truncate)
+                    hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; } ;;
+                *)
+                    [[ $_i -eq $((_n - 1)) ]] && hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; } ;;
+            esac
+        done
+    done <<< "$_flat"
+    return 1
+}
+
 hd_h11_scan() {
     HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CODE_OK=0
     local _raw="$1" _line="" _num=0 _heredoc=0 _tag="" _stripped="" _frag=""
@@ -4220,11 +4336,24 @@ hd_h11_scan() {
         fi
         # 先用主判据筛一遍:绝大多数命令行不含重定向,只有"像写系统路径"的行才付
         # 得起逐字符剥注释的代价 —— 这段每个工具调用都要跑,慢不得。
+        _frag=""
         if [[ "$_line" =~ $hd_re_sys_redirect ]]; then
             _frag="${BASH_REMATCH}"
+        elif [[ "$_line" == */*/* ]]; then
+            # 没有重定向符号不等于没有写入目标:mv/install/truncate/dd 的落点在操作数里。
+            # 前置的 */*/* 是廉价预筛(这段每个工具调用都要跑,不能对每行都分词)。
+            _frag="$(hd_h11_dest_hit "$_line")" || _frag=""
+        fi
+        if [[ -n "$_frag" ]]; then
             if hd_strip_noncode "$_line"; then _stripped="$HD_STRIP"; else _stripped="$_line"; fi
             if [[ "$_stripped" =~ $hd_re_sys_redirect ]]; then
                 HD_H11_NUM=$_num; HD_H11_HIT="${BASH_REMATCH}"; HD_H11_LINE="$_stripped"
+                return 0
+            fi
+            # 目标版命中必须在**剥完注释**的那份文本里还在:否则 `mv a /usr/bin/b # 只是注释`
+            # 之外还有 `cp x y # 顺手 mv 到 /etc 下` 这种纯叙述会被当成写系统路径。
+            if [[ -n "$_frag" && "$_stripped" == *"$_frag"* ]]; then
+                HD_H11_NUM=$_num; HD_H11_HIT="$_frag"; HD_H11_LINE="$_stripped"
                 return 0
             fi
             HD_H11_EXEMPT="第${_num}行的 ${_frag} 剥掉注释后不再命中(写在 # 之后,不会执行)"

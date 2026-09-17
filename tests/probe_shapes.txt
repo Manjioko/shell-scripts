@@ -38,24 +38,25 @@ NP|cat ~/.bashrc >> /tmp/log.txt
 #    可这条命令是**写进**系统路径,该由 H11 说话。写操作被读取类规则认领时,拒绝理由会答
 #    非所问 —— rulefail_check 对 H5 专设了"话术说的是它自己管的事",这里是同口径的疑问。
 #    先只观察,别急着定对错:要看的是这种归属偏移是不是系统性的。
-|cp /tmp/x /etc/passwd
-|mv /tmp/x /usr/local/bin/y
-|cp /tmp/x ~/.npmrc
-|cp /tmp/x ~/.bashrc
-|rm -f /etc/hosts
-|rm -f ~/.bashrc
-|truncate -s 0 /var/log/system.log
+#    第十一轮更新:下面这些行已经量定,首列填上**实测**期望值,漂移就会红。
+#    其中 H6/H5 认领写操作那两条是按实测填的,不代表归属判对了 —— 该由 H11 说话。
+H6|cp /tmp/x /etc/passwd
+H11|mv /tmp/x /usr/local/bin/y
+H6|cp /tmp/x ~/.npmrc
+H5|cp /tmp/x ~/.bashrc
+H3|rm -f /etc/hosts
+H3|rm -f ~/.bashrc
+H11|truncate -s 0 /var/log/system.log
 
 # ── E) H11/H3 有没有"无位置感知"的误拦。上一轮我建议把 hd_redir_targets_all_clean 抽成
 #    通用「目标证明器」,前提就是假定 H11/H3 也吃"文本里出现 /etc 就算命中"——这个前提
 #    当时没量过。要验的三件事:只读系统路径不该拦、写进系统路径必须拦、证明不了落点的
 #    (变量、.. 穿越)按 fail-closed 必须拦。
-|echo x > /tmp/../etc/y
-|cat a > $SYS_DIR/z
-|tee -a /etc/hosts
-|echo x >> /var/log/app.log
-|rm -rf /tmp/x/../etc
-|grep -c '/etc/passwd' notes.md
-|awk '/etc\/passwd/{print}' notes.md
-|head -3 /etc/hosts > /tmp/h.txt
-
+H11|echo x > /tmp/../etc/y
+NP|cat a > $SYS_DIR/z
+H11|tee -a /etc/hosts
+H11|echo x >> /var/log/app.log
+H3|rm -rf /tmp/x/../etc
+NP|grep -c '/etc/passwd' notes.md
+NP|awk '/etc\/passwd/{print}' notes.md
+NP|head -3 /etc/hosts > /tmp/h.txt

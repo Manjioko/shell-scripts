@@ -36,7 +36,7 @@ MUT=$WORK/mut.sh
 lines=$(grep -nF "$PAT" "$SRC" | awk -F: '$2 !~ /^[[:space:]]*#/ {print $1}' | paste -sd, -)
 n=$(printf %s "$lines" | tr ',' '\n' | grep -c .)
 if [ "$n" = 0 ]; then echo "⛔ 定位串在 $SRC 的代码行里没有命中(注释里的同名文本不算),这次变异是空操作" >&2; exit 3; fi
-echo "定位 $n 处:$lines  替换为「$REPL」"
+echo "定位 $n 处:$lines  替换为「${REPL}」"
 awk -v L="$lines" -v m="$REPL" 'BEGIN{c=split(L,a,","); for(i=1;i<=c;i++) s[a[i]+0]=1}
     s[NR]{print "            " m; hit++; next} {print}
     END{if(hit+0!=c+0){print "ERR hit="hit+0" want="c+0 > "/dev/stderr"; exit 4}}' "$SRC" > "$MUT" 2>"$WORK/err"
