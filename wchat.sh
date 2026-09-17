@@ -187,7 +187,26 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     #   auto_enable 判定"无交互终端"退回普通模式;输入组件判定又把 stdin 非 tty 报成
     #   "缺 python3 + prompt_toolkit"(实测组件齐全),于是让人反复跑 setup.sh 也无用。
     # 实测对照(同一 pty):循环内 exec → NOT-TTY;循环外 exec → TTY。
-    [[ -n "$wchat_reexec_bash" ]] && exec "$wchat_reexec_bash" "$0" "$@"
+    # exec 的前提是 "$0" 真是一份 bash 能读下去的脚本。source 进来的调用里 $0 是**调用方**
+    # 的 $0,不是本文件路径,于是有两种坏值(都已实测,不是推测):
+    #   `bash -c 'source ./wchat.sh; …'`(没给 name)→ $0 就是 $BASH 本身 → 让 bash5 去
+    #       exec 一个 Mach-O 二进制,现象 "/bin/bash: /bin/bash: cannot execute binary file";
+    #   `bash -c '…' _ args`(给了占位 name)→ $0="_" → 现象 "bash5: _: No such file…"。
+    # 两种都到不了判据层,而是把整段装载**静默变成空输出**:上一轮就是拿这种测法跑 16 条
+    # 向量,得到 16 个空,差点把"没测到"读成"判据崩了"(命令末尾那个 2>/dev/null 是帮凶)。
+    # 这里既不能"跳过 re-exec 继续在 3.2 上跑"(会退回上面记的 declare -A 静默错乱),
+    # 也不能默默放行:一律响亮报错 + exit 1,与"找不到 bash5 就明说"同一口径。
+    if [[ -n "$wchat_reexec_bash" ]]; then
+        if [[ ! -f "$0" ]] || [[ "$0" == "${BASH:-}" ]]; then
+            printf '⛔ 需要 bash 5.x,但无法安全切换:调用方的 $0=%s 不是脚本文件' "$0" >&2
+            printf '(re-exec 会 exec 到垃圾目标,把整段装载变成静默空输出)\n' >&2
+            printf '   正确姿势:用 bash 5 直接跑那个脚本 —— %s <你的脚本.sh>' "$wchat_reexec_bash" >&2
+            printf '   或在已经是 bash 5 的 shell 里 source ./wchat.sh;别用 bash -c '"'"'source …'"'"' 装载本脚本\n' >&2
+            printf '   显式指路:WCHAT_BASH=/path/to/bash5\n' >&2
+            exit 1
+        fi
+        exec "$wchat_reexec_bash" "$0" "$@"
+    fi
     # 找不到就别静默降级——后面的 declare -A 会以"工具参数错乱"这种难懂的方式失败
     case "${OSTYPE:-}" in
         darwin*) bash_install_hint='brew install bash(Apple Silicon 在 /opt/homebrew/bin/bash,Intel 在 /usr/local/bin/bash)' ;;

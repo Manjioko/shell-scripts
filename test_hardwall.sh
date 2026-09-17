@@ -1621,6 +1621,63 @@ expect H6 '已知:注释里的凭据路径仍按 H6 拦(脱敏未覆盖 H5/H6)' 
 # T15 他人家目录那 26 条在两边都执行;T16 的 2 条走"临时把 WORK_ROOT 设成 $HOME",与布局无关。
 # T17 的 30 条同样与平台无关:测的是 tty 字节流状态机与三处接线的静态存在性,不读任何路径。
 [[ -d /dev/shm && -w /dev/shm ]] && EXPECT_TOTAL=$((EXPECT_TOTAL + 2))
+# ══════════════════════════════════════════════════════════════════
+# T25 re-exec 的 $0 前提:bash -c 装载必须响亮失败,不许静默空输出
+# 上一轮的实测事故 —— 用 `bash -c 'source ./wchat.sh …'` 跑 16 条判据向量,全部返回空串,
+# 现象像"判据崩了",实际是主脚本第 190 行 `exec bash5 "$0" "$@"` 里 $0 不是脚本:
+# 没给 name 时 $0=$BASH(让 bash5 去跑二进制),给了占位 name 时 $0="_"(文件不存在)。
+# 这组断言两头都钉:坏装载必须响,好装载不许被误伤。
+# 平台相关:只在系统 bash < 5 时才成立(Linux 上 /bin/bash 常已是 5.x,不触发版本兜底,
+# 整组 SKIP 并打印说明 —— 不静默跳过,免得又变成一张"绿但没测"的表)。
+# ══════════════════════════════════════════════════════════════════
+sys_bash_major="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)"
+[[ "$sys_bash_major" =~ ^[0-9]+$ ]] || sys_bash_major=0
+if [[ -x /bin/bash ]] && (( sys_bash_major < 5 )); then
+    o=$(/bin/bash -c 'source ./wchat.sh; echo __RAN__' 2>&1); rc=$?
+    if [[ $rc -ne 0 && "$o" == *"无法安全切换"* && "$o" != *'__RAN__'* ]]; then
+        printf '  ok   坏装载(bash -c 无 name)响亮失败且不继续执行\n'; pass=$((pass + 1))
+    else
+        printf '  FAIL 坏装载(bash -c 无 name)rc=%s 输出=%s\n' "$rc" "${o:0:120}"; fail=$((fail + 1))
+    fi
+
+    o=$(/bin/bash -c 'source ./wchat.sh; echo __RAN__' _ 'grep -n x y' 2>&1); rc=$?
+    if [[ $rc -ne 0 && "$o" == *"无法安全切换"* && "$o" != *'No such file'* ]]; then
+        printf '  ok   坏装载(bash -c 占位 name)不再报 "No such file"\n'; pass=$((pass + 1))
+    else
+        printf '  FAIL 坏装载(占位 name)rc=%s 输出=%s\n' "$rc" "${o:0:120}"; fail=$((fail + 1))
+    fi
+
+    o=$(/bin/bash -c 'source ./wchat.sh' 2>&1; /bin/bash -c 'source ./wchat.sh; echo __RAN__' 2>&1)
+    if [[ "$o" != *"cannot execute binary file"* ]]; then
+        printf '  ok   旧症状 "cannot execute binary file" 不再出现\n'; pass=$((pass + 1))
+    else
+        printf '  FAIL 仍能 exec 到二进制:输出=%s\n' "${o:0:120}"; fail=$((fail + 1))
+    fi
+
+    # 正向对照:真脚本文件装载(=$0 是脚本)必须照常切到 bash 5 并走完装载口。
+    # 这条同时是 T23 那个装载口的第二个活样本 —— 上一轮证明它"在 5.x 下能挡住 REPL",
+    # 这里证明它"穿过 re-exec 之后仍然挡得住",两件事缺一个都会留下静默空输出的空间。
+    t25d=$(mktemp -d 2>/dev/null || echo /tmp/hw_t25.$$)
+    mkdir -p "$t25d"
+    # 注意别在 source 行上加 `>/dev/null 2>&1`:那个重定向会**随 exec 一起被继承**,
+    # re-exec 之后的进程会把 __LOADED__ 写进 /dev/null,现象正是"rc=0 但一字节没有"
+    # —— 上一轮那 16 条空向量的同款味道,这次是在自己身上找到的。
+    printf '%s\n' 'source ./wchat.sh || exit 2' \
+        'declare -F hard_deny_cmd >/dev/null || exit 3' \
+        'echo __LOADED__' > "$t25d/t.sh"
+    o=$(_WCHAT_LIB_ONLY=1 _WCHAT_DISABLE_UPDATE=1 /bin/bash "$t25d/t.sh" 2>&1); rc=$?
+    rm -rf "$t25d"
+    if [[ $rc -eq 0 && "$o" == *'__LOADED__'* ]]; then
+        printf '  ok   正向对照:脚本文件装载仍成功切到 bash 5 并走完装载口\n'; pass=$((pass + 1))
+        EXPECT_TOTAL=$((EXPECT_TOTAL + 4))
+    else
+        printf '  FAIL 正向对照被误伤 rc=%s 输出=%s\n' "$rc" "${o:0:160}"; fail=$((fail + 1))
+        EXPECT_TOTAL=$((EXPECT_TOTAL + 4))
+    fi
+else
+    printf '  SKIP T25 全部 4 条:本机 /bin/bash 已是 %s.x,不触发版本兜底分支\n' "${sys_bash_major:-?}"
+fi
+
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
     printf '  FAIL 断言总数 — 执行 %d 条,表应为 %d 条:有断言未产生判定(被测版本缺函数?),或按平台分支的条数与 EXPECT_TOTAL 的推导条件不一致\n' "$total" "$EXPECT_TOTAL"
