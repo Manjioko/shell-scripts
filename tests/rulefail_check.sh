@@ -66,6 +66,16 @@ unset _fn
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 bad() { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m %s — %s\n' "$1" "$2"; }
+# 传参一律拒绝。本脚本**不读**任何日志/语料:它只做"装载完整性 + 话术与规则配对"自检。
+# 历史上被误当成"真实流量回放器",每轮都往里传 ~/.ct/logs/*.jsonl,而脚本从不用 $1 ——
+# 于是"回放 92/0"这个口径与真实流量毫无关系(本轮实测:该目录根本不存在,它照样全绿)。
+# 宁可红在用法上,也不要绿在假前提上。
+if (( $# )); then
+    bad "用法错误:不接受参数(收到 $#:[$1])" "本工具不回放流量,请去掉该参数;要跑真实流量得另写解析"
+    echo ""
+    echo "PASS=$pass FAIL=$fail"
+    exit 1
+fi
 
 for _need in hard_deny_cmd hd_note_hit hd_container_exec_seg hd_h11_scan; do
     declare -F "$_need" >/dev/null 2>&1 && ok "装载到 $_need" || { bad "未装载 $_need" "后面全是空转,先修装载"; echo "PASS=$pass FAIL=$fail"; exit 1; }

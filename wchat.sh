@@ -3242,7 +3242,6 @@ hd_write_targets() {
     flat="${flat//||/$'\n'}"
     flat="${flat//\|/$'\n'}"
     flat="${flat//;/$'\n'}"
-    flat="${flat//$'\n'/$'\n'}"
 
     local seg w rhs out="" prog mode i n
     local -a reds=() ops=() topts=()
@@ -3328,12 +3327,18 @@ hd_write_targets() {
             cp|mv|rsync|scp|install)                              mode="last" ;;
             sed|awk|gawk|perl)                                    mode="inplace" ;;
         esac
-        # sed/awk 不带 -i 时操作数全是读
+        # sed/awk 不带 -i 时操作数全是读。旧版用 `*-i*` 子串匹配,于是
+        #   sed 's/a/-i/' /etc/hosts        (替换文本里恰好含 -i)
+        # 被当成"要往外写",操作数全被计入写目标(误拦方向,本轮实测发现)。
+        # 收紧成"必须是独立选项簇":行首或空白后的 -字母簇里含 i,或 --in-place 长选项。
+        # 保住 macOS 的真实形态 `sed -i '' ...`(单独一簇)与 GNU 的 `sed -i.bak`、`-ni`。
         if [[ "$mode" == "inplace" ]]; then
-            case "$seg" in
-                *-i*|*in-place*|*inplace*) : ;;
-                *) mode="flagonly" ;;
-            esac
+            if [[ "$seg" =~ (^|[[:space:]])-[A-Za-z]*i[A-Za-z]*([[:space:]]|$) ]] ||
+               [[ "$seg" =~ (^|[[:space:]])--in-place ]]; then
+                :
+            else
+                mode="flagonly"
+            fi
         fi
         # 段内出现过空参数(""/'')时,切词位置不可靠(空元素进不了数组,后面的 token
         # 会顶位)。这时若该段确实含写动词,操作数一律算目标 —— 宁可多判也不放过;
@@ -4647,7 +4652,7 @@ hard_deny_path() {
                     if [[ "$auto_mode" != "full" ]] || ! auto_allow_hit "$np" rw; then
                         hd_rule="P3"
                         if [[ "$auto_mode" == "full" ]]; then
-                            hd_msg="越界写入被拒绝:该路径不在用户的 --allow-write 名单里。替代:写到工作目录内或 /tmp,或把内容打印出来交给用户放置;确需写它请用户重启时加 --allow-write '$p'"
+                            hd_msg="越界写入被拒绝:该路径不在用户的 --allow-write 名单里。替代:写到工作目录内或 /tmp,或把内容打印出来交给用户放置${p:+;确需写它请用户重启时加 --allow-write '$p'}"
                         else
                             hd_msg="越界写入被拒绝:auto=${auto_mode} 档不放开工作目录外的写(--allow-write 只在 -auto=full 生效)。替代:写到工作目录内或 /tmp,或把内容打印出来交给用户自行放置"
                         fi

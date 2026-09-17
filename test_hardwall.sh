@@ -1863,6 +1863,13 @@ expect NP  "反锁:落点由变量拼出,证明不了"    'cp /tmp/x "${HOME}/bi
 expect H11 "macOS 真身路径:写 /private/etc/hosts 仍拦"  'echo x > /private/etc/hosts'
 expect NP  "反锁:/private/tmp 是公共临时目录(/tmp 真身)" 'echo x > /private/tmp/keep.txt'
 expect NP  "反锁:/private/var/tmp 同为公共临时目录"      'echo x > /private/var/tmp/keep.txt'
+# ── sed 只读不算写(第十五轮:收紧旧的 `*-i*` 子串匹配)──────────────────
+# 第一条是本轮实测的误伤形状:替换文本里恰好出现 -i,旧判据会把操作数全记成写目标。
+# 第二条反过来锁"真 -i 仍算写",防收紧过头。
+expect NP  "反锁:sed 替换文本里恰好含 -i,不算写"  "sed 's/a/-i/' /etc/hosts"
+# 认领者写死为实测值:走"写目标记账"那条路的是 P2,不是 H11(H11 的落点提取器不覆盖
+# sed 的 inplace 形态)。写死规则号是有意的 —— 它同时是 -i 判据的承重锁。
+expect P2  "sed -i 真原地改系统文件仍算写"       "sed -i 's/a/b/' /etc/hosts"
 # ── 命令边界归一(第十三轮):裸换行是两条命令,`\`+换行才是一条 ────────────
 # 前两条是本轮写验证脚本时被 H3 真拦下的形状(命中串把下一行要执行的路径当成了删除目标);
 # 后两条证明折叠没走过头:续行仍算一条命令、换行后的真删仍要拦。
@@ -1878,6 +1885,7 @@ fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 15))       # T29 的 15 条(14 条 expect + 1 条结构锁)
 EXPECT_TOTAL=$((EXPECT_TOTAL + 4))        # 第十三轮 命令边界归一的 4 条
 EXPECT_TOTAL=$((EXPECT_TOTAL + 3))        # 第十四轮 /private 名单精确化的 3 条
+EXPECT_TOTAL=$((EXPECT_TOTAL + 2))        # 第十五轮 sed 只读/真原地改的 2 条
 
 # ══════════════════════════════════════════════════════════════════
 # T30 装载完整性:硬墙入口在 set -u 下不得踩到未装载的常量
