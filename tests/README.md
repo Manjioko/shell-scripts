@@ -1,0 +1,35 @@
+# 回归闸门清单(名字与命令以此为准,别再凭印象编)
+
+这轮踩的坑值得钉在纸上:上下文压缩后我凭印象造出一个从未存在的
+`tests/hardwall_table.sh`,认定"517 条断言的表消失了、且从未入库",连着查了
+好几轮(找文件、查 git 历史、翻备份目录、怀疑被哪个测试越界 rm),最后发现
+**517 那张表就是仓库根的 `test_hardwall.sh` 本体** —— 它的 `expect H5 '...'`
+表体一直在,还有 `EXPECT_TOTAL` 专门守住"断言总数对不上就 FAIL",结论打在
+`RESULT total=… pass=… fail=… expect=… src=<sha>` 这一行里。文件 tracked,
+什么都没丢。所以以后:报"资产丢失"之前,先按**输出行的指纹**去 grep,不要按
+记忆里的文件名去找。
+
+| 闸门 | 命令(都用 `/opt/homebrew/bin/bash`,产品要求 bash 5+) | 我看过的真实结论 |
+| --- | --- | --- |
+| 全表断言(即"517 那张表") | `bash test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
+| 判据规则失败核查 | `bash tests/rulefail_check.sh` | `PASS=111 FAIL=0` |
+| 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |
+| 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
+| 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限与 `trunc`/`tlen`) |
+| 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
+
+辅助工具(不是闸门,别拿它们的绿当回归):`tests/mutate_call_site.sh`(变异检验,
+看断言是否真的在看那行)、`tests/isolate_section.sh`(按标记抽函数)、
+`tests/replay_audit.sh`、`tests/stub_gateway.py`(离线桩)、`tests/vision_*`。
+
+## 三条硬约定
+
+1. **新增回归脚本当轮就 `git add`**。只留在工作区的回归资产等于没有资产 ——
+   这条本来是我准备用来解释"表丢了"的理由,结果发现自己连"丢"都是错的:
+   真正丢的那类风险,是靠入库而不是靠记性来消的。
+2. **总结里报数字,必须同时记下产生它的命令原文与文件名**。压缩之后残留的
+   数字会挂在错的名字上,然后就会发生这轮这种事。
+3. **别用 `grep '^PASS='` 判断套件跑完**(harness 1955 行已解释:那行可能带
+   ANSI 前缀,行首不是 P)。判"跑完"要看 `RESULT …` 行里 `src=` 的 sha ——
+   它同时能证明你测的是哪份源码(变异脚本被打断导致源码停在突变态,坑过一次)。
+
