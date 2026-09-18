@@ -37,6 +37,12 @@ bad = 0
 for line in open(sys.argv[1], encoding="utf-8"):
     o = json.loads(line)
     r, t, ln, tl = o["rule"], o["trunc"], len(o["target"]), o["tlen"]
+    # root 字段:审计行必须说得出当时的工作根。本轮真实教训 —— 相对路径按 WORK_ROOT 解析,
+    # 日志里没有根,就查不出"写成功却看不见"到底是写在哪儿(当时根=$HOME)。
+    # 只判"键在不在":WORK_ROOT 缺席时 ${WORK_ROOT-} 应给空串而不是把整条审计打死。
+    if "root" not in o:
+        bad += 1
+        print("  不符: 审计行缺 root 字段")
     w = want[r]
     ok = (t is w[0] and ln == w[1] and tl == w[2])
     if not ok:
@@ -49,4 +55,3 @@ PY
 rc=$?
 rm -rf "$AUTO_DIR" .scratch/aa.sh
 exit $rc
-

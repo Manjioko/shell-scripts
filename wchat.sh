@@ -2959,9 +2959,10 @@ auto_audit() {
     (( at_len > 1200 )) && at_trunc=true
     jq -nc --arg ts "$(date '+%Y-%m-%dT%H:%M:%S%z')" --arg sess "$auto_session_id" \
         --arg tier "$auto_mode" --arg ev "$event" --arg tool "$tool" \
+        --arg root "${WORK_ROOT-}" \
         --arg target "${target:0:1200}" --arg rule "$rule" --arg v "$verdict" \
         --arg reason "${reason:0:200}" --argjson trunc "$at_trunc" --argjson tlen "$at_len" \
-        '{$ts,$sess,$tier,$ev,$tool,$target,$rule,verdict:$v,$reason,$trunc,$tlen}' \
+        '{$ts,$sess,$tier,$ev,$tool,$root,$target,$rule,verdict:$v,$reason,$trunc,$tlen}' \
         >> "$AUTO_AUDIT_LOG" 2>/dev/null
 }
 
@@ -5205,7 +5206,9 @@ tool_read_file() {
     resolved=$(resolve_path "$path") || resolved=""
     path_access "$path" r "读" || return 0
     [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+    # 报错也要带解析结果:只说"文件不存在: wchat.sh"会误导成"文件被删了",
+    # 真实原因往往是相对路径落到了另一个工作根下(本轮实例:根=$HOME,报的是 wchat.sh 不存在)。
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path(解析为 $resolved;工作根 $WORK_ROOT)"; printf ' ⛔ 文件不存在:%s\n' "$resolved"; return 0; }
 
     total_lines=$(wc -l < "$resolved" | tr -d ' ')
     total_chars=$(wc -m < "$resolved" | tr -d ' ')
@@ -5240,8 +5243,19 @@ tool_write_file() {
     auto_backup "$resolved"
     # 内容直接由 jq 流式写入文件,不经过命令替换(命令替换会剥掉末尾换行)
     jq -r '.content' <<< "$fn_args" > "$resolved"
-    content="✅ 已写入 $path($(wc -l < "$resolved" | tr -d ' ') 行)"
-    printf ' 已写入 %s\n' "$path"
+    # 写后必须按绝对路径复核落地。真实事故形状:会话的工作根是 $HOME,而调用方心里的根
+    # 是它上一次 cd 的仓库目录 —— 相对路径确实写成功了,只是写在 $HOME 下面;回显又只带
+    # 相对路径,于是下一次 read_file 报"文件不存在",人以为文件被删了,实际在另一个根下。
+    # 所以:不存在即明确失败(不许报 ✅),存在则把解析后的绝对路径与工作根一起回显。
+    # 判"存在"用 -e 而不是 -s:允许写空文件,那是合法操作。
+    if [[ ! -e "$resolved" ]]; then
+        content="❌ 写入未落地:$resolved(相对路径 $path 按工作根 $WORK_ROOT 解析,写后该绝对路径上不存在)"
+        printf ' ⛔ 写入未落地:%s\n' "$resolved"
+        return 0
+    fi
+    content="✅ 已写入 $path($(wc -l < "$resolved" | tr -d ' ') 行)· 实际落点 $resolved"
+    [[ "$path" == /* ]] || content+=$'\n'"   (相对路径按工作根 $WORK_ROOT 解析;若这不是你要的位置,改用绝对路径。工作根由进程启动时的目录决定,与后续 cd 无关)"
+    printf ' 已写入 %s\n' "$resolved"
 }
 
 # 纯 bash 精确替换引擎:
@@ -5255,7 +5269,8 @@ tool_edit_file() {
     resolved=$(resolve_path "$path") || resolved=""
     path_access "$path" rw "修改" || return 0
     [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
+    # 与读侧同口径:报错必须带上解析后的绝对路径,否则"改不到"会被误读成"文件没了"。
+    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path(解析为 $resolved;工作根 $WORK_ROOT)"; printf ' ⛔ 文件不存在:%s\n' "$resolved"; return 0; }
     [[ -z "$old_str" ]] && { content="错误:old_string 不能为空"; return 0; }
 
     data=$(<"$resolved")
