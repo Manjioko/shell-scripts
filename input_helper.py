@@ -38,6 +38,128 @@ def _erase_stale_box(tty, height):
         pass
 
 
+# ---------- 终端应答过滤(输入侧) ----------
+# 现象:输入框里冒出 `]11;rgb:2828/2c2c/3434`,还会随回车一起提交给模型。
+# 成因:子进程(gh / vim / mdcat / codex / opencode / tmux —— 本机 PATH 上 6 个可执行文件
+# 内嵌 `\x1b]11;?` 这条查询)问终端"你背景色是什么",终端**必定回一段应答**;这些程序常常
+# 发完查询就退出,应答留在 pty 输入队列里等**下一个读者**。它可以在很久之后才被读到
+# (甚至不是同一个进程留下的),所以"谁查询"根本追不完 —— 必须在读者侧堵。
+# wchat 的 bash 确认/编号读取早已过同一套判据(ask_read_line → tty_strip_responses),
+# 唯独输入框走 prompt_toolkit:PTK 认不出 `ESC ]` 这类序列,把**正文当普通按键**逐个塞进
+# 缓冲区 → 屏幕上就是用户看到的乱码,提交后污染发给模型的消息。
+#
+# 判据与 bash 版严格一致:**只丢"整段可识别的应答",判不动的一律放行**。少丢一条只是屏幕
+# 上多串噪声,误吞一个按键是用户的输入被改 —— 后者严重得多。这里刻意不做 bash 那套
+# "半截滞留等下片"(tty_hold):要 hold 就得把没判完的字节扣在手里,而它可能永远等不到
+# 下一片(用户只按了一个 ESC / Alt+]),那是拿真按键换噪声。PosixStdinReader 单次读 1024
+# 字节,25 字节的应答必然整段到达,分片在本路上不是实际风险。
+# bracketed paste 区间内一律不过滤:粘贴正文里出现 ESC]… 是**数据**,剥它就是篡改用户输入。
+_ESC = "\x1b"
+_PASTE_START = _ESC + "[200~"
+_PASTE_END = _ESC + "[201~"
+# 四类无条件应答:OSC/DCS(BEL 或 ST 终止)、DA1/DA2、kitty 标志应答、DECRPM。
+# 注意每条都要求 ESC 紧跟特征字节,方向键(ESC[A / ESC[1;5A)、F 键(ESC[15~ / ESCOP)、
+# Alt+字符、kitty 真按键(ESC[13u,不带 ?)都不在其中。
+_RESP_RE = re.compile(
+    _ESC + r"[\]PX^_][^\x1b\x07]*(?:" + _ESC + r"\\|\x07)"   # OSC / DCS 应答
+    + "|" + _ESC + r"\[[?>][0-9;]*c"                        # DA1 / DA2 属性应答
+    + "|" + _ESC + r"\[\?[0-9;]*u"                          # kitty 键盘标志应答
+    + "|" + _ESC + r"\[\?[0-9;]*\$y"                        # DECRPM 模式应答
+)
+# DSR 光标报告(ESC[行;列R)**不能无条件丢**:prompt_toolkit 自己就发 CPR 查询(3.0.52 见
+# output/vt100.py:712 的 `\x1b[6n`),它的应答正是这个形态,是算光标位置要用的;一律丢掉
+# 会让输入框打 "terminal doesn't support cursor position requests" 并重排错行(实测,
+# 照抄 bash 侧判据就会踩这里)。但 vim 之类程序留下的**陈旧** DSR 又确实会变成乱码。
+# 所以按配额放行:本进程向终端发了几次 CPR,就放几个 DSR 应答,多出来的判成残留。
+# 助手是"一次输入一个进程",配额天然按框重置;万一查询超时没等到应答,配额留着,最坏
+# 只是放行一条本可丢的 DSR(噪声)——方向仍是"宁漏一条应答,不误吞按键"。
+_RESP_DSR_RE = re.compile(_ESC + r"\[\d{1,6};\d{1,6}R")
+_CPR_QUERY = _ESC + "[6n"
+_cpr_quota = [0]        # 已发出、还没等到应答的 CPR 次数
+_in_paste = [False]     # 跨块保持:粘贴标记与正文可能不在同一次 read 里
+
+
+def _drop_responses(s: str) -> str:
+    """按判据丢掉整段应答(不跨块,粘贴中不调用)。DSR 按 CPR 配额放行。"""
+    if not s or _ESC not in s:
+        return s
+    s = _RESP_RE.sub("", s)
+    if not _RESP_DSR_RE.search(s):
+        return s
+    parts = []
+    pos = 0
+    for m in _RESP_DSR_RE.finditer(s):
+        parts.append(s[pos:m.start()])
+        if _cpr_quota[0] > 0:                   # 是本框问出来的 → 原样交给 PTK 解析
+            _cpr_quota[0] -= 1
+            parts.append(m.group())
+        pos = m.end()                           # 配额用完还来 → 判成残留,丢
+    parts.append(s[pos:])
+    return "".join(parts)
+
+
+def _counting_output(out):
+    """包一层 write_raw,数出本进程向终端发了几个 CPR 查询(给 _cpr_quota 记账)。
+    拿不到 write_raw(版本漂移)就原样返回 —— 记账失效最多退化成"DSR 一律判残留",
+    不能因为它把渲染弄崩。"""
+    orig = getattr(out, "write_raw", None)
+    if orig is None:
+        return out
+
+    def _write_raw(data):
+        if _CPR_QUERY in data:
+            _cpr_quota[0] += data.count(_CPR_QUERY)
+        return orig(data)
+
+    out.write_raw = _write_raw
+    return out
+
+
+def _strip_terminal_responses(s: str) -> str:
+    """丢掉整段可识别的终端应答,其余原样返回。粘贴区间内一律不碰。"""
+    if not s:
+        return s
+    if _in_paste[0]:                                   # 上次分块时粘贴还没结束
+        e = s.find(_PASTE_END)
+        if e < 0:
+            return s                                   # 整块仍是粘贴正文
+        _in_paste[0] = False
+        return s[:e + len(_PASTE_END)] + _strip_terminal_responses(
+            s[e + len(_PASTE_END):])
+    b = s.find(_PASTE_START)
+    if b < 0:
+        return _drop_responses(s)
+    e = s.find(_PASTE_END, b + len(_PASTE_START))
+    if e < 0:                                          # 粘贴没结束:状态存住,后段透传
+        _in_paste[0] = True
+        return _drop_responses(s[:b]) + s[b:]
+    return (_drop_responses(s[:b])
+            + s[b:e + len(_PASTE_END)]
+            + _strip_terminal_responses(s[e + len(_PASTE_END):]))
+
+
+def _guarded_input():
+    """造一个"输入先到过滤器再到 PTK 解析器"的 Vt100Input;任何不兼容都退回 None
+    (None = 让 PromptSession 自己 create_input(),即改造前的行为,绝不因加固而崩)。"""
+    if os.name != "posix" or not sys.stdin.isatty():
+        return None
+    try:
+        from prompt_toolkit.input.vt100 import Vt100Input
+        inp = Vt100Input(sys.stdin)
+        parser = getattr(inp, "vt100_parser", None)
+        orig = getattr(parser, "feed", None)
+        if orig is None:
+            return None                    # 属性名变了(版本漂移):不加固,不冒险
+    except Exception:
+        return None
+    def _feed(data):
+        data = _strip_terminal_responses(data)
+        if data:
+            orig(data)
+    parser.feed = _feed                    # 只在实例上包,不动 prompt_toolkit 类本身
+    return inp
+
+
 # ---------- 剪贴板图片嗅探(截图 → 直接粘贴) ----------
 # 终端粘贴协议只能传文本,图片字节永远不会从 Cmd+V/Ctrl+V 通道进来。可行的是
 # 在粘贴/热键发生时主动问系统「剪贴板里现在装的是不是图片」:各平台都有
@@ -469,6 +591,8 @@ def main() -> int:
 
     # 渲染(提示符/输入行/重绘)全部经 output 写到 /dev/tty 上屏;
     # stdout 只承载结果文本,由 bash 的命令替换捕获
+    # input= 显式给一个带应答过滤的 Vt100Input(见 _guarded_input);拿不到就传 None,
+    # 由 PromptSession 自己 create_input(),行为等同改造前。
     session = PromptSession(
         history=history,
         key_bindings=kb,
@@ -476,7 +600,8 @@ def main() -> int:
         message=[("class:prompt", "│ ")],
         prompt_continuation=_continuation,
         style=Style.from_dict({"prompt": "#808080"}),
-        output=create_output(stdout=tty),
+        output=_counting_output(create_output(stdout=tty)),
+        input=_guarded_input(),
     )
 
     try:

@@ -1483,6 +1483,10 @@ kill_tree() {
 #      整段到达,跨片只可能出现在"人正在打字"的时候。
 #   ④ bracketed paste 区间(ESC[200~ … ESC[201~)内**一律不过滤**:粘贴正文里的 ESC]… 是数据
 #      不是应答,剥它就是篡改用户粘贴。
+# 与输入助手(input_helper.py 的 _strip_terminal_responses)**判据刻意不同**:那边不能无条件
+# 丢 DSR 光标报告(ESC[行;列R)—— prompt_toolkit 自己发 CPR(`\x1b[6n`)要靠这个应答算光标,
+# 那边按"CPR 查询次数"配额放行。把两侧统一成一份判据就会把输入框的渲染搞坏
+# (两侧各自的用例见 tty_e2e_check.sh 与 tests/tty_osc_input_test.sh)。
 # 全部只用 bash 内建(这个函数在 0.01s 轮询循环里跑,fork 不得分)。
 TTY_HOLD_MAX=3
 # CSI 的参数/中间字节区间:ECMA-48 的 0x30-0x3F 与 0x20-0x2F(final byte 是 0x40-0x7E)
