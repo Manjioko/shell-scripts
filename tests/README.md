@@ -17,6 +17,18 @@
 | 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
 | 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限与 `trunc`/`tlen`) |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
+| 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
+
+### 跑闸门前先看这条(本轮实测)
+
+`tests/traffic_replay.sh` 用 PATH 上的 `bash` 起会**静默 exit 1、零输出**：本机
+`command -v bash` = `/bin/bash` 3.2，装载区的 bash5 re-exec 守卫在"被 source"这个位置
+`exec` 出去的子进程丢了父进程的管道状态，看着就像脚本自己死了。正确起法与本表所有条目
+一致，写全解释器:
+
+```
+/opt/homebrew/bin/bash tests/traffic_replay.sh   # 一致 25 / 判定崩溃 0 → exit 0
+```
 
 辅助工具(不是闸门,别拿它们的绿当回归):`tests/mutate_call_site.sh`(变异检验,
 看断言是否真的在看那行)、`tests/isolate_section.sh`(按标记抽函数)、
@@ -32,4 +44,3 @@
 3. **别用 `grep '^PASS='` 判断套件跑完**(harness 1955 行已解释:那行可能带
    ANSI 前缀,行首不是 P)。判"跑完"要看 `RESULT …` 行里 `src=` 的 sha ——
    它同时能证明你测的是哪份源码(变异脚本被打断导致源码停在突变态,坑过一次)。
-

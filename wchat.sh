@@ -69,6 +69,10 @@ pro_model="${PRO_MODEL:-qwen3.8-flash}"
 #    TOKEN_THRESHOLD           上下文压缩阈值 → 详解见「上下文压缩」节
 #    (以下属 auto 模式,留在「auto 模式」节,同样支持 env:MAX_TOOL_ROUNDS CMD_TIMEOUT
 #     AUTO_MAX_APPROVALS AUTO_DENY_STREAK AUTO_SNAPSHOT_MAX_KB AUTH_CTX_KEEP)
+#    SKILLS_DIR                  技能目录 → 见「Skill 自我进化」节。⚠ 外置值要过属主/
+#                                符号链接/o+w 三项校验,不过就退回默认值(不是退回报错);
+#                                相对路径按**启动时**的 pwd 归一;指到项目内即等于让
+#                                "能写这个目录的人"有权改 system prompt,详见该节注释
 # ② **不支持**环境变量覆盖(改了要走代码,且注释里都带实测依据,动手前先读那段):
 #    SKILL_DESC_MAX SKILL_MAX_INJECT(技能注入) KEEP_MSGS SUMMARY_PREFIX(压缩策略)
 #    TOOL_OUTPUT_MAX_LINES TOOL_OUTPUT_MAX_COL READ_MAX_CHARS GREP_MAX_MATCHES
@@ -76,7 +80,7 @@ pro_model="${PRO_MODEL:-qwen3.8-flash}"
 #    WIN THROTTLE DISP_COL PENDING_MAX OUT_HEAD_LINES OUT_BUF_SIZE(终端绘制时序)
 #    BG_SILENT_TIMEOUT INT_FORCE_TIMEOUT SSE_STALL_TIMEOUT(打断/停滞兜底)
 # ③ 派生量(**从环境设了也没用**,启动时会被重算):WORK_ROOT(=启动时的 pwd -P,它同时是
-#    硬墙的边界,刻意不放开) 由 CT_HOME 派生的 HISTORY_DIR SKILLS_DIR AUTO_DIR
+#    硬墙的边界,刻意不放开) 由 CT_HOME 派生的 HISTORY_DIR AUTO_DIR
 #    AUTO_AUDIT_LOG AUTO_BACKUP_DIR CLIP_DIR auto_session_id vision_model(=VISION_MODEL
 #    或 FLASH_MODEL) IMG_CAPABLE(=IMG_PROVIDER 是否为 none 的落地;图片侧已无探测,
 #    探测只剩联网的 WEB_SEARCH_PROVIDER) model(当前档,由
@@ -260,13 +264,75 @@ content=""
 # 注入 system,模型匹配到某技能后,再经 read_skill 工具读全文。
 CT_HOME="${HOME}/.ct"
 HISTORY_DIR="${CT_HOME}/history"
-SKILLS_DIR="${CT_HOME}/skills"
+SKILLS_DIR_DEFAULT="${CT_HOME}/skills"
 # 注入段固定标记:save_history 存盘前按它剥离,加载历史后重新注入
 SKILLS_MARK="## 可用技能(Skills)"
 # description 注入截断长度(检索词,够用即可)
 SKILL_DESC_MAX=200
 # 最多注入的技能数量(按最近修改排序),防技能膨胀挤占上下文
 SKILL_MAX_INJECT=30
+
+# ---------- SKILLS_DIR:可外置,但外置值必须过校验 ----------
+# 为什么要外置:技能要能跟着项目走(一类"SKILL.md + scripts/ + references/"打包在一起,
+# 例如 CAD/3D 打印那套工具链说明)。默认目录 ~/.ct/skills 在工作目录之外,而硬墙 P2 明确
+# "写入主目录顶层或隐藏配置目录(~/.xxx)被禁止",auto 档直接拒 —— 结果就是 AI 既装不进
+# 技能也更新不了技能,只能靠人在终端里 cp。指到项目内之后 read_skill/-skill/write_file
+# 这条链路才真正可用。
+# 为什么要校验(这是本段存在的全部理由):这个目录的内容**会进 system prompt** ——
+# scan_skills 把每个技能的 name+description 注入第 0 条消息,read_skill 再把正文整篇
+# 读进上下文。于是"谁能写这个目录"直接等价于"谁能改我的提示词",而 auto 档终审器
+# (auto_final_judge)读的恰恰是模型被这些文字引导后自述的 reason。所以判据按"同机他人
+# 能否改写我的提示词"来定,不按"看起来像不像配置目录"来定。任一条不过就**退回默认目录**:
+# 配置写错不该让程序起不来,但也不能"将错就错"地用一个不可信目录。
+#   1) 绝对路径 + 目录本身不是符号链接。相对路径会随 cd 漂移,同一次会话注入不同内容;
+#      符号链接的真实落点在别处,"路径判定看链接名"救不了它(与硬墙 LINK 判据同理)。
+#   2) 属主必须是当前用户 —— 别人的目录就是别人能写。
+#   3) 目录本身与其**直接父目录**都不得 o+w。共享可写的父目录里,任何人可以把整包技能
+#      rename 走再放一份假的,而我读到的仍是原来那个路径。
+# 八进制陷阱(实测过,别再踩):stat 出来的 mode 是 "755" 这种串,直接进 (( )) 会被当成
+# **十进制** 755,而 755&2=2 → 一个权限完全正确的目录会被误判成"全局可写"而退回。
+# 必须写 16#$mode;并且先校验串形如纯八进制,否则 stat_num 兜底返回的 0/脏值会 fail-open。
+skills_dir_reject() {   # $1=原因 $2=被拒的请求路径。只由 skills_dir_validate 调用
+    printf '\033[33m⚠ SKILLS_DIR 校验未通过:%s。已退回默认目录(本次运行不使用被拒路径)。\033[0m\n' "$1" >&2
+    printf '     被拒: %s\n     生效: %s\n' "$2" "$SKILLS_DIR_DEFAULT" >&2
+    SKILLS_DIR="$SKILLS_DIR_DEFAULT"
+}
+skills_dir_validate() { # $1=已归一的绝对路径;结论写回全局 SKILLS_DIR(通过=该目录,否则=默认)
+    local dir="$1" parent uid mode pmode
+    [[ -n "${dir//[\/]/}" ]] || { skills_dir_reject "去掉斜杠后为空,不能当技能目录" "$dir"; return 0; }
+    [[ -L "$dir" ]] && { skills_dir_reject "目录本身是符号链接" "$dir"; return 0; }
+    if [[ ! -d "$dir" ]] && ! mkdir -p "$dir" 2>/dev/null; then
+        skills_dir_reject "目录不存在且无法创建" "$dir"; return 0
+    fi
+    # 复查一次:mkdir -p 会沿路径逐段创建,极端情况下中途落点已被换成链接
+    [[ -L "$dir" ]] && { skills_dir_reject "创建后落点变成符号链接" "$dir"; return 0; }
+    uid=$(stat_num '%u' '%u' "$dir")
+    [[ "$uid" == "$(id -u)" ]] || { skills_dir_reject "属主 uid=${uid:-?} 不是当前用户 $(id -u)" "$dir"; return 0; }
+    mode=$(stat_num '%a' '%Lp' "$dir")
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || { skills_dir_reject "权限取值异常(mode=$mode)" "$dir"; return 0; }
+    (( 16#$mode & 02 )) && { skills_dir_reject "权限 $mode 为全局可写(o+w)" "$dir"; return 0; }
+    parent=$(dirname "$dir")
+    pmode=$(stat_num '%a' '%Lp' "$parent")
+    [[ "$pmode" =~ ^[0-7]{3,4}$ ]] || { skills_dir_reject "父目录权限取值异常($parent mode=$pmode)" "$dir"; return 0; }
+    (( 16#$pmode & 02 )) && { skills_dir_reject "父目录 $parent 权限 $pmode 为全局可写" "$dir"; return 0; }
+    SKILLS_DIR="$dir"
+}
+# 只有"显式外置"才走校验与守卫:没设环境变量时行为与改造前逐字节一致 —— 默认目录归人管
+# (往 ~/.xxx 写撞硬墙 P2,AI 改不动),而外置到工作目录内之后 AI 的 write_file 能直接写它,
+# 两处差别都只在这个前提下才成立,所以不能对默认目录新增判定(dotfiles 仓库常把技能
+# symlink 进 ~/.ct/skills,一律拒会让老配置静默丢技能)。
+_skills_req="${SKILLS_DIR:-}"
+SKILLS_DIR="$SKILLS_DIR_DEFAULT"
+SKILLS_DIR_EXTERNAL=0
+if [[ -n "$_skills_req" ]]; then
+    [[ "$_skills_req" != /* ]] && _skills_req="$(pwd -P)/$_skills_req"
+    skills_dir_validate "$_skills_req"
+    # 校验通过才会等于请求值;被退回时保持 0,不去对一个没被采纳的目录加守卫。
+    # 显式设成默认目录本身(有人习惯在 dotfiles 里写死)也算"没外置":守卫的前提是
+    # "这个目录 AI 写得动",~/.ct/skills 不满足,不能因为一句话赋值就改判。
+    [[ "$SKILLS_DIR" == "$_skills_req" && "$SKILLS_DIR" != "$SKILLS_DIR_DEFAULT" ]] && SKILLS_DIR_EXTERNAL=1
+fi
+unset _skills_req
 
 mkdir -p "$HISTORY_DIR" "$SKILLS_DIR"
 # 历史文件迁移(幂等):旧版本把历史 JSON 直接放在 ~/.ct/ 根目录,统一迁入
@@ -322,6 +388,12 @@ scan_skills() {
     local f name desc line in_front in_desc skills_text=""
     while IFS= read -r f; do
         [[ -f "$f" ]] || continue
+        # 外置技能目录里的符号链条目一律跳过:SKILLS_DIR 指到工作目录内之后,AI(或任何能
+        # 写该目录的东西)可以 `ln -s /elsewhere .skills/x`,借 read_skill 的 name 白名单
+        # 把目录外的 SKILL.md 读进上下文,并把它的 description 注进 system prompt。name 里
+        # 的 / 与 .. 早就堵住了,链接是这条路剩下的唯一出口 —— 注入侧(这里)与读全文侧
+        # (tool_read_skill)要一起堵,只堵一侧等于"列表里没有但模型凭记忆还能读"。
+        (( SKILLS_DIR_EXTERNAL )) && [[ -L "$f" || -L "${f%/SKILL.md}" ]] && continue
         name=""; desc=""; in_front=0; in_desc=0
         while IFS= read -r line; do
             if (( in_front == 0 )); then
@@ -1155,7 +1227,8 @@ help_user() {
     inp_msg "         硬墙(提权/系统路径/凭据/越界写/强推/下载即执行)任何档位都不放行;启动需输入 AUTO 签字"
     inp_msg "  --allow 路径 / --allow-write 路径  越界只读/可写白名单(可多次,配合 -auto)"
     inp_msg "  -img  发送图片(后接图片路径,自动转述为文字)"
-    inp_msg "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
+    inp_msg "  -skill 从当前对话提炼技能,确认后保存到本次生效的技能目录(见下)"
+    inp_msg "         当前技能目录: ${SKILLS_DIR}(未设 SKILLS_DIR 时为 ${SKILLS_DIR_DEFAULT};外置值须过校验)"
     inp_msg "  -c    手动压缩对话历史"
     inp_msg "  -u    查看当前上下文 token 用量"
     inp_msg "  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)"
@@ -1164,7 +1237,7 @@ help_user() {
     inp_msg "内容交互时，也可使用以下选项:"
     inp_msg "  -msgs 显示当前消息记录"
     inp_msg "  -l    查看历史记录并选择加载"
-    inp_msg "  -skill 从当前对话提炼技能,确认后保存到 ~/.ct/skills"
+    inp_msg "  -skill 从当前对话提炼技能,确认后保存到 ${SKILLS_DIR}"
     inp_msg "  -c    手动压缩对话历史"
     inp_msg "  -n    新对话(清空历史并清屏)"
     inp_msg "  -cl   清屏(保留对话历史)"
@@ -5790,15 +5863,24 @@ tool_read_image() {
     fi
 }
 
-# read_skill 工具:读取技能全文。技能目录(~/.ct/skills)在工作目录之外,
-# 不走 resolve_path 沙箱,而是白名单式定位:name 只能是单个目录名,
+# read_skill 工具:读取技能全文。**不管 SKILLS_DIR 在哪(默认在 ~/.ct/skills,可经 env
+# 外置到项目内)都不走 resolve_path 沙箱**,而是白名单式定位:name 只能是单个目录名,
 # 拒绝 / 与 .. 路径穿越,只读 SKILLS_DIR/<name>/SKILL.md 一个文件。
+# 之所以能绕开路径墙:这条白名单不拼用户可控的路径分量,穿越只可能在 name 里,而 name
+# 已被上面两条判死;换 SKILLS_DIR 指向不改变这个性质(校验在启动段做,见「Skill 自我进化」节)。
 tool_read_skill() {
     local name path total_chars out
     name=$(jq -r '.name // empty' <<< "$fn_args")
     [[ -z "$name" ]] && { content="错误:技能名(name)不能为空"; return 0; }
     [[ "$name" == *"/"* || "$name" == *".."* ]] && { content="错误:非法技能名: $name"; printf ' ⛔ 非法技能名:%s\n' "$name"; return 0; }
     path="$SKILLS_DIR/$name/SKILL.md"
+    # 与 scan_skills 同一侧的守卫(理由见那里的注释):列表里被跳过的条目,读全文也读不到;
+    # 只堵一侧会留下"模型凭上一轮记忆里的技能名还能穿出去"的缺口。
+    if (( SKILLS_DIR_EXTERNAL )) && { [[ -L "$path" ]] || [[ -L "$SKILLS_DIR/$name" ]]; }; then
+        content="错误:技能 $name 的目录或 SKILL.md 是符号链接,已拒绝读取(外置技能目录里的链接可指向工作目录之外)"
+        printf ' ⛔ 技能为符号链接,已拒绝:%s\n' "$name"
+        return 0
+    fi
     [[ -f "$path" ]] || { content="错误:技能不存在: ${name}。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
     total_chars=$(wc -m < "$path" | tr -d ' ')
     if (( total_chars > READ_MAX_CHARS )); then
@@ -5813,7 +5895,7 @@ tool_read_skill() {
 
 # Skill 沉淀:把当前对话提炼为一个可复用技能(Agent Skills 格式)。
 # 流程:flash 模型总结出草稿(name/description/body JSON)→ 屏幕展示 →
-# 用户 y/n 确认 → 写入 ~/.ct/skills/<name>/SKILL.md → 重新注入列表。
+# 用户 y/n 确认 → 写入 SKILLS_DIR/<name>/SKILL.md → 重新注入列表。
 # 草稿必须经用户确认才落盘,防止模型把劣质经验沉淀成长期误导。
 skill_save() {
     local to_summarize request_body resp raw name description body
@@ -5909,6 +5991,11 @@ skill_save() {
     # name 清洗成安全目录名(小写字母/数字/连字符/点/下划线);description 压成单行
     name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9._-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')
     [[ -z "$name" ]] && name="skill"
+    # 上面的字符类**留着点号**,所以 `..` 能整串活着下来:name=".." 会让写入落到
+    # "$SKILLS_DIR/../SKILL.md",即技能目录的**父目录**(默认配置下是 ~/.ct/,外置到项目里
+    # 就是工作目录根)—— 写侧此前只有 description/body 的长度约束,没有 read_skill 那条
+    # "拒 / 与 .." 的判据,两侧不对称。纯点号的名字一律换成 skill,顺带挡掉 "." 与 "..."。
+    [[ "$name" =~ ^\.+$ ]] && name="skill"
     description=$(printf '%s' "$description" | tr '\n' ' ' | tr -s ' ')
 
     inp_msg '──────── 技能草稿 ────────'
@@ -5937,6 +6024,12 @@ skill_save() {
     fi
 
     file_dir="$SKILLS_DIR/$name"
+    # 写侧同样不跟符号链接(与 scan_skills/tool_read_skill 的守卫配对):外置目录里已有的
+    # 链接条目会把新技能写到链接指向的地方,那是"人点了 y 但落点不是屏幕上报的路径"。
+    if (( SKILLS_DIR_EXTERNAL )) && { [[ -L "$file_dir" ]] || [[ -L "$file_dir/SKILL.md" ]]; }; then
+        inp_msg "⚠️  技能 $name 的目录或 SKILL.md 是符号链接,已取消保存(外置技能目录不接受链接条目)"
+        return 0
+    fi
     mkdir -p "$file_dir" || { inp_msg "⚠️  创建技能目录失败: $file_dir"; return 0; }
     printf -- '---\nname: %s\ndescription: %s\n---\n\n%s\n' "$name" "$description" "$body" > "$file_dir/SKILL.md"
     inp_msg "✅ 已保存技能: ${name} → ${file_dir}/SKILL.md"
