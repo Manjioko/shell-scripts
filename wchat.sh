@@ -531,6 +531,19 @@ CMD_TIMEOUT="${CMD_TIMEOUT:-120}"
 AUTO_MAX_APPROVALS="${AUTO_MAX_APPROVALS:-200}"
 # 连续被硬墙/终审拒绝达到此数 → 认为模型在撞墙空转,本轮降级为人工确认
 AUTO_DENY_STREAK="${AUTO_DENY_STREAK:-3}"
+
+# ---------- 安装面(第 7 项):默认拒,唯一出口是人启动时点名 ----------
+# 为什么不并入 H13(那族是"目标不可解析 ⇒ 拒"):安装不只是"目标看不清",它是
+# ① 在 WORK_ROOT 之外落盘(H12 越界判据提不出目标)、② 以你的 uid 跑第三方 postinstall
+# 代码、③ 不在快照/备份覆盖范围内、④ 会改变后续所有推理的前提(装了同名 CLI,下一轮
+# 用的就是它)。而"模型记错包名"是真实事故入口(抢注同名包不需要任何恶意),审 reason
+# 查不出来,因为模型真心认为它装的是对的东西。
+# 所以决定权放在出门前而不是运行时:"我认不认识这个包名"是人做得出的决定,
+# "这轮 reason 可不可信"不是。
+AUTO_ALLOW_INSTALL=()                 # 人点名的包名(小写);空 = 一律拒
+AUTO_INSTALL_ALL=0                    # --allow-install 不带名单 = 全开(横幅带警告)
+AUTO_MAX_INSTALLS="${AUTO_MAX_INSTALLS:-5}"   # 每会话安装次数配额,超了退回人工
+auto_installs=0
 auto_approvals=0
 auto_deny_streak=0
 
@@ -1244,6 +1257,7 @@ help_user() {
     inp_msg "         read=只自动放行越界读取 | sandbox(默认)=工作目录内全自动 | full=再加 --allow-write 名单"
     inp_msg "         硬墙(提权/系统路径/凭据/越界写/强推/下载即执行)任何档位都不放行;启动需输入 AUTO 签字"
     inp_msg "  --allow 路径 / --allow-write 路径  越界只读/可写白名单(可多次,配合 -auto)"
+    inp_msg "  --allow-install [包名,逗号]  允许 auto 安装这些包(配额 AUTO_MAX_INSTALLS,默认 5);不带包名 = 全开并警告。换源一律拒"
     inp_msg "  -img  发送图片(后接图片路径,自动转述为文字)"
     inp_msg "  -skill 从当前对话提炼技能,确认后保存到本次生效的技能目录(见下)"
     inp_msg "         当前技能目录: ${SKILLS_DIR}(未设 SKILLS_DIR 时为 ${SKILLS_DIR_DEFAULT};外置值须过校验)"
@@ -1362,6 +1376,29 @@ parse_options() {
                 fi
             fi
             ((i++))
+            continue
+        fi
+
+        # --allow-install [包名,逗号分隔]:安装面授权(第 7 项)。
+        # 刻意做成**启动时**参数而不是运行时可改的开关:墙的意义就是模型不能自己加高
+        # 自己(与 --allow-write 同一条原则)。不带值 = 全开,但当场把代价说清楚。
+        if [[ "${!i}" == "--allow-install" ]]; then
+            local _n3=$((i + 1))
+            local _v="${@:_n3:1}"
+            if [[ -n "$_v" && "$_v" != -* ]]; then
+                local -a _pk=()
+                local _one
+                IFS=',' read -r -a _pk <<< "$_v"
+                for _one in "${_pk[@]}"; do
+                    _one="${_one,,}"; _one="${_one//[[:space:]]/}"
+                    [[ -n "$_one" ]] && AUTO_ALLOW_INSTALL+=("$_one")
+                done
+                (( ${#AUTO_ALLOW_INSTALL[@]} )) && inp_msg "[auto] 安装白名单(只这些包名): ${AUTO_ALLOW_INSTALL[*]} · 配额 ${AUTO_MAX_INSTALLS} 次/会话"
+                ((i++))
+            else
+                AUTO_INSTALL_ALL=1
+                inp_msg "⚠️  [auto] 安装面**全开**:模型可以装任意包名。postinstall 以你的 uid 跑任意代码,而抢注同名包不需要恶意(模型记错一个字母就中)。想收紧就写 --allow-install 包名1,包名2"
+            fi
             continue
         fi
 
@@ -3265,6 +3302,136 @@ auto_write_fuse() {
     return 0
 }
 
+# ---------- 安装面判据(与 H14 规则配套)----------
+# 两条设计约束写死在这里:
+# 1) **必须段首**才算安装动作。整条命令全文匹配会被引号里的散文击中 ——
+#    `git commit -m "brew install x"` 不是安装。这正是 H5 误拦与 T28 字面量掩码反复
+#    踩过的那类形状,不再重犯(边界切法与 hd_write_targets 同源:&& || | ; 换行)。
+# 2) 正则/名单一律 local 定义,不依赖 $hd_p 之类后定义的常量:夹具按名字抽函数,装载
+#    顺序不完整时引用未装载的全局就是"整条判据静默失效"或当场炸(见缺席守卫那几段)。
+#
+# $1=命令 → 返回 0 = 这是安装动作;stdout 是被装的名字,一行一个。
+# **认不出名字也返回 0 而输出为空**:调用方据此不放行(fail-closed,宁可多问一次)。
+hd_install_tail() {
+    local c="$1" seg w tail="" state=0 found=0
+    local -a ws=()
+    local flat="${c//&&/$'\n'}"
+    flat="${flat//||/$'\n'}"; flat="${flat//\|/$'\n'}"; flat="${flat//;/$'\n'}"
+    while IFS= read -r seg; do
+        seg="${seg#"${seg%%[![:space:]]*}"}"
+        [[ -z "$seg" ]] && continue
+        read -r -a ws <<< "$seg"
+        state=0
+        for w in "${ws[@]}"; do
+            case $state in
+                0)  # 段首必须是包管理器(sudo 前缀跳过,提权由 H1 管)
+                    [[ "$w" == "sudo" ]] && continue
+                    if [[ "$w" =~ ^(brew|pip|pip[23]|python[0-9.]*|npm|pnpm|yarn|gem|cargo|go|uv|apt|apt-get|dnf|yum|apk|composer)$ ]]; then
+                        state=1
+                    else
+                        break
+                    fi
+                    ;;
+                1)  # 找安装动词;中间的非 flag 词(python -m pip 里的 pip)继续找,flag 跳过
+                    if [[ "$w" == "install" || "$w" == "add" || "$w" == "i" || "$w" == "tap" ]]; then
+                        state=2; found=1
+                    fi
+                    ;;
+                2)  # 收集名字:跳 flag 与重定向,其余都当包名(多认几个只会更严,不会更松)
+                    [[ "$w" == -* || "$w" == *\>* || "$w" == *'$('* ]] && continue
+                    tail+="$w"$'\n'
+                    ;;
+            esac
+        done
+    done <<< "$flat"
+    (( found )) || return 1
+    [[ -n "$tail" ]] && printf '%s' "$tail"
+    return 0
+}
+
+# 名单比对。$1 = 换行分隔的包名 → 0 = 每一个都在人点名的名单里。
+# 归一化:小写、去掉 @版本/仓库后缀与版本约束 —— 否则 `ripgrep` 与 `RipGrep@13` 会被
+# 当成两个不同的东西,名单就成了摆设。
+auto_install_allowed() {
+    local names="$1" n g hit
+    AUTO_INSTALL_MISS=""
+    [[ -n "${names//[$'\n' ]/}" ]] || return 1
+    (( AUTO_INSTALL_ALL )) && return 0
+    (( ${#AUTO_ALLOW_INSTALL[@]} )) || return 1
+    while IFS= read -r n; do
+        n="${n,,}"; n="${n%@*}"; n="${n%%[<>=!~]*}"
+        [[ -z "$n" ]] && continue
+        hit=0
+        for g in "${AUTO_ALLOW_INSTALL[@]}"; do
+            [[ "$g" == "$n" ]] && { hit=1; break; }
+        done
+        (( hit )) || AUTO_INSTALL_MISS+="$n "
+    done <<< "$names"
+    [[ -z "$AUTO_INSTALL_MISS" ]]
+}
+
+# ---------- 安装面判据(与 H14 规则配套)----------
+# 两个设计约束写死在这里:
+# 1) **必须段首**才是安装动作。整条命令里做全文匹配会被引号内的散文击中 ——
+#    `git commit -m "brew install x"` 不是安装。这正是 H5 误拦与 T28 字面量掩码
+#    反复踩过的那一类形状,不再重犯。
+# 2) 正则用 local 定义,不引用 $hd_p:本函数在源码里排在 hd_p 之前,而产品与夹具都
+#    可能在装载顺序不完整时被 eval 出来用(缺席守卫的老话题)—— 边界手写进模式里。
+# $1=命令 → 返回 0 表示"这是安装动作",stdout 一行一个被安装的包名;认不出名字时
+# 返回 0 但输出为空(调用方据此**不放行**,宁可多问一次也不默认放过)
+hd_install_tail() {
+    local c="$1" seg w tail="" state=0
+    local -a ws=()
+    local flat="${c//&&/$'\n'}"
+    flat="${flat//||/$'\n'}"; flat="${flat//\|/$'\n'}"; flat="${flat//;/$'\n'}"
+    # 换行也算边界:裸换行是两条命令(见「命令边界归一」那批反向锁)
+    while IFS= read -r seg; do
+        seg="${seg#"${seg%%[![:space:]]*}"}"          # 去左空白
+        [[ -z "$seg" ]] && continue
+        read -r -a ws <<< "$seg"
+        state=0
+        for w in "${ws[@]}"; do
+            case $state in
+                0)  # 找段首的包管理器(前面可以有 sudo —— 那由 H1 拦,不影响这里的识别)
+                    if [[ "$w" == "sudo" ]]; then continue; fi
+                    [[ "$w" =~ ^(brew|pip|pip[23]|python[0-9.]*|npm|pnpm|yarn|gem|cargo|go|uv|apt|apt-get|dnf|yum|apk|composer)$ ]] && state=1 || break
+                    ;;
+                1)  # 找安装动词;中间的 flag/子命令(-m pip / -g / --user)跳过
+                    if [[ "$w" == "install" || "$w" == "add" || "$w" == "i" ]]; then state=2
+                    elif [[ "$w" != -* ]]; then state=1     # 如 python -m pip:继续找
+                    fi
+                    ;;
+                2)  # 收集包名:跳过 flag 与重定向,遇到像是第二条命令的 token 就停
+                    [[ "$w" == -* || "$w" == *\>* || "$w" == *'$('* ]] && continue
+                    [[ "$w" == *"/"* && "$w" != *@* && "$w" != *.* ]] && continue   # 路径形态不当包名
+                    tail+="$w"$'\n'
+                    ;;
+            esac
+        done
+    done <<< "$flat"
+    [[ -n "$tail" ]] && { printf '%s' "$tail"; return 0; }
+    # 是安装动作但一个名字都没提出来:仍然判"是",让调用方走"不放行"分支
+    [[ "$flat" =~ (brew|pip|npm|yarn|pnpm|gem|cargo|apt|dnf|yum|apk|uv|composer)[[:space:]]+(install|add) ]] && return 0
+    return 1
+}
+
+# 人点名的名单比对。$1 = 换行分隔的包名;返回 0 = 每一个名字都在名单里
+auto_install_allowed() {
+    local names="$1" n g hit
+    AUTO_INSTALL_MISS=""
+    [[ -n "${names//[$'\n' ]/}" ]] || return 1        # 提不出名字 → 不放行
+    (( AUTO_INSTALL_ALL )) && return 0
+    (( ${#AUTO_ALLOW_INSTALL[@]} )) || return 1
+    while IFS= read -r n; do
+        n="${n,,}"; n="${n%@*}"; n="${n%%[<>=!]*}"     # 去版本/来源约束,只比名字
+        [[ -z "$n" ]] && continue
+        hit=0
+        for g in "${AUTO_ALLOW_INSTALL[@]}"; do [[ "$g" == "$n" ]] && { hit=1; break; }; done
+        (( hit )) || AUTO_INSTALL_MISS="$AUTO_INSTALL_MISS $n"
+    done <<< "$names"
+    [[ -z "$AUTO_INSTALL_MISS" ]]
+}
+
 # ---------- 策略身份自检:判据换了版本,auto 必须当场掉档 ----------
 # 真实事故形状:盘上的判据实测对某条命令返回 NP,而会话里它被 H5 拦了 —— 也就是
 # "当时生效的是哪一版代码"根本无法证明。bash 是**惰性读取**脚本文件的,进程运行期间
@@ -4207,6 +4374,32 @@ hard_deny_cmd() {
         hd_rule="H13"; hd_msg="该命令的写入目标在审批层无法解析(注册表式数据库/全局配置),既判不了越界也不在快照回滚范围内。替代:把要改的键值写进方案交人工执行,或用文件工具改工作目录内的配置"
         hd_note_hit
         return 0
+    fi
+    # H14 安装类动作:默认拒,唯一出口是人**启动时** --allow-install 点名(见配置区「安装面」)。
+    # 放行的时候不能 return —— 只记账,让 H10/H11/H12 继续判同一条命令的其他部分。
+    local _inst_tail
+    if _inst_tail=$(hd_install_tail "$c"); then
+        # 换源形状:有授权也拒。换 registry/index/tap URL 等于换整条供应链,是比
+        # "装哪个包"高一级的决定(那条 yarn 证书过期技能就是"源会烂、会被换"的活证据)。
+        local hd_re_regsrc='(--registry([[:space:]]|=)|--index-url|--extra-index-url|--find-links|[[:space:]]-i[[:space:]]+["'\''_]?(https?:|file:)|PIP_INDEX_URL=|PIP_EXTRA_INDEX_URL=|NPM_CONFIG_REGISTRY=|YARN_REGISTRY=|npm[[:space:]]+config[[:space:]]+set[[:space:]]+registry|brew[[:space:]]+tap[[:space:]]+https?://|--pypi-url|--default-registry)'
+        if [[ "$c" =~ $hd_re_regsrc ]]; then
+            hd_rule="H14"; hd_msg="安装时被换了源/镜像(registry、index-url、tap URL)。换源等于换整条供应链,人不签字不许动。替代:去掉源参数,或用 --allow-install 预先点名包名"
+            hd_note_hit
+            return 0
+        fi
+        if auto_install_allowed "$_inst_tail"; then
+            if (( AUTO_MAX_INSTALLS > 0 && auto_installs + 1 > AUTO_MAX_INSTALLS )); then
+                hd_rule="H14"; hd_msg="本会话安装配额已用完(${AUTO_MAX_INSTALLS} 次)。替代:把还要装什么写进结论交人工执行,或用 AUTO_MAX_INSTALLS=… 重启"
+                hd_note_hit
+                return 0
+            fi
+            auto_installs=$((auto_installs + 1))
+            auto_audit allow install "$(printf '%s' "$_inst_tail" | tr '\n' ',' | sed 's/,$//')" H14 auto_allow_install "人启动时点名的包 · 第 ${auto_installs}/${AUTO_MAX_INSTALLS} 次"
+        else
+            hd_rule="H14"; hd_msg="安装软件会在 WORK_ROOT 之外落盘、以你的 uid 跑第三方 postinstall 代码,且不在快照回滚范围内(模型还会记错包名)。替代:重启时加 --allow-install $(printf '%s' "${AUTO_INSTALL_MISS:-${_inst_tail//$'\n'/ }}" | sed 's/[[:space:]]*$//')(只点名你认识的那几个),或把安装交给人工执行;不要改用别的源、也不要用 curl|sh 绕"
+            hd_note_hit
+            return 0
+        fi
     fi
     # H10 外发敏感内容:上传动作与凭据类内容同时出现才判(单独任一都太常见)
     if [[ "$c" =~ $hd_re_upload && "$c" =~ $hd_re_upload_arg && "$c" =~ $hd_re_secret_ref ]]; then
@@ -5368,11 +5561,21 @@ auto_enable() {
     esac
     printf '  硬墙(任何档位都不放行): H1 提权 H2 下载即执行 H3 家目录/系统删 H4 磁盘\n'
     printf '    H5 家目录配置 H6 凭据 H7 改写发布历史 H8 电源 H9 批量杀进程 H10 外发密钥 H11 系统路径\n'
+    printf '    H12 越界写目标 H13 目标不可解析(defaults/plutil/osascript/launchctl/钥匙串) H14 安装(默认拒,除非启动时点名)\n'
     printf '    越界写(工作目录之外)按路径判据报 P1/P2/P3,与文件工具同一口径\n'
     printf '  刹车: 单轮工具≤%s 次 · 单命令≤%ss · 自动放行配额 %s 次 · 连续拒 %s 次降级人工\n' \
         "$MAX_TOOL_ROUNDS" "$CMD_TIMEOUT" "$AUTO_MAX_APPROVALS" "$AUTO_DENY_STREAK"
     (( ${#auto_allow_ro[@]} )) && printf '  只读白名单: %s\n' "${auto_allow_ro[*]}"
     (( ${#auto_allow_rw[@]} )) && printf '  可写白名单: %s\n' "${auto_allow_rw[*]}"
+    # 安装面必须在签字前说出来:它是"写在工作根之外 + 跑第三方代码"的能力,签字的人
+    # 有权知道这一条到底是关着、点名开着、还是全开。
+    if (( AUTO_INSTALL_ALL )); then
+        printf '\033[33m  安装面:   全开(⚠ 任意包名 + postinstall 任意代码执行;建议改 --allow-install 点名)\033[0m\n'
+    elif (( ${#AUTO_ALLOW_INSTALL[@]} )); then
+        printf '  安装白名单: %s(配额 %s 次/会话;换源一律拒)\n' "${AUTO_ALLOW_INSTALL[*]}" "$AUTO_MAX_INSTALLS"
+    else
+        printf '  安装面:   一律拒绝(H14)。要放行请退出重启加 --allow-install 包名1,包名2\n'
+    fi
 
     # 回滚点
     if auto_checkpoint; then

