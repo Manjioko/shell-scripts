@@ -7,7 +7,9 @@
 #
 # 用法:bash tests/compaction_pin_probe.sh
 set -uo pipefail
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wchat.sh"
+# 支持传入被测来源(与 test_hardwall.sh 同惯例):变异装置要靠它把断言跑到变异体上
+SRC=${1:-}
+[[ -n "$SRC" ]] || SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wchat.sh"
 [[ -f "$SRC" ]] || { printf '找不到被测脚本:%s\n' "$SRC"; exit 1; }
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/cpp.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
 
@@ -105,6 +107,9 @@ ck "压完一次后能认出 3 条锁定摘要"    "$(summary_pin_count "$messag
 ck "默认锁定上限是正整数(0 表示关闭锁定,不该是默认)" \
    "$(printf '%s' "${SUMMARY_PIN_MAX:-}" | grep -qE '^[1-9][0-9]*$' && echo yes || echo no)" "yes"
 
-printf '\n结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
+# 两条汇总:人看的中文行 + 机器可读的无色彩固定字段行(与全表同惯例,变异装置按
+# ^  FAIL 取差异、按 RESULT 取结论,少一条就是它读不到东西而误判"变异未被杀")
+printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
+printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 [[ $fail -eq 0 ]] || exit 1
 
