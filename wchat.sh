@@ -2352,8 +2352,10 @@ truncate_output() {
 #   - 压缩请求用便宜的 flash 模型、stream:false 静默一次拿完,不渲染;
 #   - 摘要作为普通 user 消息插入,历史可被递归再压缩;
 #   - 压缩失败时兜底硬截断(保留 system + 最近原文),绝不让脚本卡死;
-#   - 只在"完整一轮的边界"调用(printContent 开头),工具调用链中途调用会
-#     破坏 tool_call_id 配对,API 会直接报错。
+#   - 只在工具链已闭合的边界调用:printContent 发首请求前、tool_run_and_parse
+#     续发下一轮 ask_ai 前。切点安全性由 compact_messages 自己保证(它会把 cut
+#     前移直到 tail 首条不是 tool 消息),不靠调用方记规矩;
+#     两处都要有:只有 printContent 那一处时,-st/-auto 单轮模式永不主动压缩。
 compact_messages() {
     local total cut system_msg tail_msgs to_compact summary request_body
     local compact_file sys_file tail_file
@@ -6342,6 +6344,16 @@ tool_run_and_parse() {
     fn_args=""
     fn_id=""
 
+    # 工具链续发边界:上下文超阈值时先压缩再发。为什么必须有这一处:
+    # printContent 里那个同名检查(见其 6685 附近)读的是**上一次请求**带回的
+    # last_prompt_tokens,而新进程一启动它是 0(见文件头注释"0 表示尚无精确值"),
+    # 于是 -st/-to 单轮模式下这个边界只跨过一次、且必然判 0,主动压缩在数学上
+    # 永不触发 —— 上下文一路涨到真实窗口外,只能等请求失败后 retry_after_compact
+    # 按字节粗算补救,每次越界都要先付一次失败请求。
+    # 这里是不是安全边界:是。上方刚给所有 tool_call_id 补齐配对的 tool 消息,
+    # 而 compact_messages 的 cut 会前移直到 tail 首条不是 tool(见其工具链对齐注释)。
+    (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
+
     request_body=$(make_request_body)
     ask_ai "$request_body" 1
 }
@@ -6680,8 +6692,9 @@ printContent() {
     add_message "$content"
     local request_body rc
 
-    # 上下文超阈值时先压缩再发送。只在"完整一轮的边界"(这里)触发:
-    # 工具调用链中途压缩会破坏 tool_call_id 配对,API 直接报错。
+    # 上下文超阈值时先压缩再发送。这是"用户新一轮输入"的边界;工具链中途的
+    # 同名检查在 tool_run_and_parse 续发前(两处都要 —— 新进程 last_prompt_tokens
+    # 为 0,只留这一处的话 -st/-auto 单轮模式永远压不到)
     (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
 
     # 构建请求体:大体积 messages 经临时文件传入,防止 jq --argjson 撞
