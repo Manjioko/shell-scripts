@@ -96,7 +96,16 @@ IMG_MAX_BYTES=${IMG_MAX_BYTES:-10485760}              # 单张上限(字节,base
 IMG_MAX_SIDE=${IMG_MAX_SIDE:-2048}                    # 压缩目标:最长边像素
 IMG_MAX_BATCH=${IMG_MAX_BATCH:-4}                     # 一次请求最多合并张数
 IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}  # 一次请求图片字节合计上限
-TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-100000}"          # 压缩阈值(按各家**实测**窗口,拿不准取小)→ 「上下文压缩」节
+# 上下文三个数,分别配三把尺 —— 别再把它们合成一个:
+#   CTX_WINDOW        接口真实窗口(换模型/换网关只改这一个)
+#   TOKEN_THRESHOLD   主动压缩点,和 API 带回的**精确** prompt_tokens 比。想省 token 就调小。
+#   CTX_OVERFLOW_GATE 越界判据,和**字节粗算**(bytes*2/5,且漏算每次请求都发的 tools schema)
+#                     比,只在"请求已经失败"时用,必须明显低于真实窗口。
+# 以前只有 TOKEN_THRESHOLD 一个数兼这两个角色:抬它 = 压缩变少(想要的)但越界判据跟着抬
+# (会判成"不是上下文问题"而反复重试,573 行原注释记的就是这个)。拆开才两头都成立。
+CTX_WINDOW="${CTX_WINDOW:-1000000}"
+TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-$((CTX_WINDOW * 3 / 4))}"
+CTX_OVERFLOW_GATE="${CTX_OVERFLOW_GATE:-$((CTX_WINDOW * 5 / 8))}"
 # ---------- stat 数字字段取值(GNU/BSD 兼容) ----------
 # 取 stat 的数字字段：GNU coreutils 用 -c，BSD/macOS 用 -f。
 # 顺序必须 GNU 在前：GNU stat 的 -f 是 --file-system 且**不接格式参数**，
@@ -562,15 +571,18 @@ forget_history=0
 # 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
 last_prompt_tokens=0
 
-# 触发自动压缩的阈值 = 接口真实上下文窗口 × 75%(留安全余量)。
+# 触发自动压缩的阈值 = 接口真实上下文窗口 × 75%(留安全余量)—— 这是设计口径,
+# 现在由 CTX_WINDOW 派生,不再靠人肉改一个魔法数。
 # 不要凭 model 名猜窗口:同一 model 挂在不同网关窗口不同,各家超限表现也不一致
-# (mimo 是静默断连,可能直接报 400),所以这里只放**实测过**的值,其余走保守默认。
-#   mimo-v2.5:官方标称 32K,实测约 4 万 token 越界断连 → 24000(按 32K 的 75%)
-#   deepseek-v4:1M 窗口,作者注:可改成 100000
-#   qwen3.8-flash:本仓库未实测窗口 → 沿用 24000 保守值(宁多压一次,不要静默断连)
-# 换模型/换网关时用环境变量覆盖,不必改代码:TOKEN_THRESHOLD=100000 wchat -st "..."
-# 取高了会怎样:超限表现为"请求失败 → retry_after_compact 按本地粗算判断是否压缩重发"
-# (见该函数),阈值过高会让它判成"不是上下文问题"而反复重试,所以拿不准就取小。
+# (mimo 是静默断连,可能直接报 400)。实测过的值请写成 CTX_WINDOW:
+#   mimo-v2.5:官方标称 32K,实测约 4 万 token 越界断连 → CTX_WINDOW=32000
+#   deepseek-v4 / qwen 系:1M 窗口 → CTX_WINDOW=1000000(当前默认)
+# 换模型/换网关用环境变量覆盖,不必改代码:
+#   CTX_WINDOW=32000 wchat -st "..."        # 整条链跟着走(压缩点 24000/越界判据 20000)
+#   TOKEN_THRESHOLD=100000 wchat -st "..."  # 只想压勤一点(省 token),不动窗口认知
+# 越界检测不再受本阈值牵制:retry_after_compact 先按接口错误文本判(各家越界报错都有
+# 固定签名),拿不到可读错误才退回字节粗算 + CTX_OVERFLOW_GATE。所以把压缩点抬到窗口
+# 75% 不会再把"网络抖动"和"上下文越界"判混。
 # (赋值见脚本头部「配置集中区」)
 
 # 压缩后保留最近多少条消息原文(一轮工具链约 4 条:user + assistant(tool_calls)
@@ -2495,12 +2507,26 @@ retry_after_compact() {
     # auth 旁路请求(is_record=0)用的是 auth_message,不是主对话 messages,
     # 不参与上下文自愈(否则会误用主对话 messages 重建请求体)
     (( is_record == 0 )) && return 1
-    est_bytes=$(printf '%s' "$messages" | wc -c | tr -d ' ')
-    est_tokens=$((est_bytes * 2 / 5))
-    # 本地估算低于阈值 → 不是上下文问题(纯网络抖动),交给原重试/兜底逻辑
-    (( est_tokens <= TOKEN_THRESHOLD )) && return 1
-
-    printf '⚠️ 请求失败且本地估算 %s tokens 已超阈值 %s,自动压缩历史后重发…\n' "$est_tokens" "$TOKEN_THRESHOLD"
+    # 判"这次失败是不是上下文越界"。首选看接口自己的错误文本:各家越界都有固定签名,
+    # 命中就压,不需要赌估算。字节粗算(bytes*2/5)只能当兜底,它**两个方向都会错**:
+    # 对代码/英文偏高(1 字节≈0.25 token,它算 0.4),又完全漏算每次请求都发的
+    # tools schema 与技能清单(几万 token 量,$messages 里没有这些东西)。
+    # 所以以前"压缩点"和"越界判据"共用 TOKEN_THRESHOLD 时,想把压缩点抬到窗口 75%
+    # 就必然把判据一起抬到 75%(粗算漏的那部分还没算进来)→ 真越界被判成网络抖动反复重试。
+    # 拆成 CTX_OVERFLOW_GATE 之后,抬 TOKEN_THRESHOLD 不再削弱这条自愈。
+    # api_error 是 ask_ai 里的局部变量,靠 bash 的动态作用域在这里读到 —— 改名要同步。
+    local hd_ovf_sig api_error_lc
+    hd_ovf_sig='(context (length|window|tokens)|maximum context|too many tokens|token (limit|count).{0,20}(exceed|large)|prompt is too long|input.{0,10}token.{0,20}exceed|reduce your (prompt|input)|上下文(长度|窗口|过(长|大))|超出.{0,8}(长度|窗口|上限)|长度超限)'
+    api_error_lc=$(printf '%s' "${api_error-}" | tr '[:upper:]' '[:lower:]' || true)
+    if [[ -n "$api_error_lc" && "$api_error_lc" =~ $hd_ovf_sig ]]; then
+        printf '⚠️ 请求失败且接口报上下文越界,自动压缩历史后重发…(%s)\n' "${api_error:0:120}"
+    else
+        est_bytes=$(printf '%s' "$messages" | wc -c | tr -d ' ')
+        est_tokens=$((est_bytes * 2 / 5))
+        # 粗算没越过越界判据 → 判成纯网络抖动,交给原重试/兜底逻辑
+        (( est_tokens <= CTX_OVERFLOW_GATE )) && return 1
+        printf '⚠️ 请求失败且本地估算 %s tokens 已越过越界判据 %s,自动压缩历史后重发…\n' "$est_tokens" "$CTX_OVERFLOW_GATE"
+    fi
     before_count=$(echo "$messages" | jq 'length')
     compact_messages
     after_count=$(echo "$messages" | jq 'length')
@@ -2517,15 +2543,20 @@ retry_after_compact() {
 
 # 查看当前上下文用量
 print_usage() {
-    local est pct
+    local est pct wpct win
     est=$(printf '%s' "$messages" | wc -c | tr -d ' ')
     est=$((est * 2 / 5))
     inp_msg "消息条数: $(echo "$messages" | jq length)"
+    win="${CTX_WINDOW:-0}"
     if (( last_prompt_tokens > 0 )); then
         pct=$((last_prompt_tokens * 100 / TOKEN_THRESHOLD))
-        inp_msg "上下文用量: ${last_prompt_tokens} tokens / 阈值 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
+        inp_msg "上下文用量: ${last_prompt_tokens} tokens / 压缩点 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
+        if (( win > 0 )); then
+            wpct=$((last_prompt_tokens * 100 / win))
+            inp_msg "  窗口 ${win} tokens(已用 ${wpct}%)· 越界判据 ${CTX_OVERFLOW_GATE}(仅失败时用作粗算兜底)"
+        fi
     else
-        inp_msg "上下文用量: 约 ${est} tokens(字节粗算;精确值在下次请求后显示,阈值 ${TOKEN_THRESHOLD})"
+        inp_msg "上下文用量: 约 ${est} tokens(字节粗算,漏算 tools schema;精确值在下次请求后显示,压缩点 ${TOKEN_THRESHOLD})"
     fi
 }
 
@@ -2964,7 +2995,8 @@ auto_audit() {
         --arg root "${WORK_ROOT-}" \
         --arg target "${target:0:1200}" --arg rule "$rule" --arg v "$verdict" \
         --arg reason "${reason:0:200}" --argjson trunc "$at_trunc" --argjson tlen "$at_len" \
-        '{$ts,$sess,$tier,$ev,$tool,$root,$target,$rule,verdict:$v,$reason,$trunc,$tlen}' \
+        --arg pol "${POLICY_SHA-}" \
+        '{$ts,$sess,$tier,$ev,$tool,$root,$pol,$target,$rule,verdict:$v,$reason,$trunc,$tlen}' \
         >> "$AUTO_AUDIT_LOG" 2>/dev/null
 }
 
@@ -3112,13 +3144,100 @@ auto_tmp_write_ok() {
 # 落备份:auto 模式下覆盖任何已存在的文件前调用。放在 ~/.ct/auto/backup 下,
 # 不污染工作树(避免多出 .bak 被 git status 与 grep 命中)。
 auto_backup() {
-    local f="$1" rel dest
+    local f="$1" rel dest bak
     [[ -f "$f" ]] || return 0
     [[ -n "$auto_mode" ]] || return 0
-    rel="${f//\//+}"
     dest="$AUTO_BACKUP_DIR/$auto_session_id"
     mkdir -p "$dest" 2>/dev/null || return 0
-    cp -p "$f" "$dest/${rel}.bak" 2>/dev/null && auto_backup_count=$((auto_backup_count + 1))
+    # 扁平化名字:先转义 '+' 再把 '/' 换成 '+'。顺序反了就撞名——/a/b 与 /a+b 原本
+    # 会映射到同一个 .bak,后写的那份静默把前一份的备份覆盖掉(备份被覆盖比没备份更难查)。
+    rel="${f//+/%2b}"
+    rel="${rel//\//+}"
+    bak="$dest/${rel}.bak"
+    # 首次落备份优先:已有 .bak 就不再覆盖。原实现每次 cp -p 无条件覆盖,于是同一个文件
+    # 被改 5 次之后,.bak 存的是"第 5 次动手前的中间态"(模型自己上一轮的产物),原始版本
+    # 彻底没了 —— 而"频繁修改同一个配置"正是无人值守最常见的形状。中间态的回退本来就有
+    # 会话快照(auto_checkpoint)管,这里只负责保住"动手之前它长什么样"。
+    [[ -e "$bak" ]] && return 0
+    cp -p "$f" "$bak" 2>/dev/null && auto_backup_count=$((auto_backup_count + 1))
+}
+
+# ---------- 路径级熔断:同一个文件被写太多次 = 失控信号 ----------
+# 改→测→改→回退→再改 这种循环,单看每一次写都"合法且可回滚",串起来却说明模型
+# 没有进展。人工模式下人看得见刷屏,auto 下没人看 —— 所以只在 auto 生效。
+# 处置按"该次拒绝并提示",不做整轮降级:降级会让 -st 无人值守直接卡死,而熔断要的
+# 只是逼它停下来说明现状。
+AUTO_MAX_WRITES_PER_PATH="${AUTO_MAX_WRITES_PER_PATH:-8}"
+# 计数落在文件而不是关联数组:① macOS 自带 /bin/bash 3.2 没有关联数组,本脚本要能在
+# 它上面跑起来(3.2 终端卡死那类历史问题另说,语法层不能先炸);② 写操作可能发生在
+# 命令替换的子 shell 里,内存计数会随子 shell 退出一起丢,文件不会。
+auto_write_fuse() {
+    local abs="$1" log n
+    [[ -n "$auto_mode" ]] || return 0
+    [[ -n "$abs" ]] || return 0
+    log="$AUTO_DIR/writes-$auto_session_id.log"
+    mkdir -p "$AUTO_DIR" 2>/dev/null || return 0
+    # grep -c 在"无匹配"时 rc=1、文件不存在时 rc=2,两种都要吞掉:这里是取计数,不是判成败
+    n=$(grep -cxF "$abs" "$log" 2>/dev/null || true)
+    [[ "$n" =~ ^[0-9]+$ ]] || n=0
+    if (( AUTO_MAX_WRITES_PER_PATH > 0 && n >= AUTO_MAX_WRITES_PER_PATH )); then
+        auto_audit deny path_fuse "$abs" F1 reject "同一文件单会话已写 $n 次(上限 $AUTO_MAX_WRITES_PER_PATH),拒绝本次写入"
+        printf '\n\033[1;33m⛔ 路径熔断:%s 本会话已被写 %s 次,本次拒绝。请停止重试,说明现状与卡点\033[0m\n' "$abs" "$n"
+        return 1
+    fi
+    printf '%s\n' "$abs" >> "$log"
+    return 0
+}
+
+# ---------- 策略身份自检:判据换了版本,auto 必须当场掉档 ----------
+# 真实事故形状:盘上的判据实测对某条命令返回 NP,而会话里它被 H5 拦了 —— 也就是
+# "当时生效的是哪一版代码"根本无法证明。bash 是**惰性读取**脚本文件的,进程运行期间
+# 文件被改写,后面执行的代码确实可能换了一版;而 auto 的全部信任建立在"人签字那一版"
+# 上(auto_enable 里的一次性签字)。所以:启动时给装载的代码签名,每次终审前复核,
+# 不一致就把 auto 降级回人工(auto_downgraded 的既有语义:本条不接管,退回人确认)。
+POLICY_FILE="${BASH_SOURCE[0]}"
+_policy_hash_of() {
+    local h=""
+    h=$(sha256sum "$1" 2>/dev/null | cut -c1-12)
+    [[ -z "$h" ]] && h=$(shasum -a 256 "$1" 2>/dev/null | cut -c1-12)
+    # 两者都没有(极简容器)才退 cksum:它弱,但本函数只做"变没变",不做安全证明
+    [[ -z "$h" ]] && h=$(cksum "$1" 2>/dev/null | cut -c1-12)
+    printf '%s' "$h"
+}
+# stat 的数字字段:GNU 用 -c,BSD/macOS 用 -f(与文件头「stat 数字字段取值」同源)。
+# 两条取值都必须 `|| true`:命令替换里非零退出在 set -e 下会直接把调用方打断,
+# 而"这个平台没有 stat -c"本来就是预期分支,不是错误。
+_policy_stat() {  # $1=文件 $2=gnu格式 $3=bsd格式
+    local v
+    v=$(stat -c "$2" "$1" 2>/dev/null || true)
+    # 注意不能写成 [[ -z $v ]] && v=$(...) || v="" —— 赋值成功时 || 分支同样会执行,
+    # 把刚拿到的值清空(本轮真实踩到过一次,现象是"mtime 永远为空 → 每轮都重算哈希")
+    [[ -z "$v" ]] && v=$(stat -f "$3" "$1" 2>/dev/null || true)
+    printf '%s' "$v"
+    return 0
+}
+POLICY_SHA=$(_policy_hash_of "$POLICY_FILE")
+POLICY_MTIME=$(_policy_stat "$POLICY_FILE" %Y %m)
+POLICY_SIZE=$(_policy_stat "$POLICY_FILE" %s %z)
+policy_self_check() {
+    [[ -n "$auto_mode" ]] || return 0
+    (( auto_downgraded )) && return 0     # 已经掉过档,不必再算
+    [[ -n "$POLICY_SHA" ]] || return 0    # 没有任何哈希工具:宁可漏告警,不可误降级
+    local m s h
+    m=$(_policy_stat "$POLICY_FILE" %Y %m)
+    s=$(_policy_stat "$POLICY_FILE" %s %z)
+    # 大小与 mtime 都没动就不重算哈希(每次终审都哈希 400KB 是白烧)
+    [[ "$m" == "$POLICY_MTIME" && "$s" == "$POLICY_SIZE" ]] && return 0
+    h=$(_policy_hash_of "$POLICY_FILE")
+    if [[ -z "$h" || "$h" == "$POLICY_SHA" ]]; then
+        # 哈希回来一致(编辑后又还原/只是 touch):刷新基准,继续 auto
+        POLICY_MTIME="$m"; POLICY_SIZE="$s"; return 0
+    fi
+    auto_downgraded=1
+    POLICY_MTIME="$m"; POLICY_SIZE="$s"   # 只刷基准;POLICY_SHA 保持=签字那一版,不许追新
+    printf '\n\033[1;33m⚠ 判据文件已变更(%s → %s)。本会话按 %s 签的字,从现在起退回人工确认;要用新版判据请重启\033[0m\n' \
+        "$POLICY_SHA" "$h" "$POLICY_SHA"
+    auto_audit deny policy_selfcheck "$POLICY_FILE" S1 downgrade "startup=$POLICY_SHA onfile=$h"
 }
 
 # ---------- 硬墙①:shell 命令 ----------
@@ -3995,6 +4114,20 @@ hard_deny_cmd() {
         hd_note_hit
         return 0
     fi
+    # H13 写目标在审批层**不可解析**:这些动词改的是注册表式数据库或全局配置,命令里
+    # 往往根本没有路径(defaults/git config --global),或者路径只是"键存在哪个文件"
+    # 而非"要写哪个文件"(plutil -replace K V x.plist 写的是键,越界判断对不上目标)。
+    # 后果是两层都失守:H12 的越界判据提不出目标(实测 hd_write_targets 一律返回空),
+    # 快照/备份也覆盖不到(改的是 ~/Library 下的库,不在 WORK_ROOT)。所以按"有写语义
+    # 但目标不可知"处理 —— 与 hd_has_write 同一思路:不确定就归到拦的那一侧。
+    # 刻意不做逐动词的路径提取白名单:那正是"每个特例都要人记住"的债。
+    # 大小写不折叠(与相邻 H8/H9 同口径);宁可误杀,误杀只损失一次人工确认。
+    local hd_re_opaque_write="$hd_p"'(defaults[[:space:]]+(write|delete|read\[)|plutil[[:space:]]+(-replace|-insert|-remove|-convert)|launchctl[[:space:]]+(load|unload|bootstrap|bootout|kickstart|enable|disable)|osascript|sqlite3[[:space:]].*(update|delete|insert|drop|alter|create|vacuum|attach)|git[[:space:]]+config[[:space:]].*(--global|--system|--worktree|--file|-f[[:space:]])|security[[:space:]]+(add-|delete-|modify-|set-keychain-settings|create-keychain)|networksetup|softwareupdate[[:space:]]+(-i|--install)|installer[[:space:]]+-pkg|profiles[[:space:]]+(install|remove)|tccutil[[:space:]]+reset|htpasswd|codesign[[:space:]].*(--sign|-s)|xattr[[:space:]]+(-w|-d|--delete|--set))([[:space:]]|$)'
+    if [[ "$c" =~ $hd_re_opaque_write ]]; then
+        hd_rule="H13"; hd_msg="该命令的写入目标在审批层无法解析(注册表式数据库/全局配置),既判不了越界也不在快照回滚范围内。替代:把要改的键值写进方案交人工执行,或用文件工具改工作目录内的配置"
+        hd_note_hit
+        return 0
+    fi
     # H10 外发敏感内容:上传动作与凭据类内容同时出现才判(单独任一都太常见)
     if [[ "$c" =~ $hd_re_upload && "$c" =~ $hd_re_upload_arg && "$c" =~ $hd_re_secret_ref ]]; then
         hd_rule="H10"; hd_msg="把密钥/凭据/.env 一类内容外发被禁止。替代:只提交用户明确要求的非敏感数据"
@@ -4768,6 +4901,14 @@ auto_final_judge() {
     local cmd="$1" reason="$2" prev="$3"
     local body resp verdict attempt ufile rfile
     auto_judge=""; auto_judge_reason=""
+    # 判据文件在运行期间被改过 → 本会话签字时看到的那一版已经不成立了。当前这条直接
+    # DENY,并把 auto 整档退回人工(见 policy_self_check)。放在这里而不是只放启动横幅:
+    # bash 惰性读文件,"改了就换版"在长会话里是真实可能,不是理论风险。
+    policy_self_check
+    if (( auto_downgraded )); then
+        auto_judge="DENY"; auto_judge_reason="判据已变更或本会话已退回人工,不自动放行"
+        return 0
+    fi
     [[ -z "$reason" ]] && { auto_judge="DENY"; auto_judge_reason="未提供执行理由 reason"; return 0; }
     ufile=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
     printf '命令: %s\n执行理由: %s\n初审结论: %s\n' "$cmd" "$reason" "$prev" > "$ufile"
@@ -4914,6 +5055,25 @@ confirm_cmd() {
 #   $1 原始路径  $2 r|rw  $3 动作名(读/写入/修改/列出/搜索/读图,用于回传文案)
 path_access() {
     local p="$1" mode="$2" act="${3:-访问}" np outside=1 wallhit=0
+    # 0) 路径级熔断(只判写、只在 auto 生效,见 auto_write_fuse)。放在第 1 步**之前**:
+    #    is_granted 命中就直接 return 0,放后面的话"先前放行过的路径"永远数不到次数 ——
+    #    而恰恰是这类路径最容易被反复改(配置文件第一次批过之后就一路改到底)。
+    #    这里比第 1.5 步多算一次 resolve_path:口径不同(那一步在归一后还要过 hard_deny_path),
+    #    换掉重复计算的复杂度不值得,写盘频率本来就低。
+    #    resolve_path 只认工作根内的路径,越界时归一失败 → 退回原始 $p 计数(宁可数歪,不可不数)。
+    if [[ "$mode" == "rw" ]]; then
+        local npfuse
+        npfuse=$(resolve_path "$p" 2>/dev/null || true)
+        # 缺席守卫:夹具按名字抽函数,抽不到 auto_write_fuse 时 command not found 的 rc=127
+        # 会被 `if !` 读成"拒绝",现象是合法写入被莫名拒 —— 那是把进度刹车误装成红线。
+        # 与 hd_split_words 的缺席守卫同族,方向刻意相反:那条守越界红线(缺席宁拦),
+        # 这条只是循环刹车(缺席即放行,绝不误拒)。
+        if declare -f auto_write_fuse >/dev/null 2>&1 && ! auto_write_fuse "${npfuse:-$p}"; then
+            content="错误:${act}被路径熔断拒绝:${npfuse:-$p} 本会话已写到上限,不再接受同一目标的重复写入。停止重试,直接说明当前状态与卡点"
+            printf ' ⛔ 路径熔断拒绝%s:%s\n' "$act" "${npfuse:-$p}"
+            return 1
+        fi
+    fi
     # 1) 已授权名单(含 @ 手势与前面放行过的)
     if is_granted "$p" "$mode"; then
         return 0

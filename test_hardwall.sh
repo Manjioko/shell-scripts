@@ -71,7 +71,7 @@ granted_files=()
 # 小写 auto_* 必须一起装载：`auto_tmp_prefixes=()` 漏了就在 hard_deny_path 里踩
 # unbound variable 当场打死脚本。但带命令替换的行（auto_session_id="$(date …)"）
 # 要排除——测试进程不该执行被测脚本里那些有副作用的语句。
-eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|HD_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
+eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|HD_[A-Z0-9_]*|CTX_[A-Z0-9_]*|POLICY_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
 auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 # 数组意外为空说明**上面那个哨兵没生效**(装载环节坏了),这时明确报 harness 问题并跳过
 # T7,别让被测函数在空数组上跑出看不出所以然的红。
@@ -87,6 +87,7 @@ for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_sp
            hard_deny_path expand_tilde is_granted grant_file shell_note_grants norm_path resolve_path auto_tmp_write_ok \
            path_access _confirm_yes _ct_tmp_is_public auto_private_tmpdir hd_foreign_cred_path \
            in_root_exempt link_escapes_root hd_creds_all_exempt \
+    auto_write_fuse policy_self_check _policy_hash_of _policy_stat \
            tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses \
            hd_note_hit auth_parse_verdict auth_confirm_note; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
@@ -1944,6 +1945,31 @@ expect H5 'T31 反向锁:dot 路径确实是重定向目标 → 照旧拦(放宽
 # (实测被判 NP)。反向锁必须用盘上真实写形状,否则锁的是空气。
 expect H5 'T31 反向锁:写动词直接带 dot 配置路径 → 照旧拦' 'touch ~/.bashrc'
 expect H5 'T31 反向锁:mv 的落点是 dot 配置 → 照旧拦' 'mv wchat.sh ~/.bashrc'
+
+# ── 第十八轮 H13:写目标在审批层不可解析的注册表式 / 全局配置动作 ─────────
+# 起因是实测:hd_write_targets 对下面这些命令**一律返回空目标**(plutil 那条明写着
+# 绝对路径也提不出来),于是 H12 的越界判据对整族命令不生效;而"改常用 app 的配置"
+# 这个无人值守需求恰好整个落在这个盲区里。本表此前对 defaults/plutil/osascript/
+# launchctl/sqlite3 是 **0 条用例** —— 不是已知取舍,是没测过。
+expect H13 'defaults write 改偏好库,命令里没有可判目标'           'defaults write com.apple.Finder FX_EnableAllDescriptions -bool true'
+expect H13 'plutil 带绝对路径也只到文件不到键,越界判据对不上'      'plutil -replace Key -value 1 /Users/x/Library/Preferences/a.plist'
+expect H13 'git config --global 写 ~/.gitconfig,不在 WORK_ROOT'  'git config --global user.name bot'
+expect H13 'osascript 可驱动任意 app,写目标完全不可知'            "osascript -e 'tell application \"Finder\" to quit'"
+expect H13 'launchctl unload 改服务定义,快照覆盖不到'             'launchctl unload /Users/x/Library/LaunchAgents/x.plist'
+expect H13 'sqlite3 带 update 时不能按文件判越界'                 "sqlite3 /Users/x/a.db 'update t set a=1'"
+# 反锁:同族动词的只读 / 仓库内形态不许被顺手拦死(收紧过头是这类改动最常见的回归)
+expect NP  '反锁:defaults read 只读,不算写'                     'defaults read com.apple.Finder'
+expect NP  '反锁:git config 不带 --global 属仓库内设置'           'git config user.name bot'
+expect NP  '反锁:sqlite3 纯查询不算写'                          "sqlite3 /tmp/a.db 'select * from t'"
+# 结构锁:上下文三个数必须"由窗口派生、各司其职"。退回到单个魔法数就是本轮修复被改掉。
+if (( ${CTX_WINDOW:-0} > 0 )) && [[ "${TOKEN_THRESHOLD:-}" == "$((CTX_WINDOW * 3 / 4))" ]] \
+   && [[ "${CTX_OVERFLOW_GATE:-}" == "$((CTX_WINDOW * 5 / 8))" ]] \
+   && (( CTX_OVERFLOW_GATE < TOKEN_THRESHOLD && TOKEN_THRESHOLD < CTX_WINDOW )); then
+    pass=$((pass + 1)); echo "  ok   压缩点=窗口×3/4、越界判据=窗口×5/8,且判据低于压缩点低于窗口"
+else
+    fail=$((fail + 1)); printf '  FAIL 上下文三数关系被破坏:window=%s threshold=%s gate=%s\n' "${CTX_WINDOW:-?}" "${TOKEN_THRESHOLD:-?}" "${CTX_OVERFLOW_GATE:-?}"
+fi
+EXPECT_TOTAL=$((EXPECT_TOTAL + 10))   # 6 拦 + 3 反锁 + 1 结构锁(数段内 expect 行得来,不心算)
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
