@@ -589,6 +589,12 @@ last_prompt_tokens=0
 # + tool + assistant(最终回复),16 条 ≈ 最近 4 轮,足够模型衔接上下文)
 KEEP_MSGS=16
 
+# 旧摘要锁定上限:攒够这么多条就把它们合并重写一次,而不是每次压缩都把摘要再摘要一遍。
+# 动机(5b):摘要被反复再摘要是"关键信息丢失、只能靠上下文猜"的主因 —— 压缩 N 次就是
+# N 层套叠。锁定之后二次摘要变成有意的罕见事件(每 SUMMARY_PIN_MAX 次压缩才发生一次)。
+# 0 = 关闭锁定,退回旧行为(每次都把旧摘要吞进转写重摘要)。
+SUMMARY_PIN_MAX="${SUMMARY_PIN_MAX:-4}"
+
 # 摘要消息的前缀标记:让用户在 -msgs / 历史渲染时能一眼认出"这是压缩过的历史"
 SUMMARY_PREFIX="【历史对话摘要】"
 
@@ -2362,15 +2368,57 @@ truncate_output() {
 # 结构重组为 system + [摘要] + 最近 KEEP_MSGS 条原文。
 # 业界标准做法(Claude Code / Aider):
 #   - 压缩请求用便宜的 flash 模型、stream:false 静默一次拿完,不渲染;
-#   - 摘要作为普通 user 消息插入,历史可被递归再压缩;
+#   - 摘要作为普通 user 消息插入;**旧摘要被锁定**(不再被二次摘要),攒到
+#     SUMMARY_PIN_MAX 条才合并重写一次。布局是纯函数 compact_apply,离线断言见
+#     tests/compaction_pin_probe.sh(压缩器本身要发真实请求,不剥出来就没有回归保护);
 #   - 压缩失败时兜底硬截断(保留 system + 最近原文),绝不让脚本卡死;
 #   - 只在工具链已闭合的边界调用:printContent 发首请求前、tool_run_and_parse
 #     续发下一轮 ask_ai 前。切点安全性由 compact_messages 自己保证(它会把 cut
 #     前移直到 tail 首条不是 tool 消息),不靠调用方记规矩;
 #     两处都要有:只有 printContent 那一处时,-st/-auto 单轮模式永不主动压缩。
+
+# system 之后**连续**的旧摘要条数。它们要被原样保留,不许再喂回压缩器:摘要被反复
+# 再摘要是"历史还在但关键信息没了"的主因(压缩 N 次 = N 层套叠,全靠猜)。
+summary_pin_count() {
+    printf '%s' "$1" | jq -r --arg p "$SUMMARY_PREFIX" '
+        [ .[1:][] | ((.content // "") | startswith($p)) ] | (index(false) // length)' 2>/dev/null
+}
+
+# 压缩后的历史布局,集中成一个不碰网络的纯函数:compact_messages 只管"要不要压、摘要
+# 怎么拿",布局归这里。这样"旧摘要有没有被保住"这条可以离线断言(见
+# tests/compaction_pin_probe.sh),而不是只能靠人在真会话里撞运气。
+# $1=pin(锁定的旧摘要条数) $2=摘要正文(空串 = 压缩失败,只做硬截断) $3=cut(切点索引)
+compact_apply() {
+    local pin="$1" summary="$2" cut="$3"
+    local msg_file sum_file pin_max
+    [[ "$pin" =~ ^[0-9]+$ ]] || pin=0
+    [[ "$cut" =~ ^[0-9]+$ ]] || cut=0
+    # 钳制:锁定块不许越过切点,否则 [system]+[pinned]+[tail] 会把同一条消息数两遍
+    pin_max=$((cut > 1 ? cut - 1 : 0))
+    (( pin > pin_max )) && pin=$pin_max
+    # 整份 messages 走临时文件:它必然超过单参数上限(ARG_MAX 防护见下方专节)
+    msg_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+    printf '%s' "$messages" > "$msg_file"
+    if [[ -n "$summary" ]]; then
+        sum_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+        printf '%s' "$summary" > "$sum_file"
+        messages=$(jq -n --slurpfile m "$msg_file" --argjson pin "$pin" --argjson cut "$cut" \
+            --arg p "$SUMMARY_PREFIX" --rawfile s "$sum_file" \
+            '($m[0])[0:1] + ($m[0])[1:1+$pin] + [{role:"user", content: ($p + "\n" + ($s | rtrimstr("\n")))}] + ($m[0])[$cut:]')
+        rm -f "$sum_file"
+    else
+        # 压缩失败只能硬截断,但已锁定的旧摘要必须原样留下。旧实现是 `.[0:1] + .[$cut:]`,
+        # 连摘要一起丢 —— 网络抖一次就等于凭空删掉一层历史,比"少一次摘要"严重得多。
+        messages=$(jq -n --slurpfile m "$msg_file" --argjson pin "$pin" --argjson cut "$cut" \
+            '($m[0])[0:1] + ($m[0])[1:1+$pin] + ($m[0])[$cut:]')
+    fi
+    rm -f "$msg_file"
+    return 0
+}
+
 compact_messages() {
-    local total cut system_msg tail_msgs to_compact summary request_body
-    local compact_file sys_file tail_file
+    local total cut to_compact summary request_body pin start
+    local compact_file
     total=$(echo "$messages" | jq 'length')
     (( total <= KEEP_MSGS )) && inp_msg "消息数量未达到压缩门槛(当前 ${total} 条)" && return 0
 
@@ -2387,14 +2435,23 @@ compact_messages() {
     # 极端情况:整个对话几乎全是未闭合的工具链,再压没有意义,放弃本次压缩
     (( cut <= 1 )) && inp_msg "工具链过长,跳过本次压缩" && return 0
 
-    system_msg=$(echo "$messages" | jq '.[0]')
-    tail_msgs=$(echo "$messages" | jq --argjson cut "$cut" '.[$cut:]')
+    # 旧摘要锁定(5b 的核心):锁定块不参与本次转写,压缩只吃它之后的新消息。
+    # 攒到上限才合并重写一次 —— 让"二次摘要"从每次必发变成偶尔有意发生。
+    pin=$(summary_pin_count "$messages")
+    [[ "$pin" =~ ^[0-9]+$ ]] || pin=0
+    if (( SUMMARY_PIN_MAX > 0 && pin >= SUMMARY_PIN_MAX )); then
+        inp_msg "📦 旧摘要已攒到 ${pin} 条(上限 ${SUMMARY_PIN_MAX}),本次合并重写一次——这种有损合并每 ${SUMMARY_PIN_MAX} 次压缩才发生一次"
+        pin=0
+    fi
+    # 锁定块之外没有新内容:白烧一次摘要请求,直接放弃
+    (( cut <= 1 + pin )) && inp_msg "📦 除 ${pin} 条已锁定摘要外没有新内容可压缩,跳过本次" && return 0
+    start=$((1 + pin))
 
     # 中间段转成 "[role] content" 可读文本,减少压缩请求的输入 token;
     # assistant 带 tool_calls 的消息 content 为 null,单独转成一行描述,
     # 保证"模型调用了哪个工具、什么参数"这一关键信息不丢
-    to_compact=$(echo "$messages" | jq -r --argjson cut "$cut" '
-        .[1:$cut][] |
+    to_compact=$(echo "$messages" | jq -r --argjson start "$start" --argjson cut "$cut" '
+        .[$start:$cut][] |
         if .tool_calls != null then
             "[assistant → 工具调用] " + (.tool_calls | tostring)
         else
@@ -2434,19 +2491,15 @@ compact_messages() {
     rm -f "$compact_file"
 
     if [[ -z "$summary" ]]; then
-        messages=$(echo "$messages" | jq --argjson cut "$cut" '.[0:1] + .[$cut:]')
-        inp_msg "⚠️  压缩失败(网络/接口错误),已回退:保留 system + 最近 $KEEP_MSGS 条原文"
+        # 失败也必须走 compact_apply:旧摘要要保住(见该函数注释里的旧行为)
+        compact_apply "$pin" "" "$cut"
+        inp_msg "⚠️  压缩失败(网络/接口错误),已回退:保留 system + ${pin} 条旧摘要 + 最近 $KEEP_MSGS 条原文"
     else
-        # system_msg/tail_msgs 可能很大:--argjson 传参撞 ARG_MAX,走 slurpfile
-        sys_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-        printf '%s' "$system_msg" > "$sys_file"
-        tail_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-        printf '%s' "$tail_msgs" > "$tail_file"
-        messages=$(jq -n --slurpfile sys "$sys_file" --arg prefix "$SUMMARY_PREFIX" \
-            --arg summary "$summary" --slurpfile tail "$tail_file" \
-            '[ $sys[0], {role: "user", content: ($prefix + "\n" + $summary)}, $tail[0][] ]')
-        rm -f "$sys_file" "$tail_file"
-        inp_msg "✅ 压缩完成:$total 条消息 → 1 条摘要 + $KEEP_MSGS 条原文"
+        # 布局集中在 compact_apply:它不碰网络,所以"旧摘要有没有原样保留"能被
+        # tests/compaction_pin_probe.sh 离线钉住。ARG_MAX 防护(大 messages 走临时文件)
+        # 也在那里,两条分支共用一份实现,避免"成功/失败两处口径漂移"。
+        compact_apply "$pin" "$summary" "$cut"
+        inp_msg "✅ 压缩完成:$total 条消息 → 保留 $pin 条旧摘要 + 1 条新摘要 + 最近 $KEEP_MSGS 条原文"
     fi
     # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
     last_prompt_tokens=0
