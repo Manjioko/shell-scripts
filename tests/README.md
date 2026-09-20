@@ -11,11 +11,15 @@
 
 | 闸门 | 命令(都用 `/opt/homebrew/bin/bash`,产品要求 bash 5+) | 我看过的真实结论 |
 | --- | --- | --- |
+> 基线数于 2026-08-07 从 **517 重固化为 527**:新增第十八轮 H13(写目标不可解析)6 条拦截 + 3 条反锁 + 1 条"上下文三数关系"结构锁。
+> 那次全表跑不出 RESULT 的根因不是判据坏了,是 harness 变量抽取 `grep -vF '$('` 把 `$((…))` 算术派生
+> 一起排除在外,夹具里 TOKEN_THRESHOLD/CTX_OVERFLOW_GATE 根本不存在 —— 详见该文件第 74 行注释。
+
 | 全表断言(即"517 那张表") | `bash test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
 | 判据规则失败核查 | `bash tests/rulefail_check.sh` | `PASS=111 FAIL=0` |
 | 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |
 | 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
-| 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限、`trunc`/`tlen`,以及新增的 `root` 工作根字段) |
+| 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限、`trunc`/`tlen`、`root` 工作根、`pol` 生效判据版本) |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
 | 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 46 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本。负对照:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |

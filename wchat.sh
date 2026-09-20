@@ -3175,8 +3175,13 @@ auto_write_fuse() {
     local abs="$1" log n
     [[ -n "$auto_mode" ]] || return 0
     [[ -n "$abs" ]] || return 0
-    log="$AUTO_DIR/writes-$auto_session_id.log"
-    mkdir -p "$AUTO_DIR" 2>/dev/null || return 0
+    # 状态目录或会话号缺失(极简环境,或夹具按名单抽函数、不跑启动期赋值)时**退回不判**:
+    # 熔断只是进度刹车,不许它自己在 set -u 下把调用方打死。本轮真实踩过:现象是"表跑到
+    # path_access 段静默退出、连一条 FAIL 都不打印",因为那句调用带 >/dev/null 2>&1。
+    local base="${AUTO_DIR:-}" sess="${auto_session_id:-}"
+    [[ -n "$base" && -n "$sess" ]] || return 0
+    log="$base/writes-$sess.log"
+    mkdir -p "$base" 2>/dev/null || return 0
     # grep -c 在"无匹配"时 rc=1、文件不存在时 rc=2,两种都要吞掉:这里是取计数,不是判成败
     n=$(grep -cxF "$abs" "$log" 2>/dev/null || true)
     [[ "$n" =~ ^[0-9]+$ ]] || n=0
@@ -3220,14 +3225,18 @@ POLICY_SHA=$(_policy_hash_of "$POLICY_FILE")
 POLICY_MTIME=$(_policy_stat "$POLICY_FILE" %Y %m)
 POLICY_SIZE=$(_policy_stat "$POLICY_FILE" %s %z)
 policy_self_check() {
-    [[ -n "$auto_mode" ]] || return 0
-    (( auto_downgraded )) && return 0     # 已经掉过档,不必再算
-    [[ -n "$POLICY_SHA" ]] || return 0    # 没有任何哈希工具:宁可漏告警,不可误降级
-    local m s h
-    m=$(_policy_stat "$POLICY_FILE" %Y %m)
-    s=$(_policy_stat "$POLICY_FILE" %s %z)
+    # 三个 POLICY_* 基准值都在赋值时调了外部命令(sha/stat),夹具装载器按规矩排除带命令
+    # 替换的行 → 在夹具里它们一律是空。所以这里全部走 ${X:-} 取值、空即退回不判:
+    # 自检缺席只是少一道保险,把调用方在 set -u 下打死才是事故。
+    [[ -n "${auto_mode:-}" ]] || return 0
+    (( ${auto_downgraded:-0} )) && return 0        # 已经掉过档,不必再算
+    [[ -n "${POLICY_SHA:-}" ]] || return 0         # 没有哈希工具/没装载:宁可漏告警,不可误降级
+    local f="${POLICY_FILE:-}" m s h
+    [[ -n "$f" && -f "$f" ]] || return 0
+    m=$(_policy_stat "$f" %Y %m)
+    s=$(_policy_stat "$f" %s %z)
     # 大小与 mtime 都没动就不重算哈希(每次终审都哈希 400KB 是白烧)
-    [[ "$m" == "$POLICY_MTIME" && "$s" == "$POLICY_SIZE" ]] && return 0
+    [[ "$m" == "${POLICY_MTIME:-}" && "$s" == "${POLICY_SIZE:-}" ]] && return 0
     h=$(_policy_hash_of "$POLICY_FILE")
     if [[ -z "$h" || "$h" == "$POLICY_SHA" ]]; then
         # 哈希回来一致(编辑后又还原/只是 touch):刷新基准,继续 auto

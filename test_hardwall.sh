@@ -71,7 +71,16 @@ granted_files=()
 # 小写 auto_* 必须一起装载：`auto_tmp_prefixes=()` 漏了就在 hard_deny_path 里踩
 # unbound variable 当场打死脚本。但带命令替换的行（auto_session_id="$(date …)"）
 # 要排除——测试进程不该执行被测脚本里那些有副作用的语句。
-eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|HD_[A-Z0-9_]*|CTX_[A-Z0-9_]*|POLICY_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vF '$(')" 2>/dev/null
+# 排除条件原本是 grep -vF 美元括号 —— 它把算术派生也一起扔了(写法同样以美元括号开头),
+# 于是 TOKEN_THRESHOLD 这类由 CTX_WINDOW 派生的行不被装载,夹具里引用它的函数在 set -u
+# 下当场打死脚本。本轮实测:表跑到 path_access 段静默退出、连一条 FAIL 都不打印,因为
+# 那句调用带着重定向到 /dev/null,报错一起被吞了。
+# 真正该防的是"有副作用的命令替换"(date/pid 一类),所以只排后面不跟左括号的展开。
+# 模式单独放一行:写进 eval 的嵌套引号里会让 bash 找命令替换闭合时踩到字符类中的括号,
+# 整脚本从该行之后变成语法垃圾(实测报错报到 102 行,离真凶 30 行远)。
+_hw_nosub='\$\([^()]'
+
+eval "$(grep -E '^(hd_[a-z_0-9]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|HD_[A-Z0-9_]*|CTX_[A-Z0-9_]*|POLICY_[A-Z0-9_]*|TOKEN_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$SRC_ABS" | grep -vE "$_hw_nosub")" 2>/dev/null
 auto_tmp_prefixes=("/nonexistent-tmp-prefix-for-test")
 # 数组意外为空说明**上面那个哨兵没生效**(装载环节坏了),这时明确报 harness 问题并跳过
 # T7,别让被测函数在空数组上跑出看不出所以然的红。
@@ -1955,7 +1964,7 @@ expect H13 'defaults write 改偏好库,命令里没有可判目标'           '
 expect H13 'plutil 带绝对路径也只到文件不到键,越界判据对不上'      'plutil -replace Key -value 1 /Users/x/Library/Preferences/a.plist'
 expect H13 'git config --global 写 ~/.gitconfig,不在 WORK_ROOT'  'git config --global user.name bot'
 expect H13 'osascript 可驱动任意 app,写目标完全不可知'            "osascript -e 'tell application \"Finder\" to quit'"
-expect H13 'launchctl unload 改服务定义,快照覆盖不到'             'launchctl unload /Users/x/Library/LaunchAgents/x.plist'
+expect 'H8|H13' 'launchctl unload 改服务定义(H8 电源/服务级在前,只锁"拦住",不押规则号)' 'launchctl unload /Users/x/Library/LaunchAgents/x.plist'
 expect H13 'sqlite3 带 update 时不能按文件判越界'                 "sqlite3 /Users/x/a.db 'update t set a=1'"
 # 反锁:同族动词的只读 / 仓库内形态不许被顺手拦死(收紧过头是这类改动最常见的回归)
 expect NP  '反锁:defaults read 只读,不算写'                     'defaults read com.apple.Finder'

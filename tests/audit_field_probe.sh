@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 第十九轮回归资产:auto_audit 落盘字段的自证探针。
-# 检查三件事:
+# 检查四件事(trunc/tlen 三档 + root 工作根 + pol 判据版本):
 #   1. target 上限 400 → 1200(1500 字命令应被截到 1200);
 #   2. 新字段 trunc 按**原始长度**判定 —— 截断与否由写盘端说,不让读盘端猜;
 #   3. tlen 记下原始长度,便于日后核算"有多少语料是因为封顶才丢的"。
@@ -43,6 +43,12 @@ for line in open(sys.argv[1], encoding="utf-8"):
     if "root" not in o:
         bad += 1
         print("  不符: 审计行缺 root 字段")
+    # pol 字段 = 当时生效的判据版本(POLICY_SHA)。H5 那笔争议的根问题就是"无法证明当时
+    # 跑的是哪一版判据",现在每条审计都自带版本号。只判"键在不在":夹具按名字抽配置、
+    # 且刻意排除带命令替换的赋值行 → POLICY_SHA 为空是预期,键被删才是回归。
+    if "pol" not in o:
+        bad += 1
+        print("  不符: 审计行缺 pol 字段(生效判据版本)")
     w = want[r]
     ok = (t is w[0] and ln == w[1] and tl == w[2])
     if not ok:
