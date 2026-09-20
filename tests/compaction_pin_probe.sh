@@ -13,7 +13,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/cpp.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
 
 # 只抽需要的:三个配置 + 两个纯函数(按名字抽函数体,到行首 } 止)
 eval "$(grep -E '^(KEEP_MSGS|SUMMARY_PREFIX|SUMMARY_PIN_MAX)=' "$SRC")"
-for _f in summary_pin_count compact_apply; do
+for _f in compact_due summary_pin_count compact_apply; do
     awk -v fn="$_f" '$0 ~ "^"fn"\\(\\) \\{" {p=1} p {print} p && /^\}$/ {exit}' "$SRC" > "$TMP/$_f.sh"
     # shellcheck disable=SC1090
     source "$TMP/$_f.sh"
@@ -36,6 +36,39 @@ m=$(jq -n --arg p "$SUMMARY_PREFIX" '[
       {role:"user",content:("x"+$p+"不是开头的摘要")} ]')
 # 旧摘要 1 的原文,后面用来验"逐字保留"
 o1=$(jq -rn --arg p "$SUMMARY_PREFIX" '$p+"\n旧1"')
+
+echo "compact_due:要不要压(两处触发点与 compact_messages 共用这一份口径)"
+# 阈值显式设成本地值:这一档测的是**判据形状**,与产品默认派生式无关
+# (CTX_WINDOW→TOKEN_THRESHOLD 的派生关系已由 test_hardwall.sh 的"三数关系"结构锁钉住)
+TOKEN_THRESHOLD=100000
+_due() { if compact_due "$1"; then echo 压; else echo 不压; fi; }
+ck "t=0 不压(新进程尚无精确值 —— -st 单轮的边界形状)" "$(_due 0)"        "不压"
+ck "阈值下一格不压"                                "$(_due 99999)"       "不压"
+ck "正好等于阈值不压(严格 >,不是 >=)"              "$(_due 100000)"      "不压"
+ck "超一格就压"                                    "$(_due 100001)"      "压"
+ck "阈值被裁空时不压(半装载不许每轮都压)"          "$(TOKEN_THRESHOLD= _due 500000)" "不压"
+ck "阈值为 0 时不压(同上,烧钱且每次多一层摘要)"    "$(TOKEN_THRESHOLD=0 _due 500000)" "不压"
+ck "t 为空视为无基准,不压"                          "$(_due '')"         "不压"
+ck "t 不是数字也不炸、判不压"                       "$(_due abc)"          "不压"
+
+echo "接线锁:判据对不代表调用点还在、还在该在的位置"
+# 这几条一律按"代码形态"数,不按 compact_due 出现次数 —— 注释里也写得到函数名,
+# 按次数数会变成"改一行注释就把闸门弄红"的假敏感。
+_d1=$(grep -c '^compact_due() {' "$SRC" || true)
+ck "定义恰好 1 处" "$_d1" "1"
+_d2=$(grep -cF 'compact_due "$last_prompt_tokens"' "$SRC" || true)
+ck "调用恰好 3 处(compact_messages 选提示语 + 两处触发点)" "$_d2" "3"
+_tg=$(grep -c '&& compact_messages' "$SRC" || true)
+ck "触发点恰好 2 处(少一处就是有人把 -st 那条路径又弄丢了)" "$_tg" "2"
+_raw=$(grep -cF '(( last_prompt_tokens > TOKEN_THRESHOLD ))' "$SRC" || true)
+ck "没有裸判据残留(这条判据不许再被抄回调用点)" "$_raw" "0"
+# 触发点必须排在"发请求"之前 —— 挪到 ask_ai 之后等于回到"永不触发"(见 e67ac6a)
+_tp=$(grep -nF 'compact_due "$last_prompt_tokens" && compact_messages' "$SRC" | cut -d: -f1 | tr '\n' ' ')
+_bad=0
+for _l in $_tp; do
+    awk -v s="$_l" 'NR>s && NR<=s+6 && /make_request_body/ {f=1} END{exit f?0:1}' "$SRC" || _bad=$((_bad + 1))
+done
+ck "每个触发点都在 make_request_body 之前 6 行内" "$_bad" "0"
 
 echo "summary_pin_count:只数 system 之后**连续**的旧摘要"
 ck "连续 2 条被数出"                "$(summary_pin_count "$m")" "2"

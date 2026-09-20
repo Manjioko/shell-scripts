@@ -2377,6 +2377,24 @@ truncate_output() {
 #     前移直到 tail 首条不是 tool 消息),不靠调用方记规矩;
 #     两处都要有:只有 printContent 那一处时,-st/-auto 单轮模式永不主动压缩。
 
+# 要不要压缩:**唯一口径**。三处都用它(compact_messages 选提示语、printContent 发首请求前、
+# tool_run_and_parse 续发前)—— 同一件事抄三遍是这个仓库反复出事的形状,判据也不例外。
+# $1 = 精确 prompt_tokens(来自 API usage)。t=0 表示"新进程尚无精确值"(刚启动/刚加载历史),
+# 此时**不压**。这条不是随手写的兜底:它就是 -st/-auto 单轮模式那个"永不触发"缺陷的边界所在
+# —— 新进程第一次进 printContent 时 t 恒为 0(上下文还没建立,不该压),而工具链里再次走到
+# 同一判据时 t 已有值(该压就得压)。探针里 t=0 那一档钉的就是这个区分。
+# 阈值空/0 一律不压:半装载的夹具、被裁剪的配置段,都不该把每一轮变成一次压缩
+# (白烧一次摘要请求 + 每次多一层有损摘要)。
+compact_due() {
+    local t=${1:-0} g=${TOKEN_THRESHOLD:-0}
+    [[ "$t" =~ ^[0-9]+$ ]] || t=0
+    [[ "$g" =~ ^[0-9]+$ ]] || g=0
+    # g>0 必须显式判:光写 t>g 的话,阈值被裁空/置 0 时任何 t>0 都成立,半装载的
+    # 环境会把每一轮都变成一次压缩(白烧请求 + 每次多一层有损摘要)。这条注释与代码
+    # 曾各写各的,是探针的"阈值空/0 不压"两档把它逮出来的。
+    (( g > 0 && t > g ))
+}
+
 # system 之后**连续**的旧摘要条数。它们要被原样保留,不许再喂回压缩器:摘要被反复
 # 再摘要是"历史还在但关键信息没了"的主因(压缩 N 次 = N 层套叠,全靠猜)。
 summary_pin_count() {
@@ -2458,7 +2476,7 @@ compact_messages() {
             "[" + .role + "] " + (.content // "")
         end')
 
-    if (( last_prompt_tokens > TOKEN_THRESHOLD )); then
+    if compact_due "$last_prompt_tokens"; then
         inp_msg "📦 上下文 $last_prompt_tokens tokens 已超阈值 $TOKEN_THRESHOLD,正在自动压缩历史…"
     else
         inp_msg "📦 正在压缩历史…(当前 ${last_prompt_tokens:-0} tokens,阈值 $TOKEN_THRESHOLD)"
@@ -6574,7 +6592,7 @@ tool_run_and_parse() {
     # 按字节粗算补救,每次越界都要先付一次失败请求。
     # 这里是不是安全边界:是。上方刚给所有 tool_call_id 补齐配对的 tool 消息,
     # 而 compact_messages 的 cut 会前移直到 tail 首条不是 tool(见其工具链对齐注释)。
-    (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
+    compact_due "$last_prompt_tokens" && compact_messages
 
     request_body=$(make_request_body)
     ask_ai "$request_body" 1
@@ -6916,8 +6934,8 @@ printContent() {
 
     # 上下文超阈值时先压缩再发送。这是"用户新一轮输入"的边界;工具链中途的
     # 同名检查在 tool_run_and_parse 续发前(两处都要 —— 新进程 last_prompt_tokens
-    # 为 0,只留这一处的话 -st/-auto 单轮模式永远压不到)
-    (( last_prompt_tokens > TOKEN_THRESHOLD )) && compact_messages
+    # 为 0,只留这一处的话 -st/-auto 单轮模式永远压不到)。判据一律走 compact_due。
+    compact_due "$last_prompt_tokens" && compact_messages
 
     # 构建请求体:大体积 messages 经临时文件传入,防止 jq --argjson 撞
     # ARG_MAX(详见 make_request_body 注释);-tr/-to 模式不发送工具
