@@ -21,6 +21,7 @@
 | 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |
 | 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
 | 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限、`trunc`/`tlen`、`root` 工作根、`pol` 生效判据版本) |
+| 闸门对账(一条命令跑完上列全部) | `bash tests/run_gates.sh` | 每道必须 **rc=0 且匹配到自己的结论行**;`--list` 看清单,`--main` 加主套件 |
 | 压缩布局探针 | `bash tests/compaction_pin_probe.sh` | 16/16 通过(**不联网络**钉住旧摘要锁定:`summary_pin_count` / `compact_apply`;含"失败硬截断也不许丢掉摘要"这条) |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
