@@ -17,8 +17,45 @@
 # qwen
 # https://ws-h1sc9zrfrttu9ixx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions
 # mimo
-# https://api.xiaomimimo.com/v1/chat/completions    
-BASE_URL="${BASE_URL:-https://ws-h1sc9zrfrttu9ixx.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions}"
+# https://api.xiaomimimo.com/v1/chat/completions
+
+# ---------- stat 数字字段取值(GNU/BSD 兼容) ----------
+# 取 stat 的数字字段：GNU coreutils 用 -c，BSD/macOS 用 -f。
+# 顺序必须 GNU 在前：GNU stat 的 -f 是 --file-system 且**不接格式参数**，
+# "stat -f '%m' f" 会把 '%m' 当成第二个文件参数 —— 真错误只进 stderr(常被
+# 2>/dev/null 吃掉)，stdout 照样打印整块文件系统信息(File/ID/Block size/
+# Inodes…)且退出码 1，于是 || 后面的 stat -c 也执行，两段输出拼成一个多行
+# 串。喂进 (( )) 就是 "syntax error in expression"(历史 bug: wchat -l 每个
+# 历史文件刷 6 行报错，且插入排序条件恒假 → 列表退化成 glob 字母序、
+# 空输入"加载最新一条"实际加载到字母序第一条)。
+# 取值后强制校验纯数字：任何实现(busybox/别名/异常)给出脏值都退化成 0，
+# 而不是把报错留给下游的算术上下文。
+stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
+    local _v
+    _v=$(stat -c "$1" -- "$3" 2>/dev/null)
+    [[ "$_v" =~ ^[0-9]+$ ]] || _v=$(stat -f "$2" "$3" 2>/dev/null)
+    [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
+    printf '%s' "$_v"
+}
+# ---------- 本地配置文件 ~/.ct/config ----------
+# 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
+# 加载前校验权限:被同机其他用户可读写时拒绝加载(否则等于把 key 交给别人)。
+CT_CONFIG_FILE="${CT_CONFIG_FILE:-$HOME/.ct/config}"
+if [[ -z "$API_KEY" && -f "$CT_CONFIG_FILE" ]]; then
+    _cfg_perm=$(stat_num '%a' '%Lp' "$CT_CONFIG_FILE")
+    if [[ -n "$_cfg_perm" && "$_cfg_perm" != "600" && "$_cfg_perm" != "400" ]]; then
+        printf '\033[31m✗ %s 权限为 %s(应为 600),已拒绝加载:\033[0m chmod 600 "%s"\n' \
+            "$CT_CONFIG_FILE" "$_cfg_perm" "$CT_CONFIG_FILE" >&2
+    else
+        # shellcheck disable=SC1090
+        # cat "$CT_CONFIG_FILE"
+        source "$CT_CONFIG_FILE"
+    fi
+    unset _cfg_perm
+fi
+
+
+BASE_URL="${BASE_URL:-}"
 # api key 读取顺序:环境变量 WCHAT_API_KEY → ~/.ct/config(0600)。
 # 刻意**不再把明文 key 写回本脚本**:本目录是 git 仓库(且已 push 到 github),
 # auto 模式下模型有无次数的 cat wchat.sh + curl 机会,"脚本里没有 key"是唯一
@@ -41,8 +78,8 @@ API_KEY="${WCHAT_API_KEY:-}"
 # -stf/-stp 两个切档分支取的就是这两个变量本身,所以覆盖后运行时切档一并走新值;
 # 联网的 provider 探测也读 flash_model(按模型名前缀 mimo*/qwen* 兜底),只设环境变量
 # 时该判定同样生效。图片链路**不做厂商探测**(单端点,见「图片转述」节)。
-flash_model="${FLASH_MODEL:-qwen3.8-flash}"
-pro_model="${PRO_MODEL:-qwen3.8-flash}"
+flash_model="${FLASH_MODEL:-}"
+pro_model="${PRO_MODEL:-}"
 # 图片转述用哪个模型见下方 VISION_MODEL(留空=用 flash_model)。主对话换成纯文字
 # 模型(deepseek 等)不影响读图;彻底关闭图片链路:环境变量 IMG_PROVIDER=none
 # ===============================👆👆========================
@@ -106,40 +143,6 @@ IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}  # 一次请求图片字节
 CTX_WINDOW="${CTX_WINDOW:-1000000}"
 TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-$((CTX_WINDOW * 3 / 4))}"
 CTX_OVERFLOW_GATE="${CTX_OVERFLOW_GATE:-$((CTX_WINDOW * 5 / 8))}"
-# ---------- stat 数字字段取值(GNU/BSD 兼容) ----------
-# 取 stat 的数字字段：GNU coreutils 用 -c，BSD/macOS 用 -f。
-# 顺序必须 GNU 在前：GNU stat 的 -f 是 --file-system 且**不接格式参数**，
-# "stat -f '%m' f" 会把 '%m' 当成第二个文件参数 —— 真错误只进 stderr(常被
-# 2>/dev/null 吃掉)，stdout 照样打印整块文件系统信息(File/ID/Block size/
-# Inodes…)且退出码 1，于是 || 后面的 stat -c 也执行，两段输出拼成一个多行
-# 串。喂进 (( )) 就是 "syntax error in expression"(历史 bug: wchat -l 每个
-# 历史文件刷 6 行报错，且插入排序条件恒假 → 列表退化成 glob 字母序、
-# 空输入"加载最新一条"实际加载到字母序第一条)。
-# 取值后强制校验纯数字：任何实现(busybox/别名/异常)给出脏值都退化成 0，
-# 而不是把报错留给下游的算术上下文。
-stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
-    local _v
-    _v=$(stat -c "$1" -- "$3" 2>/dev/null)
-    [[ "$_v" =~ ^[0-9]+$ ]] || _v=$(stat -f "$2" "$3" 2>/dev/null)
-    [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
-    printf '%s' "$_v"
-}
-
-# ---------- 本地配置文件 ~/.ct/config ----------
-# 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
-# 加载前校验权限:被同机其他用户可读写时拒绝加载(否则等于把 key 交给别人)。
-CT_CONFIG_FILE="${CT_CONFIG_FILE:-$HOME/.ct/config}"
-if [[ -z "$API_KEY" && -f "$CT_CONFIG_FILE" ]]; then
-    _cfg_perm=$(stat_num '%a' '%Lp' "$CT_CONFIG_FILE")
-    if [[ -n "$_cfg_perm" && "$_cfg_perm" != "600" && "$_cfg_perm" != "400" ]]; then
-        printf '\033[31m✗ %s 权限为 %s(应为 600),已拒绝加载:\033[0m chmod 600 "%s"\n' \
-            "$CT_CONFIG_FILE" "$_cfg_perm" "$CT_CONFIG_FILE" >&2
-    else
-        # shellcheck disable=SC1090
-        source "$CT_CONFIG_FILE"
-    fi
-    unset _cfg_perm
-fi
 if [[ -z "$API_KEY" ]]; then
     _hint="mkdir -p ~/.ct && echo 'API_KEY=\"sk-你的key\"' > ~/.ct/config && chmod 600 ~/.ct/config"
     printf '\033[31m✗ 未配置 API_KEY。\033[0m任选一种:\n' >&2
