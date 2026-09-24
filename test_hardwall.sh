@@ -1784,7 +1784,18 @@ echo 'T27 H5 写目标关联:能证明无关才放行'
 expect NP "只读列目录 + 写 /tmp(本轮真实打断测量那条)" 'ls -la ~/.ct/ > /tmp/r9.txt'
 expect NP "读 dotfile 同时写 /tmp(原[设计如此]预约兑现)" 'cat ~/.bashrc > /tmp/o.txt'
 expect NP "sed 无 -i 是预览,输出写 /tmp"                "sed 's/a/b/' ~/.bashrc > /tmp/preview.txt"
-expect NP "目标在工作根而工作根在 HOME 内"               'cat ~/.bashrc > /Users/jwan/bin/out.txt'
+# 这条断言的名字里写着"工作根在 HOME 内",而本表顶层 WORK_ROOT="$PWD" —— 它一直是靠
+# "$PWD 恰好等于 /Users/jwan/bin" 这个巧合才绿的(换目录跑立刻红成 P3)。前提必须钉住:
+# 就地借 $HOME 现造一个"在 HOME 内的工作根",目标用同一个变量拼,走到哪台机器都成立。
+_hw_wr="$WORK_ROOT"; WORK_ROOT="$HOME/bin"
+expect NP "目标在工作根而工作根在 HOME 内(根就地钉在 \$HOME/bin)" \
+    "cat ~/.bashrc > $WORK_ROOT/out.txt"
+# 反向必须一起钉:同一落点、根不是它 → 判越界。少了这条,下次谁"消红"的写法就会是放宽期望。
+WORK_ROOT="$HOME/hw-probe-other-root"
+expect P3 "反例:落点在 \$HOME/bin 而工作根不是它 → P3(钉前提≠放宽期望)" \
+    "cat ~/.bashrc > $HOME/bin/out.txt"
+EXPECT_TOTAL=$((EXPECT_TOTAL + 1))   # 成对钉的两条不在按前缀 grep 数出来的那批里,各加一条
+WORK_ROOT="$_hw_wr"; unset _hw_wr
 expect NP "目标带双引号"                                 'cat ~/.bashrc > "/tmp/q.txt"'
 expect NP "目标带单引号"                                 "cat ~/.bashrc > '/tmp/q2.txt'"
 expect NP "> 后无空格"                                   'cat ~/.bashrc >/tmp/nospace.txt'
@@ -1868,7 +1879,16 @@ expect NP  "反锁:cp 从系统目录读出来看"     'cp /usr/share/doc/readme
 expect NP  "反锁:sed 只读系统文件"          'sed -n "1,5p" /etc/hosts'
 expect NP  "反锁:rsync 目标在未保护目录"    'rsync -av ./src /var/tmp/mirror'
 expect NP  "反锁:落点是变量,证明不了"       'echo x > "$TMPDIR/out.log"'
-expect NP  "反锁:落点由变量拼出,证明不了"    'cp /tmp/x "${HOME}/bin/y"'
+# 同上一条:这条的前提也是"工作根 == $HOME/bin"(命令里的 ${HOME} 会被归一,落在根内才放行;
+# 根不是它时就该判 P3 —— 那是**正确**行为,不是 bug)。所以钉住根,而不是放宽期望。
+_hw_wr="$WORK_ROOT"; WORK_ROOT="$HOME/bin"
+expect NP  "反锁:落点由变量拼出,证明不了(根就地钉在 \$HOME/bin)"  'cp /tmp/x "${HOME}/bin/y"'
+# 反向:根不是它时同一个变量拼出的落点必须判越界 —— 这条与上一条成对,单独留下任一条都能被
+# "改期望值"糊过去,配成对才糊不住。
+WORK_ROOT="$HOME/hw-probe-other-root"
+expect P3  "反例:变量拼出的落点不在工作根内 → P3"                'cp /tmp/x "${HOME}/bin/y"'
+EXPECT_TOTAL=$((EXPECT_TOTAL + 1))   # 同上:反例单独计数
+WORK_ROOT="$_hw_wr"; unset _hw_wr
 # ── /private 名单精确化(第十四轮)────────────────────────────────────────
 # 旧名单里有裸 token `private`,而 macOS 上 /tmp 的真身就是 /private/tmp(`cd /tmp &&
 # pwd -P` 天天产出这种路径),于是出现自相矛盾:写 /private/tmp/x 撞 H11,理由却是
