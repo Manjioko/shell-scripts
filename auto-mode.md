@@ -92,8 +92,14 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 
 ## 四、硬墙清单（改它之前先看第七节）
 
-### shell 命令 `hard_deny_cmd` → `H1..H12`
+### shell 命令 `hard_deny_cmd` → `H1..H14`
 
+> **判据吃的是原样多行的命令**。调用点曾把 `${command//$'\n'/ }`（一行版，只给展示/审计/
+> 终审用）喂进 `hard_deny_cmd`，于是所有"按行/按段"的判据一起退化：`hd_install_tail` 的
+> "动词必须段首"失效（只读 python heredoc 被判装包，H14 审计命中 6/6 全是误拦）、
+> `hd_noncode_payload` 没有正文行可剥（表里 T22 那条缓解在产品路径上从未生效）、
+> `hd_h11_scan` 的"第 N 行"坐标恒为第 1 行。行边界的正规处理归 `hd_fold_lines`
+> （`\`+换行折空格、裸换行前补 `;`、含 `<<` 不折），不要在它上游再做一次更粗的折叠。
 > 匹配域：H2/H3/H4 是**整串正则**，命中后还要过一道 `hd_recheck`（把「只读动词的带引号
 > 参数」脱敏后再匹一次，仍命中才算数）——否则 `grep -n 'rm ' ~/.ct/auto/audit.log` 这种
 > 只读命令会被 H3 误杀。误杀的代价不是白烧一次调用，而是**教模型换写法绕过扫描器**，
@@ -116,6 +122,8 @@ auto 模式把这些交给人工以外的东西决定，**但不是交给模型�
 | H10 | `curl --upload-file` / `-d @文件` 上送 `.env`、`*.key` | 外发，不可回滚 |
 | H11 | 重定向/`tee` 写入系统路径，名单是**两平台并集**：`/etc` `/usr` `/bin` `/sbin` `/System` `/Library` `/private` `/Applications` `/var/root` + `/proc` `/sys` `/run` `/boot` `/lib` `/lib64` `/srv` `/media` `/mnt` `/root` | 持久改变系统，不在 checkpoint 覆盖范围。`/root`（Linux 的 root 家）与 macOS 侧已有的 `/var/root` **成对**：漏掉它 `echo k > /root/.ssh/authorized_keys` 就只剩一条可放开的 P3。刻意**不含 `home`/`Users`**——用户目录按"两侧同为 P3"处理，写进这里会造成单侧加严（shell 撞 H11、文件工具只落 P3） |
 | （H12 层） | auto 下重定向/写动词的目标越界 | **规则号沿用 P1/P2/P3**，不复造第二套编号 |
+| H13 | 写目标在审批层**不可解析**：`defaults write/delete`、`plutil -replace/-insert/-convert`、`osascript`、`launchctl load/unload`、`sqlite3` 带 DML、`git config --global/--system`、`security add-*/delete-*`、`networksetup`、`tccutil reset`、`htpasswd`、`xattr -w`、`codesign --sign`、`installer -pkg` | 命令里根本没有可判的路径（`defaults write com.x k v` 改的是 `~/Library/Preferences` 里的键）：H12 的越界判据提不出目标、快照/备份也覆盖不到。按"有写语义但目标不可知"处理，与 `hd_has_write` 同一思路：不确定归到拦的那一侧。刻意不做逐动词路径白名单——那正是"每个特例都要人记住"的债 |
+| H14 | **安装面**：段首是包管理器（brew/pip/npm/pnpm/yarn/gem/cargo/go/uv/apt/dnf/yum/apk/composer，或解释器的 `setup.py install`/`-m pip install`）且出现 `install`/`add`/`tap`（裸 `i` 只认紧跟管理器的第一个实参位）；**换源形状有授权也拒**（`--registry`/`--index-url`/`-i http…`/`PIP_INDEX_URL=`/`brew tap <URL>`） | 装完落在 `WORK_ROOT` 之外（H12 提不到目标）、以你的 uid 跑第三方 postinstall、且不在快照回滚范围内。唯一出口是人**启动时** `--allow-install 包名…` 点名（配额 `AUTO_MAX_INSTALLS`）。三条口径钉住误杀面（本轮审计 H14 命中 6 次全是误拦后定的）：① **必须段首**，禁止"提不出名字就退回全文正则"的兜底（那等于把段首作废，`git commit -m "brew install …"` 会当场变红）；② **heredoc 定界符之后是载荷，不算本段参数**（但正文各自成段照常按代码判，`bash - <<SH` 里真写 `pip install` 照拦）；③ 名字进话术前过字符集与长度，提错时不许把用户正文印进审批卡与只追加的审计 |
 
 ### 文件路径 `hard_deny_path` → `P1..P3`
 

