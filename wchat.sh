@@ -41,7 +41,11 @@ stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
 # 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
 # 加载前校验权限:被同机其他用户可读写时拒绝加载(否则等于把 key 交给别人)。
 CT_CONFIG_FILE="${CT_CONFIG_FILE:-$HOME/.ct/config}"
-if [[ -z "$API_KEY" && -f "$CT_CONFIG_FILE" ]]; then
+# $API_KEY 要等第 64 行才定义，这里就取它 → 带 `set -u` 的调用方(测试夹具正是)在
+# 这一行当场 unbound 而死，走不到文件末尾的 _WCHAT_LIB_ONLY 装载口:实测 T23 两条红
+# ("装载口没生效"/"函数没定义完")报的都是这里，看起来却像"口没实现"。`${API_KEY:-}`
+# 对正常执行完全等价(那时它同样是空)，只是不再打死 strict 模式的 source。
+if [[ -z "${API_KEY:-}" && -f "$CT_CONFIG_FILE" ]]; then
     _cfg_perm=$(stat_num '%a' '%Lp' "$CT_CONFIG_FILE")
     if [[ -n "$_cfg_perm" && "$_cfg_perm" != "600" && "$_cfg_perm" != "400" ]]; then
         printf '\033[31m✗ %s 权限为 %s(应为 600),已拒绝加载:\033[0m chmod 600 "%s"\n' \
@@ -143,7 +147,10 @@ IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}  # 一次请求图片字节
 CTX_WINDOW="${CTX_WINDOW:-1000000}"
 TOKEN_THRESHOLD="${TOKEN_THRESHOLD:-$((CTX_WINDOW * 3 / 4))}"
 CTX_OVERFLOW_GATE="${CTX_OVERFLOW_GATE:-$((CTX_WINDOW * 5 / 8))}"
-if [[ -z "$API_KEY" ]]; then
+# 只装载(_WCHAT_LIB_ONLY=1,给测试夹具用)时不要求 key:口在文件末尾，而这里 exit 会
+# 让它永远到不了 —— 于是"装载口没生效"这种红，真凶其实是"这台机器没配 key"。
+# 真实执行路径一字未改:没有 _WCHAT_LIB_ONLY 就照旧报缺 key 并 exit 1。
+if [[ -z "$API_KEY" && -z "${_WCHAT_LIB_ONLY:-}" ]]; then
     _hint="mkdir -p ~/.ct && echo 'API_KEY=\"sk-你的key\"' > ~/.ct/config && chmod 600 ~/.ct/config"
     printf '\033[31m✗ 未配置 API_KEY。\033[0m任选一种:\n' >&2
     printf '  1) 写入配置文件(推荐,只需一次):\n       %s\n' "$_hint" >&2
@@ -3306,42 +3313,71 @@ auto_write_fuse() {
 }
 
 # ---------- 安装面判据(与 H14 规则配套)----------
-# 两条设计约束写死在这里:
+# 三条设计约束写死在这里:
 # 1) **必须段首**才算安装动作。整条命令全文匹配会被引号里的散文击中 ——
 #    `git commit -m "brew install x"` 不是安装。这正是 H5 误拦与 T28 字面量掩码反复
 #    踩过的那类形状,不再重犯(边界切法与 hd_write_targets 同源:&& || | ; 换行)。
+#    因此**禁止**再在本函数末尾加"提不出名字就退回全文正则"的兜底:那个兜底等于把约束 1
+#    整条作废(变异验证:只把兜底装回本函数,`git commit -m "brew install …"` 的反锁当场变红)。
 # 2) 正则/名单一律 local 定义,不依赖 $hd_p 之类后定义的常量:夹具按名字抽函数,装载
 #    顺序不完整时引用未装载的全局就是"整条判据静默失效"或当场炸(见缺席守卫那几段)。
+# 3) **解释器 + heredoc 定界符之后的载荷不算参数**。见下面循环里的那次剥离:解释器是唯一
+#    会挂任意长载荷的头,不剥就等于"载荷里出现 install 就算装包"。
+#    刻意**不用**"动词必须在解释器后 N 步内"这种做法:它两头都不对 —— 既挡不住载荷里
+#    恰好有裸 `install` 一词的只读脚本,又会把 `python3 setup.py build_ext install` 这类
+#    真装包变成漏放(方向相反,更糟)。包管理器一侧不限位置同理:
+#    `npm --prefix /x --cache /y install z` 里 flag 的**值**也是非 flag 词。
+# 4) 裸 `i`(= install 的缩写)**只在紧跟包管理器的第一个实参位**才算动词。它同时是各
+#    种语言里最常见的循环变量名,不限位置就会把只读脚本判成装包 —— 实测形状:
+#    `python3 - <<'PY' … return [i for i in range(start,end) …] … PY` 被 H14 拦,并把
+#    整段 python 正文当成"要装的包名"印进审批话术(审计里 H14 命中 6 次全是这样来的)。
 #
 # $1=命令 → 返回 0 = 这是安装动作;stdout 是被装的名字,一行一个。
 # **认不出名字也返回 0 而输出为空**:调用方据此不放行(fail-closed,宁可多问一次)。
 hd_install_tail() {
-    local c="$1" seg w tail="" state=0 found=0
+    local c="$1" seg w tail="" state=0 found=0 adj=0
     local -a ws=()
     local flat="${c//&&/$'\n'}"
     flat="${flat//||/$'\n'}"; flat="${flat//\|/$'\n'}"; flat="${flat//;/$'\n'}"
     while IFS= read -r seg; do
         seg="${seg#"${seg%%[![:space:]]*}"}"
         [[ -z "$seg" ]] && continue
+        # 约束 3:heredoc 定界符之后是**载荷**,不是这一段的参数。不剥的话,"解释器 +
+        # 任意长载荷"就等于"载荷里出现 install 就算装包"(实测误拦原文:`python3 - <<PY`
+        # 后面挂了一整份只读 python 脚本)。
+        # 只剥 opener 这一行的后半段,正文各自成段照常按代码判 —— 这里**不能**连带放过
+        # 正文里的真装包(`bash - <<SH` 里写 `pip install x` 是真要执行的,T22b 同源)。
+        # `<<<`(here-string)不是 heredoc,口径与 hd_h11_scan/hd_noncode_payload 一致。
+        [[ "$seg" == *'<<'* && "$seg" != *'<<<'* ]] && seg="${seg%%<<*}"
+        [[ -z "${seg//[[:space:]]/}" ]] && continue
         read -r -a ws <<< "$seg"
-        state=0
+        state=0; adj=0
         for w in "${ws[@]}"; do
             case $state in
                 0)  # 段首必须是包管理器(sudo 前缀跳过,提权由 H1 管)
                     [[ "$w" == "sudo" ]] && continue
                     if [[ "$w" =~ ^(brew|pip|pip[23]|python[0-9.]*|npm|pnpm|yarn|gem|cargo|go|uv|apt|apt-get|dnf|yum|apk|composer)$ ]]; then
-                        state=1
+                        state=1; adj=1
                     else
                         break
                     fi
                     ;;
-                1)  # 找安装动词;中间的非 flag 词(python -m pip 里的 pip)继续找,flag 跳过
-                    if [[ "$w" == "install" || "$w" == "add" || "$w" == "i" || "$w" == "tap" ]]; then
+                1)  # 找安装动词。不限位置是必要的:`npm --prefix /x --cache /y install z`
+                    # 里 flag 的**值**也是非 flag 词,给动词加位数上限会变成**漏放**(方向相反,
+                    # 更糟);解释器那一侧的载荷风险由上面约束 3 的剥离解决,不靠位数。
+                    # 裸 `i` 只认紧跟管理器的第一个实参位(约束 4)。
+                    if [[ "$w" == "install" || "$w" == "add" || "$w" == "i" && $adj -eq 1 || "$w" == "tap" ]]; then
                         state=2; found=1
+                    elif [[ "$w" != -* ]]; then
+                        adj=0                 # 过了第一个实参位,`i` 不再算动词
                     fi
                     ;;
-                2)  # 收集名字:跳 flag 与重定向,其余都当包名(多认几个只会更严,不会更松)
+                2)  # 收集名字:跳 flag、重定向、命令替换、**真路径**;多认一个词只会更严,不会更松。
+                    # 路径只认"以 / ./ ../ ~ 开头"的那些 —— `user/repo`(brew tap 的例行形状)与
+                    # `@scope/pkg`(npm)都是名字里的斜杠,把它们当路径丢掉,人用
+                    # `--allow-install user/repo` 点名的 tap 就永远匹配不上、只能恒拒(实测)。
                     [[ "$w" == -* || "$w" == *\>* || "$w" == *'$('* ]] && continue
+                    [[ "$w" == /* || "$w" == ./* || "$w" == ../* || "$w" == '~'* ]] && continue
                     tail+="$w"$'\n'
                     ;;
             esac
@@ -3369,68 +3405,6 @@ auto_install_allowed() {
             [[ "$g" == "$n" ]] && { hit=1; break; }
         done
         (( hit )) || AUTO_INSTALL_MISS+="$n "
-    done <<< "$names"
-    [[ -z "$AUTO_INSTALL_MISS" ]]
-}
-
-# ---------- 安装面判据(与 H14 规则配套)----------
-# 两个设计约束写死在这里:
-# 1) **必须段首**才是安装动作。整条命令里做全文匹配会被引号内的散文击中 ——
-#    `git commit -m "brew install x"` 不是安装。这正是 H5 误拦与 T28 字面量掩码
-#    反复踩过的那一类形状,不再重犯。
-# 2) 正则用 local 定义,不引用 $hd_p:本函数在源码里排在 hd_p 之前,而产品与夹具都
-#    可能在装载顺序不完整时被 eval 出来用(缺席守卫的老话题)—— 边界手写进模式里。
-# $1=命令 → 返回 0 表示"这是安装动作",stdout 一行一个被安装的包名;认不出名字时
-# 返回 0 但输出为空(调用方据此**不放行**,宁可多问一次也不默认放过)
-hd_install_tail() {
-    local c="$1" seg w tail="" state=0
-    local -a ws=()
-    local flat="${c//&&/$'\n'}"
-    flat="${flat//||/$'\n'}"; flat="${flat//\|/$'\n'}"; flat="${flat//;/$'\n'}"
-    # 换行也算边界:裸换行是两条命令(见「命令边界归一」那批反向锁)
-    while IFS= read -r seg; do
-        seg="${seg#"${seg%%[![:space:]]*}"}"          # 去左空白
-        [[ -z "$seg" ]] && continue
-        read -r -a ws <<< "$seg"
-        state=0
-        for w in "${ws[@]}"; do
-            case $state in
-                0)  # 找段首的包管理器(前面可以有 sudo —— 那由 H1 拦,不影响这里的识别)
-                    if [[ "$w" == "sudo" ]]; then continue; fi
-                    [[ "$w" =~ ^(brew|pip|pip[23]|python[0-9.]*|npm|pnpm|yarn|gem|cargo|go|uv|apt|apt-get|dnf|yum|apk|composer)$ ]] && state=1 || break
-                    ;;
-                1)  # 找安装动词;中间的 flag/子命令(-m pip / -g / --user)跳过
-                    if [[ "$w" == "install" || "$w" == "add" || "$w" == "i" ]]; then state=2
-                    elif [[ "$w" != -* ]]; then state=1     # 如 python -m pip:继续找
-                    fi
-                    ;;
-                2)  # 收集包名:跳过 flag 与重定向,遇到像是第二条命令的 token 就停
-                    [[ "$w" == -* || "$w" == *\>* || "$w" == *'$('* ]] && continue
-                    [[ "$w" == *"/"* && "$w" != *@* && "$w" != *.* ]] && continue   # 路径形态不当包名
-                    tail+="$w"$'\n'
-                    ;;
-            esac
-        done
-    done <<< "$flat"
-    [[ -n "$tail" ]] && { printf '%s' "$tail"; return 0; }
-    # 是安装动作但一个名字都没提出来:仍然判"是",让调用方走"不放行"分支
-    [[ "$flat" =~ (brew|pip|npm|yarn|pnpm|gem|cargo|apt|dnf|yum|apk|uv|composer)[[:space:]]+(install|add) ]] && return 0
-    return 1
-}
-
-# 人点名的名单比对。$1 = 换行分隔的包名;返回 0 = 每一个名字都在名单里
-auto_install_allowed() {
-    local names="$1" n g hit
-    AUTO_INSTALL_MISS=""
-    [[ -n "${names//[$'\n' ]/}" ]] || return 1        # 提不出名字 → 不放行
-    (( AUTO_INSTALL_ALL )) && return 0
-    (( ${#AUTO_ALLOW_INSTALL[@]} )) || return 1
-    while IFS= read -r n; do
-        n="${n,,}"; n="${n%@*}"; n="${n%%[<>=!]*}"     # 去版本/来源约束,只比名字
-        [[ -z "$n" ]] && continue
-        hit=0
-        for g in "${AUTO_ALLOW_INSTALL[@]}"; do [[ "$g" == "$n" ]] && { hit=1; break; }; done
-        (( hit )) || AUTO_INSTALL_MISS="$AUTO_INSTALL_MISS $n"
     done <<< "$names"
     [[ -z "$AUTO_INSTALL_MISS" ]]
 }
@@ -4399,7 +4373,30 @@ hard_deny_cmd() {
             auto_installs=$((auto_installs + 1))
             auto_audit allow install "$(printf '%s' "$_inst_tail" | tr '\n' ',' | sed 's/,$//')" H14 auto_allow_install "人启动时点名的包 · 第 ${auto_installs}/${AUTO_MAX_INSTALLS} 次"
         else
-            hd_rule="H14"; hd_msg="安装软件会在 WORK_ROOT 之外落盘、以你的 uid 跑第三方 postinstall 代码,且不在快照回滚范围内(模型还会记错包名)。替代:重启时加 --allow-install $(printf '%s' "${AUTO_INSTALL_MISS:-${_inst_tail//$'\n'/ }}" | sed 's/[[:space:]]*$//')(只点名你认识的那几个),或把安装交给人工执行;不要改用别的源、也不要用 curl|sh 绕"
+            # 话术里只印"像包名"的词,并且限长。hd_install_tail 是从命令里提词的,提错的
+            # 时候会把用户正文当包名印出来(实测:一条只读 python heredoc 把
+            # `in range(start,end) if re.match(pat,L[i])] …` 整段塞进了审批卡与审计日志,
+            # 人读不出该点名谁,而正文等于被多复制一份进只追加的审计)。认不出可靠名字时
+            # 宁可打占位符:这条出口的实质是"交人工执行",不是"照抄这里印的东西"。
+            local _iht_hint="" _iht_w _iht_ok=0
+            local -a _iht_ws=()
+            read -r -a _iht_ws <<< "${AUTO_INSTALL_MISS:-${_inst_tail//$'\n'/ }}"
+            for _iht_w in "${_iht_ws[@]}"; do
+                # 用 case 而不是 [[ =~ ]]:hd_note_hit 的"命中片段"默认取 BASH_REMATCH,
+                # 而这段就跑在 hard_deny_cmd 自己的 shell 里 —— 用 =~ 会把循环最后一次
+                # 匹配(某个包名)留在 BASH_REMATCH 里,话术末尾于是多出"(命中: foo)"这种
+                # 看着像判据片段、其实是提取残留的东西(实测踩过)。另:字符类里的 `<`/`>`
+                # 必须反斜杠转义 —— case 模式在**分词阶段**就把 `<>` 当重定向运算符,不转义
+                # 连语法都过不去(实测 syntax error near unexpected token `<>`)。
+                case "$_iht_w" in
+                    ''|*[!A-Za-z0-9./_@~\<\>=+-]*) continue ;;
+                esac
+                (( ${#_iht_hint} >= 60 )) && break
+                _iht_hint+="$_iht_w "; _iht_ok=1
+            done
+            _iht_hint="${_iht_hint% }"
+            (( _iht_ok )) || _iht_hint="<没认出可靠包名>"
+            hd_rule="H14"; hd_msg="安装软件会在 WORK_ROOT 之外落盘、以你的 uid 跑第三方 postinstall 代码,且不在快照回滚范围内(模型还会记错包名)。替代:重启时加 --allow-install ${_iht_hint}(只点名你认识的那几个),或把安装交给人工执行;不要改用别的源、也不要用 curl|sh 绕"
             hd_note_hit
             return 0
         fi
@@ -6629,9 +6626,24 @@ tool_run_and_parse() {
             # 放在审批器之前:这些命令不该再花一次 API 去问"能不能",答案是恒否。
             # auto 下直接拒并把规则号+替代方案回传;非 auto 下升级为严格人工确认
             # (必须输入 yes,保留人的最终裁量权,不改变历史可放行这一事实)。
+            # cmd_one 只给**展示/审计/终审**用(那三处要一行,免得日志与卡片被撑开)。
+            # 判据一律吃原样多行的 $command:行边界的处理本来就归 hd_fold_lines
+            # (`\`+换行折空格、裸换行补 `;`,并保留行号给 H11),调用点不该先做一次
+            # 更粗的折叠。曾经这里喂的就是 cmd_one,三个后果都是实测的:
+            #   ① hd_install_tail 的"安装动词必须在段首"前提整体失效 —— 一条 && 之后的
+            #      正文变成一个段,只读分析脚本 `python3 - <<'PY' … return [i for i in
+            #      range(…) …]` 里那个循环变量 i 被当成 `npm i` 的 install 动词,于是整段
+            #      python 正文被当成"要装的包名"印进审批话术(审计里 H14 命中 6 次,6/6 是
+            #      heredoc 命令、0/6 是真装包);
+            #   ② hd_noncode_payload 按行解析 heredoc,折完就没有"正文行"可剥 —— 表里 T22
+            #      那条"提交说明里的叙述文本不算命令"在产品路径上从未生效(实测同一条命令
+            #      原样多行 rc=1 放行、折叠后 H3 硬拒);
+            #   ③ hd_fold_lines 注释里特意保住换行就是为了 H11 的"第 N 行"坐标,折叠后
+            #      任何多行命令的坐标恒为第 1 行(实测判据串 34 行 → 1 行)。
+            # 表里"接线锁 + 折叠不变量"两起钉这条,改回去就红。
             cmd_one=${command//$'\n'/ }
             hd_approved=0
-            if hard_deny_cmd "$cmd_one"; then
+            if hard_deny_cmd "$command"; then
                 if [[ -n "$auto_mode" ]]; then
                     auto_note_deny
                     auto_audit shell "run_shell_command" "$cmd_one" "$hd_rule" auto_deny "$hd_msg"
