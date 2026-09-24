@@ -1424,13 +1424,16 @@ esac
 
 # ── T23 第二轮 B:测试装载口(不再靠 stdin EOF 的巧合)──────────────────
 echo "T23 装载口 _WCHAT_LIB_ONLY"
-if grep -q '_WCHAT_LIB_ONLY' wchat.sh; then
+# 一律按 $SRC_ABS 取被测文件:写死 ./wchat.sh 时，这张表对着副本跑(负对照、
+# `bash test_hardwall.sh /tmp/hw/wchat.sh`)测的仍是工作副本 —— 改好了验不出、改坏了
+# 红不出来，最后就变成"这两条红大概是环境问题"(本轮就是这么误判过一次)。
+if grep -q '_WCHAT_LIB_ONLY' "$SRC_ABS"; then
     ok "主脚本里实现了装载口(此前只有本表注释在声称它有)"
 else
     bad "装载口缺失" "本表会退回'跑 REPL 撞到 EOF 才算完'的巧合,主流程一走错误分支就整表消失"
 fi
-_g=$(grep -n '_WCHAT_LIB_ONLY' wchat.sh | head -1 | cut -d: -f1)
-_p=$(grep -n '^parse_options "\$@"' wchat.sh | head -1 | cut -d: -f1)
+_g=$(grep -n '_WCHAT_LIB_ONLY' "$SRC_ABS" | head -1 | cut -d: -f1)
+_p=$(grep -n '^parse_options "\$@"' "$SRC_ABS" | head -1 | cut -d: -f1)
 if (( _g > 0 && _p > 0 && _g < _p )); then
     ok "口在 parse_options 之前(参数解析带建目录/写文件副作用,那不算只装载)"
 else
@@ -1440,7 +1443,7 @@ fi
 # 没口 → REPL 卡在 read 上等输入,轮询超时后拿不到标记。这才是"没跑主流程"的直接证据,
 # 比 grep 到那行代码强(代码在但位置错、或被前面的 exit 抢先,都照样是假绿)。
 _t23out="/tmp/hw_libonly.$$.out"; : > "$_t23out"
-( sleep 30 | ( _WCHAT_LIB_ONLY=1 source ./wchat.sh >/dev/null 2>&1; printf 'LOADED\n' ) > "$_t23out" 2>/dev/null ) &
+( sleep 30 | ( _WCHAT_LIB_ONLY=1 source "$SRC_ABS" >/dev/null 2>&1; printf 'LOADED\n' ) > "$_t23out" 2>/dev/null ) &
 _t23pid=$!
 _t23got=""
 for _t23i in 1 2 3 4 5 6 7 8 9 10; do
@@ -1456,7 +1459,7 @@ else
 fi
 # 口之后判据链必须可用:位置放太早(函数还没定义完)会装载出半套工具,
 # 表现是"该拦的照拦、降级与脱敏静默失效",极难从结果反推。
-if ( _WCHAT_LIB_ONLY=1 source ./wchat.sh >/dev/null 2>&1
+if ( _WCHAT_LIB_ONLY=1 source "$SRC_ABS" >/dev/null 2>&1
     declare -F hard_deny_cmd hd_h11_scan hd_noncode_payload >/dev/null 2>&1 ); then
     ok "走装载口后 hard_deny_cmd / hd_h11_scan / hd_noncode_payload 都可用"
 else
@@ -1685,21 +1688,21 @@ EXPECT_TOTAL=$((EXPECT_TOTAL + 17))
 sys_bash_major="$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || echo 0)"
 [[ "$sys_bash_major" =~ ^[0-9]+$ ]] || sys_bash_major=0
 if [[ -x /bin/bash ]] && (( sys_bash_major < 5 )); then
-    o=$(/bin/bash -c 'source ./wchat.sh; echo __RAN__' 2>&1); rc=$?
+    o=$(SRC_ABS="$SRC_ABS" /bin/bash -c 'source "$SRC_ABS"; echo __RAN__' 2>&1); rc=$?
     if [[ $rc -ne 0 && "$o" == *"无法安全切换"* && "$o" != *'__RAN__'* ]]; then
         printf '  ok   坏装载(bash -c 无 name)响亮失败且不继续执行\n'; pass=$((pass + 1))
     else
         printf '  FAIL 坏装载(bash -c 无 name)rc=%s 输出=%s\n' "$rc" "${o:0:120}"; fail=$((fail + 1))
     fi
 
-    o=$(/bin/bash -c 'source ./wchat.sh; echo __RAN__' _ 'grep -n x y' 2>&1); rc=$?
+    o=$(SRC_ABS="$SRC_ABS" /bin/bash -c 'source "$SRC_ABS"; echo __RAN__' _ 'grep -n x y' 2>&1); rc=$?
     if [[ $rc -ne 0 && "$o" == *"无法安全切换"* && "$o" != *'No such file'* ]]; then
         printf '  ok   坏装载(bash -c 占位 name)不再报 "No such file"\n'; pass=$((pass + 1))
     else
         printf '  FAIL 坏装载(占位 name)rc=%s 输出=%s\n' "$rc" "${o:0:120}"; fail=$((fail + 1))
     fi
 
-    o=$(/bin/bash -c 'source ./wchat.sh' 2>&1; /bin/bash -c 'source ./wchat.sh; echo __RAN__' 2>&1)
+    o=$(SRC_ABS="$SRC_ABS" /bin/bash -c 'source "$SRC_ABS"' 2>&1; SRC_ABS="$SRC_ABS" /bin/bash -c 'source "$SRC_ABS"; echo __RAN__' 2>&1)
     if [[ "$o" != *"cannot execute binary file"* ]]; then
         printf '  ok   旧症状 "cannot execute binary file" 不再出现\n'; pass=$((pass + 1))
     else
@@ -1714,10 +1717,10 @@ if [[ -x /bin/bash ]] && (( sys_bash_major < 5 )); then
     # 注意别在 source 行上加 `>/dev/null 2>&1`:那个重定向会**随 exec 一起被继承**,
     # re-exec 之后的进程会把 __LOADED__ 写进 /dev/null,现象正是"rc=0 但一字节没有"
     # —— 上一轮那 16 条空向量的同款味道,这次是在自己身上找到的。
-    printf '%s\n' 'source ./wchat.sh || exit 2' \
+    printf '%s\n' 'source "$SRC_ABS" || exit 2' \
         'declare -F hard_deny_cmd >/dev/null || exit 3' \
         'echo __LOADED__' > "$t25d/t.sh"
-    o=$(_WCHAT_LIB_ONLY=1 _WCHAT_DISABLE_UPDATE=1 /bin/bash "$t25d/t.sh" 2>&1); rc=$?
+    o=$(SRC_ABS="$SRC_ABS" _WCHAT_LIB_ONLY=1 _WCHAT_DISABLE_UPDATE=1 /bin/bash "$t25d/t.sh" 2>&1); rc=$?
     rm -rf "$t25d"
     if [[ $rc -eq 0 && "$o" == *'__LOADED__'* ]]; then
         printf '  ok   正向对照:脚本文件装载仍成功切到 bash 5 并走完装载口\n'; pass=$((pass + 1))
@@ -1982,6 +1985,97 @@ expect NP  '反锁:commit 说明里写着 brew install 不是安装动作'      
 expect NP  '反锁:卸载不是安装(否则日常维护全被挡)'                'brew uninstall wget'
 expect NP  '反锁:使用已装工具不是安装'                            'rg pattern notes.md'
 expect NP  '反锁:sqlite3 纯查询不算写'                          "sqlite3 /tmp/a.db 'select * from t'"
+# ── 第二十二轮:H14 误拦现场复盘(折叠输入 / 重名定义 / 全文兜底)──────────
+# 起因是真实审计:H14 历史命中 6 次,**6/6 是带 heredoc 的命令、0/6 是真装包**,其中同一条
+# 只读 python 分析脚本被反复拦 3 次(11:09/14:09/14:10,同一会话)。三条根因各钉一笔:
+#   ① 调用点曾把 `${command//$'\n'/ }` 喂进 hard_deny_cmd → 判据看不见行边界(接线锁+折叠不变量);
+#   ② hd_install_tail / auto_install_allowed 曾被定义两遍:产品按 source 顺序跑**后一份**,
+#      而本表抽函数在第一个 `^}$` 就 exit → 只测**前一份**(结构锁);
+#   ③ 生效那份还带"提不出名字就退回全文正则"的兜底,等于把"必须段首"整条作废(反锁 1981)。
+# ②的代价是实测的:只删前一份、保留产品生效那份,本表从 533/2 变 531/4 —— 一条**多拦**
+# (commit 说明里的 `brew install` 散文被判 H14)、一条**少拦**(`brew tap` 从 H14 掉成放行)。
+# 表测的代码与产品跑的代码不是同一份时,这张表的绿是假的。
+_r22_py='cd /tmp/x && python3 - <<'"'"'PY'"'"'
+import re
+L=open("焦糖玛奇朵.js",encoding="utf-8").read().split("\n")
+print([i for i in range(3) if re.match(r"^(Cupsize|Temperature)", L[i])])
+PY'
+# 载荷里带 add/install 这两个词的只读脚本:改代码时最常见的形状(注释、词表、报告标题)。
+# 判据靠"定界符之后不算参数"这一条剥掉它;而正文里真写装包命令时必须照旧拦 —— 两起配对,
+# 少任何一起,另一边的修法都会走偏成放水或误杀。
+_r22_data='python3 - <<'"'"'PY'"'"'
+# install 与 add 两种口径都要统计,先打个占位
+counts = {"ok": 1}
+print(counts)
+PY'
+_r22_real='bash - <<'"'"'SH'"'"'
+set -e
+pip install requests
+SH'
+expect NP  'R22 只读 python heredoc 不算装包(审计原文形状:正文里有裸 i)'   "$_r22_py"
+expect H14 'R22 解释器挂真装包参数照旧拦:setup.py install'                  'python3 setup.py install'
+expect H14 'R22 解释器挂真装包参数照旧拦:python3 -m pip install'            'python3 -m pip install requests'
+expect H14 'R22 包管理器一侧不限位置(flag 的值也算词,限位数会变漏放)'        'npm --prefix /x --cache /y install z'
+expect H14 'R22 npm i 缩写仍认(紧跟管理器的第一个实参位)'                  'npm i lodash'
+expect NP  'R22 反锁:pip show i 的 i 是参数,不是 install 缩写'             'pip show i'
+expect NP  'R22 反锁:解释器跑 -c 脚本,正文里的 i 不算动词'                 'python3 -c "print(i)"'
+expect NP  'R22 反锁:heredoc 载荷里的 add/install 字样不是安装动作'         "$_r22_data"
+expect H14 'R22 heredoc **正文**里的真装包照旧拦(剥载荷不等于放过执行体)'    "$_r22_real"
+# 提取器本身的两条:名字提不出来 = 人没法点名,恒拒就成了死路(实测 brew tap 中过这一枪)
+[[ "$(hd_install_tail 'brew tap user/repo')" == *user/repo* ]] \
+    && ok 'R22 brew tap 的 user/repo 要提成名(否则 --allow-install 永远匹配不上)' \
+    || bad 'R22 brew tap 提不出包名' "实得[$(hd_install_tail 'brew tap user/repo')]"
+[[ -z "$(hd_install_tail 'brew install ./local-dir')" ]] \
+    && ok 'R22 真路径不当包名(名字进不了人点名的名单)' \
+    || bad 'R22 路径被当成包名' "实得[$(hd_install_tail 'brew install ./local-dir')]"
+# 折叠不变量:同一批向量按**原样**与**折成一行**两种形状喂 hard_deny_cmd,判定必须一致。
+# 这条是 ① 的行为锁:谁再把 cmd_one 喂回判据,这里就红。
+# 刻意**不含**"数据型 heredoc + 正文里有危险字样"那类(T22a):折叠后它必然 H3 —— 按行剥正文
+# 的 hd_noncode_payload 在没有换行的串上没有正文行可剥;要让折叠形状也放行只能同行剥正文,而那
+# 会连带吃掉 `cat <<E > /etc/hostname` 的写目标(T22d 钉着"opener 行照旧拦")= 放水。
+# 那一族由下面的接线锁守:调用点根本不该折叠。
+_r22_fold=(
+    'brew install ripgrep'
+    'npm i lodash'
+    'python3 -m pip install requests'
+    'git commit -m "brew install ripgrep 的事已做完"'
+    'brew uninstall wget'
+    'pip show i'
+    'cd /tmp && node -e "for (const i of [1,2]) console.log(i)"'
+    'python3 setup.py install'
+    'npm --prefix /x --cache /y install z'
+    "$_r22_py"
+    "$_r22_data"
+    # 刻意不放 "$_r22_real":正文里真装包那条**就是**依赖换行的(折叠后定界符之后一律剥掉,
+    # 只剩 `bash -`)。它进这张表只能证明"不许折叠",而那由上面的接线锁管;放进来会把
+    # "折叠会放过执行体"这件事写成一条自相矛盾的期望值。
+)
+for _r22_v in "${_r22_fold[@]}"; do
+    _r22_a=$(deny_rule "$_r22_v"); _r22_b=$(deny_rule "${_r22_v//$'\n'/ }")
+    if [[ "$_r22_a" == "$_r22_b" ]]; then
+        ok "R22 折叠不变量 [$_r22_a] ${_r22_v%%$'\n'*}"
+    else
+        bad 'R22 折叠改变了判定' "原样[$_r22_a] vs 折叠[$_r22_b] | ${_r22_v:0:56}"
+    fi
+done
+# 接线锁:判据必须吃原样多行的 $command;一行版只许用于展示/审计/终审
+if grep -qE 'if hard_deny_cmd "\$command"; then' "$SRC_ABS"; then
+    ok 'R22 接线:hard_deny_cmd 吃的是原样 $command'
+else
+    bad 'R22 接线被改回' 'hard_deny_cmd 入参不再是 $command —— 折叠过的命令让判据看不见行边界'
+fi
+if grep -qE 'hard_deny_cmd "\$cmd_one"' "$SRC_ABS"; then
+    bad 'R22 接线:折叠成一行的一份又进了判据' 'cmd_one 只许用于展示/审计/终审'
+else
+    ok 'R22 接线:cmd_one 不进判据'
+fi
+# 结构锁:顶层同名函数只能有一份(本表抽函数与产品装载顺序对重名的处理正好相反)
+_r22_dup=$(grep -oE '^[a-z_][a-z_0-9]*\(\) \{' "$SRC_ABS" | sed 's/() {//' | sort | uniq -d)
+if [[ -z "$_r22_dup" ]]; then
+    ok 'R22 结构:被测脚本没有重名顶层函数(表测的=产品跑的)'
+else
+    bad 'R22 结构:存在重名顶层函数' "$(printf '%s' "$_r22_dup" | tr '\n' ' ') —— 本表只抽第一份,产品跑最后一份"
+fi
 # 结构锁:上下文三个数必须"由窗口派生、各司其职"。退回到单个魔法数就是本轮修复被改掉。
 if (( ${CTX_WINDOW:-0} > 0 )) && [[ "${TOKEN_THRESHOLD:-}" == "$((CTX_WINDOW * 3 / 4))" ]] \
    && [[ "${CTX_OVERFLOW_GATE:-}" == "$((CTX_WINDOW * 5 / 8))" ]] \
@@ -1992,6 +2086,9 @@ else
 fi
 EXPECT_TOTAL=$((EXPECT_TOTAL + 8))    # 5 拦 + 3 反锁(H14 安装面)
 EXPECT_TOTAL=$((EXPECT_TOTAL + 10))   # 6 拦 + 3 反锁 + 1 结构锁(数段内 expect 行得来,不心算)
+EXPECT_TOTAL=$((EXPECT_TOTAL + $(grep -cE "^expect[[:space:]]+[A-Z0-9|]+[[:space:]]+'R22 " "$HW_SELF")))   # R22 表行:同样 grep 数,不心算
+EXPECT_TOTAL=$((EXPECT_TOTAL + ${#_r22_fold[@]} + 2 + 2 + 1))   # 折叠不变量 + 提取器 2 + 接线锁 2 + 结构锁 1
+unset _r22_py _r22_data _r22_fold _r22_v _r22_a _r22_b _r22_dup
 
 total=$((pass + fail))
 if [[ "$total" -ne "$EXPECT_TOTAL" ]]; then
