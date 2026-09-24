@@ -200,15 +200,18 @@ echo "=== 8. 鉴权双头一致性(api-key 头是小米 MiMo LLM 需要的兼容
 ak=$(grep -vE '^[[:space:]]*#' "$REAL" | grep -cF -- '-H "api-key: $API_KEY"')
 bear=$(grep -vE '^[[:space:]]*#' "$REAL" | grep -cF -- '-H "Authorization: Bearer $API_KEY"')
 ck "Bearer 与 api-key 成对出现(数量守恒)" "$([[ "$ak" == "$bear" && "$ak" -gt 0 ]] && echo "$ak/$bear")" "$bear/$bear"
-head45=$(sed -n '1,60p' "$REAL")
-has "头部有「鉴权头(勿删)」说明" "$head45" "鉴权头(勿删)"
-has "说明里点明给小米 MiMo LLM" "$head45" "MiMo"
+# 锚定用内容,不用行号区间:区间是"上面每加几行注释就被挤一次"的那种断言 —— 实测
+# HEAD 上就已经偏了两条(「鉴权头」说明在第 65 行,而区间只取到 60),红的是"别人家的
+# 测试坏了",与产品毫无关系。改内容锚之后同样删不掉:marker 或关键词一没,锚就空。
+auth_doc=$(grep -A16 '鉴权头(勿删)' "$REAL")
+has "头部有「鉴权头(勿删)」说明" "$auth_doc" "鉴权头(勿删)"
+has "说明里点明给小米 MiMo LLM" "$auth_doc" "MiMo"
 ck "每一处 api-key 头都紧跟在鉴权点上" \
    "$(grep -vE '^[[:space:]]*#' "$REAL" | awk '/Authorization: Bearer \$API_KEY/{b=NR} /-H "api-key:/{if(b&&NR-b<=2)n++} END{print n+0}')" "$ak"
 
 echo "=== 9. 探测收口:不再有"以 BASE_URL 锁图片形状" ==="
-has "集中区注释里仍有 api-key 双头提示" "$(sed -n '30,80p' "$REAL")" "mimo LLM"
-has "头部注释说明图片侧不再有探测" "$(sed -n '1,25p' "$REAL")" "图片侧已无厂商探测"
+has "集中区注释里仍有 api-key 双头提示" "$(grep -E '^[[:space:]]*#.*mimo LLM' "$REAL")" "mimo LLM"
+has "头部注释说明图片侧不再有探测" "$(grep -E '^[[:space:]]*#.*图片侧已无厂商探测' "$REAL")" "图片侧已无厂商探测"
 
 rm -rf "$T" "$W"
 echo
