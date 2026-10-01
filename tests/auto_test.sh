@@ -482,12 +482,53 @@ run_case s4 "$J
 ck "非 auto:判 Y 照常执行" "$([[ -e $BASE/proj/PLAIN ]] && echo y)" y
 ck "非 auto:终审零调用"    "$(grep -c '"kind": *"final"' "$BASE/req-s4.jsonl")" 0
 ck "非 auto:不写 auto 审计" "$(grep -c '"tier":""' "$AUTO_LOG" 2>/dev/null)" 0
+
+# ── E5 回归:工具结果首行以"已登记选项 + 空格"开头时,续发请求绝不能被吞 ──────────
+# 起源(实测 2026-09-28):ask_ai 入口曾有一条"content 以选项开头就拦截"的检查,而它是
+# 首请求与工具链续发**共用**的出口,续发时全局 content 装的正是上一个工具的结果。
+# 于是 `echo '-c 用来编译'` 这种日常命令的输出会命中拦截 → content 被清空 + return 0 →
+# 整轮静默结束(无正文、无报错,历史里只剩一条孤立的 tool 消息)。
+# 差分证据:修复前 s5 主请求=1、正文不出现;s6(同形但输出 hello)主请求=2、正文出现。
+# 这条用例钉的是"两者都应为 2 次且有正文"——只断言 s5 不够,没有对照组就分不清
+# 是"修好了"还是"用例自己跑挂了"(本轮我踩了三次后者)。
+echo "=== E5 工具结果以选项串开头:续发请求不能被吞 ==="
+run_case s5 "$J
+ {\"type\":\"tool\",\"name\":\"run_shell_command\",\"args\":{\"command\":\"echo '-c 用来编译'\",\"reason\":\"首行是指令串\"}},
+ {\"type\":\"text\",\"text\":\"E5FINALBODY\"}
+]" "" unused unused
+# 对照组:同一形状,只把输出首串换成普通文本
+run_case s6 "$J
+ {\"type\":\"tool\",\"name\":\"run_shell_command\",\"args\":{\"command\":\"echo 'hello world'\",\"reason\":\"首行是普通文本\"}},
+ {\"type\":\"text\",\"text\":\"E6FINALBODY\"}
+]" "" unused unused
+ck "E5 选项串首行仍发出续发(主请求=2)" "$(grep -c '"kind": *"main"' "$BASE/req-s5.jsonl")" 2
+ck "E5 最终正文到达"                     "$(grep -ac 'E5FINALBODY' "$BASE/out-s5.log")" 1
+ck "E6 对照组主请求=2(证明 E5 不是空跑)"  "$(grep -c '"kind": *"main"' "$BASE/req-s6.jsonl")" 2
+ck "E6 对照组正文到达"                   "$(grep -ac 'E6FINALBODY' "$BASE/out-s6.log")" 1
+# 注:人类输入通道不在这里断言。它由 handle_cmd_line 末尾的兜底负责(任何以 - 开头的
+# 输入 → "未知命令" 警告 + return 2),那条路径需要往 pty 里喂按键,不属于本用例的形状。
+# 不写没有断言的标题 —— 那是"看着有保险、实际没触发"的假覆盖。
+# 结构锁:删掉 ask_ai 守卫后,人类输入通道唯一的保护就是这个兜底。
+# 它一旦被改没,`-l` 之类误输就会静默变成正文发给模型 —— 与本轮修的缺陷同族但方向相反,
+# 所以必须钉住。用 -F 固定串匹配(不写正则:这里全是 ${}/%% 这类正则元字符,转义必炸)。
+ck "人类通道'未知命令'兜底仍在(删守卫未留空档)" \
+   "$(grep -Fc '未知命令: ${trimmed%% *}' "$REAL")" 1
 [[ $fail -eq 0 ]] && rm -rf "$BASE" || echo "   现场保留:$BASE(cat out-s1.log / req-s1.jsonl / $AUTO_LOG)"
+# 本函数是 `e2e() ( ... )` —— **子 shell**,里面的 fail 出不去。不显式回传的话,
+# 任何 e2e 失败都会被结尾那句"✅ 全部通过"掩盖(run_gates 又只看结论行 + rc=0,
+# 于是整条 e2e 层一直是"永远绿"的假保险)。这里用退出码把失败条数带出去。
+printf 'E2E 小计:失败 %d 项\n' "$fail"
+exit $(( fail > 255 ? 255 : fail ))
 )
 
 echo; echo "===== 单元:硬墙/路径/档位/授权/刹车/审计/checkpoint/接线 ====="
 [[ $PART == all || $PART == unit ]] && unit
 echo; echo "===== 端到端:桩网关 + pty 跑真脚本 ====="
-[[ $PART == all || $PART == e2e  ]] && e2e
+if [[ $PART == all || $PART == e2e ]]; then
+    # e2e 是子 shell,失败条数经退出码回传(见函数末尾那句 exit)
+    e2e
+    e2e_rc=$?
+    (( e2e_rc > 0 )) && fail=$(( fail + e2e_rc ))
+fi
 echo
 if (( fail )); then echo "❌ 失败 $fail 项"; exit 1; else echo "✅ auto_test 全部通过"; fi

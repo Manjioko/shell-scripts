@@ -47,18 +47,21 @@ done
 
 # --- 闸门表:名字 | 命令 | 结论行的匹配正则(pass) | 说明 ---------------------------
 # pass 正则**必须**锚定到该闸门自己打印的结论行;匹配不到就判失败(见硬规矩 1)。
-GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 流量回放 主套件)
+GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件)
 GATE_CMDS=("bash -n wchat.sh && bash -n test_hardwall.sh && bash -n tests/run_gates.sh && echo SYNTAX-ok-3-files" "bash test_hardwall.sh" "bash tests/rulefail_check.sh"
            "bash tests/compaction_pin_probe.sh" "bash tests/audit_field_probe.sh"
            "bash tests/probe_shapes.sh" "bash tests/skills_dir_test.sh"
+           "bash tests/mcp_channel_test.sh"
            "bash tests/traffic_replay.sh" "bash tests/auto_test.sh unit")
-GATE_MODE=(c x x x x x x x x)
+GATE_MODE=(c x x x x x x x x x)
 GATE_PAT=('^SYNTAX-ok-3-files$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^PASS=[0-9]+ FAIL=0$'
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^结论: 通过$' '不符 0$'
-         '闸门全部通过' '^结论:无新增漂移' '^RESULT|全部通过|PASS=[0-9]+ FAIL=0$')
+         '闸门全部通过' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^结论:无新增漂移' '^RESULT|全部通过|PASS=[0-9]+ FAIL=0$')
 GATE_NOTE=('两个脚本语法' '527+ 条判据向量与总数守卫' '规则覆盖 + 出口话术 + 分支数锁'
            'compact_due/布局/接线锁' 'trunc/tlen + root + pol 字段' '判据形状向量'
-           'SKILLS_DIR 越界与软链防护' '离线语料回放(漂移需先复跑再 GEN=1 固化)'
+           'SKILLS_DIR 越界与软链防护'
+           'MCP 通道:开关/暴露面/审计/预算(全打桩,不依赖 npm 与 Chrome)'
+           '离线语料回放(漂移需先复跑再 GEN=1 固化)'
            '主套件(--main 才跑,慢)')
 
 want() {  # 有没有被参数选中
@@ -68,7 +71,7 @@ want() {  # 有没有被参数选中
 
 if (( LIST_ONLY )); then
     for i in "${!GATE_NAMES[@]}"; do
-        (( i == 8 && ! RUN_MAIN )) && printf '  %-10s %-34s (跳过,--main 才跑)\n' "${GATE_NAMES[$i]}" "${GATE_CMDS[$i]}" && continue
+        (( i == 9 && ! RUN_MAIN )) && printf '  %-10s %-34s (跳过,--main 才跑)\n' "${GATE_NAMES[$i]}" "${GATE_CMDS[$i]}" && continue
         printf '  %-10s %-34s %s\n' "${GATE_NAMES[$i]}" "${GATE_CMDS[$i]}" "${GATE_NOTE[$i]}"
     done
     exit 0
@@ -81,7 +84,7 @@ printf '\n\033[1m══ 闸门对账(工作目录 %s · 源码 %s)══\033[0m\
 
 for i in "${!GATE_NAMES[@]}"; do
     name="${GATE_NAMES[$i]}"; cmd="${GATE_CMDS[$i]}"; pat="${GATE_PAT[$i]}"
-    if (( i == 8 && ! RUN_MAIN )); then
+    if (( i == 9 && ! RUN_MAIN )); then
         want "$name" && printf '  \033[2m-- %-8s 主套件已跳过(--main 才跑)\033[0m\n' "$name"
         skip=$((skip + 1)); continue
     fi

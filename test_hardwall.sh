@@ -531,6 +531,19 @@ pd deny "$HOME/.npmrc" rw          "路径拒 ~/.npmrc 写"
 pd deny "$HOME/.netrc" r           "路径拒 ~/.netrc"
 pd deny "$HOME/.config/gcloud/x" r "路径拒 ~/.config/gcloud(与 hd_re_secret_dir 同)"
 pd deny "$HOME/.config/azure/x" r  "路径拒 ~/.config/azure"
+# --- MCP:mcporter 的凭据面(两侧同口径,与上面 npmrc/gcloud 一族同理) ---
+# 实测本机 ~/.mcporter/ 下即使 daemon 已 stop 也会留下 daemon/user.key(32B,0600),
+# 而 OAuth vault 按上游文档落 ~/.mcporter/credentials.json 或 $XDG_DATA_HOME/mcporter/
+# /credentials.json。只拦默认位会漏 XDG 位,所以两条都在名单里。
+# 【MCP-R22】
+pd deny "$HOME/.mcporter/credentials.json" r          "路径拒 mcporter vault(默认位)"
+pd deny "$HOME/.mcporter/daemon/user.key" r           "路径拒 mcporter daemon 连接密钥(stop 后仍残留)"
+pd deny "$HOME/.local/share/mcporter/credentials.json" r "路径拒 mcporter vault(XDG_DATA_HOME 位)"
+expect H6 "命令同判:cat mcporter vault"               "cat '$HOME/.mcporter/credentials.json'"
+expect H6 "命令同判:head mcporter daemon key"         "head -1 '~/.mcporter/daemon/user.key'"
+pd allow "$HOME/.mcporterish/notes.md" r              "反锁:.mcporterish 前缀相似目录不误伤"
+expect NP "反锁:cat ~/.mcporterish/notes.md 放行"     "cat '$HOME/.mcporterish/notes.md'"
+# 【MCP-R22 段结束】
 pd deny "/srv/keys/id_rsa" r       "路径拒 任意位置私钥(旧写法拿整串比 id_rsa 是死分支)"
 pd deny "/srv/keys/api.key" rw     "路径拒 .key 写"
 pd deny "$HOME/.ssh/id_rsa.pub" r  "路径拒 .ssh 目录内一切(含公钥,目录墙既有设计)"
@@ -2108,6 +2121,8 @@ EXPECT_TOTAL=$((EXPECT_TOTAL + 8))    # 5 拦 + 3 反锁(H14 安装面)
 EXPECT_TOTAL=$((EXPECT_TOTAL + 10))   # 6 拦 + 3 反锁 + 1 结构锁(数段内 expect 行得来,不心算)
 EXPECT_TOTAL=$((EXPECT_TOTAL + $(grep -cE "^expect[[:space:]]+[A-Z0-9|]+[[:space:]]+'R22 " "$HW_SELF")))   # R22 表行:同样 grep 数,不心算
 EXPECT_TOTAL=$((EXPECT_TOTAL + ${#_r22_fold[@]} + 2 + 2 + 1))   # 折叠不变量 + 提取器 2 + 接线锁 2 + 结构锁 1
+# MCP 凭据面那批(4 拦 + 1 命令侧 + 2 反锁):条数由段标记内 grep 得来,不心算
+EXPECT_TOTAL=$((EXPECT_TOTAL + $(awk '/【MCP-R22】/{f=1;next} /【MCP-R22 段结束】/{f=0} f && /^(expect|pd) /{c++} END{print c+0}' "$HW_SELF")))
 unset _r22_py _r22_data _r22_fold _r22_v _r22_a _r22_b _r22_dup
 
 total=$((pass + fail))
