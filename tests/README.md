@@ -45,7 +45,7 @@
 | 闸门对账(一条命令跑完上列全部) | `bash tests/run_gates.sh` | 每道必须 **rc=0 且匹配到自己的结论行**;`--list` 看清单,`--main` 加主套件 |
 | 压缩布局探针 | `bash tests/compaction_pin_probe.sh` | 16/16 通过(**不联网络**钉住旧摘要锁定:`summary_pin_count` / `compact_apply`;含"失败硬截断也不许丢掉摘要"这条) |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
-| MCP 通道闸门 | `bash tests/mcp_channel_test.sh` | `-mcp` 开关与暴露面(排除别家程序 import 进来的 server)、名字校验拒 `-y`/`../`、L0 幂等注入与超预算折叠、`mcp_call` 的成功/isError/CLI 失败/图片丢弃四分支、**会话级授权的四种形状**(默认只问 1 次 / `always` 问 3 次 / auto 不问 / 被拒不记账)、**通用暴露面**(参数差异不改变暴露、实际命令行逐字摊出、缺 description 被点名、源码零第三方专名与 flag 字面量)、次数刹车、无人值守范围闸、`tools()` 关闭时逐字节不变。**全部打桩**:不依赖 npm/Chrome,可离线跑 |
+| MCP 通道闸门 | `bash tests/mcp_channel_test.sh` | `-mcp` 开关与暴露面(排除别家程序 import 进来的 server)、名字校验拒 `-y`/`../`、L0 幂等注入与超预算折叠、`mcp_call` 的成功/isError/CLI 失败/图片丢弃四分支、**会话级授权的四种形状**(默认只问 1 次 / `always` 问 3 次 / auto 不问 / 被拒不记账)、**次数刹车的默认形状**(默认不限、显式设上限才生效、"不限"绝不写成"上限 0 次"、标记不带 `/0` 分母)、**通用暴露面**(参数差异不改变暴露、实际命令行逐字摊出、缺 description 被点名、源码零第三方专名与 flag 字面量)、次数刹车、无人值守范围闸、`tools()` 关闭时逐字节不变。**全部打桩**:不依赖 npm/Chrome,可离线跑 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
 | 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 46 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本。负对照:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |
 

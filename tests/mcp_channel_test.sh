@@ -224,7 +224,30 @@ out=$(MOCK_OUT='{"content":[{"type":"text","text":"x"}]}' run "$prep
 auto_mode=sandbox; MCP_MAX_CALLS=3; MCP_CALLS=3
 fn_args='{\"server\":\"chrome\",\"tool\":\"evaluate\",\"args\":{}}'
 tool_mcp_call >/dev/null 2>&1; printf '%s' \"\$content\"")
-ck "达上限即拒(进度刹车,不判语义)" "$(printf '%s' "$out" | grep -c '次数已达本会话上限')" "1"
+ck "达上限即拒(显式设了上限时才生效)" "$(printf '%s' "$out" | grep -c '次数已达本会话上限')" "1"
+
+# —— 默认必须是不限(Bruker/Blender 类 server 撞的正是这个)——
+# 这条**读的是装载后的变量值**,不是 grep 源码那行常量:常量行被改坏、或 env 前缀写错
+# (本文件里已踩过"$1 展开后 bash 不当赋值前缀"那个坑),这里就会红。
+q0=$(run "echo \"M=\$MCP_MAX_CALLS\"")
+ck "装载后的默认上限 = 0(不限)" "$q0" "M=0"
+# 用同一份 prep 但**不覆盖**上限,连发 7 次:一次都不许被拒,且计数照常累加(刹车关了≠不记账)
+prep_nolim="${prep/MCP_MAX_CALLS=5;/}"
+out=$(MOCK_OUT='{"content":[{"type":"text","text":"x"}]}' run "$prep_nolim
+auto_mode=sandbox
+for i in 1 2 3 4 5 6 7; do
+  fn_args='{\"server\":\"chrome\",\"tool\":\"evaluate\",\"args\":{}}'
+  tool_mcp_call >/dev/null 2>&1
+done
+printf 'CALLS=%s DENIED=%s' \"\$MCP_CALLS\" \"\$(printf '%s' \"\$content\" | grep -c '次数已达')\"")
+# 用 grep -o 抽取:tool_mcp_call 每次都会往 stdout 打一行"调用完成",整串相等会被它撑爆
+# (上一版就是这么红的 —— 红的是我的比对式,不是判据)。
+ck "默认下连发 7 次一次都不拒,计数仍累加" \
+   "$(printf '%s' "$out" | grep -o 'CALLS=[0-9]* DENIED=[0-9]*')" "CALLS=7 DENIED=0"
+# 上限说法只有一个出处(三处共用);两形都要对,且**不许出现"上限 0 次"这种假话**
+ck "有上限时的说法" "$(run "MCP_MAX_CALLS=5; mcp_quota_text" 2>/dev/null | tr -d '\n')" "单会话上限 5 次(超出会拒并提示你)"
+ck "不限时的说法"   "$(run "MCP_MAX_CALLS=0; mcp_quota_text" 2>/dev/null | tr -d '\n')" "不限次数(默认;要收紧用 AUTO_MAX_MCP_CALLS=<n>)"
+ck "不限时绝不出现『上限 0 次』" "$(run "MCP_MAX_CALLS=0; mcp_quota_text" 2>/dev/null | grep -c '上限 0 次')" "0"
 
 out=$(run "$prep
 fn_args='{\"server\":\"nope\",\"tool\":\"evaluate\"}'
@@ -553,21 +576,28 @@ ck "被拒后不记账:仍会再问"               "$(run_grant CONFIRM_RC=1)"  
 ck "输入框有 MCP 授权常驻标记"            "$(grep -c '⚡ mcp 已授权本会话' "$REAL")" "1"
 # ⚠ 上面那条只是"源码里有这句话",**不构成行为保证**:把 if 条件改成恒假,字符串还在,
 # 照样绿(实测变异 3 就是这么逃过的)。所以补一条真调 normal_line 的断言。
-marker_count() {   # $1=MCP_GRANTED 值 → 输出 normal_line 里授权标记出现的次数
+marker_line() {   # $1=MCP_GRANTED 值 [$2=上限,默认 40] → 原样吐 normal_line 的输出
     env W="$W" GS="$W/h-grant/state" WCHAT_SRC="$REAL" HOME="$W/h-grant/home" \
-        TMPDIR="$W/h-grant/tmp" CLIP_DIR="$W/h-grant/clip" GR="$1" \
+        TMPDIR="$W/h-grant/tmp" CLIP_DIR="$W/h-grant/clip" GR="$1" LIM="${2-40}" \
         "$BASHX" -c "
 set +u
 _mcp_load(){ _WCHAT_LIB_ONLY=1 source '$REAL' >/dev/null 2>&1; }   # ⚠ 必须函数上下文里 source
 _mcp_load
-MCP_ENABLE=1; MCP_GRANTED=\" \$GR\"; MCP_CALLS=3; MCP_MAX_CALLS=40
+MCP_ENABLE=1; MCP_GRANTED=\" \$GR\"; MCP_CALLS=3; MCP_MAX_CALLS=\$LIM
 MCP_STATE_DIR=''; MCP_EXPOSED=''; CLIP_DIR='$W/clip'; AUDIT_FILE='$W/audit.txt'
 auto_mode=''; ask_ai(){ :; }; tput(){ :; }
 normal_line 2>/dev/null
-" </dev/null | grep -c 'mcp 已授权本会话'
+" </dev/null | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g'
 }
-ck "标记真打得出来(有授权时,行为断言)" "$(marker_count 'chrome')" "1"
-ck "无授权时不打标记(不误报状态)"       "$(marker_count '')"        "0"
+_ml_on=$(marker_line 'chrome')       # 有授权 + 默认那档上限
+_ml_off=$(marker_line '')            # 没授权
+_ml_nolimit=$(marker_line 'chrome' 0)  # 有授权但不限次数(新默认)
+ck "标记真打得出来(有授权时,行为断言)"        "$(printf '%s' "$_ml_on"  | grep -c 'mcp 已授权本会话')" "1"
+ck "无授权时不打标记(不误报状态)"              "$(printf '%s' "$_ml_off" | grep -c 'mcp 已授权本会话')" "0"
+ck "有上限时标记带分母 3/40"                   "$(printf '%s' "$_ml_on"  | grep -c '已调用 3/40 次')" "1"
+# 新默认(不限)下**不许出现 "/0"** —— 那会被读成"配额已耗尽",比不写更糟
+ck "不限时不带 /0 分母"                        "$(printf '%s' "$_ml_nolimit" | grep -c '/0')" "0"
+ck "不限时仍显示已调用次数(刹车关了≠不记账)"   "$(printf '%s' "$_ml_nolimit" | grep -c '已调用 3 次')" "1"
 ck "授权表不用 declare -A(函数内 source 会 local 化)" \
    "$(awk '/^MCP_GRANTED=/,0' "$REAL" | head -3 | grep -c 'declare -A')" "0"
 

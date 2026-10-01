@@ -308,7 +308,7 @@ MCP_CATALOG_MAX="${MCP_CATALOG_MAX_BYTES:-6144}"  # L0 常驻清单总字节帽;
 MCP_RESULT_MAX="${MCP_RESULT_MAX_BYTES:-16384}"   # 结果字节帽(独立于 truncate_output:单行 JSON 会骗过按行截断)
 MCP_MARK="## 可用外部能力(MCP)"       # 注入段固定标记,save_history 按它剥离,与 SKILLS_MARK 同一条路
 MCP_STATE_DIR=""              # 会话内 server 清单缓存目录(mcp_boot 里建)
-MCP_CALLS=0                   # 本会话 mcp_call 次数,配 MCP_MAX_CALLS 做循环刹车
+MCP_CALLS=0                   # 本会话 mcp_call 累计(**不复位**),供审计与可见标记用
 # —— 授权策略(mcp-design.md §5.4 本轮定稿)——
 # session(默认)= 首次用到某个 server 时问一次,之后本会话内该 server 全部工具不再逐个问;
 # always      = 回到"每次调用都问"(想严格时的退路)。
@@ -321,7 +321,12 @@ MCP_CONFIRM="${MCP_CONFIRM:-session}"
 # **函数上下文**里 source(_mcp_load() { source … }),而 `declare` 在函数内等于 local
 # —— 关联数组会随函数返回消失,现象是"闸门里授权永远不生效、生产却正常",最难查的那种分叉。
 MCP_GRANTED=""
-MCP_MAX_CALLS="${AUTO_MAX_MCP_CALLS:-40}"  # 【只数次数、不判语义】—— auto 全放行后的唯一进度刹车
+MCP_MAX_CALLS="${AUTO_MAX_MCP_CALLS:-0}"   # 0=不限(默认)。为什么默认关掉:这条**整场会话累计、没有复位点**
+                                            # (对比 tool_round 每轮复位,见 7833 行),所以它比全局总闸
+                                            # MAX_TOOL_ROUNDS=250 紧得多;Blender 这类一次建模上百个 op 的
+                                            # server 一开场就把配额吃光。本仓库对这件事早有结论(547 行
+                                            # "失控防护不靠这个数字…逼出预算耗尽草草收尾的坏行为"),
+                                            # 是我当时没照着定。想收紧用 AUTO_MAX_MCP_CALLS=<n> 显式给。
 
 # 【为什么清单走 home 层、不走项目层】mcporter 默认会把 `<工作根>/config/mcporter.json`
 # 与 home 层合并,而 wchat 的工作根**每次启动随 cwd 变** —— 那会让"-mcp <某server> 能不能用"
@@ -2361,6 +2366,17 @@ mcp_exit_stop() {
 # 现在只做两件与 server 无关的事:① 把 server 实际拿到的命令行**原样摊开**(见 mcp_boot 的
 # mcp_show_surface);② 用途说明缺失时**明写出来**(见 mcp_catalog_text),让路由信息缺失可见。
 
+# 次数上限的**唯一**说法。三处引用它(授权提示、auto 签字前的知情行、输入框标记的分母),
+# 不许在调用点各写一份条件句 —— 那是本仓库点名的"同一条规矩抄三遍",改一漏二还不报错。
+# 默认不限时必须说成"不限次数":打"上限 0 次"会让知情提示本身变成假话。
+mcp_quota_text() {
+    if (( MCP_MAX_CALLS > 0 )); then
+        printf '单会话上限 %s 次(超出会拒并提示你)' "${MCP_MAX_CALLS}"
+    else
+        printf '不限次数(默认;要收紧用 AUTO_MAX_MCP_CALLS=<n>)'
+    fi
+}
+
 # 把"本次实际暴露面"原样摊开给人看。**这里没有任何判据** —— 只打印我们能算的事实:
 # server 名、它自报的工具数、它实际拿到的命令行(transport,实测含完整启动参数)、
 # 以及人在自己清单里写没写用途说明。第三方参数语义归数据与文档,不归本文件。
@@ -2648,9 +2664,10 @@ tool_mcp_call() {
         printf ' ⛔ 工具不在启用清单\n'; return 0; }
     jq -e . <<< "$aj" >/dev/null 2>&1 || { content="错误:args 不是合法 JSON 对象: $aj"; printf ' ⛔ args 非 JSON\n'; return 0; }
 
-    # —— 次数刹车:auto 全放行之后,这是唯一不参与"判断"的控制点 ——
-    # 与 AUTO_MAX_APPROVALS / AUTO_MAX_INSTALLS / auto_write_fuse 同族:出事最常见的原因
-    # 不是某次决定判错,而是这个循环根本没打算停。
+    # —— 次数刹车(**默认关闭**,AUTO_MAX_MCP_CALLS=<n> 才生效)——
+    # 它确实不参与"判断语义",只数次数;但**数总次数对"空转"没有信息量**(Blender 的正常会话就是几百次),
+    # 而计数又是整场累计不复位 —— 所以默认给 0。真要防原地打转,判据应该看"同 server.tool + 同 args
+    # 且返回也没变"的连续重复(那是我们能算的事实),而不是总量。见 mcp-design.md §5.4 配套 2。
     if (( MCP_MAX_CALLS > 0 && MCP_CALLS >= MCP_MAX_CALLS )); then
         auto_audit mcp "mcp_call" "$s.$t" quota MCP_MAX_CALLS "本会话 MCP 调用已达上限 $MCP_MAX_CALLS 次,停止继续调用"
         content="错误:MCP 调用次数已达本会话上限($MCP_MAX_CALLS)。这是进度刹车,不是权限判定 —— 停止重试,把当前结果与卡点直接告诉用户。"
@@ -2669,8 +2686,9 @@ tool_mcp_call() {
         fi
         MCP_GRANTED="$MCP_GRANTED $s"
         auto_audit mcp "grant" "$s" grant human_yes "会话级授权(粒度=server),首次调用 args 已完整展示"
-        printf ' \033[2m🔓 本会话已授权 %s：其全部工具不再逐个询问(上限 %s 次/会话,超出会拒并提示你)\033[0m\n' \
-            "$s" "$MCP_MAX_CALLS"
+        local _qt; _qt=$(mcp_quota_text)   # 一次取值,别在三处各拼一遍(见助手注释)
+        printf ' \033[2m🔓 本会话已授权 %s：其全部工具不再逐个询问 · %s\033[0m\n' \
+            "${s}" "${_qt}"
     fi
 
     (( ++MCP_CALLS ))
@@ -6262,8 +6280,9 @@ auto_enable() {
     # auto 全放行之所以可接受,靠的就是"人在签字时看得见自己开了什么"这一条;
     # 少打这一行,那次决定就变成了无人知情下的默认放行。
     if (( MCP_ENABLE == 1 )); then
-        printf '\033[33m  MCP:      已启用,暴露 %s · 单会话上限 %s 次 · auto 下不逐次询问(全量审计 ev=mcp)\033[0m\n' \
-            "$(printf '%s ' $MCP_EXPOSED)" "$MCP_MAX_CALLS"
+        local _qt; _qt=$(mcp_quota_text)
+        printf '\033[33m  MCP:      已启用,暴露 %s · %s · auto 下不逐次询问(全量审计 ev=mcp)\033[0m\n' \
+            "$(printf '%s ' $MCP_EXPOSED)" "${_qt}"
         printf '            ⚠ 这些工具的副作用发生在工作目录之外,硬墙 H1–H14/P1–P3 判不到它们\n'
     else
         printf '  MCP:      未启用(不带 -mcp 时不注册 mcp_* 通道;模型仍可经 shell 自行调用,见 -h)\n'
@@ -8351,8 +8370,10 @@ normal_line() {
     # 授权换走了逐次弹窗这道兜底,剩下的三条(次数上限、审计、可随时中止)就得写在脸上,
     # 否则"我什么时候放行的、现在还在放行"会变成只有翻日志才知道的事。
     if (( MCP_ENABLE == 1 )) && [[ -n "${MCP_GRANTED// /}" ]]; then
-        printf '\033[2m⚡ mcp 已授权本会话:%s · 已调用 %s/%s 次 · 审计 ev=mcp · Ctrl+C 中止当前调用\033[0m\n' \
-            "${MCP_GRANTED# }" "$MCP_CALLS" "$MCP_MAX_CALLS"
+        local _mq=""   # 不限时不能带分母:"3/0 次"会被读成"配额只剩 0"
+        (( MCP_MAX_CALLS > 0 )) && _mq="/${MCP_MAX_CALLS}"   # 判据与 mcp_quota_text 同一个变量
+        printf '\033[2m⚡ mcp 已授权本会话:%s · 已调用 %s%s 次 · 审计 ev=mcp · Ctrl+C 中止当前调用\033[0m\n' \
+            "${MCP_GRANTED# }" "$MCP_CALLS" "${_mq}"
     fi
 
     # 输入阶段的前置条件,三种原因**分开报**:以前合并成一条"缺组件",而真因往往是
