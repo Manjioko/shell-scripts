@@ -430,6 +430,9 @@ ck "截断时给出可执行收窄路径"  "$(grep -c 'mcp_schema' "$W/trunc.out
 # 剥掉控制序列与结尾换行:装载口注册的 EXIT trap 会恢复终端(打 \033[?25h\033[?7h),
 # 只影响"整值相等"的断言;不改生产 trap,在夹具侧收拾。
 _strip_ctl() { sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g' | tr -d '\n\r'; }
+# ⚠ 行结构类断言**必须用这个**而不是 _strip_ctl:_strip_ctl 里的 tr -d '\n' 会把整个输出
+#   压成一行,"^  · 提醒" 这种行首锚定就永远 0 命中 —— 现象是"断言说没这行,人眼看明明有"(刚踩过)。
+_strip_ansi() { sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g'; }
 
 echo "=== J 通用暴露面(§5.4.2:wchat 不解释第三方参数) ==="
 # 这一段以前测的是"体检判据"(按包名匹配、逐个 flag 子串比对)。那套判据已整体删除,
@@ -437,12 +440,18 @@ echo "=== J 通用暴露面(§5.4.2:wchat 不解释第三方参数) ==="
 #   ① 我们不因参数做任何区别对待(没有判据,也就没有判据腐烂);
 #   ② 该给人看的事实(实际命令行、归属、缺用途说明)有没有如实说出来。
 mkdir -p "$W/h-surf/home" "$W/h-surf/tmp" "$W/h-surf/clip"
-printf '{"servers":[%s,%s,%s]}' \
- '{"name":"tuned","description":"有用途说明的 server","status":"ok","transport":"STDIO npx -y some-mcp --redact-on","tools":[{"name":"alpha"}]}' \
- '{"name":"bare","status":"ok","transport":"STDIO node ./plain-server.js --verbose","tools":[{"name":"beta"},{"name":"gamma"}]}' \
- '{"name":"other","description":"另一种用途","status":"ok","transport":"STDIO uvx other-mcp","tools":[{"name":"do"}]}' \
+# 字段形状照 2026-10-01 实测抄:失败者带 status=offline + error + issue.rawMessage + durationMs,
+# 顶层带 counts。慢失败(30884ms/Timeout)与秒失败(70ms/Connection closed)**必须同时在场**,
+# 因为"耗时"是把"配置写错"和"冷启动再来一次"分开的唯一证据。
+printf '{"mode":"list","counts":{"ok":2,"auth":0,"offline":3,"http":0,"error":0},"servers":[%s,%s,%s,%s,%s]}' \
+ '{"name":"tuned","description":"有用途说明的 server","status":"ok","durationMs":812,"transport":"STDIO npx -y some-mcp --redact-on","tools":[{"name":"alpha"}]}' \
+ '{"name":"bare","status":"ok","durationMs":300,"transport":"STDIO node ./plain-server.js --verbose","tools":[{"name":"beta"},{"name":"gamma"}]}' \
+ '{"name":"other","description":"另一种用途","status":"ok","durationMs":400,"transport":"STDIO uvx other-mcp","tools":[{"name":"do"}]}' \
+ '{"name":"slow","status":"offline","durationMs":30884,"error":"Timeout","issue":{"kind":"offline","rawMessage":"Timeout"},"transport":"STDIO uvx slow-mcp","tools":[]}' \
+ '{"name":"dead","status":"offline","durationMs":70,"error":"Connection closed","issue":{"kind":"offline","rawMessage":"Connection closed"},"transport":"STDIO node /nope.js","tools":[]}' \
  > "$W/surf_list.json"
-printf '{"imports":[],"mcpServers":{"tuned":{"command":"npx"},"bare":{"command":"node"},"other":{"command":"uvx"}}}' > "$W/surf_cfg.json"
+# 配置里**多声明两个上游没报回来的**:ghost(缺席)与 -bad(名字不合法)—— 两类都是原来会静默的
+printf '{"imports":[],"mcpServers":{"tuned":{"command":"npx"},"bare":{"command":"node"},"other":{"command":"uvx"},"slow":{"command":"uvx"},"dead":{"command":"node"},"ghost":{"command":"uvx"},"-bad":{"command":"npx"}}}' > "$W/surf_cfg.json"
 
 cat > "$W/surf_prelude.sh" <<'PEOF'
 set +u
@@ -460,7 +469,7 @@ mcp_boot 2>&1 >/dev/null
 echo "EXPOSED=[$(printf '%s' "$MCP_EXPOSED" | tr '\n' ' ')]"
 PEOF
 _sfx=$(W="$W" WCHAT_SRC="$REAL" HOME="$W/h-surf/home" TMPDIR="$W/h-surf/tmp" CLIP_DIR="$W/h-surf/clip" \
-       SURF_JSON="$W/surf_list.json" CASE_CFG="$W/surf_cfg.json" "$BASHX" "$W/h-surf.sh" 2>&1)
+       SURF_JSON="$W/surf_list.json" CASE_CFG="$W/surf_cfg.json" "$BASHX" "$W/h-surf.sh" 2>&1 | _strip_ansi)
 # 参数带不带"安全开关"不该影响暴露面 —— 我们不做那层判断了
 ck "三个 server 全部暴露(不因参数差异区别对待)" \
    "$(printf '%s' "$_sfx" | tr '\n' ' ' | grep -o 'EXPOSED=\[[^]]*\]')" "EXPOSED=[tuned bare other]"
@@ -472,6 +481,39 @@ ck "缺用途说明的 server 被点名"        "$(printf '%s' "$_sfx" | grep -c
 ck "写了用途说明的不再啰嗦"            "$(printf '%s' "$_sfx" | grep -c 'tuned 没有 description')" "0"
 ck "通用提醒只发一次(不随 server 刷屏)" \
    "$(printf '%s' "$_sfx" | grep -c 'MCP 结果会进对话上下文并发到 API 端')" "1"
+# —— 失败必须报原因(用户报的真问题:配了 3 个只报 1 个,剩下两个静默) ——
+ck "慢失败报原因与耗时"   "$(printf '%s' "$_sfx" | grep -c 'slow · status=offline · 原因(上游原文): Timeout · 耗时 30884ms')" "1"
+ck "秒失败报原因与耗时"   "$(printf '%s' "$_sfx" | grep -c 'dead · status=offline · 原因(上游原文): Connection closed · 耗时 70ms')" "1"
+ck "声明了而上游没报回来" "$(printf '%s' "$_sfx" | grep -c 'ghost · 上游清单里')" "1"
+ck "名字不合法要说成我们主动排除(不误报成上游故障)" \
+   "$(printf '%s' "$_sfx" | grep -c '\-bad · 名字不合法,我们主动排除')" "1"
+ck "失败者仍然把命令行摊出来" "$(printf '%s' "$_sfx" | grep -c '命令行: STDIO node /nope.js')" "1"
+ck "汇总行引用上游 counts(不是我们自己数的判据)" "$(printf '%s' "$_sfx" | grep -c '上游 counts: ok=2')" "1"
+ck "成功与失败计数如实:7 声明 / 3 可用 / 4 未启用" \
+   "$(printf '%s' "$_sfx" | grep -o '共声明 [0-9]* 个:可用 [0-9]*,未启用 [0-9]*')" "共声明 7 个:可用 3,未启用 4"
+# 点名点到不存在的名字:原来 `(( want )) || continue` 完全无声
+_pn=$(W="$W" WCHAT_SRC="$REAL" HOME="$W/h-surf/home" TMPDIR="$W/h-surf/tmp" CLIP_DIR="$W/h-surf/clip" \
+      SURF_JSON="$W/surf_list.json" CASE_CFG="$W/surf_cfg.json" "$BASHX" -c '
+set +u
+_mcp_load(){ _WCHAT_LIB_ONLY=1 source "$WCHAT_SRC" >/dev/null 2>&1; }; _mcp_load
+MCP_STATE_DIR="'"$W"'/h-surf/state"; MCP_EXPOSED="tuned"; MCP_ONLY=(tuned blendor)
+MCP_CONFIG="$CASE_CFG"; mkdir -p "$MCP_STATE_DIR"
+mcp_show_surface "$SURF_JSON"' 2>&1)
+ck "点名打错要明说配置里没有(不再伪装成 server 坏了)" \
+   "$(printf '%s' "$_pn" | grep -c '点名 blendor:配置里')" "1"
+# —— 行结构:两段文本喂一个 printf 会被当"格式+参数",现象是少换行、与下一行黏住 ——
+ck "提示行不与前一行黏连(每行独立)" \
+   "$(printf '%s\n' "$_sfx" | grep -c '^  \[mcp\] 本次共声明')" "1"
+ck "提醒行独立成行" "$(printf '%s\n' "$_sfx" | grep -c '^    · 提醒:MCP 结果')" "1"
+ck "耗时说明独立成行" "$(printf '%s\n' "$_sfx" | grep -c '^    · 耗时长的失败')" "1"
+# —— 只给人看:失败原因**不许**进模型可见面(诱导它去修 server,而那层它无权限也不该碰)——
+_mdl=$(MOCK_OUT="$(cat "$W/surf_list.json")" run "
+MCP_ENABLE=1; MCP_CONFIG='$W/surf_cfg.json'; MCP_ONLY=()
+mcp_boot >/dev/null 2>&1
+messages=\$(jq -n '[{role:\"system\",content:\"base\"}]'); inject_skills >/dev/null 2>&1 || true
+inject_mcp; printf '%s' \"\$messages\" | jq -r '.[0].content'; tools | jq -c .")
+ck "模型看到的 system 段里没有失败原因" "$(printf '%s' "$_mdl" | grep -c 'status=offline\|原因(上游原文)\|Connection closed')" "0"
+ck "模型看到的 tools 里也没有"          "$(printf '%s' "$_mdl" | grep -c '上游 counts')" "0"
 # 判据词汇必须彻底消失 —— 否则"删了体检"只是删了函数名,文案还在替第三方解释参数
 ck "不再出现任何参数判据话术" \
    "$(printf '%s' "$_sfx" | grep -c '未设\|建议加\|修法\|不达标\|达标')" "0"

@@ -130,6 +130,7 @@
 | MCP 方法名出现在 server 包里 | `build/src/third_party/index.js` 含 `tools/call`、`tools/list`、`notifications/progress` |
 | daemon 内部按 `view` 记账 | `mcporter/dist/daemon/*.js`：`views = new Map()`、上限 1024；`user.json` 里也有 `views`/`servers` 字段 |
 | **上游自己实现了浏览器归属冲突检测** | `mcporter/dist/daemon/browser-owner.js` 里有 `class BrowserOwner`、`class BrowserOwnerConflict` |
+| `list --json` 里失败者带什么 | 【实测】每个 server 的键：`status` / `error` / `issue.kind` / `issue.rawMessage` / `durationMs` / `source{kind,path}` / `transport`；顶层另有 `mode` 与 `counts{ok,auth,offline,http,error}` |
 | 干净停止会删掉状态与 socket | 【实测】优雅 stop 后 `~/.mcporter/daemon/` **只剩 `user.key`**；`user.json`/`user.sock` 消失 |
 | 空缓存首次拉 mcporter 的体积 | 【实测】`~/.npm/_npx` 新 HOME 首拉 **118M**（包本身 3.9M，其余是依赖树） |
 | daemon 怎么创建 server 子进程 | 【推断】只观察到行为（daemon 停止后 server 也随之消失）。`dist` 里 `spawn(` 仅出现在 `chrome-devtools-relay-discovery.js` 与 `cli-metadata.js`，**未定位到通例实现**，别据此下结论 |
@@ -157,6 +158,38 @@ ls -la ~/.mcporter/daemon/                               # 有 sock+json=在跑�
 ps -eo pid,ppid,command | grep -E 'mcporter|chrome-devtools'   # 看父子关系与"谁是短命进程"
 # 看真实 argv：把 MCP_LAUNCHER 指向一个 printf 'CALL: %s\n' "$*" 的替身脚本，再跑一次探测
 ```
+
+### 0·补.8 启动失败的五种形状（以及为什么过去全是静默的）
+
+用户实测报告：配了 chrome / git / blender 三个 server，若只有 chrome 成功，启动输出里**只有 chrome**，
+另外两个既不报错也不解释。根因是一行过滤器：
+
+```bash
+jq -e --arg s "$n" '.tools | length > 0' "$MCP_STATE_DIR/$n.json" && printf '%s\n' "$n"   # 丢弃时零输出
+```
+
+失败者 `tools` 必为空 → 被无声丢掉；而**原因字段上游一直给了**（见 §0·补.5 新增那行），我们一个都没读。
+现在每个"配置里声明过的 server"都必有一行，五种形状分别措辞：
+
+| 形状 | 判据 | 输出 | 含义（**转述，不解释**） |
+|---|---|---|---|
+| 成功 | `status=ok` 且 `tools>0` | `✓ 名字 · N 个工具 · transport` | — |
+| 秒失败 | `status≠ok`，`durationMs` 几十毫秒 | `✗ 名字 · status=offline · 原因(上游原文): Connection closed · 耗时 70ms` | 命令本身起不来（可执行文件/参数不对） |
+| 慢失败 | `status≠ok`，`durationMs` 数秒~数十秒 | 同上，`Timeout · 耗时 30884ms` | 连不上（冷启动拉包、端口/实例被占）——**再启一次往往就好** |
+| 在线但空 | `status=ok` 且 `tools=0` | `⚠ 名字 · 在线但没提供工具` | 连上了，是它自己不暴露工具（可能被自身开关裁掉） |
+| 缺席 | 配置声明了、`list` 里根本没有 | `✗ 名字 · 上游清单里根本没有这个 server` | 配置与上游不一致，附 `list --status` 复核命令 |
+| 名字不合法 | 过不了 `mcp_name_ok` | `✗ 名字 · 名字不合法,我们主动排除` | **是我们丢的，不是上游坏的**——必须分开报 |
+| 点名点错 | `-mcp` 里的名字配置中没有 | `✗ 点名 blendor:配置里没有这个 server(打错了?现有:…)` | 否则会被误读成"blender 坏了" |
+
+两条设计约束：
+
+- **`durationMs` 是硬要求**。缺了它就会把"配置写错"和"冷启动再来一次"混成同一条 —— 那是把静默换成误导。
+  我自己实测时就撞上过一次：配置完全正确的 git server 因为临时 HOME 冷启动报 `Timeout`。
+- **只给人看（stderr），不进模型可见面**。模型看到失败原因会去试图"修 server"，而那一层它既无权限
+  （`~/.mcporter` 被 P1/H6 拦着）也不该碰；"哪些可用"它已经从 L0 拿到，调用未启用的 server 本来就有
+  一条明确错误。这条由闸门里的反向锁钉住：L0 与 `tools()` 里出现 `status=offline`/`原因(上游原文)` 即红。
+
+---
 
 ---
 
@@ -785,6 +818,7 @@ mcp_call    {server, tool, args(object), output?} → 执行；默认 text
 | ✅ 10 | **`options_list` 既存隐患先单独立项修掉，再动 MCP**（切片 0.7） | §九 / §13.2 |
 | ✅ 12 | **非 auto 改成会话级授权**（粒度=server、首次展示 args、不做 origin 追问、保留 `MCP_CONFIRM=always` 退路、输入框常驻授权标记） | §5.4.1 |
 | ✅ 13 | **撤回 args 路径扫描**：真实日志里的正则字面量就是误拒反判据，不精确的判据不装成墙 | §5.4 配套三 |
+| ✅ 18 | **启动失败必须可观测**：遍历"声明过的全部 server"，五类失败各自措辞并转述上游 `error`+`durationMs`+`source`+`counts`；**只给人看**，不进模型可见面（有反向锁） | §0·补.8 |
 | ✅ 17 | **`MCP_MAX_CALLS` 默认改 0（不限）**：40 的作用域是整场累计、比全局总闸紧且与 `wchat.sh:547` 自家结论矛盾；保留计数/审计/可见标记，上限说法收进单一助手 | §5.4 配套 2 的修订 |
 | ✅ 15 | **第三方参数判据整体移出代码**（删 `mcp_audit_server` / `MCP_STRICT_CONFIG`），改为原样摊开实际命令行；原则"wchat 只对自己能算出来的事实下判据" | §5.4.2 |
 | ✅ 16 | **路由话分两层**：常驻段只留跨 server 通用的"外部程序运行态 vs 静态内容"；类别线索归各 server 在自己的 `description` 里写，缺失时清单行**明写**"未提供用途说明" | §14.8 |
@@ -1388,10 +1422,12 @@ done
 ### 14.5 当前基线
 
 - 全表 **569/569 fail=0**（`test_hardwall.sh`）
-- MCP 通道闸门 **109/109 fail=0**（`tests/mcp_channel_test.sh`，全打桩、离线可跑，已接进 `run_gates.sh` 第 9 道）
-- `run_gates --main` → **`GATES run=10 pass=10 fail=0 skip=0 sha=777d0247f873`**，rc=0
+- MCP 通道闸门 **122/122 fail=0**（`tests/mcp_channel_test.sh`，全打桩、离线可跑，已接进 `run_gates.sh` 第 9 道）
+- `run_gates --main` → **`GATES run=10 pass=10 fail=0 skip=0 sha=2a9243404e3b`**，rc=0
   （本轮实跑：全表 569/569、判据出口 123/0、压缩 29/29、形状 20/0、审计通过、技能目录通过、
-  回放 64 条无新增漂移、主套件通过。次数刹车改默认不限之后的 4 次变异 G/H/I/J 全部变红，见 §5.4 配套 2 的修订）
+  回放 64 条无新增漂移、主套件通过。变异全部精准命中：刹车默认 4 次（G/H/I/J，§5.4 配套 2 的修订）、
+  启动失败可观测 5 次（K 成员判断/L2 不取原因/N 名字不合法误报/O2 点名短路/M 原因泄进模型可见面，§14.9）。
+  注：变异 L 与 O 的第一版把脚本语法弄崩导致 A 段全红，**那不算精准杀死**，已换成语法合法的等价退化形）
   （以上为 A 方案落地后实跑；每条新断言都做过变异验证，见 §14.7/§14.8）
 
 ---
@@ -1477,6 +1513,33 @@ chrome 形（desc 由用户写，含浏览器语汇）与 figma 形（无 desc�
 | 2 | **`BrowserOwner` 与 §5.2 独占锁的关系**：0.14.1 包里存在 `class BrowserOwner`/`BrowserOwnerConflict`（§0·补.5），而 `MCP_PKG` 注释说"无 browserOwner" | 若上游自己已能拒"第二个会话抢同一浏览器"，我们的 `~/.ct/mcp/owners` 就有重复建设；但**不能凭这个删锁**——上游检测覆盖不到"两个 wchat 会话互抢 daemon"这一层 | 起两个会话同时 `-mcp`，看谁报错、报的是谁的错；再读 `daemon/browser-owner.js` 的触发条件 |
 | 3 | **连续重复调用的熔断（防"原地打转"）**：连续 N 次相同 `server.tool` + 相同 args 且返回也没变 → 熔断并回一句"你在重复同一条调用且结果没变"。先只做警告不拦 | 次数上限默认关掉之后，这一类失控没有了专门的兜底（`tool_round`/`AUTO_DENY_STREAK` 仍是通用护栏）。判据本身是字符串相等，属我们能算的事实，符合 §5.4.2 —— 但**本轮未实现**，且要防误伤合法轮询（等渲染/等构建：返回会变，所以附加"返回也没变"这条） |
 | 4 | rsync `~/.npm/_npx/` 到新机能否免下载 | 只影响离线部署的省事程度 | 新机实测；npx 缓存按 spec 哈希，跨大版本可能失效 |
+
+### 14.9 【本轮】"让失败可见"这一改里，我自己错了四次
+
+都值得记，因为它们全是**断言抓不到、只有肉眼或行为能抓**的形状：
+
+1. **成员判断用错了连接符**。`MCP_EXPOSED` 是**换行**拼的，我写 `[[ " $MCP_EXPOSED " == *" $n "* ]]`
+   → 永远不命中 → 三个正常 server 全被报成"未启用"。旧代码 `for n in $MCP_EXPOSED` 靠词分割所以没这问题。
+   **抓住它的正是我刚加的汇总行断言**（`可用 0, 未启用 7`）——这是"新断言立刻抓到新代码"的一次正例。
+2. **`printf 'A;' 'B%s\n' x y` 不是拼接**。bash 里相邻引号串是**两个参数**，printf 会把 A 当格式、
+   把 B 当参数再循环套格式 → B 整段消失且少了换行，现象是两行黏成一行。我连着三次才修对：
+   第一次"补换行"没解决，第二次拆两条 `printf` 但反斜杠换行落在引号**外面**（又是两个词），
+   第三次才把格式串写在同一行内。`bash -n` 全程不报 —— 它是合法语法，只是语义不对。
+3. **替换留下的重复行变成了一条独立命令**。我用 python 插入 + 去重，结果留下一行裸
+   `"$MCP_LAUNCHER" "$MCP_PKG" >&2` → 它真的去执行了 `npx mcporter@0.14.1`，命令挂住 120s 才被发现。
+   `bash -n` 同样不报（语法完全合法）。**教训：插入式改动的"去重"必须自己核对，别信 assert 数量。**
+4. **夹具的比对式自己会错**。行结构断言一开始 0 命中，我以为是代码缺换行 —— 实际是我复用了
+   `_strip_ctl`，它里面有 `tr -d '\n'`（为"整值相等"设计的），把整个输出压成一行，`^  · 提醒` 当然找不到。
+   另一次是 `_sfx` 没剥 ANSI 就拿 `^  \[mcp\]` 锚定。**"断言说没有、人眼看明明有"时，先怀疑比对式。**
+
+另外两条流程上的自我纠正：
+- 我造的前两次"变异"（L、O）把 `wchat.sh` 语法弄崩了，表现为 A 段函数注册全红 —— 那**不算精准杀死**
+  （任何破坏都会让整份脚本红）。改成语法合法的等价退化形状（不取 `error` 字段、点名核对短路）后，
+  各自精准命中 1–2 条目标断言。变异装置的红条数多不等于杀得好，**要红在承重的那一条上**。
+- 本轮实测还顺手证明了一次：`daemon stop` 之后 `~/.mcporter/daemon/` 只剩 `user.key`
+  （`user.json`+`user.sock` 被自己删掉），与我们"干净停止"的判据一致。
+
+---
 
 ---
 

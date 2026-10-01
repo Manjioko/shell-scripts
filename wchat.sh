@@ -2389,16 +2389,90 @@ mcp_pgrep_pattern() {
     [[ -n "$p" ]] && printf '%s\n' "$p" || printf '%s\n' "$MCP_PKG"
 }
 
+# 把"每个 server 到底怎么了"如实报出来。**只给人看(stderr),不进模型可见面** ——
+# 失败原因是上游给的字符串,给模型只会诱导它去"修 server"(那一层它既没权限也不该碰,
+# ~/.mcporter 已被 P1/H6 拦着);而"哪些可用"这件事模型已经从 L0 拿到了。
+# 为什么不在这几行里判断"这个原因危不危险/能不能救":见 §5.4.2 —— 只转述,不解释。
+# 形状实测(2026-10-01 本机,临时 HOME 里造一个正常 + 一个故意配错的 server):
+#   每个 server 带 status / error / issue.rawMessage / durationMs / source / transport;
+#   顶层带 counts{ok,auth,offline,http,error}。失败分两类,**耗时是唯一的区分证据**:
+#     · 70ms   + Connection closed  → 命令根本起不来(可执行文件或参数写错)
+#     · 30884ms+ Timeout            → 起得来但连不上(冷启动拉包、端口/profile 被占)
+#   所以少了耗时就会把"配置写错"和"再启一次就好"混成同一条,那是把静默换成误导。
 mcp_show_surface() {   # $1 = mcporter list --json 的路径
-    local raw="${1-}" n tr nd cnt
+    local raw="${1-}" n tr nd cnt st rs ms declared=0 okn=0 badn=0 exposed_sp
+    # ★ MCP_EXPOSED 是用换行拼的(`printf '%s\n' … | while …`),所以成员判断**不能**直接
+    #   `[[ " $MCP_EXPOSED " == *" $n "* ]]` —— 那要在换行里找空格包夹,永远不命中,
+    #   现象是"三个都成功的 server 全被报成未启用"(闸门新加的汇总行断言当场抓到)。
+    #   先归一化成空格分隔再判；名字已过 mcp_name_ok,不含 glob 字符。
+    exposed_sp=$(printf '%s ' $MCP_EXPOSED)
     printf '  \033[2m[mcp] 暴露面(命令行归你,wchat 不解释也不替你改):\033[0m\n' >&2
-    for n in $MCP_EXPOSED; do
-        tr=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|.transport][0] // "?"' "$raw" 2>/dev/null)
-        cnt=$(jq '.tools|length' "$MCP_STATE_DIR/$n.json" 2>/dev/null)
-        nd=$(jq -r '.desc // ""' "$MCP_STATE_DIR/$n.json" 2>/dev/null)
-        printf '    - %s · %s 个工具 · %s\n' "$n" "${cnt:-?}" "${tr:-?}" >&2
-        [[ -n "$nd" ]] || printf '      ⚠ %s 没有 description:模型只能凭工具名猜它何时该用。建议在 %s 里给它写一句用途。\n' "$n" "$MCP_CONFIG" >&2
+    # 遍历**配置里声明过的全部** server,而不是只遍历暴露成功的那些 ——
+    # 原实现的过滤器是 `.tools|length > 0`,失败者 tools 为空被无声丢弃,现象就是
+    # "配了三个只报一个,剩下的既不报错也不解释"。
+    for n in $(jq -r '.mcpServers // {} | keys[]' "$MCP_CONFIG" 2>/dev/null); do
+        declared=$((declared + 1))
+        if [[ " $exposed_sp " == *" $n "* ]]; then
+            cnt=$(jq '.tools|length' "$MCP_STATE_DIR/$n.json" 2>/dev/null)
+            tr=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|.transport][0] // "?"' "$raw" 2>/dev/null)
+            nd=$(jq -r '.desc // ""' "$MCP_STATE_DIR/$n.json" 2>/dev/null)
+            printf '    \033[32m✓\033[0m %s · %s 个工具 · %s\n' "$n" "${cnt:-?}" "${tr:-?}" >&2
+            okn=$((okn + 1))
+            [[ -n "$nd" ]] || printf '      ⚠ %s 没有 description:模型只能凭工具名猜它何时该用。建议在 %s 里给它写一句用途。\n' "$n" "$MCP_CONFIG" >&2
+            continue
+        fi
+        badn=$((badn + 1))
+        # 名字不合法是**我们自己**丢的(原实现 `mcp_name_ok || continue` 无声),必须先于
+        # 上游状态报出来 —— 否则会拿一个"其实在线"的 server 去走"没提供工具"那支,越说越歪。
+        if ! mcp_name_ok "$n"; then
+            printf '    \033[31m✗\033[0m %s · 名字不合法,我们主动排除(只允许 字母/数字/下划线 开头,可含 - 与 .,≤64)\n' "$n" >&2
+            printf '      这类名字进 argv 会被当选项吃掉(实测过 "-y" → "Unknown MCP server"),所以不试。\n' >&2
+            continue
+        fi
+        st=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|(.status//"?")][0] // "缺席"' "$raw" 2>/dev/null)
+        rs=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|((.issue.rawMessage // .error // "?")|tostring)][0] // ""' "$raw" 2>/dev/null)
+        ms=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|(.durationMs//""|tostring)][0] // ""' "$raw" 2>/dev/null)
+        tr=$(jq -r --arg x "$n" '[.servers[]?|select(.name==$x)|(.transport//"")][0] // ""' "$raw" 2>/dev/null)
+        # 上游字符串照抄,只去换行与截断 —— 长度不设防会把一屏 stack trace 打进启动输出
+        rs=$(printf '%s' "$rs" | tr -d '\r\n' | cut -c1-160)
+        if [[ "$st" == "缺席" ]]; then
+            printf '    \033[31m✗\033[0m %s · 上游清单里**根本没有这个 server**(status=缺席)\n' "$n" >&2
+            printf '      含义:它被 %s 声明了,但 mcporter 没报回来。先跑 %s -y %s list --status 看它怎么说。\n' \
+                "$MCP_CONFIG" "$MCP_LAUNCHER" "$MCP_PKG" >&2
+        elif [[ "$st" == "ok" ]]; then
+            # 在线但一个工具都没给:不是启动失败,是 server 自己没提供 —— 三种措辞不能合并
+            printf '    \033[33m⚠\033[0m %s · 在线但没提供工具(status=ok,tools=0)· %s\n' "$n" "${tr:-?}" >&2
+            printf '      含义:连上了,只是它不暴露任何工具(可能全被自己的开关裁掉了)。本次不注册它。\n' >&2
+        else
+            printf '    \033[31m✗\033[0m %s · status=%s · 原因(上游原文): %s%s\n' \
+                "$n" "$st" "${rs:-?}" "$([[ -n "$ms" ]] && printf ' · 耗时 %sms' "$ms")" >&2
+            [[ -n "$tr" ]] && printf '      命令行: %s\n' "$tr" >&2
+        fi
     done
+    # 点名点到不存在的名字:原实现 `(( want )) || continue` 是**无声**的,
+    # 于是 `-mcp blendor` 看起来像"blender 这个 server 坏了",其实是名字打错。
+    if (( ${#MCP_ONLY[@]} )); then
+        local -a _only=("${MCP_ONLY[@]}")
+        for n in "${_only[@]}"; do
+            [[ " $exposed_sp " == *" $n "* ]] && continue
+            jq -e --arg x "$n" '[.mcpServers // {} | keys[]]|index($x)' "$MCP_CONFIG" >/dev/null 2>&1 || \
+                printf '    \033[31m✗\033[0m 点名 %s:配置里**没有这个 server**(打错了?现有:%s)\n' \
+                    "$n" "$(jq -r '(.mcpServers//{}|keys)|join(" ")' "$MCP_CONFIG" 2>/dev/null)" >&2
+        done
+    fi
+    # 汇总行用上游自己的 counts(不是我们数出来的判据),再补一句"慢失败多半是冷启动"
+    local cts; cts=$(jq -r '.counts // {} | to_entries | map("\(.key)=\(.value)") | join(" ")' "$raw" 2>/dev/null)
+    printf '  \033[2m[mcp] 本次共声明 %s 个:可用 %s,未启用 %s;上游 counts: %s\033[0m\n' \
+        "$declared" "$okn" "$badn" "${cts:-无}" >&2
+    # ⚠ 这里必须是两条 printf:bash 里 `'a' 'b'` 是**两个参数**,不是拼接
+    # —— 写成 `printf 'A;' 'B%s\n' x y` 会把 A 当格式、B 当参数再循环套格式,
+    #   现象是 B 整段消失且**少了换行**,与下一行黏住(实测踩过,现象就在这里)。
+    if (( badn > 0 )); then
+        # 整个格式串**必须写在一行内**:反斜杠换行落在引号外面就又变成两个参数了
+        printf '  \033[2m  · 耗时长的失败(数秒~数十秒)多为冷启动或端口/实例被占,再启一次即可;几十毫秒就失败的多半是命令或参数本身不对。\033[0m\n' >&2
+        printf '  \033[2m    诊断:%s -y %s list --status\033[0m\n' "$MCP_LAUNCHER" "$MCP_PKG" >&2
+    fi
+
     printf '  \033[2m  · 提醒:MCP 结果会进对话上下文并发到 API 端;要关遥测/脱敏头,请按上面 server 的文档自己加到它的参数里。\033[0m\n' >&2
 }
 
