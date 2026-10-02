@@ -455,6 +455,28 @@ clip_line_width() {
 # 用法:LC_ALL=C awk "$_AWK_U8LEN"'{ acc += u8len($0) + 1; ... }'
 _AWK_U8LEN='function u8len(s,   t, n) { t = s; n = gsub(/[\200-\277]/, "", t); return length(s) - n }'
 
+# ---------- messages[].content 的两种形状:共享 jq 片段(随"真多模态"新增) ----------
+# content 有两种形状:纯文本请求是**字符串**;带图请求是**部件数组**
+# ([{type:"image_url",…},{type:"text",…}])。全文件原先有 4 处把 content 当字符串用
+# (jq 的 + 拼接与 startswith),实测数组进去的下场:
+#   - `"[tool] " + (.content // "")` → rc=5 `string ("[tool] ") and array cannot be added`,
+#     且**报错前已经产出的行照常进摘要器** → 表现为"压缩成功但摘要是拿半截对话写的";
+#   - `(.content // "") | startswith(...)` → rc=5 `startswith() requires string inputs`
+#     → 输出空串 → 调用处把 pin 兜成 0 → **旧摘要不再锁定,每次压缩都做二次摘要**;
+#   - 显示层 `jq -r ".content"` 遇数组 rc=0 但输出整段 JSON(含 base64)进渲染。
+# 三类都是"不崩、静默给错东西",与 _AWK_U8LEN 那条同源,所以按同一规矩处理:
+# **口径只写一份**,四处共用这两个变量(同 vision_build_body 收敛成一份的理由)。
+# **必须是单行赋值**:vision_e2e.sh:33-40 记过同类事故 —— 多行引号串会把按模式抽取的
+# 测试沙箱"整段吞进字符串里,source 不报错但函数根本不存在"。IMG_DESC_PROMPT 也是单行。
+# 口径:数组 → 取所有 text 部件拼起来,并追加一行"N 张原图未纳入文本转写"的计数
+#       (图片本体不进转写,但不许把"这里看过图"这件事整个抹掉);字符串/null → 原样。
+# 拼写约束(破了会在调用处静默出坏 jq 程序):不含单引号、不含反引号、不含 ${}。
+_JQ_CONTENT_TEXT='(if (.content|type)=="array" then (([.content[]?|select(.type=="text")|.text]|join("\n")) + (if ([.content[]?|select(.type=="image_url")]|length)>0 then "\n(此处原有 "+([.content[]?|select(.type=="image_url")]|length|tostring)+" 张原图,图片本体不进文本转写)" else "" end)) else (.content // "") end)'
+# 判"这份 messages 里有没有原图部件"。只看结构(.type=="image_url"),不用全文搜
+# "data:image" 字符串 —— 后者会被正文里恰好出现的同类文本骗到(与联网 provider
+# 判定同一取向:能判结构就不判字面)。
+_JQ_HAS_IMAGE='[.. | objects | select(.type == "image_url")] | length > 0'
+
 # 扫描技能目录,解析每个 SKILL.md 的 frontmatter(name/description),
 # 输出"技能名: 描述"列表供注入。按 mtime 排序,只取前 SKILL_MAX_INJECT 个。
 scan_skills() {
@@ -1123,7 +1145,10 @@ get_history() {
     local tc_map=""
     while IFS= read -r line; do
         role=$(jq -r '.role' <<< "$line")
-        msg_content=$(jq -r '.content // empty' <<< "$line")
+        # 显示层取正文:必须走 $_JQ_CONTENT_TEXT。旧写法 `jq -r ".content"` 遇到数组型
+        # content(带图消息)**rc=0 且把整个数组连同 base64 展开成缩进 JSON** 喂进渲染,
+        # 表现为"加载历史时终端刷几十万字符"。null 与新写法的空串对下游 [[ -n ]] 等价。
+        msg_content=$(jq -r "$_JQ_CONTENT_TEXT" <<< "$line")
         reasoning=$(jq -r '.reasoning_content // empty' <<< "$line")
         # 本条 assistant 发起的工具调用。真实历史里 95/97 条 assistant 只带
         # tool_calls(content 为空),旧版一条都不显示 —— 加载历史后完全看不出
@@ -3215,8 +3240,28 @@ compact_due() {
 # system 之后**连续**的旧摘要条数。它们要被原样保留,不许再喂回压缩器:摘要被反复
 # 再摘要是"历史还在但关键信息没了"的主因(压缩 N 次 = N 层套叠,全靠猜)。
 summary_pin_count() {
-    printf '%s' "$1" | jq -r --arg p "$SUMMARY_PREFIX" '
-        [ .[1:][] | ((.content // "") | startswith($p)) ] | (index(false) // length)' 2>/dev/null
+    # $_JQ_CONTENT_TEXT 不是可选的整洁:content 是数组(带图消息)时,旧的
+    # `(.content // "") | startswith($p)` 会 rc=5 输出空串,调用处把 pin 兜成 0 →
+    # **旧摘要失去锁定,每次压缩都把它再摘要一遍**(套叠有损,正是"历史还在但关键
+    # 信息没了"的主因)。错得不报错,所以这条必须钉在形状上而不是靠模型不出图。
+    #
+    # 取数失败不许再静默退化成 0。"空/非数字"只可能是三种真故障:全局片段没装载、
+    # 夹具抽取名单漏登记(→ 沙箱里它是空串)、jq 过旧不认 //。而 pin=0 恰好把本函数
+    # 存在的理由整个废掉,还一句错都不说 —— 与 bugList #47「夹具漏登记
+    # auto_install_allowed → 沙箱 command not found → H14 放行分支永远走不到」同病:
+    # **被测代码一依赖全局,装载失败必须出声**。
+    # 处置:出声 + return 1(调用处仍按非数字兜 0 —— 保守截断总比停掉压缩好),
+    # 但那行黄字会让人看见"锁定机制早就没在工作",而不是压了十次才发现。
+    local out rc
+    out=$(printf '%s' "$1" | jq -r --arg p "$SUMMARY_PREFIX" '
+        [ .[1:][] | ('"$_JQ_CONTENT_TEXT"' | startswith($p)) ] | (index(false) // length)' 2>&1)
+    rc=$?
+    if (( rc != 0 )) || [[ ! "$out" =~ ^[0-9]+$ ]]; then
+        printf '\033[33m⚠️ summary_pin_count 取数失败(rc=%s),本次压缩按 pin=0 继续,旧摘要可能失去锁定。原因:%s\033[0m\n' \
+            "$rc" "${out:0:200}" >&2
+        return 1
+    fi
+    printf '%s' "$out"
 }
 
 # 压缩后的历史布局,集中成一个不碰网络的纯函数:compact_messages 只管"要不要压、摘要
@@ -3284,13 +3329,17 @@ compact_messages() {
 
     # 中间段转成 "[role] content" 可读文本,减少压缩请求的输入 token;
     # assistant 带 tool_calls 的消息 content 为 null,单独转成一行描述,
-    # 保证"模型调用了哪个工具、什么参数"这一关键信息不丢
+    # 保证"模型调用了哪个工具、什么参数"这一关键信息不丢。
+    # ⚠ 取 content 必须走 $_JQ_CONTENT_TEXT 而不是 `.content // ""`:带图消息的 content
+    #   是数组,旧写法在这里 rc=5,而**报错前已产出的行会照常喂进摘要器** —— 表现为
+    #   "压缩成功、摘要里后半段没了"的静默数据损失,比崩溃难发现。图片本体不进转写,
+    #   但留一句"此处原有 N 张图"的计数,免得摘要把"看图"这件事整个抹掉。
     to_compact=$(echo "$messages" | jq -r --argjson start "$start" --argjson cut "$cut" '
         .[$start:$cut][] |
         if .tool_calls != null then
             "[assistant → 工具调用] " + (.tool_calls | tostring)
         else
-            "[" + .role + "] " + (.content // "")
+            "[" + .role + "] " + '"$_JQ_CONTENT_TEXT"'
         end')
 
     if compact_due "$last_prompt_tokens"; then
@@ -3371,7 +3420,17 @@ make_request_body() {
         model: $model,
         messages: $msgs[0],
         thinking: {type: $thinking},
-        reasoning_effort: "high",
+        # 带图时撤掉 high:实测(2026-09-30,同一张 120px PNG)qwen 网关
+        #   纯文本 + thinking:disabled + reasoning_effort:high → 200
+        #   **带图   + thinking:disabled + reasoning_effort:high → 400**
+        #     "'"'"'reasoning_effort'"'"' must be '"'"'none'"'"' when '"'"'enable_thinking'"'"' is false"
+        #   带图   + disabled + reasoning_effort:none → 200 / 带图 + enabled + high → 200
+        # 这是 bugList #35 那个坑换了个位置:当初只在转述子请求上踩,图片一进 messages
+        # 就打在**主请求**上,而默认档 thinking 就是 disabled(wchat.sh:541) → 表现为
+        # "带图的工具链第 2 轮续发必挂"。mimo 网关三档实测对 high+disabled+图 都收,
+        # 但两家行为不一致,所以只能条件化,不能统一收敛成一种形状。
+        # 只在"带图且关思考"时取值变化;不带图时输出与改动前**逐字节相同**(回归基线靠这条)。
+        reasoning_effort: (if ($thinking == "disabled" and ($msgs[0] | '"$_JQ_HAS_IMAGE"')) then "none" else "high" end),
         stream: true,
         tools: $tool,
         stream_options: {include_usage: true}
@@ -7152,12 +7211,14 @@ skill_save() {
 
     (( $(echo "$messages" | jq 'length') <= 1 )) && { inp_msg "⚠️  当前对话为空,没有可沉淀的经验"; return 0; }
 
-    # 对话转可读文本(与压缩同款格式),发给 flash 提炼
+    # 对话转可读文本(与压缩同款格式),发给 flash 提炼。
+    # 取 content 的口径与 compact_messages 必须一致(共用 $_JQ_CONTENT_TEXT):旧写法在这里
+    # 同样 rc=5,后果是"技能草稿基于半截对话提炼"——提炼出来的技能会长期误导后续会话。
     to_summarize=$(echo "$messages" | jq -r '.[1:][] |
         if .tool_calls != null then
             "[assistant → 工具调用] " + (.tool_calls | tostring)
         else
-            "[" + .role + "] " + (.content // "")
+            "[" + .role + "] " + '"$_JQ_CONTENT_TEXT"'
         end')
     inp_msg '📦 正在从当前对话提炼技能…'
     # 用 function calling 拿结构化草稿:tool_calls 的 arguments 由 API 层保证
