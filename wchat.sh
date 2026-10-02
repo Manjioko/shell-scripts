@@ -107,6 +107,10 @@ pro_model="${PRO_MODEL:-}"
 #    IMG_PROVIDER              图片链路开关 auto|none(原 mimo/openai 两个"形状家族"值
 #                              因探测无消费方已收掉,现等同 auto)→ 见「图片转述」节
 #    IMG_MAX_BYTES / IMG_MAX_SIDE / IMG_MAX_BATCH / IMG_BATCH_MAX_BYTES  图片配额四件套
+#    IMG_INLINE / IMG_INLINE_MAX_SIDE / IMG_INLINE_MAX_BYTES / IMG_INLINE_HOLD
+#                              inline 通道(原图交主模型自己看)的开关与预算
+#    IMG_INLINE_GONE_MARK / IMG_INLINE_GONE_HINT  降级文案(措辞由实验定,见该节注释)
+#                              → 均见「图片理解」节
 #    TOKEN_THRESHOLD           上下文压缩阈值 → 详解见「上下文压缩」节
 #    (以下属 auto 模式,留在「auto 模式」节,同样支持 env:MAX_TOOL_ROUNDS CMD_TIMEOUT
 #     AUTO_MAX_APPROVALS AUTO_DENY_STREAK AUTO_SNAPSHOT_MAX_KB AUTH_CTX_KEEP)
@@ -137,6 +141,39 @@ IMG_MAX_BYTES=${IMG_MAX_BYTES:-10485760}              # 单张上限(字节,base
 IMG_MAX_SIDE=${IMG_MAX_SIDE:-2048}                    # 压缩目标:最长边像素
 IMG_MAX_BATCH=${IMG_MAX_BATCH:-4}                     # 一次请求最多合并张数
 IMG_BATCH_MAX_BYTES=${IMG_BATCH_MAX_BYTES:-30408704}  # 一次请求图片字节合计上限
+# ---------- inline 通道:read_image 把原图交给**主模型**自己看 ----------
+# 与转述(describe_images)是两条并行通道,不是替换。分工由实测定:
+#   inline  → 精度来自"第一次观察就是看图",转述会一次性把精度拍死(精密图纸/接线图场景);
+#   describe → 主模型不收图时唯一能读到图的办法,且结论落成文字、跨轮不重付。
+# 关键设计(为什么 messages 里**只存一行引用** `[[IMGREF:id]]`,base64 留在磁盘上,
+# 发请求时才由 make_request_body 展开成 image_url 部件)—— 三个实测代价:
+#   1) 一张 2048px 图 base64 ≈ 3.4MB,一旦进 $messages,add_message/make_request_body/
+#      save_history 每次"整份 messages 过一遍 jq"都要重付:实测单次 44ms → 208ms;
+#   2) 全文件有 4 处按字节粗算 token(`wc -c` × 2/5),base64 让它**失真 553 倍**
+#      (一张图算出 138 万 tokens,网关真实 image_tokens=2502)→ 一张图就把
+#      CTX_OVERFLOW_GATE(62.5 万)顶穿,此后每次网络抖动都被误判成"上下文越界"而白压一次摘要;
+#   3) 存历史会把 base64 写进 ~/.ct/history/*.json(每张 3.4MB,且那是绝不能删的目录)。
+# 引用形态一并解决这三条,还让"降级"退化成"删一个临时文件"(不碰 messages 一个字节)。
+IMG_INLINE=${IMG_INLINE:-1}                            # 0=只用转述(改动前的旧行为,逐字节等价)
+# inline 的边长上限单独一档,不复用 IMG_MAX_SIDE:那条为"一次转述请求"定,
+# 这条要为"每轮重付"定。实测 image_tokens 只跟**像素**走:512px=258 / 1024px=1026 /
+# 2048px=2502 / 120px=66;压成 JPEG 只减上传字节、token 一分不减(同图 PNG 1.6MB 与
+# JPEG 2.5MB 都是 2502)。所以下面两个约束各管各的,别混。
+IMG_INLINE_MAX_SIDE=${IMG_INLINE_MAX_SIDE:-2048}
+IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES:-2097152}  # 交付件字节上限(2MB,超了退回转述)
+# 同时"活着"的原图张数:更早的引用文件被删 → 展开时自动变成"已移除"那段文字。
+# 默认 1 = 保留最近一张。不设 0("只活一轮"):同一张图常在一轮工具链里被反复追问,
+# 一轮就剥等于把刚拿到的精度扔掉;也不设更大,每张每轮 2.5k tokens。
+IMG_INLINE_HOLD=${IMG_INLINE_HOLD:-1}
+# 降级文案。措辞由实验定(.scratch/mm_stubborn_experiment.py 六臂 × 15 样本):
+#   A 只报状态 / B 能力声明 / C 带丢失维度 / D 极简一句 → 13/13 全部选择**重新调用 read_image**,
+#     连"第一轮已经把丝印读错"的样本也一样 → **承重的是"有标记"这件事,不是文案长度**;
+#   F 只删图、留着"原图如下"那句旧文字 → 2/3 坚持原结论,其中 1 例是"读错后不再重读"
+#     = 真的将错就错。所以标记必须是**显式陈述"图不在了"**,且降级时**绝不能保留**
+#     任何"本条附有图片"这类现在时断言(那就是 F 臂)。
+# 也**不留转述**:留了就是一段看着像原始观察的二手材料,它会把二手当亲眼所见。
+IMG_INLINE_GONE_MARK=${IMG_INLINE_GONE_MARK:-'【原图已移除】'}
+IMG_INLINE_GONE_HINT=${IMG_INLINE_GONE_HINT:-'我此前基于这张图给出的结论属未经复核的一次性观察;凡涉及线号/位号/元件值/坐标/微小文字,继续依赖前应重新调用 read_image。'}
 # 上下文三个数,分别配三把尺 —— 别再把它们合成一个:
 #   CTX_WINDOW        接口真实窗口(换模型/换网关只改这一个)
 #   TOKEN_THRESHOLD   主动压缩点,和 API 带回的**精确** prompt_tokens 比。想省 token 就调小。
@@ -724,8 +761,9 @@ GREP_MAX_COL=500
 # web_fetch 单次返回网页纯文本的字符上限,超出按行截断并提示
 WEB_MAX_CHARS=20000
 
-# ---------- 图片理解(多模态,转述架构)配置 ----------
-# 设计原则:用户发图(@/-img)与 AI 读图(read_image)都不把图片放进 messages——
+# ---------- 图片理解(两条通道:inline + 转述兜底)配置 ----------
+# 这里只放**赋值**;两条通道的分工、为什么 base64 不进 messages、以及"用户发图仍走转述"
+# 的理由,统一写在「图片理解」节开头(6924 行附近),不要在本节再复制一份口径。
 # ---------- 图片转述(单端点前提下的最小组合) ----------
 # 本地 base64 后单独调一次视觉接口,只把文字转述作为普通文本写入上下文。
 # 好处:messages/历史不膨胀、压缩不因图片频繁触发、图片 token 每张只付一次。
@@ -2968,7 +3006,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "read_image",
-                "description": "读取本地图片并返回其内容的文字转述(含图中所有文字的完整转录)。需要查看截图、图表、照片内容时使用本工具;它返回的是文字描述,不是原图。路径在工作目录外时会请求用户确认,确认通过即可读取。",
+                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。措辞按实测写:同一时刻只有**最近一张**原图保持可见,读过新图后更早的会被回收成一行『原图已移除』的说明;那条说明里没有任何图片内容,也没有转述。需要重新核对细节时**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3409,8 +3447,32 @@ make_request_body() {
     else
         tools_json=$(tools)
     fi
+    # ---------- inline 引用展开(只在这里做)----------
+    # messages 里只存 [[IMGREF:id]] 一行短标记,base64 留在磁盘(理由与三组实测代价见
+    # 配置节 IMG_INLINE_*)。这里在发请求前把标记换成真正的 image_url 部件。
+    # ⚠ **没有引用时一次 jq 都不多跑**:msgs 直接沿用 $messages,请求体与改动前逐字节相同
+    #   (刀1 立的那条回归基线靠这个"先判再展开"的顺序保住,不是靠展开逻辑碰巧无害)。
+    # 展开必须在算 reasoning_effort 之前完成:那条判据看的是"有没有 image_url 部件",
+    # 只存标记的 messages 里根本没有部件 → 不展开就会漏判,带图的续发照样 400。
+    local msgs="$messages" newmsgs=""
+    if [[ "$msgs" == *'[[IMGREF:'* ]]; then
+        mapf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
+        img_build_map "$mapf"
+        # --rawfile 而非 --argjson:map 文件是几 MB 的 base64,走参数列表必撞 ARG_MAX。
+        # ($map|fromjson) as $map 只是把"文件原文"就地转成对象,不动 $_JQ_EXPAND_REFS。
+        newmsgs=$(printf '%s' "$msgs" | jq -c \
+            --rawfile map "$mapf" \
+            --arg gone_pre "$IMG_INLINE_GONE_MARK" \
+            --arg gone_hint "$IMG_INLINE_GONE_HINT" \
+            '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS" 2>/dev/null)
+        # 展开失败(jq 报错/输出空)宁可发"带标记的原样文本",也不许发坏 JSON:
+        # 后果是模型看到 [[IMGREF:xxx]] 这行字而没看到图(怪,可解释),
+        # 而不是请求体半截被截、或历史被 jq 的半途输出改坏。
+        [[ -n "$newmsgs" ]] && msgs="$newmsgs"
+        rm -f "$mapf"
+    fi
     tmpfile=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$messages" > "$tmpfile"
+    printf '%s' "$msgs" > "$tmpfile"
     out=$(jq -n \
         --arg model "$model" \
         --arg thinking "$thinking" \
@@ -6860,12 +6922,20 @@ tool_web_search() {
     printf ' 已搜索: %s\n' "$query"
 }
 
-# ========== 图片理解(多模态,转述架构) ==========
-# 统一入口:用户发图(@/-img)与 AI 工具读图(read_image)共用下面的转述管线。
-# 设计原则:图片绝不进 messages——本地 base64 后单独调一次视觉请求
-# (模型由 VISION_MODEL/flash_model 决定;请求形状不按厂商分叉,见「图片转述」节),
-# 只把文字转述作为普通文本写入上下文,
-# 避免消息/历史膨胀、压缩频繁触发与图片 token 每轮重复计费。
+# ========== 图片理解(两条通道:inline 主通道 + 转述兜底) ==========
+# 本节的描述以前是"图片绝不进 messages,转述是唯一路径"。那句话已经被实测推翻
+# (qwen 网关与 mimo 三个型号都接受 tool 消息带 image_url,详见 tool_read_image 的注释),
+# 现在的事实是两条通道并存,按 IMG_INLINE 选:
+#   inline(默认,read_image) : 原图交给**主模型**自己看。base64 不进 messages ——
+#     消息里只有一行引用标记(形如 双左括号 + IMGREF:号 + 双右括号),发请求前由
+#     make_request_body 展开成 image_url 部件(动机是三条实测代价:jq 整份重扫 208ms/次、
+#     字节粗算失真 553 倍会误判越界、base64 会写进 ~/.ct/history)。
+#   describe(兜底)          : 本地 base64 后单独调一次视觉接口(VISION_MODEL/flash_model),
+#     只把文字转述写进上下文。触发条件:IMG_INLINE=0、图超预算/压不动、或主模型被接口
+#     判为不收图(ask_ai 里摘图重发那次)。用户发图(@/-img)**仍只走 describe**,
+#     本轮改造刻意没动它(量大、且要与文字输入混排,单独一期)。
+# 两条通道的取舍不是"谁更省":转述每张只付一次但精度被一次观察拍死,inline 精度高
+# 但图片 token 每轮重付(实测 2048px≈2502/轮)—— 所以 inline 必须配 HOLD 回收。
 
 # 扩展名 → MIME 类型。按扩展名识别,不做内容嗅探(为便利牺牲准确性)。
 img_mime() {
@@ -6953,6 +7023,198 @@ im.convert("RGB").save(sys.argv[2], "JPEG", quality=80)' "$in" "$out" >/dev/null
     rm -f "$out"
     return 1
 }
+
+# ---------- inline 通道助手(原图交给主模型自己看) ----------
+# 数据流(刻意让 base64 只在"文件 ↔ 磁盘"之间流动,一次都不进 bash 变量):
+#   read_image → prepare_inline(按像素封顶) → <ref>.url 文件(data URL 原文)
+#              → messages 里只留一行 [[IMGREF:id]] 标记
+#              → make_request_body 调 img_build_map 现采现拼,展开成 image_url 部件
+#   降级 = 删掉那个 .url 文件。展开时找不到就自动走"已移除"分支(见 img_build_map 的注释)
+#   —— 所以"保留最近 N 张"这件事不需要改写 messages,也就不需要再动那四处 content 口径。
+IMG_REF_DIR=""
+IMG_REFS=()
+IMG_REF_SEQ=0
+inline_ref_id=""
+
+# 读像素尺寸:$1 图片 → "宽 高";取不到输出空、rc=1(调用方据此放弃缩放,不编尺寸)。
+# 为什么不用 PIL / ImageMagick:两个都不是必装(PIL 本机实测就没有)。sips 是 macOS 自带,
+# 拿不到再用 stdlib 读 PNG 的 IHDR / JPEG 的 SOF 段 —— 纯字节,零依赖。
+img_dims() {
+    local out=""
+    if command -v sips >/dev/null 2>&1; then
+        out=$(sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null \
+              | awk -F': ' '/^pixelWidth/{w=$2} /^pixelHeight/{h=$2} END{if(w&&h)print w, h}')
+    fi
+    if [[ -z "$out" ]] && command -v python3 >/dev/null 2>&1; then
+        out=$(python3 -c '
+import struct,sys
+d=open(sys.argv[1],"rb").read()
+if d[:8]==b"\x89PNG\r\n\x1a\n" and len(d)>24:
+    print(*struct.unpack(">II",d[16:24])); sys.exit(0)
+if d[:2]==b"\xff\xd8":
+    i,n=2,len(d)
+    while i+9<n:
+        if d[i]!=0xFF: i+=1; continue
+        m=d[i+1]
+        if m in (0xD8,0xD9) or 0xD0<=m<=0xD7: i+=2; continue
+        seg=struct.unpack(">H",d[i+2:i+4])[0]
+        if 0xC0<=m<=0xCF and m not in (0xC4,0xC8,0xCC):
+            h,w=struct.unpack(">HH",d[i+5:i+9]); print(w,h); sys.exit(0)
+        i+=2+seg
+' "$1" 2>/dev/null)
+    fi
+    printf '%s' "$out"
+    [[ -n "$out" ]]
+}
+
+# inline 专用压缩:$1 原图 → 交付路径。失败 rc=1(调用方退回转述)。
+# 与 prepare_image 的分工要分清:那条按**字节**封顶(为一次转述请求省上传),
+# 这条按**像素**封顶(为每轮重付的 image_tokens 省钱)—— 两者互不替代。
+# IMG_MAX_* 是在 $() 的子 shell 里覆盖的,不会污染 describe_images 用的同一组全局。
+prepare_inline() {
+    local in="$1" out w h longest
+    in=$( IMG_MAX_BYTES="$IMG_INLINE_MAX_BYTES" IMG_MAX_SIDE="$IMG_INLINE_MAX_SIDE" \
+          prepare_image "$1" 2>/dev/null ) || return 1
+    [[ -f "$in" ]] || return 1
+    read -r w h <<<"$(img_dims "$in")"
+    [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || { printf '%s\n' "$in"; return 0; }
+    longest=$(( w > h ? w : h ))
+    (( longest <= IMG_INLINE_MAX_SIDE )) && { printf '%s\n' "$in"; return 0; }
+    out=$(mktemp "${TMPDIR:-/tmp}/ct_inl_XXXXXX")
+    if command -v sips >/dev/null 2>&1; then
+        sips -Z "$IMG_INLINE_MAX_SIDE" -s format jpeg -s formatOptions 85 "$in" --out "$out" >/dev/null 2>&1
+    elif command -v ffmpeg >/dev/null 2>&1; then
+        ffmpeg -y -loglevel error -i "$in" -vf "scale=${IMG_INLINE_MAX_SIDE}:-2" \
+            -f image2 -c:v mjpeg -q:v 3 "$out" >/dev/null 2>&1
+    fi
+    [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
+    printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
+}
+
+img_ref_dir() {
+    [[ -n "$IMG_REF_DIR" && -d "$IMG_REF_DIR" ]] && return 0
+    # 顺手回收**已死进程**留下的引用目录:一个 .url 就是几 MB,散在 $TMPDIR 里不能只等系统清。
+    # 判据用"进程还在不在"(kill -0),不用 mtime —— mtime 会把一个正在用的长会话的图当垃圾删,
+    # 后果是它突然降级成"原图已移除":虽然诚实(不骗模型)但是无妄之灾。
+    local d pid
+    for d in "${TMPDIR:-/tmp}"/ct_imgref.*; do
+        [[ -d "$d" ]] || continue
+        pid="${d##*.}"
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        (( pid == $$ )) && continue
+        kill -0 "$pid" 2>/dev/null || rm -rf "$d"
+    done
+    IMG_REF_DIR="${TMPDIR:-/tmp}/ct_imgref.$$"
+    mkdir -p "$IMG_REF_DIR" 2>/dev/null && return 0
+    IMG_REF_DIR=""
+    return 1
+}
+
+# 只保留最近 IMG_INLINE_HOLD 个引用活着:更早的 `.url` **改名为 `.gone`**(不是删掉)。
+# 为什么留一个空壳而不是直接删:展开时必须区分两种"没有 .url 文件"的情况 ——
+#   (a) 这个号是我们发过的、图被回收了 → 该写成"【原图已移除】+路径+请重看";
+#   (b) 这串字符只是**正文里碰巧长得像标记**(比如模型读到本仓库源码,里面就有这个字面量)
+#       → 一个字都不许动。
+# 只靠"文件在不在"区分不了这两种,那样会让工具结果被静默改写(实测踩过,见提交说明)。
+# 为什么用"改名"而不是"改写 messages":改写要把整份 messages 再过一遍 jq(实测带图 208ms/次),
+# 而且改写本身会造出 F 臂那种"旧断言还在"的形状 —— 动文件两件事都不犯。
+img_refs_prune() {
+    local keep="${IMG_INLINE_HOLD:-1}" id
+    [[ "$keep" =~ ^[0-9]+$ ]] || keep=1
+    while (( ${#IMG_REFS[@]} > keep )); do
+        id="${IMG_REFS[0]}"
+        mv -f "${IMG_REF_DIR}/${id}.url" "${IMG_REF_DIR}/${id}.gone" 2>/dev/null \
+            || rm -f "${IMG_REF_DIR}/${id}.url"
+        IMG_REFS=("${IMG_REFS[@]:1}")
+    done
+    return 0
+}
+
+# 挂一张原图:$1 原图路径 $2 展示名。成功 → inline_ref_id 置为引用号、rc=0;
+# 任何一步不满足(关了 inline / 端点不收图 / 压不下来 / 超预算)一律 rc=1,由调用方退回转述。
+img_inline_attach() {
+    local orig="$1" label="$2" final size ext mime f prefix
+    inline_ref_id=""
+    (( IMG_CAPABLE )) || return 1
+    (( IMG_INLINE )) || return 1
+    img_ref_dir || return 1
+    final=$(prepare_inline "$orig") || return 1
+    [[ -f "$final" ]] || return 1
+    size=$(wc -c < "$final" | tr -d ' ')
+    if (( size > IMG_INLINE_MAX_BYTES )); then
+        [[ "$final" != "$orig" ]] && rm -f "$final"
+        return 1
+    fi
+    ext=$(printf '%s' "${final##*.}" | tr '[:upper:]' '[:lower:]')
+    mime=$(img_mime "$ext"); [[ -z "$mime" ]] && mime="image/jpeg"
+    IMG_REF_SEQ=$((IMG_REF_SEQ + 1))
+    f="${IMG_REF_DIR}/r${IMG_REF_SEQ}$$"
+    prefix="data:${mime};base64,"
+    printf '%s' "$prefix" > "$f.url" || { rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"; return 1; }
+    # base64 直接重定向进文件(几 MB 也不进 bash 变量:变量走 --arg 会撞 ARG_MAX,
+    # 而 describe_images 那套 --rawfile 是为了"读",这里连读都省了)。
+    # ⚠ **必须 tr -d '\n'**:实测(2026-10-02,xxd 打在字节上)macOS 的 base64 不折行但
+    #   **结尾吐一个 0a**,GNU coreutils 还会每 76 字符折一次 —— 两种都会把裸换行写进
+    #   JSON 字符串内部,img_build_map 产出的 map 当场非法、展开静默失败,
+    #   表现是"模型只看到一行 [[IMGREF:..]] 而没看到图"。describe_images 用同一个 tr
+    #   正是为此;我第一版漏了它,靠 .scratch/mm_fix_verify2.sh 的 A/B 臂才抓出来。
+    base64 < "$final" | tr -d '\n' >> "$f.url"
+    # 不能只靠 `||` 判管道成败:本脚本没开 pipefail,管道里 base64 失败时 tr 依然成功退出。
+    # 所以直接量结果:data 前缀之后必须真有 base64 正文。
+    if (( $(wc -c < "$f.url" | tr -d ' ') <= ${#prefix} )); then
+        rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"
+        return 1
+    fi
+    [[ "$final" != "$orig" ]] && rm -f "$final"
+    IMG_REFS+=("r${IMG_REF_SEQ}$$")
+    img_refs_prune
+    inline_ref_id="r${IMG_REF_SEQ}$$"
+    return 0
+}
+
+# 把 messages 里活着的引用写成 {id:{url:"data:..."}} 给 jq 展开用。$1=输出文件。
+# base64 用 cat 直接落文件,不进 bash 变量;data URL 的字符集是 [A-Za-z0-9+/=:] 加
+# mime,不含引号/反斜杠,所以手拼 JSON 安全(describe_images 里同一前提已长期验证)。
+img_build_map() {
+    local ids id f first=1
+    printf '{' > "$1"
+    ids=$(printf '%s' "$messages" | jq -r \
+        '[.. | strings | capture("\\[\\[IMGREF:(?<id>[A-Za-z0-9_]+)\\]\\]").id] | unique | .[]' 2>/dev/null)
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        f="${IMG_REF_DIR}/${id}"
+        if [[ -s "${f}.url" ]]; then
+            # 活着:交原图。url 字段是文件原文,不经命令替换(几 MB 也不进 bash 变量)
+            (( first )) || printf ',' >> "$1"
+            first=0
+            printf '"%s":{"url":"' "$id" >> "$1"
+            cat "${f}.url" >> "$1"
+            printf '"}' >> "$1"
+        elif [[ -e "${f}.gone" ]]; then
+            # 我们发过号、但已被回收:交给展开逻辑写成"已移除"
+            (( first )) || printf ',' >> "$1"
+            first=0
+            printf '"%s":{"gone":true}' "$id" >> "$1"
+        fi
+        # 两者都不在 = 这串字符不是我们发的号(例如模型读到本仓库源码,里面有同款字面量)
+        # → 不进 map,展开逻辑对它一个字都不动。这条是实测踩出来的,见 _JQ_EXPAND_REFS 注释。
+    done <<< "$ids"
+    printf '}' >> "$1"
+}
+
+# 调用处必须提供两个 jq 变量:$gone_pre(标记)/$gone_hint(义务声明)——
+# 用 --arg 传而不是在这里写死字面量:这两个值是可 env 覆盖的配置,
+# 把文案烤进片段里就等于"改了 IMG_INLINE_GONE_MARK 却没生效"的假开关。
+# ⚠ 措辞硬约束(实验 F 臂,2/3 坚持原结论):无图时**不许**保留任何"本条附有图片"
+#   这类现在时断言。原 caption 只写路径等事实(见 tool_read_image),所以这里
+#   "标记 + 事实 + 义务"拼出来的 gone 形状天然诚实。
+# ⚠ `($map|has($m.id))` 那层守卫是**防误伤**,不是冗余:没有它,任何正文里恰好长得像
+#   标记的文本都会被改写成"已移除"。实测踩过:本文件自己的注释里就写着这个字面量,
+#   结果 read_file 读回来的内容被当场改写、我据此写 old_string 必然匹配不上。
+#   只有 img_build_map 认过号(.url 或 .gone 存在)的 id 才会进入改写。
+# ⚠ **必须单行赋值**:_JQ_CONTENT_TEXT 上面记过 —— 多行引号串会被按行抽取的测试夹具
+#   整段吞进字符串,source 不报错但变量根本不存在。
+_JQ_EXPAND_REFS='def _cap: capture("\\[\\[IMGREF:(?<id>[A-Za-z0-9_]+)\\]\\]"); def _strip($id): gsub("\\[\\[IMGREF:" + $id + "\\]\\]"; "") | gsub("^[ \t\n]+|[ \t\n]+$"; ""); map( if (.content|type)=="string" and (.content|test("\\[\\[IMGREF:[A-Za-z0-9_]+\\]\\]")) then (.content|_cap) as $m | (if ($map|has($m.id)) then .content = (if ($map[$m.id]|has("url")) then [ {type:"image_url", image_url:{url:$map[$m.id].url}}, {type:"text", text:(.content|_strip($m.id))} ] else ($gone_pre + "\n" + (.content|_strip($m.id)) + "\n" + $gone_hint) end) else . end) else . end )'
 
 # ---------- 视觉请求体的字段落点 ----------
 # 公共骨架(模型/messages/stream)不放这里,以免与其它请求重复。以 jq 对象片段形式
@@ -7144,9 +7406,21 @@ describe_images() {
     return 0
 }
 
-# AI 工具:读取工作目录内的图片。与用户发图共用转述管线——返回给模型的
-# 是文字转述而非图片本身(OpenAI 协议中 tool 消息 content 只能是字符串,
-# 无法携带 image_url,转述是唯一协议合规的"看图"方式)。
+# AI 工具:读取工作目录内的图片。默认走 **inline**:原图作为本条 tool 结果的
+# image_url 部件交给**主模型自己看**,精度不再被一次转述拍死(精密图纸/单片机接线图)。
+#
+# 旧注释在这里写着"OpenAI 协议中 tool 消息 content 只能是字符串,无法携带 image_url,
+# 转述是唯一协议合规的看图方式"。**该结论已被实测推翻**(2026-10-02,.scratch/mm_shape_probe*.sh):
+#   qwen 网关 + mimo-v2.6-flash / v2.6-pro / v2.5 全部接受 tool 消息带图,
+#   usage 里 image_tokens 真计入(66/16),且同题无图的负对照**答错**——
+#   说明字节确实进了视觉通道,不是模型嘴上应付。
+# 当年把它写成"协议限制",起因是一次 400(#35 那个 thinking/reasoning_effort 一致性坑):
+#   坑是真的,但那是**请求形状**的问题,不是图片不能进 tool 消息。错误结论固化在注释与
+#   bugList #36 里,一直在阻止一个本来正确的改造。
+#
+# base64 **不进 messages**:tool 结果里只留一行事实 caption + [[IMGREF:id]] 标记,
+# 展开发生在 make_request_body(动机与三组实测代价见配置节 IMG_INLINE_*)。
+# 退回链:inline 不成立(IMG_INLINE=0 / 端点判不收图 / 压不动 / 超预算)→ describe_images 转述。
 # 沙箱与 read_file 一致:路径必须解析后落在 WORK_ROOT 内。
 tool_read_image() {
     local path resolved
@@ -7158,16 +7432,26 @@ tool_read_image() {
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
 
-    # provider=none(手工关或曾被接口拒)时 describe_images 不发请求,直接返回
-    # "不支持图片"文案。这里把它作为工具结果回给模型(tool content 协议上只能是
-    # 字符串),模型才知道图没看成,而不是凭文件名猜内容
+    # 1) inline 优先。caption 只写**事实**(路径),刻意不写"本条附有图片/请以原图为准"
+    #    这类现在时断言:图一旦被回收,那句话就变成假陈述,而实验证明假陈述的代价是
+    #    模型**坚持自己上一轮的(可能读错的)结论**而不去重读(F 臂 2/3 坚持,含 1 例将错就错)。
+    #    路径必须留在 caption 里 —— 它是模型"要不要重看"的唯一抓手。
+    if img_inline_attach "$resolved" "$path"; then
+        content="read_image: $path"$'\n'"[[IMGREF:$inline_ref_id]]"
+        printf ' 🖼 原图已交给主模型 %s\n' "$path"
+        return 0
+    fi
+
+    # 2) 退回转述。provider=none(手工关或曾被接口拒)时 describe_images 不发请求,
+    #    直接把"不支持"作为工具结果回给模型,它才知道图没看成,而不是凭文件名猜内容。
+    #    这里明写"精度低于直接看图":别让模型把转述当成它看过了原图。
     describe_images "$resolved"
     if (( describe_failed )); then
         content="图片未识别: $describe_result"
         printf ' ⚠️ 图片未识别:%s\n' "$path"
     else
-        content="图片 $path 的内容转述(本工具返回文字描述,非原图):"$'\n\n'"$describe_result"
-        printf ' 已识别图片 %s\n' "$path"
+        content="图片 $path 的文字转述(本次未能提供原图,转述精度低于直接看图,细节需重看时再次调用本工具):"$'\n\n'"$describe_result"
+        printf ' 已识别图片 %s(转述兜底)\n' "$path"
     fi
 }
 
@@ -7925,6 +8209,31 @@ ask_ai() {
     if [[ -z "$full_response" && -z "$raw_reasoning" && -n "$api_error" ]]; then
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
+        # ---------- 主模型/网关不收图:摘掉原图,按文字重发一次 ----------
+        # 这是 inline 通道唯一那条"没探测就上路"的兜底:没有静态黑名单,靠接口自己说。
+        # 判据口径直接沿用 describe_images 里那条被实测验证过的规矩(见该函数注释):
+        # 必须**同时**出现图片类词与"不支持"类词 —— 只按 "not support" 匹配会把
+        # "图片格式不支持"当成"模型不支持图片",一次坏文件就废掉整个通道(bugList #36)。
+        # 处置顺序很要紧:先删引用文件(messages 里只剩 [[IMGREF:id]] 标记,展开时自然
+        # 变成"【原图已移除】+路径+请重看"那段诚实文字),再关 IMG_INLINE,最后重发。
+        # 不降级 IMG_CAPABLE:转述用的 VISION_MODEL 可能仍是带视觉的型号,通道该留着。
+        # 只走一次(img_selfheal_done),且外层已要求"本轮零产出",不会打断已有输出。
+        if (( ${img_selfheal_done:-0} == 0 )) && [[ "$messages" == *'[[IMGREF:'* ]] \
+            && ( [[ "${err_msg,,}" == *image* && "${err_msg,,}" == *"not support"* ]] \
+              || [[ "${err_msg,,}" == *image* && "${err_msg,,}" == *"not"*"accept"* ]] \
+              || [[ "${err_msg,,}" == *vision* ]] || [[ "$err_msg" == *不支持图片* ]] ); then
+            img_selfheal_done=1
+            rm -f "${IMG_REF_DIR:?}"/*.url 2>/dev/null
+            IMG_REFS=()
+            IMG_INLINE=0
+            printf '\033[33m⚠️ 接口拒收图片,已摘掉原图并按文字重发;本会话后续 read_image 走转述。报错:%s\033[0m\n' \
+                "${err_msg:0:160}" >&2
+            ask_ai "$(make_request_body)" "$is_lock_screen" "$is_record_usage"
+            rc=$?
+            (( rc == 0 || rc == 130 )) && return "$rc"
+            # 重发仍失败:回到原兜底(把错误写进 full_response 让人和模型都看得见)
+            err_msg="摘图重发后仍失败(首次:${err_msg})"
+        fi
         # 上下文越界(400 context/token/length exceeded):主动压缩后重发一次
         if [[ "$err_msg" == *[Cc]ontext* || "$err_msg" == *[Tt]oken* || "$err_msg" == *[Ll]ength* || "$err_msg" == *exceed* ]]; then
             retry_after_compact "$is_lock_screen" "$is_record_usage"
