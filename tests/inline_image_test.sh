@@ -280,6 +280,41 @@ exp7=$(printf '%s' "$one" | jq -c --rawfile map "$W/m7.json" \
 ck "换轮后展开只剩文字且带移除标记" "$(jq -r '.[0].content|type' <<<"$exp7")/$(jq -r '.[0].content' <<<"$exp7" | grep -c '原图已移除')" "string/1"
 IMG_REF_GROUP=3; img_inline_attach "$del" "轮3.png" >/dev/null   # 恢复一个活引用给后续节用
 
+echo "=== 12. 「不收图」判据:用真实端点抓回的报错原文 ==="
+# 这些字符串不是编的,是 2026-10-03 从两个真实端点取回的原文
+# (.scratch/tokens.log;qwen3.7-max 那条尤其关键 —— 里面没有 image/vision/not support
+#  任何词,旧判据一条都不匹配,于是纯文字档每轮 400、永不退回转述)。
+reject_case() {  # $1=期望(yes=判不收图 / no=不许关通道) $2=说明 $3=原文
+    if img_reject_wording "$3"; then got=yes; else got=no; fi
+    ck "$2(期望 $1)" "$got" "$1"
+}
+reject_case yes  "qwen3.7-max 真实拒绝文本" \
+  'The provided messages input is invalid. The error info is [Unexpected item type in content.].'
+reject_case yes  "内容形状非法的真实文本" \
+  'if content is list. item must be dict and key[type] should in dict'
+reject_case yes  "英文明确不支持" 'The model does not support image input.'
+reject_case yes  "直接否认视觉"   'This is not a vision model.'
+reject_case yes  "无视觉能力"     'The account has no vision capability.'
+reject_case yes  "中文拒绝文本"   '当前模型不支持图片输入'
+# 下面三条是**反向锁**:误判成"不收图"会把整个会话的内联能力关掉,后果比漏判重
+reject_case no   "几何限制不能算能力问题" \
+  'The image length and width do not meet the model restrictions. [height:8 or width:8 must be larger than 10]'
+reject_case no   "型号不存在不能算能力问题" 'Model not exist.'
+reject_case no   "含 vision 的无关报错(旧 ask_ai 那份 *vision* 单条件正是在这里误杀)" \
+  'The requested vision model was not found, check the model name.'
+reject_case no   "鉴权失效不能算能力问题" 'AuthenticationError: Incorrect API key provided.'
+reject_case no   "空文本不能判不收图"   ''
+
+# 规矩只许有一处定义、其余全走调用(三处各抄一份已经漂过一次:ask_ai 那份多了
+# `*vision*` 单条件,就是上面那条负锁要拦的形状)
+ck "判据定义恰好 1 处" "$(grep -c '^img_reject_wording() {' "$SRC")" "1"
+ck "判据至少 3 处调用(probe/ask_ai/describe_images 都走它)" \
+   "$(( $(grep -c 'img_reject_wording ' "$SRC") - 1 ))" "3"
+ck "兜底不得再用 rm 删 .url(必须改名 .gone,否则标记变孤儿、正文留裸标记)" \
+   "$(grep -c 'rm -f "${IMG_REF_DIR:?}"' "$SRC")" "0"
+ck "正向判据必须看 image_tokens 而不是只看有回复" \
+   "$(grep -c 'prompt_tokens_details.image_tokens' "$SRC" | awk '{print ($1>=1)?"yes":"no"}')" "yes"
+
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 (( fail == 0 ))

@@ -125,3 +125,12 @@
   **闸门这边值得单独记**:这类"时机/位置"缺陷,机制断言抓不到 —— HEAD 上 prune 的裁剪逻辑本身是对的、"只有一处递增"也对,唯一能抓的是**位置锁**(递增必须在 `if 本轮有图` 之前 + 递增后紧邻 prune)。新增第 11 组五条位置锁,HEAD 负对照 = 69/71 红 2 条,正是那两条;机制向量在 HEAD 上全绿,如果只写机制向量这次又会漏过去。
   又踩并修掉的两个测试自身问题(都是自己的老毛病复发,记下来):① `img_build_map` 扫全局 `$messages`,却在赋值前就采 map → 号采不到、看起来像展开逻辑坏(本文件第二次);② 断言里用了另一道闸门的变量名 `$SRC_ABS`(本闸门只有 `$SRC`)→ 变量为空会让位置比较"恰好成立",是假绿的入口,补了一条"锚点必须找得到"的前置断言兜住。
   inline 闸门 64→71 条;README 计数同步。
+[v]59. 【done·把唯一没实测的那条判据打上真机,结果双向都错】任务本是"用真实纯文字档打一次,拿准拒绝形状"。用端点自己报的型号清单(/models)挑档 —— **猜型号名只会得 404 "Model not exist",那不是"不收图"**,上一版我猜的 qwen3-max/plus/turbo 全踩在这上面。真机结果:
+  ① **HTTP 200 不等于收图**。代理上的 `deepseek-v4-pro`、`glm-5.2` 都回 200,但 usage 里**没有 image_tokens 字段**、prompt_tokens 只有 18/29(带视觉的档是 66/90),模型直接答"看不到" —— **网关把 image_url 部件静默丢掉**。而 `img_probe_main_model` 只验"content 非空"就判"收图",这两档会被判成支持:inline 常开、模型一直瞎答、token 照付、永不报错。正向判据改成 `usage.prompt_tokens_details.image_tokens > 0`。
+    也不能改用"答得对不对"来验:`deepseek` 官方 `deepseek-chat` 同样没有 image_tokens,却答对了"红色"(prompt_tokens=203,它把 base64 当文字读了)—— 答复正确性会给出**相反**结论。
+  ② **真实拒绝文本一条判据都不匹配**:`qwen3.7-max` 带图回 400 "The provided messages input is invalid. The error info is [Unexpected item type in content.]" —— 里面没有 image / vision / not support 任何词,旧判据判"未知" → **每轮都 400 也永不退回转述**。
+  ③ **三份"算不算不收图"的判断已经漂移**,危险的那份在 ask_ai:`*vision*` **单独命中就关通道** → "The requested vision model was not found" 这类拼错型号名的无关报错会把整个会话的内联能力永久关掉(误杀比漏判更难查,它看起来像"这档就是不支持")。
+  修:收成 `img_reject_wording()` 一处定义,probe / ask_ai / describe_images 三处都调它;新措辞按真机文本分三组(能力否认需"图片类词 + 不支持类词"**同时**命中;"unexpected item type"+"content" 双词;直接否认视觉的短语)。**旧 describe_images 字面表里的 "not a vision model" / "no vision capability" 平移进新函数** —— 否则"统一判据"会变成"覆盖面缩小"(差点丢,被自己写的向量抓到)。
+  连带修一个"两处各自正确、合起来错":ask_ai 兜底原先 `rm -f *.url`,而刀2 加了"发号守卫"(没发过号的标记一个字都不动)之后,**删文件 = 该号变成非我方 → 裸 [[IMGREF:xxx]] 原样留在正文给模型看**。改成改名 `.gone`,并加结构锁禁止回退成 rm。
+  测试:inline 闸门 71→86 条(第 12 组用真机原文做 11 条正/反向断言 + 4 条结构锁;反向锁专门钉"几何限制 / 型号不存在 / 鉴权失效 / 含 vision 的无关报错"四种**不许**判成不收图)。HEAD 负对照 76/86 红 10 条。真机复验:qwen3.8-flash rc=0 收图;deepseek-v4-pro 与 glm-5.2 由"误判支持"翻成 rc=1 自动退回转述;qwen3.7-max rc=1 被新措辞判住。
+  顺带:配置区又一行过期说明("用户发图仍只走 describe",刀4 起不成立)当场改;两个探针脚本因跑在 bash 3.2 上 `${1,,}` bad substitution、以及 bash 引号吞掉对照输出,都改 python 做 —— 不再跟引号纠缠。

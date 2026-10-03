@@ -7038,8 +7038,9 @@ tool_web_search() {
 #     字节粗算失真 553 倍会误判越界、base64 会写进 ~/.ct/history)。
 #   describe(兜底)          : 本地 base64 后单独调一次视觉接口(VISION_MODEL/flash_model),
 #     只把文字转述写进上下文。触发条件:IMG_INLINE=0、图超预算/压不动、或主模型被接口
-#     判为不收图(ask_ai 里摘图重发那次)。用户发图(@/-img)**仍只走 describe**,
-#     本轮改造刻意没动它(量大、且要与文字输入混排,单独一期)。
+#     判为不收图(切档预检 IMG_MAIN_VISION=0,或 ask_ai 里摘图重发那次)。
+#     用户发图(@/-img)与 read_image **同一条链路**(刀4 起):printContent 逐张 attach,
+#     单张超预算/压不动时只有那几张退回 describe —— 不再有"发图只走转述"的例外。
 # 两条通道的取舍不是"谁更省":转述每张只付一次但精度被一次观察拍死,inline 精度高
 # 但图片 token 每轮重付(实测 2048px≈2502/轮)—— 所以 inline 必须配 HOLD 回收。
 
@@ -7197,6 +7198,44 @@ prepare_inline() {
     printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
 }
 
+# ---------- "这次报错算不算模型不收图"的唯一判据 ----------
+# 原先这条规矩在文件里有**三份**,而且已经漂移:probe 要求两组词同时命中、describe_images
+# 用一份字面短语表、ask_ai 则是 `*image* && *not support* || … || **`*vision*` 单独命中**
+# —— 最后那条最危险:任何带 "vision" 的无关报错(如 "vision model not found")都会把
+# 整个内联通道永久关掉。同一条规矩抄三遍必漂,这里收成一处,三处都调它。
+#
+# 措辞来源不是想象,是 2026-10-03 真实端点抓回来的原文(见 .scratch/tokens.log):
+#   qwen3.7-max(纯文字档,带图 400):
+#     "The provided messages input is invalid. The error info is [Unexpected item type in content.]"
+#     ↑ 里面**没有** image / vision / not support 任何一个词 —— 旧判据一条都不匹配,
+#       于是每次续发都 400、永不退回转述。这是这次实测最主要的收获。
+#   另一条真实形状(内容形状非法时):"if content is list. item must be dict and key[type]..."
+# 宽严取舍:上面两条都是"我们把数组 content 发过去才会出现"的错,所以按
+# "item type + content" 双词同时命中来认,不单独匹配 "invalid"(那会命中我们自己的
+# 参数 bug,把锅甩给模型能力)。宁可漏判(继续试、多付一次失败)也不错判(永久关通道)。
+img_reject_wording() {  # $1=错误文本 → 0=算"不收图" 1=不算
+    local t="${1:-}" lc="${1,,}"
+    [[ -n "$t" ]] || return 1
+    # 一组:图片或视觉能力被明确说"不支持/不接受"
+    if [[ ( "$lc" == *image* || "$lc" == *vision* || "$lc" == *multimodal* || "$t" == *图片* || "$t" == *多模态* ) \
+       && ( "$lc" == *"not support"* || "$lc" == *"not"*"support"* || "$lc" == *unsupport* \
+         || "$lc" == *"do not accept"* || "$lc" == *"does not accept"* || "$lc" == *unsupported* \
+         || "$t" == *不支持* || "$t" == *不接受* ) ]]; then
+        return 0
+    fi
+    # 二组:数组 content 被拒(纯文字档的典型回法),必须两个词同时在场
+    if [[ "$lc" == *"unexpected item type"* && "$lc" == *content* ]]; then return 0; fi
+    if [[ "$lc" == *"item must be dict"* || "$lc" == *"key[type]"* ]]; then return 0; fi
+    # 三组:直接否认视觉能力的说法(不带 support/accept 字样)。
+    # 这几条是从旧 describe_images 那份字面表**平移**过来的 —— 统一判据时不能顺手丢掉
+    # 别人踩出来的措辞,否则"合成一处"就变成"覆盖面缩小"(实测差点丢:not a vision model
+    # / no vision capability 在前两组里都接不住)。
+    if [[ "$lc" == *"not a vision model"* || "$lc" == *"no vision capability"* \
+       || "$lc" == *"no vision model"* || "$lc" == *"lacks vision"* \
+       || "$lc" == *"not support visual"* ]]; then return 0; fi
+    return 1
+}
+
 # ---------- 主模型收不收图:切档时探一次 ----------
 # 为什么必须有这条:内联之后图片进的是**主对话**,主模型若是纯文字型号就每次 400。
 # ask_ai 里有"撞了再摘图重发"的兜底,但那要先付一次失败请求;探测把它变成一次
@@ -7215,7 +7254,7 @@ IMG_VISION_PROBED_FOR=""
 IMG_PROBE_PNG='iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAUElEQVR4nO3PsQkAAAzDsPz/dHpFliLwbFCaTBvvu94DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAAcuOzw4j9XSHcAAAAASUVORK5CYII='
 
 img_probe_main_model() {  # 返回 0=收图 1=明确不收 2=探不出(网络/鉴权等,不据此改判)
-    local url="${BASE_URL:-}" key="${API_KEY:-}" f resp code content_got err_lc
+    local url="${BASE_URL:-}" key="${API_KEY:-}" f resp err_txt content_got img_tok
     # 缓存先看:**在任何前置检查之前**。放后面的话,一个已经探明的结论会因为这次
     # 恰好缺 key/缺 URL 而被降级成"未知" —— 环境抖动抹掉了已知事实,方向正好反了。
     # (闸门第 10 节用"清空 BASE_URL 仍返回缓存值"钉住这个顺序。)
@@ -7233,19 +7272,28 @@ img_probe_main_model() {  # 返回 0=收图 1=明确不收 2=探不出(网络/�
     resp=$(curl -s --connect-timeout 10 --max-time 40 "$url" \
         -H "Content-Type: application/json" -H "Authorization: Bearer $key" -H "api-key: $key" \
         --data-binary "@$f" 2>/dev/null)
-    code=$(jq -r '.error.message // .message // empty' <<<"$resp" 2>/dev/null)
+    err_txt=$(jq -r '.error.message // .message // empty' <<<"$resp" 2>/dev/null)
     content_got=$(jq -r '.choices[0].message.content // empty' <<<"$resp" 2>/dev/null)
+    img_tok=$(jq -r '.usage.prompt_tokens_details.image_tokens // empty' <<<"$resp" 2>/dev/null)
     rm -f "$f"
     IMG_VISION_PROBED_FOR="$model"
-    if [[ -n "$content_got" ]]; then
-        IMG_MAIN_VISION=1; return 0
+    # 正向判据必须是 image_tokens > 0 —— **HTTP 200 不等于收图**。实测(2026-10-03):
+    #   deepseek-v4-pro / glm-5.2 在 qwen 代理上都回 200,但 usage 里**没有 image_tokens
+    #   字段**、prompt_tokens 只有 18 / 29(真收图时是 66+),模型直接答"看不到" ——
+    #   **代理把 image_url 部件静默丢掉了**。旧写法只看 content 非空就判"收图",
+    #   这两档会被误判为支持:inline 常开、模型一直瞎答、token 照付,且永远不报错。
+    # 也不能改用"答得对不对"来判:deepseek 官方档在没有视觉编码的情况下答对了"红色"
+    # (它把 base64 当文字读),答复正确性会给出**相反**结论。
+    # 已知残余风险:若某端点带视觉却不报 image_tokens,这里会误判成"不收图" —— 表现是
+    # 白白退回转述(精度低但能用),用 IMG_INLINE=1 手工强制内联即可覆盖。
+    if [[ -z "$err_txt" && -n "$content_got" ]]; then
+        if [[ "$img_tok" =~ ^[0-9]+$ && "$img_tok" -gt 0 ]]; then
+            IMG_MAIN_VISION=1; return 0
+        fi
+        IMG_MAIN_VISION=0; return 1
     fi
-    err_lc="${code,,}"
-    # 判据与 describe_images / ask_ai 同一条规矩:必须**同时**出现图片类词与"不支持"类词。
-    # 只按 "not support" 匹配会把"图片格式不支持"当成"模型不收图",一次坏输入废掉整个通道。
-    if [[ -n "$code" && ( ( "$err_lc" == *image* || "$err_lc" == *vision* || "$code" == *图片* ) \
-        && ( "$err_lc" == *"not support"* || "$err_lc" == *"not"*"support"* || "$err_lc" == *unsupport* \
-           || "$err_lc" == *"do not accept"* || "$err_lc" == *"does not accept"* || "$code" == *不支持* ) ) ]]; then
+    # 措辞判断走统一判据(原先这里自己抄了一份,与 ask_ai/describe_images 三份已经漂了)
+    if [[ -n "$err_txt" ]] && img_reject_wording "$err_txt"; then
         IMG_MAIN_VISION=0; return 1
     fi
     # 其余一律算"探不出":网络错、超时、鉴权失效都不能推断模型不收图
@@ -7578,15 +7626,12 @@ describe_images() {
         # 接口明确说"不支持图片输入"→ 进程内降级为 none,后续发图直接提示即可,
         # 不再烧注定失败的请求。判定要同时出现 image/vision 与 not support:
         # 只按 "not support" 匹配会把"格式不支持"误判成"模型不支持"(整会话作废)
-        case "${err,,}" in
-            # 只认"模型/接口不支持图片输入"这一类措辞。用词要紧:宽松匹配会把
-            # "图片格式不支持"当成"模型不支持",一次坏文件就让整会话失去读图能力
-            *"not support image"* | *"not support visual"* | *"image input is not supported"* | \
-            *"does not accept image"* | *"not a vision model"* | *"no vision capability"* | *"不支持图片"*)
-                
-                describe_result="当前视觉模型(${vision_model})不支持图片,本轮起不再尝试识别图片(报错: ${err})"
-                vision_disable "$describe_result" ;;
-        esac
+        # 措辞判断走统一判据(原先这里自己抄了一份字面短语表,三处已经漂;
+        # 那些短语本身已平移进 img_reject_wording,覆盖面不缩小)
+        if img_reject_wording "$err"; then
+            describe_result="当前视觉模型(${vision_model})不支持图片,本轮起不再尝试识别图片(报错: ${err})"
+            vision_disable "$describe_result"
+        fi
     fi
     _img_cleanup
     return 0
@@ -8396,20 +8441,23 @@ ask_ai() {
         err_msg=$(printf '%s' "$api_error" | jq -r '.error.message // .error // empty' 2>/dev/null)
         [[ -z "$err_msg" ]] && err_msg=$api_error
         # ---------- 主模型/网关不收图:摘掉原图,按文字重发一次 ----------
-        # 这是 inline 通道唯一那条"没探测就上路"的兜底:没有静态黑名单,靠接口自己说。
-        # 判据口径直接沿用 describe_images 里那条被实测验证过的规矩(见该函数注释):
-        # 必须**同时**出现图片类词与"不支持"类词 —— 只按 "not support" 匹配会把
-        # "图片格式不支持"当成"模型不支持图片",一次坏文件就废掉整个通道(bugList #36)。
-        # 处置顺序很要紧:先删引用文件(messages 里只剩 [[IMGREF:id]] 标记,展开时自然
-        # 变成"【原图已移除】+路径+请重看"那段诚实文字),再关 IMG_INLINE,最后重发。
-        # 不降级 IMG_CAPABLE:转述用的 VISION_MODEL 可能仍是带视觉的型号,通道该留着。
-        # 只走一次(img_selfheal_done),且外层已要求"本轮零产出",不会打断已有输出。
+        # 这是 inline 通道那条"没探测就上路"的兜底:没有静态黑名单,靠接口自己说。
+        # 措辞判断已收成 img_reject_wording 一处 —— 原先这里另抄了一份,而且比别处宽:
+        # `*vision*` 单独命中就关通道,任何带 vision 的无关报错(如 "vision model not found")
+        # 都会把整个会话的内联能力永久关掉。三份漂移的规矩合成一份。
+        # ⚠ 处置必须是**改名 .gone 而不是 rm**:自"发号守卫"之后,map 里没有这个号 =
+        #   "不是我们发的" → 展开逻辑对它**一个字都不动**,rm 会让 messages 里留下一串
+        #   裸 [[IMGREF:xxx]] 给模型看(改名才会走"已移除"那条诚实分支)。
+        # 顺序:改名 → 关 IMG_INLINE → 重发。不降级 IMG_CAPABLE:转述用的 VISION_MODEL
+        # 可能仍是带视觉的型号,那条通道该留着。只走一次,且外层已要求本轮零产出。
         if (( ${img_selfheal_done:-0} == 0 )) && [[ "$messages" == *'[[IMGREF:'* ]] \
-            && ( [[ "${err_msg,,}" == *image* && "${err_msg,,}" == *"not support"* ]] \
-              || [[ "${err_msg,,}" == *image* && "${err_msg,,}" == *"not"*"accept"* ]] \
-              || [[ "${err_msg,,}" == *vision* ]] || [[ "$err_msg" == *不支持图片* ]] ); then
+            && img_reject_wording "$err_msg"; then
             img_selfheal_done=1
-            rm -f "${IMG_REF_DIR:?}"/*.url 2>/dev/null
+            local _vf
+            for _vf in "${IMG_REF_DIR:-}"/*.url; do
+                [[ -f "$_vf" ]] || continue
+                mv -f "$_vf" "${_vf%.url}.gone" 2>/dev/null || rm -f "$_vf"
+            done
             IMG_REFS=()
             IMG_INLINE=0
             printf '\033[33m⚠️ 接口拒收图片,已摘掉原图并按文字重发;本会话后续 read_image 走转述。报错:%s\033[0m\n' \
