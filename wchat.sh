@@ -8482,6 +8482,18 @@ printContent() {
     tool_round=0
     auto_downgraded=0
 
+    # ---------- 轮边界:图片可见性的唯一分界线 ----------
+    # 轮号 +1 并**马上降级**。两件都必须做,少任何一件 HOLD 都不兑现:
+    #   · 只在下一轮开始时降级,而不是等下一次读图顺带做 —— 降级原先只挂在
+    #     img_inline_attach 里,于是"这轮只打字不读图"时上一轮的图会一直挂着,
+    #     每轮继续重付 token(实测第 2 轮 image_url 部件仍是 2、.gone 是 0);
+    #   · 必须放在**每轮必经**的位置。原先它写在 `if 本轮有图` 里面,纯文字轮连
+    #     轮号都不推进,等于分界线只在"发过图的轮"之间存在。
+    # HOLD 的单位是**轮**不是张:同一轮内读过的图全部可见(按张裁会让用户一次甩来的
+    # 四张面板里前三张当轮就消失);换轮后按 IMG_INLINE_HOLD 保留最近 N 轮。
+    IMG_REF_GROUP=$(( ${IMG_REF_GROUP:-0} + 1 ))
+    img_refs_prune
+
     # 用户发图(@/-img):优先 **inline** —— 原图随本轮 user 消息交给主模型自己看;
     # 单张不成立(超预算/压不动)或 IMG_INLINE=0 时,那几张退回转述(describe_images)。
     # 机制与 read_image 完全同一套:消息里只写事实 + 引用标记,base64 由
@@ -8489,9 +8501,8 @@ printContent() {
     if (( ${#input_images[@]} > 0 )); then
         local img_n=${#input_images[@]} img_desc="" img_ok=0 img_path
         local -a img_fb=()
-        # 轮号 +1:HOLD 的单位是**轮**不是张(IMG_INLINE_HOLD=1 意为"只有本轮的图可见,
-        # 换轮才降级")。按张裁会让"用户一次甩来四张面板"里的前三张在同一轮就消失。
-        IMG_REF_GROUP=$(( ${IMG_REF_GROUP:-0} + 1 ))
+        # 轮号已在 printContent 开头的"轮边界"处 +1 并降级过,这里**不再推进**
+        # (原先在这儿 +1,纯文字轮就永远不推进;重复 +1 还会让 HOLD≥2 时提前误降级)
         if (( IMG_INLINE && IMG_CAPABLE )); then
             for img_path in "${input_images[@]}"; do
                 if img_inline_attach "$img_path" "$img_path"; then

@@ -245,6 +245,41 @@ img_probe_main_model; r10d=$?
 ck "缺配置必须判'未知'(rc=2)" "$r10d" "2"
 ck "'未知'不得把结论写成不收图" "${IMG_MAIN_VISION:-空}" "空"
 
+echo "=== 11. 轮边界位置(降级必须发生在换轮时,不是等下次读图) ==="
+# 这一组是**位置锁**而不是行为锁,原因值得记下:机制本身(prune 按轮裁剪)在坏版本上也是对的,
+# 坏在"谁调用它"——原先 IMG_REF_GROUP+1 与 prune 都只在 img_inline_attach 里发生,
+# 于是"下一轮只打字不读图"时上一轮的图一直挂着、每轮重付 token
+# (实测:第2轮 image_url 部件仍是 2、.gone 是 0)。所以必须钉位置。
+pc_start=$(grep -n '^printContent() {' "$SRC" | cut -d: -f1)
+inc_line=$(grep -n 'IMG_REF_GROUP=\$(( ' "$SRC" | head -1 | cut -d: -f1)
+img_if_line=$(grep -n 'if (( \${#input_images\[@\]} > 0 ))' "$SRC" | head -1 | cut -d: -f1)
+ck "被测源里能找到轮号递增与发图分支两个锚点(找不到=锚点漂了,断言全不可信)" \
+   "$([[ -n "$inc_line" && -n "$img_if_line" ]] && echo yes)" "yes"
+ck "全文件只有一处轮号递增(重复递增会让 HOLD>=2 时提前误降级)" \
+   "$(grep -c 'IMG_REF_GROUP=\$(( ' "$SRC")" "1"
+ck "轮号递增在'本轮有图'判断之前(纯文字轮也必须推进)" \
+   "$([[ -n "$inc_line" && -n "$img_if_line" && "$inc_line" -lt "$img_if_line" ]] && echo before || echo "after:$inc_line/$img_if_line")" "before"
+ck "轮边界处紧接着调用降级(不等下一次 attach)" \
+   "$(awk -v s="$inc_line" 'NR>s && NR<=s+3 && /img_refs_prune/{f=1} END{print f?"yes":"no"}' "$SRC")" "yes"
+ck "img_inline_attach 里仍保留 prune(同轮累计也要能裁)" \
+   "$(awk '/^img_inline_attach\(\) \{/{f=1} f && /img_refs_prune/{c++} f && /^\}$/{exit} END{print c+0}' "$SRC" | tr -d ' ' | awk '{print ($1>=1)?"yes":"no"}')" "yes"
+
+# 机制本身也钉一条:换轮后旧引用必须变成 .gone(不是消失)且展开出诚实的 gone 文字
+IMG_REF_GROUP=1; img_inline_attach "$del" "轮1.png" >/dev/null; t1="$inline_ref_id"
+IMG_REF_GROUP=2; img_refs_prune
+one=$(jq -nc --arg a "$t1" '[{role:"tool",tool_call_id:"c",content:("read_image: 轮1.png [[IMGREF:"+$a+"]]")}]')
+# ⚠ 顺序:img_build_map 扫的是**全局 $messages**,必须先赋值再采 map
+# (这个坑本文件已踩过一次:反过来写就会得到"map 里没有这个号 → 按未知处理 → 正文不动",
+#  看起来像展开逻辑坏了,其实是测试自己的时序)
+messages="$one"; img_build_map "$W/m7.json"
+ck "换轮后旧引用文件改名 .gone 而非被删(要靠它区分已回收/非我方)" \
+   "$([[ -e "$IMG_REF_DIR/$t1.gone" && ! -e "$IMG_REF_DIR/$t1.url" ]] && echo yes)" "yes"
+exp7=$(printf '%s' "$one" | jq -c --rawfile map "$W/m7.json" \
+       --arg gone_pre "$IMG_INLINE_GONE_MARK" --arg gone_hint "$IMG_INLINE_GONE_HINT" \
+       '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS")
+ck "换轮后展开只剩文字且带移除标记" "$(jq -r '.[0].content|type' <<<"$exp7")/$(jq -r '.[0].content' <<<"$exp7" | grep -c '原图已移除')" "string/1"
+IMG_REF_GROUP=3; img_inline_attach "$del" "轮3.png" >/dev/null   # 恢复一个活引用给后续节用
+
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 (( fail == 0 ))
