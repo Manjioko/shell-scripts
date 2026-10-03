@@ -113,7 +113,9 @@ pro_model="${PRO_MODEL:-}"
 #                              → 均见「图片理解」节
 #    TOKEN_THRESHOLD           上下文压缩阈值 → 详解见「上下文压缩」节
 #    (以下属 auto 模式,留在「auto 模式」节,同样支持 env:MAX_TOOL_ROUNDS CMD_TIMEOUT
-#     AUTO_MAX_APPROVALS AUTO_DENY_STREAK AUTO_SNAPSHOT_MAX_KB AUTH_CTX_KEEP)
+#     AUTO_MAX_APPROVALS AUTO_DENY_STREAK AUTO_SNAPSHOT_MAX_KB AUTH_CTX_KEEP
+#     AUTO_MAX_WRITES_PER_PATH 路径熔断的总量兜底(默认 40;设 0 = 关闭这条判据,不是"一律拒")
+#     AUTO_FUSE_WINDOW 熔断形状判据(F2/F3)回看多少条内容指纹)
 #    SKILLS_DIR                  技能目录 → 见「Skill 自我进化」节。⚠ 外置值要过属主/
 #                                符号链接/o+w 三项校验,不过就退回默认值(不是退回报错);
 #                                相对路径按**启动时**的 pwd 归一;指到项目内即等于让
@@ -4171,35 +4173,108 @@ auto_backup() {
     cp -p "$f" "$bak" 2>/dev/null && auto_backup_count=$((auto_backup_count + 1))
 }
 
-# ---------- 路径级熔断:同一个文件被写太多次 = 失控信号 ----------
-# 改→测→改→回退→再改 这种循环,单看每一次写都"合法且可回滚",串起来却说明模型
-# 没有进展。人工模式下人看得见刷屏,auto 下没人看 —— 所以只在 auto 生效。
+# ---------- 路径级熔断:进度刹车(2026-10-02 重写判据) ----------
+# 人工模式下人看得见刷屏,auto 下没人看 —— 所以只在 auto 生效。
 # 处置按"该次拒绝并提示",不做整轮降级:降级会让 -st 无人值守直接卡死,而熔断要的
 # 只是逼它停下来说明现状。
-AUTO_MAX_WRITES_PER_PATH="${AUTO_MAX_WRITES_PER_PATH:-8}"
-# 计数落在文件而不是关联数组:① macOS 自带 /bin/bash 3.2 没有关联数组,本脚本要能在
-# 它上面跑起来(3.2 终端卡死那类历史问题另说,语法层不能先炸);② 写操作可能发生在
-# 命令替换的子 shell 里,内存计数会随子 shell 退出一起丢,文件不会。
+#
+# 旧实现只有"同一文件单会话被写 N 次就拒"一条判据。做 read_image 那两轮时被它拦断两次,
+# 两次拦的都是**正当推进**,不是失控 —— 复盘出三个缺陷(都改):
+#   1) **失败的编辑也吃额度**:计数在 path_access 第 0 步,而 old_string 的匹配校验在
+#      它之后;没匹配上时文件一个字节都没动,额度却已扣掉一次。试错成本被记成失控成本。
+#      (负对照还顺带暴露另一面:旧实现是"允许即追加",连"这次到底写没写"都不看。)
+#   2) **判"次数"不判"形状"**:注释一直声明要抓"改→测→改回→再改"这种原地打转,实现却
+#      只数总量 → "8 次改在不同位置"与"8 次在同一函数里反复横跳"不可区分,误杀的正是
+#      前者(8600 行的单文件做一次重构,十几处写入是正常量级)。
+#   3) **上限取值两头都不对**:8 太低(重构必撞),但抬到 99 又等于取消刹车 —— 真失控的
+#      模型可以烧完 99 次整文件重写,而这 99 次里没有任何"无进展"信号被识别出来。
+# 拆成三件事:
+#   - **写成功才记账**(auto_write_fuse_record,按落地文件的 CRC 记账)→ 缺陷 1 消失;
+#   - 加两条真正的"无进展形状":来回改(A↔B↔A↔B,判据 F2)与反复写同一内容(连三次同
+#     指纹,判据 F3)。它们在第 3~6 次就触发,**远早于任何总量上限** —— 刹车该由形状踩,
+#     不该由配额踩;
+#   - 总量上限退成最后兜底,抬到 40:够一次正常多步重构(实测本轮 7~8 次)与新闸门迭代
+#     (实测 8+ 次),又不至于让失控会话跑满。想更宽是 env 的事,不是把数字调到 99 假装解决。
+AUTO_MAX_WRITES_PER_PATH="${AUTO_MAX_WRITES_PER_PATH:-40}"
+AUTO_FUSE_WINDOW="${AUTO_FUSE_WINDOW:-6}"      # 形状判据回看多少条指纹
+
+# 记账文件格式:<绝对路径>\t<内容指纹>
+# 为什么指纹取"落地文件的 CRC"而不是"打算写入的内容哈希":写完再读盘算,一个动作同时
+# 回答"写成功了吗"和"内容真的变了吗",而且几 MB 的内容不必进 bash 变量(全文件 ARG_MAX 纪律)。
+# ⚠ 旧格式(只有路径、没有指纹)的行**继续计入次数**,只是不参与形状判据:不向后兼容会让
+#   升级后的第一个会话把历史读成 0 次,等于当场解除刹车。
+auto_write_fuse_log() {
+    local base="${AUTO_DIR:-}" sess="${auto_session_id:-}"
+    [[ -n "$base" && -n "$sess" ]] || return 1
+    printf '%s/writes-%s.log' "$base" "$sess"
+}
+
+# 形状判据 F2:最近几条指纹里出现 A↔B↔A↔B(隔位相同、相邻不同)= 改回来又改回去。
+auto_write_oscillating() {  # $1=空格分隔的指纹序列(旧→新)
+    local -a h=($1)
+    local n=${#h[@]}
+    (( n < 4 )) && return 1
+    [[ "${h[n-4]}" == "${h[n-2]}" && "${h[n-3]}" == "${h[n-1]}" && "${h[n-4]}" != "${h[n-3]}" ]]
+}
+
+# 形状判据 F3:连续三次写入后内容完全相同 = 写了等于没写。
+# 与 F2 互补:F2 抓"在两版之间摇摆",F3 抓"原地踏步"(典型是模型以为写失败而反复重发)。
+auto_write_frozen() {
+    local -a h=($1)
+    local n=${#h[@]}
+    (( n < 3 )) && return 1
+    [[ "${h[n-1]}" == "${h[n-2]}" && "${h[n-2]}" == "${h[n-3]}" ]]
+}
+
+# 判"这次写允不允许"。**只判,不记账** —— 拆成两半正是为了让"失败的编辑不吃额度"成立。
 auto_write_fuse() {
-    local abs="$1" log n
+    local abs="$1" log n hashes rule="" reason=""
     [[ -n "$auto_mode" ]] || return 0
     [[ -n "$abs" ]] || return 0
     # 状态目录或会话号缺失(极简环境,或夹具按名单抽函数、不跑启动期赋值)时**退回不判**:
     # 熔断只是进度刹车,不许它自己在 set -u 下把调用方打死。本轮真实踩过:现象是"表跑到
     # path_access 段静默退出、连一条 FAIL 都不打印",因为那句调用带 >/dev/null 2>&1。
-    local base="${AUTO_DIR:-}" sess="${auto_session_id:-}"
-    [[ -n "$base" && -n "$sess" ]] || return 0
-    log="$base/writes-$sess.log"
-    mkdir -p "$base" 2>/dev/null || return 0
-    # grep -c 在"无匹配"时 rc=1、文件不存在时 rc=2,两种都要吞掉:这里是取计数,不是判成败
-    n=$(grep -cxF "$abs" "$log" 2>/dev/null || true)
+    log=$(auto_write_fuse_log) || return 0
+    mkdir -p "${AUTO_DIR:-}" 2>/dev/null || return 0
+    [[ -f "$log" ]] || return 0
+    # 按字段精确匹配计数。不能再用 grep -cxF "$abs":加了指纹列之后它会一律读成 0,
+    # 而"读成 0"的表现是刹车悄悄解除 —— 比误拦危险得多。
+    n=$(awk -F'\t' -v p="$abs" '$1==p{c++} END{print c+0}' "$log" 2>/dev/null)
     [[ "$n" =~ ^[0-9]+$ ]] || n=0
     if (( AUTO_MAX_WRITES_PER_PATH > 0 && n >= AUTO_MAX_WRITES_PER_PATH )); then
-        auto_audit deny path_fuse "$abs" F1 reject "同一文件单会话已写 $n 次(上限 $AUTO_MAX_WRITES_PER_PATH),拒绝本次写入"
-        printf '\n\033[1;33m⛔ 路径熔断:%s 本会话已被写 %s 次,本次拒绝。请停止重试,说明现状与卡点\033[0m\n' "$abs" "$n"
+        rule=F1; reason="同一文件单会话已写 $n 次(上限 $AUTO_MAX_WRITES_PER_PATH)"
+    else
+        hashes=$(awk -F'\t' -v p="$abs" '$1==p && $2!=""{print $2}' "$log" 2>/dev/null \
+                 | tail -n "$AUTO_FUSE_WINDOW" | tr '\n' ' ')
+        if auto_write_oscillating "$hashes"; then
+            rule=F2; reason="内容指纹来回变化(A↔B↔A↔B),累计已写 $n 次:这就是「改→测→改回去→再改」的形状"
+        elif auto_write_frozen "$hashes"; then
+            rule=F3; reason="连续三次写入后内容完全相同,累计已写 $n 次:写了等于没写"
+        fi
+    fi
+    if [[ -n "$rule" ]]; then
+        auto_audit deny path_fuse "$abs" "$rule" reject "${reason},拒绝本次写入"
+        printf '\n\033[1;33m⛔ 路径熔断(%s):%s\n   目标:%s\n   处置:停止重试同一目标。把"现状是什么、卡在哪一步、需要什么授权或哪个环境变量"说清楚。这条是**进度刹车**不是红线(AUTO_MAX_WRITES_PER_PATH 可调),但形状判据命中时继续写大概率只是重复同一个失败\033[0m\n' \
+            "$rule" "$reason" "$abs"
         return 1
     fi
-    printf '%s\n' "$abs" >> "$log"
+    return 0
+}
+
+# 写成功之后记账:$1 = 实际落点的绝对路径。
+# 只在成功分支调用,所以"匹配失败的 edit""创建目录失败的 write"都不占额度。
+auto_write_fuse_record() {
+    local abs="$1" log h
+    [[ -n "$auto_mode" ]] || return 0
+    [[ -n "$abs" && -f "$abs" ]] || return 0
+    log=$(auto_write_fuse_log) || return 0
+    [[ -f "$log" ]] || return 0
+    # 只取 cksum 的 CRC 一个数:它默认输出 "<crc> <字节数>" 带空格,而形状判据是按空白
+    # 分词读指纹列的 —— 带空格的指纹会把序列切成两倍长度,交替/冻结判据全部错位
+    # (这条是闸门实测抓出来的,不是推演)。字节数本来也不参与判据,丢掉不损失信息。
+    h=$(cksum < "$abs" 2>/dev/null | awk '{print $1}')
+    [[ -n "$h" ]] || return 0
+    printf '%s\t%s\n' "$abs" "$h" >> "$log"
     return 0
 }
 
@@ -6226,17 +6301,25 @@ path_access() {
     #    而恰恰是这类路径最容易被反复改(配置文件第一次批过之后就一路改到底)。
     #    这里比第 1.5 步多算一次 resolve_path:口径不同(那一步在归一后还要过 hard_deny_path),
     #    换掉重复计算的复杂度不值得,写盘频率本来就低。
-    #    resolve_path 只认工作根内的路径,越界时归一失败 → 退回原始 $p 计数(宁可数歪,不可不数)。
+    #    ⚠ 本步**只判,不记账**:记账在 tool_write_file / tool_edit_file 确认落盘之后
+    #    (auto_write_fuse_record)。这是"失败的编辑不吃额度"的结构前提 —— 别把 record
+    #    挪回这里,那等于把缺陷 1 原样装回去(闸门有结构锁钉这件事)。
+    #    ⚠ 键必须与 record **逐字同源**(都是"resolve_path 成功用它,失败退 expand_tilde")。
+    #    旧写法在这里退回**原始 $p**,而工具侧 record 用 expand_tilde 的结果:归一失败时
+    #    两边键不同 → 计数永远读不到 → 刹车静默解除(比误拦危险得多)。
+    #    实测补充:resolve_path 对"文件还不存在"是**成功**的(它归一已存在的父目录),
+    #    所以新建文件这条本来就不会分叉;分叉只在真正越界时出现,而那正是要数准的场合。
     if [[ "$mode" == "rw" ]]; then
         local npfuse
         npfuse=$(resolve_path "$p" 2>/dev/null || true)
+        [[ -n "$npfuse" ]] || npfuse="$(expand_tilde "$p")"
         # 缺席守卫:夹具按名字抽函数,抽不到 auto_write_fuse 时 command not found 的 rc=127
         # 会被 `if !` 读成"拒绝",现象是合法写入被莫名拒 —— 那是把进度刹车误装成红线。
         # 与 hd_split_words 的缺席守卫同族,方向刻意相反:那条守越界红线(缺席宁拦),
         # 这条只是循环刹车(缺席即放行,绝不误拒)。
-        if declare -f auto_write_fuse >/dev/null 2>&1 && ! auto_write_fuse "${npfuse:-$p}"; then
-            content="错误:${act}被路径熔断拒绝:${npfuse:-$p} 本会话已写到上限,不再接受同一目标的重复写入。停止重试,直接说明当前状态与卡点"
-            printf ' ⛔ 路径熔断拒绝%s:%s\n' "$act" "${npfuse:-$p}"
+        if declare -f auto_write_fuse >/dev/null 2>&1 && ! auto_write_fuse "$npfuse"; then
+            content="错误:${act}被路径熔断拒绝:${npfuse} 本会话在该目标上已判无进展(F1 超上限 / F2 来回改 / F3 内容不变),不再接受同一目标的重复写入。停止重试,直接说明当前状态与卡点"
+            printf ' ⛔ 路径熔断拒绝%s:%s\n' "$act" "$npfuse"
             return 1
         fi
     fi
@@ -6607,6 +6690,10 @@ tool_write_file() {
     content="✅ 已写入 $path($(wc -l < "$resolved" | tr -d ' ') 行)· 实际落点 $resolved"
     [[ "$path" == /* ]] || content+=$'\n'"   (相对路径按工作根 $WORK_ROOT 解析;若这不是你要的位置,改用绝对路径。工作根由进程启动时的目录决定,与后续 cd 无关)"
     printf ' 已写入 %s\n' "$resolved"
+    # 熔断记账放在**确认落地之后**:这就是"失败的编辑不吃额度"的落点本体。
+    # 旧版在 path_access 第 0 步计数,于是"未匹配""不唯一""创建目录失败""写后复核不存在"
+    # 这些一个字节都没改的路径全都白扣一次额度(缺陷详见 auto_write_fuse 头注)。
+    auto_write_fuse_record "$resolved"
 }
 
 # 纯 bash 精确替换引擎:
@@ -6640,6 +6727,9 @@ tool_edit_file() {
         printf '%s' "$data" > "$resolved"
         content="✅ 已修改 $path(替换 1 处)"
         printf ' 已修改 %s\n' "$path"
+        # 记账只在这个分支(真的写了盘)发生。上面 count==0 / count>1 两条"未做任何修改"
+        # 的路径一条都不记账 —— 闸门 tests/write_fuse_test.sh 第 4 组就是钉这件事。
+        auto_write_fuse_record "$resolved"
     fi
 }
 

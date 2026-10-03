@@ -47,25 +47,26 @@ done
 
 # --- 闸门表:名字 | 命令 | 结论行的匹配正则(pass) | 说明 ---------------------------
 # pass 正则**必须**锚定到该闸门自己打印的结论行;匹配不到就判失败(见硬规矩 1)。
-GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件 内联图片)
+GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件 内联图片 写熔断)
 GATE_CMDS=("bash -n wchat.sh && bash -n test_hardwall.sh && bash -n tests/run_gates.sh && echo SYNTAX-ok-3-files" "bash test_hardwall.sh" "bash tests/rulefail_check.sh"
            "bash tests/compaction_pin_probe.sh" "bash tests/audit_field_probe.sh"
            "bash tests/probe_shapes.sh" "bash tests/skills_dir_test.sh"
            "bash tests/mcp_channel_test.sh"
            "bash tests/traffic_replay.sh" "bash tests/auto_test.sh unit"
-           "bash tests/inline_image_test.sh")
-GATE_MODE=(c x x x x x x x x x x)
+           "bash tests/inline_image_test.sh" "bash tests/write_fuse_test.sh")
+GATE_MODE=(c x x x x x x x x x x x)
 GATE_PAT=('^SYNTAX-ok-3-files$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^PASS=[0-9]+ FAIL=0$'
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^结论: 通过$' '不符 0$'
          '闸门全部通过' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^结论:无新增漂移' '^RESULT|全部通过|PASS=[0-9]+ FAIL=0$'
-         '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+         '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE=('两个脚本语法' '527+ 条判据向量与总数守卫' '规则覆盖 + 出口话术 + 分支数锁'
            'compact_due/布局/接线锁' 'trunc/tlen + root + pol 字段' '判据形状向量'
            'SKILLS_DIR 越界与软链防护'
            'MCP 通道:开关/暴露面/审计/预算(全打桩,不依赖 npm 与 Chrome)'
            '离线语料回放(漂移需先复跑再 GEN=1 固化)'
            '主套件(--main 才跑,慢)'
-           'inline 图片通道:引用展开/gone 形状/外来字面量防误伤(不联网)')
+           'inline 图片通道:引用展开/gone 形状/外来字面量防误伤(不联网)'
+           '路径熔断:只判不记/写成功才记账/F2 来回改/F3 同内容/键同源(不联网)')
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。
