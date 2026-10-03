@@ -163,9 +163,12 @@ IMG_INLINE=${IMG_INLINE:-1}                            # 0=只用转述(改动�
 # JPEG 2.5MB 都是 2502)。所以下面两个约束各管各的,别混。
 IMG_INLINE_MAX_SIDE=${IMG_INLINE_MAX_SIDE:-2048}
 IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES:-2097152}  # 交付件字节上限(2MB,超了退回转述)
-# 同时"活着"的原图张数:更早的引用文件被删 → 展开时自动变成"已移除"那段文字。
-# 默认 1 = 保留最近一张。不设 0("只活一轮"):同一张图常在一轮工具链里被反复追问,
-# 一轮就剥等于把刚拿到的精度扔掉;也不设更大,每张每轮 2.5k tokens。
+# 保留最近 **N 轮**的原图(单位是轮,不是张 —— 轮号由 printContent 每轮 +1 的 IMG_REF_GROUP 记)。
+# 更早轮次的引用文件被**改名成 .gone**(不是删掉:要靠它区分"我们发过号但已回收"与
+# "正文里碰巧长得像标记"两种情况,后者一个字都不许动)→ 展开时自动变成"已移除"那段文字。
+# 为什么按轮不按张:同一轮里连读三张、或用户一次甩来四张面板做对比,按张裁会让前几张在
+# **同一轮**就消失 —— 那是不能接受的形状。为什么不设 0:那样本轮结束就剥,而模型常在
+# 同一轮里对同一张图反复追问;也不设更大,每张每轮 2.5k tokens。
 IMG_INLINE_HOLD=${IMG_INLINE_HOLD:-1}
 # 降级文案。措辞由实验定(.scratch/mm_stubborn_experiment.py 六臂 × 15 样本):
 #   A 只报状态 / B 能力声明 / C 带丢失维度 / D 极简一句 → 13/13 全部选择**重新调用 read_image**,
@@ -7209,14 +7212,26 @@ img_ref_dir() {
 # 为什么用"改名"而不是"改写 messages":改写要把整份 messages 再过一遍 jq(实测带图 208ms/次),
 # 而且改写本身会造出 F 臂那种"旧断言还在"的形状 —— 动文件两件事都不犯。
 img_refs_prune() {
-    local keep="${IMG_INLINE_HOLD:-1}" id
+    # 按**轮(观察窗口)**裁剪,不按张:IMG_INLINE_HOLD 的含义是"保留最近 N 轮"。
+    # 为什么必须按轮:同一轮里连读三张图、或用户一次甩来四张面板做对比,按张裁到 1 会让
+    # 前几张在**同一轮**就降级成"原图已移除" —— 用户刚交付的对比材料当场消失。
+    # 条目格式 "<轮号> <引用号>";无轮号的旧条目按第 0 轮处理(向后兼容,不在这里炸)。
+    local keep="${IMG_INLINE_HOLD:-1}" cutoff e grp left=()
     [[ "$keep" =~ ^[0-9]+$ ]] || keep=1
-    while (( ${#IMG_REFS[@]} > keep )); do
-        id="${IMG_REFS[0]}"
-        mv -f "${IMG_REF_DIR}/${id}.url" "${IMG_REF_DIR}/${id}.gone" 2>/dev/null \
-            || rm -f "${IMG_REF_DIR}/${id}.url"
-        IMG_REFS=("${IMG_REFS[@]:1}")
+    (( keep < 1 )) && keep=1
+    cutoff=$(( ${IMG_REF_GROUP:-0} - keep + 1 ))
+    (( cutoff <= 0 )) && return 0
+    for e in "${IMG_REFS[@]}"; do
+        [[ -n "$e" ]] || continue
+        if [[ "$e" == *" "* ]]; then grp="${e%% *}"; e="${e#* }"; else grp=0; fi
+        if (( grp < cutoff )); then
+            mv -f "${IMG_REF_DIR}/${e}.url" "${IMG_REF_DIR}/${e}.gone" 2>/dev/null \
+                || rm -f "${IMG_REF_DIR}/${e}.url"
+        else
+            left+=("$grp $e")
+        fi
     done
+    IMG_REFS=("${left[@]}")
     return 0
 }
 
@@ -7256,7 +7271,7 @@ img_inline_attach() {
         return 1
     fi
     [[ "$final" != "$orig" ]] && rm -f "$final"
-    IMG_REFS+=("r${IMG_REF_SEQ}$$")
+    IMG_REFS+=("${IMG_REF_GROUP:-0} r${IMG_REF_SEQ}$$")   # 带轮号:按轮裁剪靠它(见 img_refs_prune)
     img_refs_prune
     inline_ref_id="r${IMG_REF_SEQ}$$"
     return 0
@@ -7268,8 +7283,13 @@ img_inline_attach() {
 img_build_map() {
     local ids id f first=1
     printf '{' > "$1"
+    # ⚠ 必须用 scan 而不是 capture:capture 对一段文本**只返回第一个**匹配 ——
+    #   一条消息里放多张图(用户一次甩来几张面板是常态)时只会采到第一个号,其余的
+    #   既不进 map 也不展开,表现是"只看到第一张"而不是报错。
+    #   它与 _JQ_EXPAND_REFS 是同一种病的一对,**只修一半比不修更会骗人**:
+    #   修了展开没修采集,现象会变成"图更少",很容易被当成别的原因。
     ids=$(printf '%s' "$messages" | jq -r \
-        '[.. | strings | capture("\\[\\[IMGREF:(?<id>[A-Za-z0-9_]+)\\]\\]").id] | unique | .[]' 2>/dev/null)
+        '[.. | strings | scan("\\[\\[IMGREF:([A-Za-z0-9_]+)\\]\\]")] | flatten | unique | .[]' 2>/dev/null)
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
         f="${IMG_REF_DIR}/${id}"
@@ -7304,7 +7324,12 @@ img_build_map() {
 #   只有 img_build_map 认过号(.url 或 .gone 存在)的 id 才会进入改写。
 # ⚠ **必须单行赋值**:_JQ_CONTENT_TEXT 上面记过 —— 多行引号串会被按行抽取的测试夹具
 #   整段吞进字符串,source 不报错但变量根本不存在。
-_JQ_EXPAND_REFS='def _cap: capture("\\[\\[IMGREF:(?<id>[A-Za-z0-9_]+)\\]\\]"); def _strip($id): gsub("\\[\\[IMGREF:" + $id + "\\]\\]"; "") | gsub("^[ \t\n]+|[ \t\n]+$"; ""); map( if (.content|type)=="string" and (.content|test("\\[\\[IMGREF:[A-Za-z0-9_]+\\]\\]")) then (.content|_cap) as $m | (if ($map|has($m.id)) then .content = (if ($map[$m.id]|has("url")) then [ {type:"image_url", image_url:{url:$map[$m.id].url}}, {type:"text", text:(.content|_strip($m.id))} ] else ($gone_pre + "\n" + (.content|_strip($m.id)) + "\n" + $gone_hint) end) else . end) else . end )'
+# ⚠ 必须支持**一条消息多个标记**(用户一次发多张图就是这种形状)。早期版本用
+#   `capture` 只取第一个匹配 → 3 张图只展开 1 张,其余以字面量留在正文里。
+#   与 img_build_map 的采集端是同一对缺陷,两处必须一起改(见那里的注释)。
+# ⚠ jq 陷阱:管道之后 `.` 已经变了,写 `$map|has(.)` 里的 `.` 不是循环元素而是 $map
+#   本身,会报 "Cannot check whether object has a object key" —— 必须先 `. as $x` 绑定。
+_JQ_EXPAND_REFS='def _ids: [scan("\\[\\[IMGREF:([A-Za-z0-9_]+)\\]\\]")] | map(.[0]) | unique; def _trim: gsub("^[ \t\n]+|[ \t\n]+$"; ""); def _drop($ks): reduce $ks[] as $k (.; gsub("\\[\\[IMGREF:" + $k + "\\]\\]"; "")); map( if (.content|type)=="string" then (.content|_ids) as $ids | ([$ids[] | . as $x | select($map|has($x))]) as $known | (if ($ids|length)==0 or ($known|length)==0 then . else ([$known[] | . as $x | select($map[$x]|has("url"))]) as $L | ([$known[] | . as $x | select(($map[$x]|has("url"))|not)]) as $G | (if ($L|length)>0 then .content = ( [ $L[] | . as $x | {type:"image_url", image_url:{url:$map[$x].url}} ] + [ {type:"text", text: ((.content | _drop($L + $G) | _trim) + (if ($G|length)>0 then "\n" + $gone_pre + "(" + ($G|length|tostring) + " 张本次不在上下文),需要时重新调用 read_image" else "" end)) } ] ) else .content = ($gone_pre + "\n" + (.content | _drop($G) | _trim) + "\n" + $gone_hint) end) end) else . end )'
 
 # ---------- 视觉请求体的字段落点 ----------
 # 公共骨架(模型/messages/stream)不放这里,以免与其它请求重复。以 jq 对象片段形式
@@ -8386,32 +8411,57 @@ printContent() {
     tool_round=0
     auto_downgraded=0
 
-    # 图片转述:本轮 @/-img 选的图片在此统一转述(独立视觉请求,转述文本
-    # 进 messages,原图不进上下文)。纯图片无文字时,描述即消息内容。
+    # 用户发图(@/-img):优先 **inline** —— 原图随本轮 user 消息交给主模型自己看;
+    # 单张不成立(超预算/压不动)或 IMG_INLINE=0 时,那几张退回转述(describe_images)。
+    # 机制与 read_image 完全同一套:消息里只写事实 + 引用标记,base64 由
+    # make_request_body 发请求前展开(为什么用引用不用内联,见 IMG_INLINE_* 配置节)。
     if (( ${#input_images[@]} > 0 )); then
-        local img_n=${#input_images[@]} img_desc=""
-        describe_images "${input_images[@]}"
-        # 转述(同步 curl)期间 Ctrl+C:trap 置 input_aborted,curl 同进程组被
-        # SIGINT 杀掉、resp 为空。视为本轮取消:不写入任何消息,直接回到输入
-        if (( input_aborted )); then
-            input_aborted=0
-            input_images=()
-            round_aborted=1
-            printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n\n'
-            return 0
+        local img_n=${#input_images[@]} img_desc="" img_ok=0 img_path
+        local -a img_fb=()
+        # 轮号 +1:HOLD 的单位是**轮**不是张(IMG_INLINE_HOLD=1 意为"只有本轮的图可见,
+        # 换轮才降级")。按张裁会让"用户一次甩来四张面板"里的前三张在同一轮就消失。
+        IMG_REF_GROUP=$(( ${IMG_REF_GROUP:-0} + 1 ))
+        if (( IMG_INLINE && IMG_CAPABLE )); then
+            for img_path in "${input_images[@]}"; do
+                if img_inline_attach "$img_path" "$img_path"; then
+                    img_ok=$(( img_ok + 1 ))
+                    [[ $img_ok -eq 1 ]] && img_desc+=$'\n'"(用户发送了 $img_n 张图片)"
+                    img_desc+=$'\n'"read_image: $img_path"$'\n'"[[IMGREF:$inline_ref_id]]"
+                else
+                    img_fb+=("$img_path")
+                fi
+            done
+            (( img_ok > 0 )) && printf ' 🖼 %s/%s 张原图已随本轮消息交给主模型\n' "$img_ok" "$img_n"
+        else
+            img_fb=("${input_images[@]}")
         fi
         input_images=()
-        if (( describe_failed )); then
-            # 括号内是给模型看的说明:明确"没看到图"+"别再调 read_image",
-            # 否则模型会反复重试同一工具(实测会烧掉十几轮才放弃)
-            img_desc=$'\n[图片未识别: '"$describe_result"'。你看不到这张图的内容,不要臆测,也不要再调用 read_image 重试]'
-        else
-            img_desc=$'\n(用户发送了 '"$img_n"' 张图片,以下是图片内容的文字转述)\n'"$describe_result"
+        # 退回转述的那部分:独立视觉请求(模型由 VISION_MODEL 定),与 inline 互不影响
+        if (( ${#img_fb[@]} > 0 )); then
+            describe_images "${img_fb[@]}"
+            # 转述(同步 curl)期间 Ctrl+C:trap 置 input_aborted,curl 同进程组被 SIGINT
+            # 杀掉、resp 为空。视为本轮取消:不写入任何消息,直接回到输入
+            # (inline 分支不发网络请求,所以这个早退只可能发生在退回转述时)
+            if (( input_aborted )); then
+                input_aborted=0
+                round_aborted=1
+                printf '\n\033[2m⏹ 已中断,图片未发送\033[0m\n\n'
+                return 0
+            fi
+            if (( describe_failed )); then
+                # 明确"没看到图"+"别再瞎猜",否则模型会反复重试同一工具(实测烧十几轮);
+                # 这里把可重看的路径留在正文里,它才有"再调一次"的抓手。
+                img_desc+=$'\n[有 '"${#img_fb[@]}"' 张图未能识别: '"$describe_result"'。你看不到这些图的内容,不要臆测;确需再看时按上面的路径重新调用 read_image]'
+            else
+                img_desc+=$'\n(以下 '"${#img_fb[@]}"' 张图本次未能提供原图,下面是文字转述,精度低于直接看图)\n'"$describe_result"
+            fi
         fi
-        if [[ -n "$content" ]]; then
-            content+="$img_desc"
-        else
-            content="$img_desc"
+        if [[ -n "$img_desc" ]]; then
+            if [[ -n "$content" ]]; then
+                content+="$img_desc"
+            else
+                content="$img_desc"
+            fi
         fi
     fi
 

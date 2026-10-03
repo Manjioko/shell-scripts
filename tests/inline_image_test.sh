@@ -102,10 +102,15 @@ ck "外来文本原样保留" "$(jq -r '.[0].content' <<<"$out")" \
    "源码里写着 [[IMGREF:zz9]] 这种字面量,还有 [[IMGREF:abc]]"
 ck "没被加【原图已移除】前缀" "$(jq -r '.[0].content' <<<"$out" | grep -c '原图已移除')" "0"
 
-echo "=== 6. 回收走真实机制:读新图 → 旧图 .url 改名 .gone ==="
+echo "=== 6. 回收走真实机制:换轮 → 上一轮图 .url 改名 .gone ==="
+# HOLD 的单位是**轮**(IMG_REF_GROUP),不是张:同一轮里读多张必须全部可见,
+# 换轮时才把上一轮的降级。这里显式推进轮号来模拟"用户发了新一轮消息"。
+IMG_REF_GROUP=1
 img_inline_attach "$del" "图纸B.png"; idB="$inline_ref_id"
-ck "活引用数 = IMG_INLINE_HOLD" "${#IMG_REFS[@]}" "$IMG_INLINE_HOLD"
-ck "旧引用变 .gone 而非消失" "$([[ -e "$IMG_REF_DIR/$idA.gone" && ! -e "$IMG_REF_DIR/$idA.url" ]] && echo yes)" "yes"
+ck "上一轮的图已被改名 .gone" "$([[ -e "$IMG_REF_DIR/$idA.gone" && ! -e "$IMG_REF_DIR/$idA.url" ]] && echo yes)" "yes"
+ck "本轮的图仍活着" "$([[ -s "$IMG_REF_DIR/$idB.url" ]] && echo yes)" "yes"
+ck "IMG_REFS 只留本轮一条" "${#IMG_REFS[@]}" "1"
+ck "条目带轮号(按轮裁剪靠它)" "${IMG_REFS[0]%% *}" "1"
 two=$(jq -c -n --arg a "$idA" --arg b "$idB" '[
   {role:"tool",tool_call_id:"c1",content:("read_image: 图纸A.png\n[[IMGREF:"+$a+"]]")},
   {role:"assistant",content:"看过A"},
@@ -114,6 +119,7 @@ messages="$two"; img_build_map "$W/m3.json"
 exp3=$(printf '%s' "$two" | jq -c --rawfile map "$W/m3.json" \
        --arg gone_pre "$IMG_INLINE_GONE_MARK" --arg gone_hint "$IMG_INLINE_GONE_HINT" \
        '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS")
+ck "展开非空(jq 报错必须算失败,不许被 grep 数成 0 而假通过)" "$([[ -n "$exp3" ]] && echo yes)" "yes"
 ck "旧那条 → 字符串形状" "$(jq -r '.[0].content|type' <<<"$exp3")" "string"
 ck "含【原图已移除】" "$(jq -r '.[0].content' <<<"$exp3" | grep -c '原图已移除')" "1"
 ck "保留路径(重看的唯一抓手)" "$(jq -r '.[0].content' <<<"$exp3" | grep -c '图纸A.png')" "1"
@@ -161,6 +167,59 @@ IMG_INLINE=0; inline_ref_id=""
 if img_inline_attach "$del" "图纸C.png"; then r=attached; else r=refused; fi
 ck "IMG_INLINE=0 时 attach 必须拒绝" "$r" "refused"
 ck "拒绝时不留引用号" "${inline_ref_id:-}" ""
+
+echo "=== 9. 同轮多张 与 单条消息多标记(用户发图的形状) ==="
+# 为什么单独一节:printContent 把用户一次甩来的多张图拼进**同一条** user 消息,
+# 而展开片段早期用 capture(单匹配)→ 只有第一张成为 image_url 部件,其余以字面量
+# 留在正文里(实测:双标记残留 1、三标记残留 2)。这是"用户发 4 张面板、模型只看到 1 张"
+# 级别的缺陷,必须有独立一节看着它。
+IMG_REF_GROUP=2; IMG_INLINE=1; IMG_INLINE_HOLD=1
+same=""; for i in 1 2 3; do img_inline_attach "$del" "同轮$i.png"; same+="$inline_ref_id,"; done
+ck "同一轮连读 3 张必须全部可见(按轮不按张)" "${#IMG_REFS[@]}" "3"
+ck "同轮 3 个 .url 都在" "$(ls "$IMG_REF_DIR"/*.url 2>/dev/null | wc -l | tr -d ' ')" "3"
+
+# 用同轮 3 个号拼一条"用户发图"形状的消息(一张消息、三个标记)
+idlist=(); for e in "${IMG_REFS[@]}"; do idlist+=("${e#* }"); done
+json_ids=$(printf '\"%s\",' "${idlist[@]}" | sed 's/,$//')
+# ⚠ --argjson 而不是 --arg:传的是 JSON 数组,--arg 会把它当字符串 → to_entries 当场报错
+multi=$(jq -nc --argjson ids "[$json_ids]" '
+  {role:"user"} | .content = ($ids | to_entries
+     | map("read_image: 面板\(.key+1).png\n[[IMGREF:\(.value)]]") | join("\n"))')
+messages="[$multi]"; img_build_map "$W/m4.json"
+ck "map 认出同轮 3 个号" "$(jq 'length' "$W/m4.json")" "3"
+exp4=$(printf '%s' "$messages" | jq -c --rawfile map "$W/m4.json" \
+       --arg gone_pre "$IMG_INLINE_GONE_MARK" --arg gone_hint "$IMG_INLINE_GONE_HINT" \
+       '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS")
+ck "多标记展开非空" "$([[ -n "$exp4" ]] && echo yes)" "yes"
+ck "3 张图 → 4 个部件(3 image + 1 text)" "$(jq -r '.[0].content|length' <<<"$exp4")" "4"
+ck "零标记残留" "$(jq -r '.[0].content|tostring' <<<"$exp4" | grep -c IMGREF)" "0"
+ck "每个部件都是 image_url" "$(jq -r '[.[0].content[]|select(.type=="image_url")]|length' <<<"$exp4")" "3"
+
+# 混合:同一条消息里 1 活 + 1 已回收。
+# ⚠ 取号前先验数量:上一版直接 ${IMG_REFS[1]},在没有"按轮"语义的版本上跑会 unbound 崩掉,
+#   整道闸门连 RESULT 都不输出 —— 按本仓库铁律"没有结论行=失败",但**崩**比红更坏:
+#   红会告诉人去哪看,崩只会让人以为闸门坏了。所以前置条件不满足要记 FAIL 后继续。
+if (( ${#idlist[@]} >= 2 )); then
+    live_id="${idlist[0]}"; gone_id="${idlist[1]}"
+    mv -f "$IMG_REF_DIR/$gone_id.url" "$IMG_REF_DIR/$gone_id.gone" 2>/dev/null
+    mixed=$(jq -nc --arg a "$live_id" --arg b "$gone_id" '{role:"user",content:("read_image: A.png [[IMGREF:"+$a+"]]\nread_image: B.png [[IMGREF:"+$b+"]]")}')
+    messages="[$mixed]"; img_build_map "$W/m5.json"
+    exp5=$(printf '%s' "$messages" | jq -c --rawfile map "$W/m5.json" \
+           --arg gone_pre "$IMG_INLINE_GONE_MARK" --arg gone_hint "$IMG_INLINE_GONE_HINT" \
+           '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS")
+    ck "混合条:仍是数组且带 1 个 image_url" "$(jq -r '[.[0].content[]|select(.type=="image_url")]|length' <<<"$exp5")" "1"
+    ck "混合条:正文点名被回收的那张" "$(jq -r '.[0].content[-1].text' <<<"$exp5" | grep -c '原图已移除')" "1"
+    ck "混合条:无标记残留" "$(jq -r '.[0].content|tostring' <<<"$exp5" | grep -c IMGREF)" "0"
+    unk=$(jq -nc --arg a "$live_id" '{role:"user",content:("真图 [[IMGREF:"+$a+"]] 与源码里的 [[IMGREF:zz99]] 同行")}')
+    messages="[$unk]"; img_build_map "$W/m6.json"
+    exp6=$(printf '%s' "$messages" | jq -c --rawfile map "$W/m6.json" \
+           --arg gone_pre "$IMG_INLINE_GONE_MARK" --arg gone_hint "$IMG_INLINE_GONE_HINT" \
+           '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS")
+    ck "同条里的未知标记不被删除也不被改写" "$(jq -r '.[0].content[1].text' <<<"$exp6" | grep -c 'IMGREF:zz99')" "1"
+    ck "同条里的真号仍被展开成图" "$(jq -r '[.[0].content[]|select(.type=="image_url")]|length' <<<"$exp6")" "1"
+else
+    ck "混合/未知标记两条向量需要同轮 >=2 个引用(前置条件)" "lt2" "ge2"
+fi
 
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
