@@ -161,6 +161,10 @@ IMG_INLINE=${IMG_INLINE:-1}                            # 0=只用转述(改动�
 # 这条要为"每轮重付"定。实测 image_tokens 只跟**像素**走:512px=258 / 1024px=1026 /
 # 2048px=2502 / 120px=66;压成 JPEG 只减上传字节、token 一分不减(同图 PNG 1.6MB 与
 # JPEG 2.5MB 都是 2502)。所以下面两个约束各管各的,别混。
+# ⚠ 上面这组数字是 **qwen 档**实测的,换端点不能套用:同一张 120px 图 mimo 三个型号
+#   (v2.6-flash / v2.6-pro / v2.5)报的都是 16,约 qwen 的 1/4 —— 两家的图像缩放规则
+#   不同。所以"2048px≈2.5k token/轮"这种成本账只能按当前 BASE_URL 估;文件头部
+#   「IMG_MAX_SIDE=2048 → 约 4k token」那句同样是 qwen 口径,换 mimo 档会低一个量级。
 IMG_INLINE_MAX_SIDE=${IMG_INLINE_MAX_SIDE:-2048}
 IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES:-2097152}  # 交付件字节上限(2MB,超了退回转述)
 # 保留最近 **N 轮**的原图(单位是轮,不是张 —— 轮号由 printContent 每轮 +1 的 IMG_REF_GROUP 记)。
@@ -3011,7 +3015,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "read_image",
-                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。措辞按实测写:同一时刻只有**最近一张**原图保持可见,读过新图后更早的会被回收成一行『原图已移除』的说明;那条说明里没有任何图片内容,也没有转述。需要重新核对细节时**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
+                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。可见范围:同一轮内读过的图全部可见,换轮后只有最近一轮的图可见,更早的会收成一行以「原图已移除」开头的说明;那行里没有任何图片内容,也没有转述。需要重新核对细节时**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述;若某条结果里只剩一行路径而看不到图片本体(重新加载历史之后也会这样),同样按本说明重新调用。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3577,12 +3581,16 @@ print_usage() {
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 # 第 6 个参数 reasoning:thinking 模式下 assistant 消息必须回传 reasoning_content
 add_message() {
-    local addctx="$1"
-    local role="$2"
-    local tool_call_id="$3"
-    local tool_call_name="$4"
-    local tool_call_args="$5"
-    local reasoning="$6"
+    # ⚠ 六个参数一律用 ${n:-} 取:生产没开 set -u(少传参数只是取空),但**所有测试夹具
+    #   都开 set -uo pipefail** —— 无条件引用 $4/$5/$6 会在夹具里当场 unbound 而死,
+    #   现象是"夹具跑起来没输出/闸门中途不出结论行",极难归因到被调函数。
+    #   本轮就被绊过两次(一次探针静默无输出、一次闸门崩)。同类既有 bug 见 bugList #43。
+    local addctx="${1:-}"
+    local role="${2:-}"
+    local tool_call_id="${3:-}"
+    local tool_call_name="${4:-}"
+    local tool_call_args="${5:-}"
+    local reasoning="${6:-}"
     # content(工具输出可达几十 KB 甚至更大)与 reasoning(思考全文)经 --arg
     # 传参都属单个参数:Linux 单参数上限 128KB,超限即
     # "Argument list too long"。一律写临时文件后用 --rawfile 读入
@@ -4239,7 +4247,11 @@ auto_write_fuse() {
     # path_access 段静默退出、连一条 FAIL 都不打印",因为那句调用带 >/dev/null 2>&1。
     log=$(auto_write_fuse_log) || return 0
     mkdir -p "${AUTO_DIR:-}" 2>/dev/null || return 0
-    [[ -f "$log" ]] || return 0
+    # ⚠ 日志不存在时必须**建出来**,不是"退回不判":旧写法 `[[ -f "$log" ]] || return 0`
+    #   在全新会话里让本函数与 record 双双直接返回 —— 熔断**整个静默失效**(2026-10-03 由
+    #   刀3 引入、当天被发现;旧实现靠 `printf >> "$log"` 隐式建文件,改成"只判不记"时
+    #   把这条隐式依赖弄丢了)。闸门必须有一条不预建日志的向量钉住它,见 write_fuse_test 第 6 组。
+    [[ -e "$log" ]] || { : > "$log" 2>/dev/null || return 0; }
     # 按字段精确匹配计数。不能再用 grep -cxF "$abs":加了指纹列之后它会一律读成 0,
     # 而"读成 0"的表现是刹车悄悄解除 —— 比误拦危险得多。
     n=$(awk -F'\t' -v p="$abs" '$1==p{c++} END{print c+0}' "$log" 2>/dev/null)
@@ -4271,7 +4283,8 @@ auto_write_fuse_record() {
     [[ -n "$auto_mode" ]] || return 0
     [[ -n "$abs" && -f "$abs" ]] || return 0
     log=$(auto_write_fuse_log) || return 0
-    [[ -f "$log" ]] || return 0
+    # 同 auto_write_fuse:不存在就建,不能"记不上就静默丢掉"(否则计数永远为 0,刹车永不触发)
+    [[ -e "$log" ]] || { : > "$log" 2>/dev/null || return 0; }
     # 只取 cksum 的 CRC 一个数:它默认输出 "<crc> <字节数>" 带空格,而形状判据是按空白
     # 分词读指纹列的 —— 带空格的指纹会把序列切成两倍长度,交替/冻结判据全部错位
     # (这条是闸门实测抓出来的,不是推演)。字节数本来也不参与判据,丢掉不损失信息。
@@ -7184,6 +7197,61 @@ prepare_inline() {
     printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
 }
 
+# ---------- 主模型收不收图:切档时探一次 ----------
+# 为什么必须有这条:内联之后图片进的是**主对话**,主模型若是纯文字型号就每次 400。
+# ask_ai 里有"撞了再摘图重发"的兜底,但那要先付一次失败请求;探测把它变成一次
+# 几十 token 的预检(探针图 137 字节,见 IMG_PROBE_PNG)。
+# 为什么只在**运行时切档**(-stp/-stf)探、不在启动时探:启动发请求会让"打开工具"变慢
+# 且静默花钱;而切档本来就是用户主动动作,当场回显"这档不吃图,read_image 走转述"有用。
+# 启动档 -p/-dp 保持"未知",交给运行时兜底 —— 宁可晚知道,不要拖慢启动。
+# 探测请求刻意**不带 reasoning_effort**:两家实测都收,而它正是 qwen 带图 400 的成因之一。
+IMG_MAIN_VISION="${IMG_MAIN_VISION:-}"     # 空=未知 / 1=收图 / 0=不收图(→read_image 自动退回转述)
+IMG_VISION_PROBED_FOR=""
+# 探针图刻意做成 64x64 纯色两块(左红右蓝):137 字节、token 极少,而"左半边什么颜色"
+# 只有真吃到图才答得出。
+# ⚠ 不要缩到 10px 以下:qwen 网关会以 "height:8 or width:8 must be larger than 10"
+#   直接 400 —— 实测踩过,现象是探测恒返回"未知"(不报错、只是永远探不出),
+#   看起来像"这档不支持预检"而不是"探针图太小"。
+IMG_PROBE_PNG='iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAUElEQVR4nO3PsQkAAAzDsPz/dHpFliLwbFCaTBvvu94DAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPAAcuOzw4j9XSHcAAAAASUVORK5CYII='
+
+img_probe_main_model() {  # 返回 0=收图 1=明确不收 2=探不出(网络/鉴权等,不据此改判)
+    local url="${BASE_URL:-}" key="${API_KEY:-}" f resp code content_got err_lc
+    # 缓存先看:**在任何前置检查之前**。放后面的话,一个已经探明的结论会因为这次
+    # 恰好缺 key/缺 URL 而被降级成"未知" —— 环境抖动抹掉了已知事实,方向正好反了。
+    # (闸门第 10 节用"清空 BASE_URL 仍返回缓存值"钉住这个顺序。)
+    if [[ "$IMG_VISION_PROBED_FOR" == "$model" && -n "$IMG_MAIN_VISION" ]]; then
+        [[ "$IMG_MAIN_VISION" == "1" ]] && return 0 || return 1
+    fi
+    [[ -n "$url" && -n "$key" ]] || return 2
+    f=$(mktemp "${TMPDIR:-/tmp}/ct_vprobe_XXXXXX")
+    jq -nc --arg m "$model" --arg b "$IMG_PROBE_PNG" '{
+        model:$m, stream:false, thinking:{type:"disabled"},
+        messages:[{role:"user",content:[
+            {type:"image_url",image_url:{url:("data:image/png;base64,"+$b)}},
+            {type:"text",text:"一个词:左半边是什么颜色"}]}]}' > "$f" || { rm -f "$f"; return 2; }
+    # 走 @file 与全文件一致(这里只有 ~1KB,但规矩不分大小:破例一次就会有第二次)
+    resp=$(curl -s --connect-timeout 10 --max-time 40 "$url" \
+        -H "Content-Type: application/json" -H "Authorization: Bearer $key" -H "api-key: $key" \
+        --data-binary "@$f" 2>/dev/null)
+    code=$(jq -r '.error.message // .message // empty' <<<"$resp" 2>/dev/null)
+    content_got=$(jq -r '.choices[0].message.content // empty' <<<"$resp" 2>/dev/null)
+    rm -f "$f"
+    IMG_VISION_PROBED_FOR="$model"
+    if [[ -n "$content_got" ]]; then
+        IMG_MAIN_VISION=1; return 0
+    fi
+    err_lc="${code,,}"
+    # 判据与 describe_images / ask_ai 同一条规矩:必须**同时**出现图片类词与"不支持"类词。
+    # 只按 "not support" 匹配会把"图片格式不支持"当成"模型不收图",一次坏输入废掉整个通道。
+    if [[ -n "$code" && ( ( "$err_lc" == *image* || "$err_lc" == *vision* || "$code" == *图片* ) \
+        && ( "$err_lc" == *"not support"* || "$err_lc" == *"not"*"support"* || "$err_lc" == *unsupport* \
+           || "$err_lc" == *"do not accept"* || "$err_lc" == *"does not accept"* || "$code" == *不支持* ) ) ]]; then
+        IMG_MAIN_VISION=0; return 1
+    fi
+    # 其余一律算"探不出":网络错、超时、鉴权失效都不能推断模型不收图
+    return 2
+}
+
 img_ref_dir() {
     [[ -n "$IMG_REF_DIR" && -d "$IMG_REF_DIR" ]] && return 0
     # 顺手回收**已死进程**留下的引用目录:一个 .url 就是几 MB,散在 $TMPDIR 里不能只等系统清。
@@ -7242,6 +7310,9 @@ img_inline_attach() {
     inline_ref_id=""
     (( IMG_CAPABLE )) || return 1
     (( IMG_INLINE )) || return 1
+    # 已探明主模型不收图 → 直接退回转述,不试那一次必然 400 的主请求
+    # (未知=空值时照常尝试,由 ask_ai 的运行时兜底处理)
+    [[ "${IMG_MAIN_VISION:-}" == "0" ]] && return 1
     img_ref_dir || return 1
     final=$(prepare_inline "$orig") || return 1
     [[ -f "$final" ]] || return 1
@@ -8775,6 +8846,16 @@ handle_cmd_line() {
     if [[ "$line" == "-stp" ]]; then
         model="$pro_model"
         inp_msg "✅ 已切换到 pro 模型 ($model)"
+        # 切档后探一次"这档收不收图":内联通道依赖主模型带视觉,不探的话第一次读图
+        # 要先付一次 400 才由兜底摘图。探测 ~几十 token,只在切档时花一次。
+        # ⚠ 必须**直接调用**,不能放进 $( ) 或管道里跑:那会让函数在子 shell 执行,
+        #   它写的 IMG_MAIN_VISION / IMG_VISION_PROBED_FOR 就丢了 —— 探测白做且不报错。
+        img_probe_main_model; rc_vp=$?
+        case "$rc_vp" in
+            0) inp_msg "  视觉预检:该档收图 ✅" ;;
+            1) inp_msg "  视觉预检:该档**不收图** → read_image 自动走文字转述(精度较低)" ;;
+            *) inp_msg "  视觉预检未完成(网络/鉴权等),read_image 仍会试内联,失败时自动退回转述" ;;
+        esac
         return 0
     fi
     if [[ "$line" == "-stt" ]]; then
@@ -8786,6 +8867,13 @@ handle_cmd_line() {
         model="$flash_model"
         thinking="disabled"
         inp_msg "✅ 已恢复默认 (model=$model, thinking=disabled)"
+        # 同 -stp:切回来也要重探(缓存按 model 名判,见 img_probe_main_model)
+        img_probe_main_model; rc_vp=$?
+        case "$rc_vp" in
+            0) inp_msg "  视觉预检:该档收图 ✅" ;;
+            1) inp_msg "  视觉预检:该档**不收图** → read_image 自动走文字转述(精度较低)" ;;
+            *) inp_msg "  视觉预检未完成(网络/鉴权等),read_image 仍会试内联,失败时自动退回转述" ;;
+        esac
         return 0
     fi
     # 会话中途开关 auto:与启动时同一套装配流程(能力清单 + 回滚点 + 签字),

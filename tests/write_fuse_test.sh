@@ -189,6 +189,46 @@ if (( fail > 0 )); then
     done
 fi
 
+echo "=== 6. 回归锁:全新会话(日志文件不存在)熔断必须自己工作 ==="
+# 为什么单独一节:刀3 把"检查时记账"拆成"只判 + 成功后记"两处,两边都写了
+# `[[ -f "$log" ]] || return 0`,而**没有任何地方创建这个文件** —— 旧实现靠
+# `printf >> "$log"` 隐式建文件。后果是整个会话里熔断 100% 静默失效:不计数、不拦,
+# 也不报错。而 24 条断言当时全绿,因为每条向量都先 `: > "$L"` 把文件建好了 ——
+# **夹具把 bug 复制成了前提**。这一节刻意不预建,且必须在 HEAD 上是红的。
+load_into '
+  AUTO_DIR="$W/never-seen"; auto_session_id="brandnew"
+  AUTO_MAX_WRITES_PER_PATH=3; auto_mode="full"
+  mkdir -p "$AUTO_DIR"; rm -rf "$AUTO_DIR/writes-brandnew.log"
+  L="$AUTO_DIR/writes-brandnew.log"
+  [[ -e "$L" ]] && echo "PRE=exists(不该发生)" || echo "PRE=absent"
+  mkdir -p "$W/root/sub"; r=""
+  for i in 1 2 3 4; do
+    printf "c%s\n" "$i" > "$W/root/sub/fresh.txt"
+    fn_args=$(jq -nc --arg p "sub/freshlock.txt" --arg c "content line $i" "{path:\$p,content:\$c}")
+    tool_write_file >/dev/null 2>&1
+    [[ "$content" == *熔断* ]] && { r="refuse@$i"; break; }
+  done
+  echo "RESULT_LOOP=${r:-never}"
+  # 只用双引号:本节整段是 load_into 的单引号参数,body 里出现任何单引号都会截断字符串
+  # (上一版用 awk '...' 就是这个语法错)。数法与第 4 节的 HASFIELD 保持同款写法。
+  echo "LOGLINES=$(wc -l < "$L" 2>/dev/null | tr -d " ")"
+  echo "CRCROWS=$(awk -F"\t" "NF==2{c++} END{print c+0}" "$L" 2>/dev/null)"
+' > "$W/o6.txt" 2>&1
+ck "前提:会话开始时确实没有日志文件" "$(grep -c 'PRE=absent' "$W/o6.txt")" "1"
+ck "熔断必须自己建出日志文件(旧写法在这里直接 return,整个刹车不工作)" \
+   "$(grep -o 'LOGLINES=[0-9]*' "$W/o6.txt" | cut -d= -f2 | awk "{print (\$1>=1)?\"yes\":\"no\"}")" "yes"
+ck "记录必须带 CRC 列(=新判据有料)" "$(grep -o 'CRCROWS=[0-9]*' "$W/o6.txt" | cut -d= -f2)" "3"
+ck "上限 3 时第 4 次必须被拒(证明不是永远放行)" \
+   "$(grep -o 'RESULT_LOOP=refuse@[0-9]*' "$W/o6.txt" | sed 's/.*@//')" "4"
+
+# 失败时打现场(崩与红都要能看见)
+if (( fail > 0 )); then
+    printf '\n\033[2m── 原始输出(排障用)──\033[0m\n'
+    for _o in o1 o2 o3 o4 o6; do
+        [[ -s "$W/$_o.txt" ]] && { printf '  [%s]\n' "$_o"; sed 's/^/    /' "$W/$_o.txt"; }
+    done
+fi
+
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 (( fail == 0 ))

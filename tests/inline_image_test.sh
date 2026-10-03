@@ -221,6 +221,30 @@ else
     ck "混合/未知标记两条向量需要同轮 >=2 个引用(前置条件)" "lt2" "ge2"
 fi
 
+echo "=== 10. 切档视觉预检(只测离线性,不发网络) ==="
+# 探测函数本体要发请求,闸门里不测它发得对不对(那是端到端探针的活);
+# 这里钉的是**结论有没有接进链路**与**缓存是否真挡住网络**——
+# 探测错了比不探更糟:一次拼错的模型名若被判"不收图",通道就被永久关掉。
+IMG_CAPABLE=1; IMG_INLINE=1
+IMG_MAIN_VISION=0
+if img_inline_attach "$del" "预检拒绝.png"; then r10a=attached; else r10a=refused; fi
+ck "预检=不收图 时 attach 必须直接拒绝(不付那次必然 400 的主请求)" "$r10a" "refused"
+ck "拒绝时不留引用号" "${inline_ref_id:-}" ""
+IMG_MAIN_VISION=""
+img_inline_attach "$del" "预检未知.png"; r10b="$inline_ref_id"
+ck "预检未知时照常尝试内联" "$([[ -n "$r10b" ]] && echo yes)" "yes"
+# 缓存:BASE_URL 清空后若仍返回"收图",说明走的是缓存、没碰网络
+_saved_url="$BASE_URL"
+IMG_MAIN_VISION=1; IMG_VISION_PROBED_FOR="$model"; BASE_URL=""
+img_probe_main_model; r10c=$?
+BASE_URL="$_saved_url"
+ck "同模型第二次预检走缓存(无 BASE_URL 也返回缓存结论=没发请求)" "$r10c" "0"
+# 探不出(缺 key/url)时不许改判:否则一次网络抖动就把通道关掉
+IMG_MAIN_VISION=""; IMG_VISION_PROBED_FOR=""; BASE_URL=""; API_KEY=""
+img_probe_main_model; r10d=$?
+ck "缺配置必须判'未知'(rc=2)" "$r10d" "2"
+ck "'未知'不得把结论写成不收图" "${IMG_MAIN_VISION:-空}" "空"
+
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 (( fail == 0 ))
