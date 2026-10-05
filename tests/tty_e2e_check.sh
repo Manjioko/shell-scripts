@@ -7,7 +7,7 @@
 # 用法:  bash tty_e2e_check.sh [wchat.sh 路径]
 set -uo pipefail
 
-SRC="${1:-$HOME/bin/wchat.sh}"
+SRC="${1:-$(cd "$(dirname "$0")/.." && pwd)/wchat.sh}"   # 默认测本仓库那份(原先写死 $HOME/bin,换机即挂)
 [[ -f "$SRC" ]] || { echo "找不到被测脚本:$SRC(用法: bash $0 /path/to/wchat.sh)"; exit 2; }
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     # 必须 re-exec,不能只拒绝:本机 PATH 里第一个 bash 常是 /bin/bash 3.2,而脚本

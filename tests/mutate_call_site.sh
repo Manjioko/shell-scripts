@@ -45,11 +45,11 @@ awk -v L="$lines" -v m="$REPL" 'BEGIN{c=split(L,a,","); for(i=1;i<=c;i++) s[a[i]
 if [ -s "$WORK/err" ]; then echo "⛔ $(cat "$WORK/err")" >&2; exit 4; fi
 echo "变异体与原文差异 $(diff "$SRC" "$MUT" | grep -c '^<') 处(末尾换行差异由 awk 补,无害)"
 
-fails() { "$BASH5" ${MUT_SUITE:-test_hardwall.sh} "$1" 2>/dev/null | grep -a '^  FAIL' | sed 's/^  FAIL //; s/ | cmd=.*//' | sort; }
+fails() { "$BASH5" ${MUT_SUITE:-tests/test_hardwall.sh} "$1" 2>/dev/null | grep -a '^  FAIL' | sed 's/^  FAIL //; s/ | cmd=.*//' | sort; }
 fails "$SRC"  > "$WORK/base.f"
-"$BASH5" ${MUT_SUITE:-test_hardwall.sh} "$SRC"  2>/dev/null | grep -a '^RESULT ' | sed 's/^/  基线 /'
+"$BASH5" ${MUT_SUITE:-tests/test_hardwall.sh} "$SRC"  2>/dev/null | grep -a '^RESULT ' | sed 's/^/  基线 /'
 fails "$MUT" > "$WORK/mut.f"
-"$BASH5" ${MUT_SUITE:-test_hardwall.sh} "$MUT" 2>/dev/null | grep -a '^RESULT ' | sed 's/^/  变异 /'
+"$BASH5" ${MUT_SUITE:-tests/test_hardwall.sh} "$MUT" 2>/dev/null | grep -a '^RESULT ' | sed 's/^/  变异 /'
 add=$(comm -13 "$WORK/base.f" "$WORK/mut.f" | grep -c .)
 gone=$(comm -23 "$WORK/base.f" "$WORK/mut.f" | grep -c .)
 echo "  相对基线:新增红条 $add 条,消失 $gone 条"

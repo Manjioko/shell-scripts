@@ -3,7 +3,7 @@
 这轮踩的坑值得钉在纸上:上下文压缩后我凭印象造出一个从未存在的
 `tests/hardwall_table.sh`,认定"517 条断言的表消失了、且从未入库",连着查了
 好几轮(找文件、查 git 历史、翻备份目录、怀疑被哪个测试越界 rm),最后发现
-**517 那张表就是仓库根的 `test_hardwall.sh` 本体** —— 它的 `expect H5 '...'`
+**517 那张表就是tests/ 下的 `tests/test_hardwall.sh` 本体** —— 它的 `expect H5 '...'`
 表体一直在,还有 `EXPECT_TOTAL` 专门守住"断言总数对不上就 FAIL",结论打在
 `RESULT total=… pass=… fail=… expect=… src=<sha>` 这一行里。文件 tracked,
 什么都没丢。所以以后:报"资产丢失"之前,先按**输出行的指纹**去 grep,不要按
@@ -20,7 +20,7 @@
 > 同轮再 **+2 条**(560 → **562**):把两条**靠巧合才绿**的向量(顶层 `WORK_ROOT="$PWD"`,而作者恰好在
 > `/Users/jwan/bin` 跑表)的前提就地钉成 `WORK_ROOT="$HOME/bin"`,并各配一条**反例**(根不是它 → 必须判 P3)。
 > 反例是重点:只钉前提的话,下次"消红"的最短路径就是把期望放宽,反例把它堵成双向。
-> 实测:仓库根与 `cp wchat.sh test_hardwall.sh <别的目录>` 两处都 `562/562 fail=0`(改前别处是 560/558/2);
+> 实测:仓库根与 `cp wchat.sh tests/test_hardwall.sh <别的目录>` 两处都 `562/562 fail=0`(改前别处是 560/558/2);
 > 变异"把反例改成 NP"当场红 1 条。**装置防不住的**:同时删掉反例与它那行 `EXPECT_TOTAL` 仍然自洽,只能靠 review。
 > ⚠ 本机现存 2 条红与判据无关,是 T23 装载口那两条(`source ./wchat.sh` 会先跑启动期代码、撞 REPL 读取):
 > 看 `RESULT` 时按 `fail=2` 起算,别把它们读成回归。
@@ -37,21 +37,25 @@
 > 那次全表跑不出 RESULT 的根因不是判据坏了,是 harness 变量抽取 `grep -vF '$('` 把 `$((…))` 算术派生
 > 一起排除在外,夹具里 TOKEN_THRESHOLD/CTX_OVERFLOW_GATE 根本不存在 —— 详见该文件第 74 行注释。
 
-| 全表断言(即"517 那张表") | `bash test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
+| 全表断言(即"517 那张表") | `bash tests/test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
 | 判据规则失败核查 | `bash tests/rulefail_check.sh` | `PASS=111 FAIL=0` |
 | 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |
 | 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
 | 审计字段探针 | `bash tests/audit_field_probe.sh` | 3/3 通过(钉住 `auto_audit` 的 1200 上限、`trunc`/`tlen`、`root` 工作根、`pol` 生效判据版本) |
 | 闸门对账(一条命令跑完上列全部) | `bash tests/run_gates.sh` | 每道必须 **rc=0 且匹配到自己的结论行**;`--list` 看清单,`--main` 加主套件 |
 | 压缩布局探针 | `bash tests/compaction_pin_probe.sh` | 37/37 通过(**不联网络**钉住旧摘要锁定:`summary_pin_count` / `compact_apply`;含"失败硬截断也不许丢掉摘要"、**数组型 content 不许把锁定计数打成空**、以及"裸 content 惯用法只剩片段定义那 1 处"的结构锁 + 反例锁)。⚠ 它的夹具登记名单里必须含 `_JQ_CONTENT_TEXT`:被测函数一依赖全局,漏登记=沙箱里它是空串=jq 编译失败=函数返回空,断言会红(有"没抽到就拒跑"守卫,不会假绿) |
-| inline 图片通道闸门 | `bash tests/inline_image_test.sh` | 86/86(**不联网**;第 10 组 = 切档视觉预检的离线性:预检=不收图 时 attach 必须直接拒绝、结论未知时照常尝试、**缓存必须排在所有前置检查之前**(否则一次缺 key 就把已知事实抹成未知)、缺配置只能判"未知"不得判"不收图";第 11 组 = **轮边界位置锁**:降级必须发生在换轮时的 printContent 开头,而不是等下一次读图 —— 机制本身在坏版本上也是对的,**坏在谁调用它**,所以只能钉位置:递增在 `if 本轮有图` 之前、全文件仅一处递增、递增后紧接着 prune。HEAD 负对照 = 69/71 红 2 条,正是那两条位置锁;第 12 组 = **「不收图」判据用真机抓回的报错原文做断言**:`Unexpected item type in content`、`item must be dict and key[type]` 必须判住(纯文字档就是这么回的,里面没有 image/vision/not support 任何词,旧判据一条都不匹配 → 每轮 400 也永不退回转述),而"几何限制 / 型号不存在 / 鉴权失效 / 含 vision 的无关报错"四种**不许**判成不收图 —— 最后一条专治旧 ask_ai 那份 `*vision*` 单条件的误杀(一次拼错型号名就永久关掉通道);另有结构锁钉"判据只一处定义、兜底必须改名 .gone 不得 rm .url、正向判据必须看 image_tokens 而非只看有回复")。HEAD 负对照 = 76/86 红 10 条钉住 `read_image` 与**用户发图 `@`/`-img`** 把原图交给主模型这两条链(第 9 节专测"按轮保留"与"单条消息多标记":两处缺陷同源 —— jq `capture` 对一段文本只返回第一个匹配,**采集端 `img_build_map` 与展开端 `_JQ_EXPAND_REFS` 必须一起改**,只修一半时现象会从"图不对"变成"图更少",比不修更会骗人;HOLD 的单位是**轮**不是张,否则用户一次甩来四张面板时前三张会在同一轮消失):按像素封顶、`.url` 尾字节必须是 `3d` 而非 `0a`(base64 结尾换行会混进手拼 JSON,展开静默失败 → 表现为"模型只看到一行标记、没有图")、live 展开必须真出 `image_url` 部件、**外来同款字面量一个字都不许改写**(没发过号的 id 不进 map)、回收走 `.url`→`.gone` 改名且 gone 形状含"痕迹/路径事实/重看义务"三件、**禁止任何"图还附着"类现在时断言**、`IMG_INLINE=0` 时 attach 必须被拒、无引用时请求体与 HEAD 逐字节相同。负对照:对 HEAD 跑本闸门 = 47/54(红 7 条全落在第 9 节的新向量上),且**必须给出 RESULT 行** —— 上一版在这里崩过一次(`set -u` 下取空数组元素),而**崩比红更坏:红会指路,崩只会把人带去查错方向**。变异验证四条各自可杀(撤 `tr` 红 16 条 / 去掉发号守卫红 2 条 / gone 丢义务红 1 条 / 改回删文件红 4 条)。⚠ 捕获请求体时重定向要放在**子 shell 内层**:`source` 主脚本会连带装上那条打印光标转义的 EXIT trap,放外层会把 `\033[?25h` 收进请求体尾巴,`jq -e` 判非法而单键取值照样成功 —— 现象是"一半断言红一半绿",极难归因(实测踩过) |
+| inline 图片通道闸门 | `bash tests/inline_image_test.sh` | **102/102**(原 86 + 刀3 新增第 13 组 16 条,**不联网**;第 10 组 = 切档视觉预检的离线性:预检=不收图 时 attach 必须直接拒绝、结论未知时照常尝试、**缓存必须排在所有前置检查之前**(否则一次缺 key 就把已知事实抹成未知)、缺配置只能判"未知"不得判"不收图";第 11 组 = **轮边界位置锁**:降级必须发生在换轮时的 printContent 开头,而不是等下一次读图 —— 机制本身在坏版本上也是对的,**坏在谁调用它**,所以只能钉位置:递增在 `if 本轮有图` 之前、全文件仅一处递增、递增后紧接着 prune。HEAD 负对照 = 69/71 红 2 条,正是那两条位置锁;第 12 组 = **「不收图」判据用真机抓回的报错原文做断言**:`Unexpected item type in content`、`item must be dict and key[type]` 必须判住(纯文字档就是这么回的,里面没有 image/vision/not support 任何词,旧判据一条都不匹配 → 每轮 400 也永不退回转述),而"几何限制 / 型号不存在 / 鉴权失效 / 含 vision 的无关报错"四种**不许**判成不收图 —— 最后一条专治旧 ask_ai 那份 `*vision*` 单条件的误杀(一次拼错型号名就永久关掉通道);另有结构锁钉"判据只一处定义、兜底必须改名 .gone 不得 rm .url、正向判据必须看 image_tokens 而非只看有回复")。HEAD 负对照 = 76/86 红 10 条钉住 `read_image` 与**用户发图 `@`/`-img`** 把原图交给主模型这两条链(第 9 节专测"按轮保留"与"单条消息多标记":两处缺陷同源 —— jq `capture` 对一段文本只返回第一个匹配,**采集端 `img_build_map` 与展开端 `_JQ_EXPAND_REFS` 必须一起改**,只修一半时现象会从"图不对"变成"图更少",比不修更会骗人;HOLD 的单位是**轮**不是张,否则用户一次甩来四张面板时前三张会在同一轮消失):按像素封顶、`.url` 尾字节必须是 `3d` 而非 `0a`(base64 结尾换行会混进手拼 JSON,展开静默失败 → 表现为"模型只看到一行标记、没有图")、live 展开必须真出 `image_url` 部件、**外来同款字面量一个字都不许改写**(没发过号的 id 不进 map)、回收走 `.url`→`.gone` 改名且 gone 形状含"痕迹/路径事实/重看义务"三件、**禁止任何"图还附着"类现在时断言**、`IMG_INLINE=0` 时 attach 必须被拒、无引用时请求体与 HEAD 逐字节相同。负对照:对 HEAD 跑本闸门 = 47/54(红 7 条全落在第 9 节的新向量上),且**必须给出 RESULT 行** —— 上一版在这里崩过一次(`set -u` 下取空数组元素),而**崩比红更坏:红会指路,崩只会把人带去查错方向**。变异验证四条各自可杀(撤 `tr` 红 16 条 / 去掉发号守卫红 2 条 / gone 丢义务红 1 条 / 改回删文件红 4 条)。⚠ 捕获请求体时重定向要放在**子 shell 内层**:`source` 主脚本会连带装上那条打印光标转义的 EXIT trap,放外层会把 `\033[?25h` 收进请求体尾巴,`jq -e` 判非法而单键取值照样成功 —— 现象是"一半断言红一半绿",极难归因(实测踩过) |
+| 历史渲染闸门(原仓库根 `test_history_render.sh`) | `bash tests/test_history_render.sh` | **6/7,`FAIL T1b 消息丢失 — head=0 tail=0` 是既有红,与本轮搬移无关**:同一份脚本配 `git show HEAD:wchat.sh` 在干净目录里复跑,红得一模一样(它要真 pty/交互环境)。搬动时只改了一处 `cd "$(dirname "$0")/.."`(退回仓库根找 wchat.sh 与 render_helper.py)。**不在 run_gates 的 12 道之内**,别把它当套件红去查 |
+| pty 分页闸门(原仓库根 `test_pty_pager.sh`) | `bash tests/test_pty_pager.sh` | `PASS=7 FAIL=0 SKIP=0`;同样只改自定位一行。不在 12 道之内 |
 | 写熔断闸门 | `bash tests/write_fuse_test.sh` | 28 条(**不联网**;第 6 组是回归锁 —— **全新会话、日志文件不存在时也必须建文件并计数**:刀3 把"检查时记账"拆成"只判 + 成功后记"两处,两边都写了 `[[ -f "$log" ]] || return 0` 却没人创建该文件,于是整个会话里熔断 100% 静默失效;而当时 24 条断言全绿,因为每条向量都先 `: > "$L"` 建好了文件 —— **夹具把 bug 复制成了前提**。这一组刻意不预建,且在带 bug 的版本上必红);在临时工作根里 source 被测脚本,跑真实的 `tool_write_file`/`tool_edit_file`):F1 超上限、**上限=0 是"关闭"不是"全拒"**、非 auto 不判、F2 来回改必拒、**线性推进不许拒**(误杀正当重构就是这条在挡)、F3 同内容连写必拒、远期重复 `A B C A` 不算来回改、**旧格式行仍计数**(升级不许把刹车解除)、失败编辑不记账、record 只在两个写工具里(结构锁)、键两步归一同源(接线锁)。负对照:对 `git show HEAD:wchat.sh` 必须红(实测 17/24 红)。六条变异各自可杀:检查时追加 6 / 计数退回 `grep -cxF` 1 / 拆 F2 2 / 指纹带空格 1 / 键退回原始 `$p` 1 / 上限改回 8 1。⚠ 三条踩过才写进来的坑:① body 是在**内层 bash** 展开的,`$W` 必须显式传进去,否则路径塌成 `/root/...`、报出"记账没发生"这种看着像产品坏了的假信号;② 比键必须走 `pwd -P` 物理路径(`/var/…` 与 `/private/var/…` 是同一目录两种写法);③ 结构锁要先剔注释再数 —— 熔断块注释里本来就要讨论 `record`,不剔就是假红 |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
 | MCP 通道闸门 | `bash tests/mcp_channel_test.sh` | `-mcp` 开关与暴露面(排除别家程序 import 进来的 server)、名字校验拒 `-y`/`../`、L0 幂等注入与超预算折叠、`mcp_call` 的成功/isError/CLI 失败/图片丢弃四分支、**会话级授权的四种形状**(默认只问 1 次 / `always` 问 3 次 / auto 不问 / 被拒不记账)、**次数刹车的默认形状**(默认不限、显式设上限才生效、"不限"绝不写成"上限 0 次"、标记不带 `/0` 分母)、**通用暴露面**(参数差异不改变暴露、实际命令行逐字摊出、缺 description 被点名、源码零第三方专名与 flag 字面量)、**启动失败的五种形状**(秒失败/慢失败/在线但空/上游缺席/名字不合法各自措辞,`durationMs` 与上游 `counts` 必须转述;点名打错不许静默;失败原因**只走 stderr**,有反向锁禁止它进 L0/`tools()`)、次数刹车、无人值守范围闸、`tools()` 关闭时逐字节不变。**全部打桩**:不依赖 npm/Chrome,可离线跑 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
 | 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 46 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本。负对照:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |
 
-`tty_e2e_check.sh`(仓库根)是**要真人终端**的手动探针(测 bash 侧 `tty_*` 函数,判"不漏也不吞")。
+**本轮把仓库根的四张表搬进 `tests/`**:`test_hardwall.sh`、`test_history_render.sh`、`test_pty_pager.sh`、`tty_e2e_check.sh`(用 `git mv`,历史保留)。搬它们不是因为写错,是因为根目录只剩产品与这四张表,而四张表全都用 `cd "$(dirname "$0")"` + `$PWD/wchat.sh` 定位被测源—— 直接搬会变成"找不到被测源文件"(就是 `skills_dir_test.sh` 现在这副样子)。所以每张都改成 `cd "$(dirname "$0")/.."` 退回仓库根,并同步改了引用点:`run_gates.sh`、`mutate_call_site.sh`(MUT_SUITE 默认值)、`rulefail_check.sh`、`traffic_replay.sh`(它按 `^WORK_ROOT="$PWD"` 的行号从硬墙表里**抽装载片段**,路径不改就抽空)、`tests/README.md` 本身,以及 `wchat.sh` 注释里的 5 处指向。另修了 `test_hardwall.sh` 的 `HW_SELF`(`$PWD/$(basename $0)` 搬目录后会指到不存在的路径,而三条结构守卫靠它 grep 表自身)。验证方式:从 `/tmp` 调用这张表,照样全绿。
+
+`tests/tty_e2e_check.sh` 是**要真人终端**的手动探针(测 bash 侧 `tty_*` 函数,判"不漏也不吞")。
 `tests/tty_osc_input_test.sh` 与它不重复:后者自己开 pty、自己当假终端,无头环境也能跑,
 测的是 python 输入助手这一侧。两个都要绿才算这条链闭合。
 

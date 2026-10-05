@@ -174,6 +174,38 @@ IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES:-2097152}  # 交付件字节上限(2
 # **同一轮**就消失 —— 那是不能接受的形状。为什么不设 0:那样本轮结束就剥,而模型常在
 # 同一轮里对同一张图反复追问;也不设更大,每张每轮 2.5k tokens。
 IMG_INLINE_HOLD=${IMG_INLINE_HOLD:-1}
+# ---------- 刀3:活图预算(降级由"堆积量"决定,不再由轮数决定) ----------
+# 为什么换量纲【实测,见 docs/img-cache-policy.md §十】:降级的真实代价是"改写一条历史
+# 消息的展开形态 → 该点之后未被命中的那段缓存作废",单次损失 ≈ 一张图的 token 数
+# (四格 −13 / 1203 / 3507 / 3571)。按轮降级让这个事件**每轮发生一次**;按堆积量降级后:
+#   · 一张图的会话(2048px ≈ 2.5k)永远不触发 → 全程驻留、零断点、零重读;
+#   · 截图回路堆到十几张时才回收,而且**一次降到地板以下**,断点次数与超出张数无关。
+# ⚠ 滞回(高水位触发 / 低水位收手)是这条的核心,不是装饰:只设高水位、每超一张降一张,
+#    断点次数照样是 O(轮数),等于没修。
+IMG_LIVE_BUDGET_TOKENS=${IMG_LIVE_BUDGET_TOKENS:-6000}  # 高水位。**0 = 关闭预算,回退旧的逐轮 HOLD 行为**(闸门 G7 钉这条)
+IMG_LIVE_FLOOR_TOKENS=${IMG_LIVE_FLOOR_TOKENS:-3600}    # 低水位:一次降到这里才收手
+IMG_LIVE_MAX_BYTES=${IMG_LIVE_MAX_BYTES:-12582912}      # 活图 base64 字节上限(极端护栏,**不是日常判据**;日常由 token 预算管)
+                                                       # ⚠ 旧值 4194304(4MB)是拍小过的:实测两张 1.77MB 照片 base64 合计 4.72MB 就越线,
+                                                       # 用户第一轮后刚粘的图就被批量回收(2026-10-04 现场,恰好是它最不该被踢的时刻)。
+                                                       # 12MB≈5 张照片;延迟代价内插 ~20s(实测 2.36MB→4s / 9.4MB→22s / 23.6MB→37s)。
+                                                       # 依据是"可行性错、延迟可等":23.6MB 网关也不收错,这条只兜极端堆积。
+IMG_LIVE_KEEP_MIN=${IMG_LIVE_KEEP_MIN:-1}               # 回收后至少留几张:整轮 0 图会把缓存线切回去
+# 像素 → token 的单价估算。常数按**当前端点**实测拟合:120px=72 / 512px=194 / 1024px=770 /
+# 2048px=2496 —— 面积近似线性、2048 触顶、小图有地板价(120px 已 72,不是 14)。
+# ⚠ 换端点必须重算(mimo 档实测约 1/4,见 #56④);刀4 会用 usage.image_tokens 自标定替掉它。
+IMG_TOKENS_PER_MEGAPIXEL=${IMG_TOKENS_PER_MEGAPIXEL:-1000}
+IMG_TOKENS_CAP=${IMG_TOKENS_CAP:-2500}
+IMG_TOKENS_FLOOR=${IMG_TOKENS_FLOOR:-100}
+# ---------- 刀4:单价自标定(换端点不用手改上面那三个常数) ----------
+# 上面那组常数是**按当前端点拟合**出来的,换档就失真(mimo 实测约 1/4,#56④)。
+# 而网关每次请求都会回到 `usage.prompt_tokens_details.image_tokens` —— 那是真实计费值,
+# 拿它来标定估算器,常数就只当"还没标定过时的初值"用。
+# ⚠ 只报命中量不报价格的那类网关里,字段缺失 = 不标定 = 退回常数,所以这是纯增强。
+IMG_TOKENS_AUTOCAL=${IMG_TOKENS_AUTOCAL:-1}         # 0 = 关闭自标定,只用上面三个常数
+# 标定表每进程一份(与 ct_imgref/ct_imgobs 同一理由:状态放文件,不放 bash 变量 ——
+# 采样点在 ask_ai 的 usage 解析处,而**读取点在 make_request_body 的子 shell 里**)。
+# 行格式: <model>|<引用号>|<最长边>|<真实 image_tokens>
+img_tok_table_file() { printf '%s' "${TMPDIR:-/tmp}/ct_imgtok.$$"; }
 # 降级文案。措辞由实验定(.scratch/mm_stubborn_experiment.py 六臂 × 15 样本):
 #   A 只报状态 / B 能力声明 / C 带丢失维度 / D 极简一句 → 13/13 全部选择**重新调用 read_image**,
 #     连"第一轮已经把丝印读错"的样本也一样 → **承重的是"有标记"这件事,不是文案长度**;
@@ -337,7 +369,7 @@ SKILL_DESC_MAX=200
 # 最多注入的技能数量(按最近修改排序),防技能膨胀挤占上下文
 SKILL_MAX_INJECT=30
 
-# ---------- MCP:能力开关与预算(设计见 mcp-design.md) ----------
+# ---------- MCP:能力开关与预算(设计见 docs/mcp-design.md) ----------
 # ⚠ 语义要钉准:`-mcp` 是**能力开关**,不是安全边界。关掉它只保证"我们不提供
 #   mcp_* 这三条通道",不保证"这台机器访问不到 MCP"(模型仍可用 shell 跑 npx mcporter)。
 #   把两者混为一谈,以后就会有人拿"-mcp 没开"当"MCP 不可达"的证据来推安全结论。
@@ -355,7 +387,7 @@ MCP_RESULT_MAX="${MCP_RESULT_MAX_BYTES:-16384}"   # 结果字节帽(独立于 tr
 MCP_MARK="## 可用外部能力(MCP)"       # 注入段固定标记,save_history 按它剥离,与 SKILLS_MARK 同一条路
 MCP_STATE_DIR=""              # 会话内 server 清单缓存目录(mcp_boot 里建)
 MCP_CALLS=0                   # 本会话 mcp_call 累计(**不复位**),供审计与可见标记用
-# —— 授权策略(mcp-design.md §5.4 本轮定稿)——
+# —— 授权策略(docs/mcp-design.md §5.4 本轮定稿)——
 # session(默认)= 首次用到某个 server 时问一次,之后本会话内该 server 全部工具不再逐个问;
 # always      = 回到"每次调用都问"(想严格时的退路)。
 # 为什么默认不是 always:一次真实前端排查里 15 次 mcp_call **全是只读 DOM 查询**,每次都问
@@ -718,6 +750,21 @@ forget_history=0
 # 发给 API,所以 prompt_tokens 就是"当前上下文总 token 数",无需估算或累计。
 # 0 表示尚无精确值(刚启动/刚加载历史),此时不触发自动压缩。
 last_prompt_tokens=0
+
+# ---------- 图片可见性观测(刀1:只加不改,零行为变化) ----------
+# 背景【实测 2026-10-03,见 docs/img-visibility-policy.md §十一】:网关有隐式前缀缓存
+# (usage.prompt_tokens_details.cached_tokens,128 token 分块),而**改写一条历史消息的
+# 展开形态**会让该点之后的缓存全部作废 —— 损失 = 分叉点之后的 token 数。
+# 所以"历史前缀有没有被改写过"是能直接从请求体上量出来的量,不必靠猜。
+# ⚠ 这些计数**只统计不拦截**。真要动历史的那三类事件(回收/压缩/会话重载)会自报
+#   IMG_PRUNE_EVENTS,对不上号才出声。
+# ⚠ 出声一律走 stderr,**绝不走 stdout**:本函数的调用点是 $(make_request_body),
+#   写 stdout 就等于把一行警告拼进发给 API 的 JSON 里(静默污染请求体)。
+last_cached_tokens=0        # 最近一次请求命中的缓存 token
+last_image_tokens=0         # 最近一次请求的 image_tokens(缺失/0 = 本次没收到图)
+IMG_PRUNE_EVENTS=0          # 合法改写事件计数(回收改名成功 / 压缩发生)
+# 累计的"意外改写"不放在这里 —— 它活在本进程的观测文件 $(_img_obs_file) 里,
+# 因为记录点 make_request_body 是被 $(...) 调用的(子 shell,变量存不住)。
 
 # 触发自动压缩的阈值 = 接口真实上下文窗口 × 75%(留安全余量)—— 这是设计口径,
 # 现在由 CTX_WINDOW 派生,不再靠人肉改一个魔法数。
@@ -1555,7 +1602,7 @@ parse_options() {
             continue
         fi
 
-        # -mcp [server,逗号分隔]:外部能力开关(设计见 mcp-design.md)。
+        # -mcp [server,逗号分隔]:外部能力开关(设计见 docs/mcp-design.md)。
         # 刻意做成**启动时**参数,与 --allow-install / --allow-write 同一条原则:
         # 开关的意义在于模型不能自己把它打开。
         # ⚠ 它是**能力开关,不是安全边界** —— 不带 -mcp 只保证"我们不提供 mcp_* 三条
@@ -1725,7 +1772,7 @@ kill_tree() {
 # 与输入助手(input_helper.py 的 _strip_terminal_responses)**判据刻意不同**:那边不能无条件
 # 丢 DSR 光标报告(ESC[行;列R)—— prompt_toolkit 自己发 CPR(`\x1b[6n`)要靠这个应答算光标,
 # 那边按"CPR 查询次数"配额放行。把两侧统一成一份判据就会把输入框的渲染搞坏
-# (两侧各自的用例见 tty_e2e_check.sh 与 tests/tty_osc_input_test.sh)。
+# (两侧各自的用例见 tests/tty_e2e_check.sh 与 tests/tty_osc_input_test.sh)。
 # 全部只用 bash 内建(这个函数在 0.01s 轮询循环里跑,fork 不得分)。
 TTY_HOLD_MAX=3
 # CSI 的参数/中间字节区间:ECMA-48 的 0x30-0x3F 与 0x20-0x2F(final byte 是 0x40-0x7E)
@@ -2236,7 +2283,7 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 }
 
 # ==================== MCP 通道 ====================
-# 协议与进程生命周期整体外包给 mcporter(设计与实测见 mcp-design.md §二/§四/§十)。
+# 协议与进程生命周期整体外包给 mcporter(设计与实测见 docs/mcp-design.md §二/§四/§十)。
 # 三条硬约束写在这里,改这段代码前先读:
 #   1) **wchat 不是任何 MCP server 的父进程**。本仓库现有的后台通道是发后即忘
 #      (run_in_background: `nohup … &` 拿到 $! 就返回,无台账、无回收),而 EXIT trap
@@ -2253,7 +2300,7 @@ os.waitpid(pid, 0)' "$BASH" "$wrapped_cmd" <"$win_tmpdir/in" > "$win_tmpdir/fifo
 
 # 三条通道的注册体。默认是空数组 —— **只有 -mcp 生效且真拿到工具时才非空**,
 # 这样 tools() 关掉时的输出与加本特性之前逐字节相同(§七 第一条闸门钉这条)。
-# 设计取舍见 mcp-design.md §3.3:工具名清单常驻 L0,所以原设计的 mcp_tools 中间层
+# 设计取舍见 docs/mcp-design.md §3.3:工具名清单常驻 L0,所以原设计的 mcp_tools 中间层
 # 只在"清单被折叠"时才需要,这里保留它作为降级后的入口。
 MCP_TOOLS_JSON='[]'
 MCP_TOOLS_JSON_FULL=$(cat <<'MCPJSON'
@@ -2425,7 +2472,7 @@ mcp_exit_stop() {
 
 # ---------- 为什么这里不再有"配置体检"(本轮 A 方案,原 mcp_audit_server 已删) ----------
 # 曾经的形状:按 transport 里的包名子串决定要不要审,再逐个匹配 flag 名,命中就警告/摘除。
-# 删掉它不是否认那条知识(Cookie 进上下文、URL 发给 CrUX 都是实测真事,记在 mcp-design.md §12),
+# 删掉它不是否认那条知识(Cookie 进上下文、URL 发给 CrUX 都是实测真事,记在 docs/mcp-design.md §12),
 # 而是否认它**被存放的位置**。三条理由:
 #   1) `case "$tr" in *<某包>*) … ;; *) return 0 ;; esac` 让"没检查"与"检查通过"在启动输出里
 #      **完全不可区分** —— 接第二个 server 时这套治理静默失效,和 §14.7 那两条假绿同族。
@@ -2813,7 +2860,7 @@ tool_mcp_call() {
     # —— 次数刹车(**默认关闭**,AUTO_MAX_MCP_CALLS=<n> 才生效)——
     # 它确实不参与"判断语义",只数次数;但**数总次数对"空转"没有信息量**(Blender 的正常会话就是几百次),
     # 而计数又是整场累计不复位 —— 所以默认给 0。真要防原地打转,判据应该看"同 server.tool + 同 args
-    # 且返回也没变"的连续重复(那是我们能算的事实),而不是总量。见 mcp-design.md §5.4 配套 2。
+    # 且返回也没变"的连续重复(那是我们能算的事实),而不是总量。见 docs/mcp-design.md §5.4 配套 2。
     if (( MCP_MAX_CALLS > 0 && MCP_CALLS >= MCP_MAX_CALLS )); then
         auto_audit mcp "mcp_call" "$s.$t" quota MCP_MAX_CALLS "本会话 MCP 调用已达上限 $MCP_MAX_CALLS 次,停止继续调用"
         content="错误:MCP 调用次数已达本会话上限($MCP_MAX_CALLS)。这是进度刹车,不是权限判定 —— 停止重试,把当前结果与卡点直接告诉用户。"
@@ -3015,7 +3062,7 @@ tools() {
             "type": "function",
             "function": {
                 "name": "read_image",
-                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。可见范围:同一轮内读过的图全部可见,换轮后只有最近一轮的图可见,更早的会收成一行以「原图已移除」开头的说明;那行里没有任何图片内容,也没有转述。需要重新核对细节时**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述;若某条结果里只剩一行路径而看不到图片本体(重新加载历史之后也会这样),同样按本说明重新调用。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
+                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。已附上的图片在会话内**驻留**、跨多轮可见(由预算管理,不由轮次决定);被回收时那条消息只剩一行以「原图已移除」开头的说明,那行里没有任何图片内容,也没有转述。⚠ 判断\"这张图我现在还看不看得见\",只看你上下文里有没有图片部件,**不要因为\"这是新一轮/换轮了\"就断定它已被回收**——需要某张图而它的图片本体确实不在上下文里时,**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述;若某条结果里只剩一行路径而看不到图片本体(重新加载历史之后也会这样),同样按本说明重新调用;同图连调两次仍看不到时,第二次会收回旧引用并**重新挂载**给你——去重不会把你锁死,你对\"我此刻看不看得见\"的判断具有最终效力。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -3077,7 +3124,7 @@ tools() {
     else
         out="$all"
     fi
-    # MCP 三条通道按开关追加(mcp-design.md §6.2)。走的是**与 web_search 剔除同一条缝**
+    # MCP 三条通道按开关追加(docs/mcp-design.md §6.2)。走的是**与 web_search 剔除同一条缝**
     # —— 同一个函数、同一处出口,不另起第二套注册机制。
     # MCP_ENABLE=0 时 MCP_TOOLS_JSON 恒为 [],这条不成立,输出与加本特性之前逐字节相同;
     # 那条不变量由 tests/mcp_channel_test.sh 钉住,不靠"我觉得没动"。
@@ -3434,6 +3481,14 @@ compact_messages() {
     fi
     # 重置计数:下一轮正常请求会带回新 messages 的精确 prompt_tokens
     last_prompt_tokens=0
+    # 压缩成功/失败两条分支都走了 compact_apply → 历史**确实**被整段重写。
+    # 这是刀1 报警的第二类合法凭据(旧摘要替代原文 = 前缀必然作废,而省下的 token
+    # 远大于这一次作废,所以它不该被当成 bug 报出来)。
+    IMG_PRUNE_EVENTS=$(( IMG_PRUNE_EVENTS + 1 ))
+    # 刀3"压缩搭车":压缩本来就要整段重写历史、缓存已经在这里作废一次,
+    # 顺手把超预算的活图收掉是**零边际成本**的回收时机(见 docs §三 M2 路径 1)。
+    # 放在自报事件之后:这一次回收引发的形态变化已经被上面的事件计数豁免。
+    img_refs_prune_by_budget
 }
 
 # ========== ARG_MAX 防护:大字符串绝不走命令行参数 ==========
@@ -3449,6 +3504,30 @@ compact_messages() {
 
 # 构建主对话流式请求体。messages 从临时文件经 --slurpfile 读入;
 # tools 由 tools 函数生成(体积固定且小,可走 --argjson)。
+# 观测状态文件:每个进程一份(与 ct_imgref.$$ 同一套写法)。
+# 为什么必须是文件:`request_body=$(make_request_body)` 是子 shell,变量存不住。
+_img_obs_file() { printf '%s' "${TMPDIR:-/tmp}/ct_imgobs.$$"; }
+# 读累计值 $1=列号(4=意外改写次数,5=全价重付估计)。
+# ⚠ 列号必须做非空校验:awk -v c="" 不会报错,只会安静地读出空串,
+#   于是"应当为 0"的断言全部假绿 —— 只有带非零期望的那条才会暴露读数器本身坏了。
+_img_obs_col() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 0
+    awk -v c="$1" 'NR==1{print $c}' "$(_img_obs_file)" 2>/dev/null
+}
+
+# 历史前缀指纹:$1=messages JSON $2=取前 N 条。
+# 图片部件只取**长度**不取正文(MB 级 base64 不进哈希:既省一次全量字符串化,
+# 又照样能抓到"数组→字符串"这类形态翻转 —— 那才是我们要的事件,不是字节)。
+_img_prefix_fp() {
+    printf '%s' "$1" | jq -c --argjson n "$2" '
+      [.[:$n][] | (.content
+         | if type=="array"
+             then (map(if has("image_url") then "IMGURL:"+(.image_url.url|length|tostring)
+                                    else (.text // .type // "s") end))
+             else . end
+         | tostring)]' 2>/dev/null | cksum | awk '{print $1}'
+}
+
 make_request_body() {
     local tools_json tmpfile out
     if (( no_tools )); then
@@ -3479,6 +3558,45 @@ make_request_body() {
         # 而不是请求体半截被截、或历史被 jq 的半途输出改坏。
         [[ -n "$newmsgs" ]] && msgs="$newmsgs"
         rm -f "$mapf"
+    fi
+    # ---------- 刀1:历史前缀指纹比对(只出声,不拦截) ----------
+    # 为什么值得为此多跑两次 jq:前缀被悄悄改写意味着"那之后的 token 全部从打折变全价",
+    # 而这件事在屏幕上完全不可见【实测:同一形状两次给出 1203 与 0 两种损失】。
+    # ⚠ 状态一律落在**文件**里,不放 bash 变量:本函数的调用点是
+    #   `request_body=$(make_request_body)`(见 3617 / 8262 两处)—— 那是子 shell,
+    #   写在变量里的计数会被整份丢弃,表现为"探针全绿而产品从不报警"。
+    #   同一个道理本文件早就用过了:base64 落盘、熔断按 CRC 记账,都是这个原因。
+    # 只在**本会话挂过图**时才跑:纯文字会话一次 jq 都不多付,
+    # 刀1 立的那条"无引用时请求体逐字节相同"基线不能被这个观测块弄破。
+    if [[ -n "${IMG_REF_DIR:-}" && "${IMG_OBSERVE_PREFIX:-1}" == "1" && "${msgs:0:1}" == "[" ]]; then
+        local _n _prev_line _prev_n _prev_ph _prev_seen _ph _brk _brktok
+        _n=$(printf '%s' "$msgs" | jq 'length' 2>/dev/null || echo "")
+        [[ "$_n" =~ ^[0-9]+$ ]] || _n=""
+        if [[ -n "$_n" ]]; then
+            _prev_line=$(cat "$(_img_obs_file)" 2>/dev/null || echo "")
+            read -r _prev_n _prev_ph _prev_seen _brk _brktok _prev_dir <<<"$_prev_line"
+            _brk=${_brk:-0}; _brktok=${_brktok:-0}; _prev_seen=${_prev_seen:-0}
+            # 换了引用目录 = 换了一个观察窗口(会话重载 / 全新进程 / 多格实验)。
+            # 这时上一发的指纹属于**另一段历史**,拿来比会误报 —— 直接放弃这一发的比对。
+            # 这条不是想象:phase5 四格共用一个进程时,第二格开局就响了一次。
+            if [[ -n "$_prev_dir" && "$_prev_dir" != "${IMG_REF_DIR:-}" ]]; then
+                _prev_n=""; _prev_ph=""
+            fi
+            if [[ "$_prev_n" =~ ^[0-9]+$ ]] && (( _n >= _prev_n )) && [[ -n "$_prev_ph" ]]; then
+                _ph=$(_img_prefix_fp "$msgs" "$_prev_n")
+                if [[ -n "$_ph" && "$_ph" != "$_prev_ph" && "$IMG_PRUNE_EVENTS" == "$_prev_seen" ]]; then
+                    # 指纹变了,而这期间一次合法回收/压缩都没发生 → 有代码在动旧消息
+                    _brk=$((_brk + 1))
+                    if (( last_prompt_tokens > last_cached_tokens )); then
+                        _brktok=$(( _brktok + last_prompt_tokens - last_cached_tokens ))
+                    fi
+                    printf '⚠️ 历史前缀被改写(上一发 %s 条消息的指纹对不上,约 %s token 从打折变全价);期间无回收/压缩事件 → 请查哪里的展开形态动了旧消息\n' \
+                        "$_prev_n" "$(( last_prompt_tokens > last_cached_tokens ? last_prompt_tokens - last_cached_tokens : 0 ))" >&2
+                fi
+            fi
+            printf '%s %s %s %s %s %s' "$_n" "$(_img_prefix_fp "$msgs" "$_n")" \
+                "$IMG_PRUNE_EVENTS" "$_brk" "$_brktok" "${IMG_REF_DIR:-}" > "$(_img_obs_file)" 2>/dev/null
+        fi
     fi
     tmpfile=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
     printf '%s' "$msgs" > "$tmpfile"
@@ -3573,6 +3691,18 @@ print_usage() {
             wpct=$((last_prompt_tokens * 100 / win))
             inp_msg "  窗口 ${win} tokens(已用 ${wpct}%)· 越界判据 ${CTX_OVERFLOW_GATE}(仅失败时用作粗算兜底)"
         fi
+                # 刀1 观测:图片可见性的两类历史改写。合法那次是"诚实的价格",意外那次是 bug。
+        # 只在挂过图或有过意外改写时才出声(纯文字会话不该看到这两行)。
+        local _brk _brktok
+        _brk=$(_img_obs_col 4); _brktok=$(_img_obs_col 5)
+        _brk=${_brk:-0}; _brktok=${_brktok:-0}
+        if [[ -n "${IMG_REF_DIR:-}" ]] || (( _brk > 0 )); then
+            inp_msg "  图片可见性: 合法改写 ${IMG_PRUNE_EVENTS} 次 · 意外改写 ${_brk} 次(累计约 ${_brktok} token 从打折变全价)"
+            inp_msg "  活图: $(ls "${IMG_REF_DIR:-}"/*.url 2>/dev/null | wc -l | tr -d ' ') 张在上下文(回收发生时屏幕必打 ♻,没打过 ♻ 就没回收过)"
+            inp_msg "  上次请求: 命中缓存 ${last_cached_tokens} / ${last_prompt_tokens} tokens · 图片计费 ${last_image_tokens} tokens"
+            # 刀4:单价是从网关回传值自标定的,不显示样本数就看不出"这一档到底标定过没有"
+            inp_msg "  单价自标定: $(img_token_calib_count 2>/dev/null) 条样本(model=${model:-?}，AUTOCAL=${IMG_TOKENS_AUTOCAL})"
+        fi
     else
         inp_msg "上下文用量: 约 ${est} tokens(字节粗算,漏算 tools schema;精确值在下次请求后显示,压缩点 ${TOKEN_THRESHOLD})"
     fi
@@ -3661,7 +3791,7 @@ auth_add_message() {
 # 提示词(auth_sys_tail 的补充口径)强制要求判 N 时回「N编号:原因」——**整行没有空格**。
 # 而旧解析写的是"剥掉第一个空格分隔的 token":规范格式下首个 token 就是整行,
 # 于是理由被连字吃干、恒为空,界面只剩兜底模板。等于把"给人看的那一句依据"主动销毁,
-# 再用一句同义反复冒充它。实测六种输入的对照见 test_hardwall.sh T19。
+# 再用一句同义反复冒充它。实测六种输入的对照见 tests/test_hardwall.sh T19。
 # 三条口径:①首字符定 Y/N,其余一律 N(fail-closed,沿用旧规);②编号必须保住
 # (它是提示词里 N 列表的序号,人靠它知道撞了哪一条);③模型违规没写 N 前缀时,
 # 整行当理由留下 —— 丢掉一段看不懂的文本,也比编一句确定的假理由好。
@@ -4887,7 +5017,7 @@ hd_mask_readonly() {
 # 洞。echo/printf 的参数永远不会被当文件读，才配得上脱敏。
 # 也没收 git/say：`git apply '.npmrc'`、`say -f '~/.npmrc'` 都带文件操作数。
 # 代价是 `git commit -m '别 cat ~/.npmrc'` 仍判 H6 —— 与 H3 那边「未加引号不脱敏」
-# 同一类刻意保守，锁在 test_hardwall.sh 表里。
+# 同一类刻意保守，锁在 tests/test_hardwall.sh 表里。
 # 补充:上面这条否决的是"把只读动词的引号参数**整体**当数据",并没有覆盖同一工具的
 # 「位置语义」—— grep 家族头部的模式位不是操作数,那一格改由 hd_mask_search_pat 单独脱,
 # 尾部操作数一格都不动。两条合起来才是当前口径,别照上面那条再去扩。
@@ -5163,7 +5293,7 @@ hard_deny_cmd() {
     # (除非它的目标正是 /dev 下那几个丢弃型设备,那是 ① 的事)。
     #
     # 写动词那一支原样保留,与下面这套目标关联**并列**,不互斥:以前该拒的现在一条都不漏
-    # (反例见 test_hardwall.sh T2 的 H5 正例、T27 的反向锁)。
+    # (反例见 tests/test_hardwall.sh T2 的 H5 正例、T27 的反向锁)。
     #
     # 重定向那一支(原 `[[ "$s" == *'>'* ]] && return 0`)本轮改走"方案②":目标关联。
     # 原注释写的是"不做精确,因为那要把 hd_write_targets 接进硬墙,而它是 fail-open 组件"
@@ -5423,7 +5553,7 @@ hard_deny_cmd() {
 
     # H12 写目标越界(只在 auto 下判定;非 auto 由人工确认兜底)。
     # 写目标由 hd_write_targets 按"重定向目标 / 写动词段操作数"两种角色提取,
-    # 不再对整条命令全量切词 —— 判据与 auto-mode.md 第 103 行写的
+    # 不再对整条命令全量切词 —— 判据与 docs/auto-mode.md 第 103 行写的
     # "auto 下重定向/写动词的目标越界"对齐(上一版实现宽于文档口径)。
     # AUTO_SHELL_PATHS=0 是总闸:关掉等于 shell 侧越界写完全不拦(文件工具侧仍
     # 拦),只用于排查误杀,不要长期置 0。
@@ -7332,7 +7462,9 @@ img_refs_prune() {
     # 为什么必须按轮:同一轮里连读三张图、或用户一次甩来四张面板做对比,按张裁到 1 会让
     # 前几张在**同一轮**就降级成"原图已移除" —— 用户刚交付的对比材料当场消失。
     # 条目格式 "<轮号> <引用号>";无轮号的旧条目按第 0 轮处理(向后兼容,不在这里炸)。
+    # 注意:`local a=1 b=$a` 里 $a 读的是外层同名变量(set -u 下当场炸),要拆两行。
     local keep="${IMG_INLINE_HOLD:-1}" cutoff e grp left=()
+    local dropped=0
     [[ "$keep" =~ ^[0-9]+$ ]] || keep=1
     (( keep < 1 )) && keep=1
     cutoff=$(( ${IMG_REF_GROUP:-0} - keep + 1 ))
@@ -7341,20 +7473,252 @@ img_refs_prune() {
         [[ -n "$e" ]] || continue
         if [[ "$e" == *" "* ]]; then grp="${e%% *}"; e="${e#* }"; else grp=0; fi
         if (( grp < cutoff )); then
-            mv -f "${IMG_REF_DIR}/${e}.url" "${IMG_REF_DIR}/${e}.gone" 2>/dev/null \
-                || rm -f "${IMG_REF_DIR}/${e}.url"
+            if mv -f "${IMG_REF_DIR}/${e}.url" "${IMG_REF_DIR}/${e}.gone" 2>/dev/null; then
+                dropped=$((dropped+1))
+            else
+                rm -f "${IMG_REF_DIR}/${e}.url"
+                dropped=$((dropped+1))
+            fi
         else
             left+=("$grp $e")
         fi
     done
     IMG_REFS=("${left[@]}")
+    # 自报合法改写事件:回收会把那条消息的展开形态从"带图"改成"已移除文本",
+    # 这是一次**故意的**前缀作废(诚实的代价),所以刀1 的报警要对它闭嘴。
+    (( dropped > 0 )) && IMG_PRUNE_EVENTS=$(( IMG_PRUNE_EVENTS + dropped ))
     return 0
 }
 
-# 挂一张原图:$1 原图路径 $2 展示名。成功 → inline_ref_id 置为引用号、rc=0;
+# 这个内容是否已经有一张**活着的**图挂在上下文里?命中 → 打印引用号、rc=0;否则 rc=1。
+# 刀2 的去重靠它。三条设计决定都有实测依据,别再改回去:
+#   · 键取**内容**而不是路径:#54 的"键同源"病 —— 同一文件的相对/绝对/软链三种写法会让
+#     按路径去重要么漏判要么误判;而"同一张图存成两个名字"本来就该算重复。
+#   · 只认 `.url` 还在的引用:已回收(`.gone`)的号**不参与命中** —— 这是不变量 I2
+#     (形态只能 带图→已回收,永不反向)的落地方式;复活旧号会让多条历史消息
+#     同时展开成同一张新图。
+#   · 比 "原文件校验和 + 边长档" 而不是只比原文件:见上条 IMG_INLINE_MAX_SIDE 的误判风险。
+# 本函数**只读不写**,因此可以被 $(...) 取返回值;凡是要改 IMG_REFS/IMG_REF_SEQ 的函数
+# 一律不许走命令替换(那正是本轮四次数据作废的原因)。
+# 这个内容是否已经有一张**活着的**图挂在上下文里?命中 → 打印引用号、rc=0;否则 rc=1。
+# 刀2 的去重靠它。三条设计决定都有实测依据,别再改回去:
+#   · 键取**内容**而不是路径:#54 的"键同源"病 —— 同一文件的相对/绝对/软链三种写法会让
+#     按路径去重要么漏判要么误判;而"同一张图存成两个名字"本来就该算重复。
+#   · 只认 `.url` 还在的引用:已回收(`.gone`)的号**不参与命中** —— 这是不变量 I2
+#     (形态只能 带图→已回收,永不反向)的落地方式;复活旧号会让多条历史消息
+#     同时展开成同一张新图。
+#   · 比 "原文件校验和 + 边长档" 而不是只比原文件:见上条 IMG_INLINE_MAX_SIDE 的误判风险。
+# 本函数**只读不写**,因此可以被 $(...) 取返回值;凡是要改 IMG_REFS/IMG_REF_SEQ 的函数
+# 一律不许走命令替换(那正是本轮四次数据作废的原因)。
+img_live_ref_of() {
+    local orig="$1" key e rid want
+    [[ -n "${IMG_REF_DIR:-}" && -f "$orig" ]] || return 1
+    key=$(cksum < "$orig" 2>/dev/null | awk '{printf "%s_%s", $1, $2}')
+    [[ -n "$key" ]] || return 1
+    want="${key}_${IMG_INLINE_MAX_SIDE}"
+    for e in "${IMG_REFS[@]:-}"; do
+        [[ -n "$e" && "$e" == *" "* ]] || continue
+        rid="${e#* }"
+        [[ -s "${IMG_REF_DIR}/${rid}.url" ]] || continue
+        [[ "$(awk '{printf "%s_%s", $1, $3}' "${IMG_REF_DIR}/${rid}.fp" 2>/dev/null)" == "$want" ]] \
+            && { printf '%s' "$rid"; return 0; }
+    done
+    return 1
+}
+
+# 记一条标定:$1=model $2=引用号 $3=最长边 $4=网关回传的真实 image_tokens。
+# 三道 sanity gate 都是必要的:一次坏样本会让预算判据长期偏掉(要么永不回收、要么每轮回收)。
+#   · 关掉自标定 → 不记
+#   · 数量级不合理(超过 cap 的 4 倍或为 0)→ 不记。cap 的 4 倍是刻意留的宽容量:
+#     真实计费偶尔会因分块规则高于我们的 cap,完全按 cap 卡会把有效样本一起丢掉。
+#   · 同一 (model,引用号) 已有记录 → 不重复记(采样点在每次带图请求上,不去重会写爆表)
+img_token_calibrate() {
+    (( ${IMG_TOKENS_AUTOCAL:-1} == 1 )) || return 0
+    local model="$1" rid="$2" side="$3" real="$4" f
+    [[ "$side" =~ ^[0-9]+$ && "$real" =~ ^[0-9]+$ ]] || return 0
+    (( real >= 1 && real <= ${IMG_TOKENS_CAP:-2500} * 4 )) || return 0
+    [[ -n "$model" && -n "$rid" ]] || return 0
+    f=$(img_tok_table_file)
+    grep -q "^$model|$rid|" "$f" 2>/dev/null && return 0
+    printf '%s|%s|%s|%s\n' "$model" "$rid" "$side" "$real" >> "$f" 2>/dev/null
+}
+
+# 数当前 model 已有多少条标定样本(-u 展示用)。**只读**,可安全 $() 取值。
+# 按 model 数而不是数全表:表按会话累积,换端点/换 model 后旧样本还在,
+# 而展示行里写的是当前 model —— 数字必须跟它对得上,不然又是"看起来有、其实无关"。
+# (本函数曾被写入熔断拦在定义这一步,而 print_usage 已经引用它 → 悬空引用;
+#  那次教训是"引用先于定义落盘"也是半移动状态的一种,闸门见 inline_image_test 第 15 组。)
+img_token_calib_count() {
+    local f n
+    [[ -n "${model:-}" ]] || { printf '0'; return 0; }
+    f=$(img_tok_table_file)
+    [[ -s "$f" ]] || { printf '0'; return 0; }
+    n=$(awk -F'|' -v m="$model" '$1 == m { n++ } END { print n + 0 }' "$f" 2>/dev/null)
+    printf '%s' "${n:-0}"
+}
+
+# 查标定:$1=model $2=最长边 → 打印估算 token;没有同 model 的样本就返回空(让调用方退回常数)。
+# 取**最接近的已标定边长**再按面积缩放:同一端点的 token/面积关系实测近似线性,
+# 而"必须逐档都标一遍"不现实(用户不会每张图都只挂一张)。
+img_token_lookup() {
+    (( ${IMG_TOKENS_AUTOCAL:-1} == 1 )) || return 1
+    local model="$1" side="$2" line bside bt best=99999999 tok
+    [[ -n "$model" && "$side" =~ ^[0-9]+$ ]] || return 1
+    # 逐行取同 model 的最近档(用 awk 一次扫完,避免 bash 循环里反复起进程)
+    # ⚠ BEGIN{best=1e18} 不是装饰:awk 的 best 未初始化即 0,d<best 恒假 → 查表**永不命中**
+    #   而且不报错,表现是"实现了自标定、实际从来没用上"(2026-10-04 离线验出;对照实验:
+    #   去掉这行即复现"标定写进表、est 不变",补上即命中)。bash 侧那个 best=99999999 与此无关。
+    line=$(awk -F'|' -v m="$model" -v s="$side" '
+        BEGIN { best = 1e18 }
+        $1==m { d = ($3 > s ? $3 - s : s - $3); if (d < best) { best = d; bs = $3; bt = $4 } }
+        END { if (bt != "") print bs, bt }' "$(img_tok_table_file)" 2>/dev/null)
+    [[ -n "$line" ]] || return 1
+    local bside2 btok; read -r bside2 btok <<<"$line"
+    [[ "$bside2" =~ ^[0-9]+$ && "$btok" =~ ^[0-9]+$ ]] || return 1
+    (( bside2 > 0 )) || return 1
+    tok=$(( btok * side * side / (bside2 * bside2) ))
+    (( tok > ${IMG_TOKENS_CAP:-2500} )) && tok=${IMG_TOKENS_CAP:-2500}
+    (( tok < ${IMG_TOKENS_FLOOR:-100} )) && tok=${IMG_TOKENS_FLOOR:-100}
+    printf '%s' "$tok"
+}
+
+# 采样:把"本次请求真实计了多少 image_tokens"归到那张图上,记进标定表。
+# 三个放弃条件,每一个都是为了**不标错**(标错的代价比不标大):
+#   · 活引用不止一个 → 真实值是谁的?不知道 → 放弃
+#   · 请求里图片部件不是 1 个 → 同上,放弃
+#   · 这张已经标过 → 不再遍历 MB 级请求体(顺序:先做便宜的引用数,再做贵的 jq)
+img_token_sample() { # $1=请求体 JSON
+    local model_now="${model:-}" e rid n=0 last="" side parts
+    (( ${IMG_TOKENS_AUTOCAL:-1} == 1 )) || return 0
+    [[ -n "$model_now" && -n "${IMG_REF_DIR:-}" ]] || return 0
+    for e in "${IMG_REFS[@]:-}"; do
+        [[ -n "$e" && "$e" == *" "* ]] || continue
+        rid="${e#* }"
+        [[ -s "${IMG_REF_DIR}/${rid}.url" ]] || continue
+        n=$((n + 1)); last="$rid"
+    done
+    (( n == 1 )) || return 0
+    grep -q "^$model_now|$last|" "$(img_tok_table_file)" 2>/dev/null && return 0
+    side=$(awk 'NR==1{print ($4 > $5 ? $4 : $5)}' "${IMG_REF_DIR}/${last}.fp" 2>/dev/null)
+    [[ "$side" =~ ^[0-9]+$ ]] || return 0
+    parts=$(printf '%s' "$1" | jq -r '[..|objects|select(has("image_url"))]|length' 2>/dev/null)
+    [[ "$parts" == "1" ]] || return 0
+    img_token_calibrate "$model_now" "$last" "$side" "$last_image_tokens"
+}
+
+# 单价估算的唯一一把尺:$1=最长边像素。
+# 顺序:**先查该 model 的实测标定**,查不到才用面积常数 —— 常数只当冷启动初值。
+img_est_from_side() {
+    local side="${1:-0}" est
+    [[ "$side" =~ ^[0-9]+$ ]] || side=0
+    (( side <= 0 )) && { printf '%s' "${IMG_TOKENS_CAP:-2500}"; return 0; }
+    if est=$(img_token_lookup "${model:-}" "$side") && [[ -n "$est" ]]; then
+        printf '%s' "$est"; return 0
+    fi
+    est=$(( side * side / ${IMG_TOKENS_PER_MEGAPIXEL:-1000} ))
+    (( est > ${IMG_TOKENS_CAP:-2500} )) && est=${IMG_TOKENS_CAP:-2500}
+    (( est < ${IMG_TOKENS_FLOOR:-100} )) && est=${IMG_TOKENS_FLOOR:-100}
+    printf '%s' "$est"
+}
+
+# 单张活图的 token 估算:$1=引用号。读 .fp 第 4/5 列(交付件像素)。
+# 面积近似线性(实测 512→194 / 1024→770,约 1 token/1000px²),2048 触顶,小图有地板价。
+# 估算**刻意偏保守**(宁可早回收,不要每轮白付),所以它高于真实值的误差是可接受的。
+img_token_est() {
+    local d w h side est
+    d=$(awk 'NR==1{print $4" "$5}' "${IMG_REF_DIR}/$1.fp" 2>/dev/null)
+    read -r w h <<<"$d"
+    [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || { printf '%s' "${IMG_TOKENS_CAP:-2500}"; return 0; }
+    side=$(( w > h ? w : h ))
+    est=$(( side * side / ${IMG_TOKENS_PER_MEGAPIXEL:-1000} ))
+    (( est > ${IMG_TOKENS_CAP:-2500} )) && est=${IMG_TOKENS_CAP:-2500}
+    (( est < ${IMG_TOKENS_FLOOR:-100} )) && est=${IMG_TOKENS_FLOOR:-100}
+    printf '%s' "$est"
+}
+
+# 活图总 token / 总字节。判据与 img_build_map 同侧(都看 .url 在不在),
+# 不看账本单凭 IMG_REFS —— 否则又会退化成"账本说没了、图还在发"那种静默错。
+img_live_tokens() {
+    local e tot=0
+    for e in "${IMG_REFS[@]:-}"; do
+        [[ -n "$e" && "$e" == *" "* ]] || continue
+        e="${e#* }"
+        [[ -s "${IMG_REF_DIR}/${e}.url" ]] || continue
+        tot=$(( tot + $(img_token_est "$e") ))
+    done
+    printf '%s' "$tot"
+}
+img_live_bytes() {
+    local e tot=0
+    for e in "${IMG_REFS[@]:-}"; do
+        [[ -n "$e" && "$e" == *" "* ]] || continue
+        e="${e#* }"
+        [[ -s "${IMG_REF_DIR}/${e}.url" ]] && tot=$(( tot + $(wc -c < "${IMG_REF_DIR}/${e}.url") ))
+    done
+    printf '%s' "$tot"
+}
+
+# 刀3 的核心:**降级由堆积量决定,不由轮数决定**。
+# 四条设计决定各挡一种失败形状:
+#   · 滞回(高水位触发 / 低水位收手)—— 只设高水位会退化成"每超一张降一张",
+#     断点次数照样 O(轮数),等于没修。
+#   · 来源分级 + 留底 KEEP_MIN(F-2,旧为"最旧优先")—— 用户亲手粘的图是对话主角,
+#     模型自己 read_image 的先踢,同级才按挂载先后。为什么不能按纯年龄:用户粘贴的图
+#     在 printContent 里**最先挂载**,纯年龄序永远先踢它(2026-10-04 现场:第一轮后
+#     被回收的正是用户刚粘的那张)。留底是因为整轮 0 图会把请求切回"不带图"那条
+#     缓存线(实测逐轮翻转会把命中打回分叉点之前)。
+#   · 只在**轮边界与压缩时**调用 —— 轮内回收会改写上一条已发出的消息,破不变量 I1;
+#     所以 img_inline_attach 结尾那次无条件 prune 换成了调本函数(budget=0 时才回落旧行为)。
+#   · 回收必须**说出口**(F-3)—— 模型对"哪张还在"的自述不可信(现场把图1/图2 说反过,
+#     还脑补过被回收图的细节),♻ 那行是用户唯一能看见"图没了"的地方。
+# IMG_LIVE_BUDGET_TOKENS=0 → 整条策略关闭,退回旧的逐轮 HOLD(闸门 G7 钉这个回滚)。
+img_refs_prune_by_budget() {
+    (( ${IMG_LIVE_BUDGET_TOKENS:-0} > 0 )) || { img_refs_prune; return 0; }
+    local tok bytes why=""
+    tok=$(img_live_tokens); bytes=$(img_live_bytes)
+    (( tok > IMG_LIVE_BUDGET_TOKENS )) && why="IMG_LIVE_BUDGET_TOKENS"
+    (( ${IMG_LIVE_MAX_BYTES:-0} > 0 && bytes > IMG_LIVE_MAX_BYTES )) && { [[ -z "$why" ]] && why="IMG_LIVE_MAX_BYTES"; }
+    [[ -n "$why" ]] || return 0
+    local -a entries=() victims=()
+    local e s
+    for e in "${IMG_REFS[@]:-}"; do [[ -n "$e" && "$e" == *" "* ]] && entries+=("$e"); done
+    # F-2:受害者按 (来源, 挂载先后) 排序:tool 先,user 后。.fp 缺第 6 列(旧格式/判不出)
+    # 一律按 user 对待 —— 保方向,宁可把"模型自读"错当"用户粘贴"多留一轮。
+    for s in tool user; do
+        for e in "${entries[@]}"; do
+            [[ -n "$e" && "$e" == *" "* ]] || continue
+            [[ "$(awk 'NR==1{print ($6 == "tool" ? "tool" : "user")}' "${IMG_REF_DIR}/${e#* }.fp" 2>/dev/null)" == "$s" ]] && victims+=("$e")
+        done
+    done
+    local n=${#victims[@]} i rid dropped=0
+    for (( i=0; i<n; i++ )); do
+        (( n - i <= ${IMG_LIVE_KEEP_MIN:-1} )) && break          # 留底:绝不清到 0 张
+        tok=$(img_live_tokens); bytes=$(img_live_bytes)
+        (( tok <= ${IMG_LIVE_FLOOR_TOKENS:-3600} )) && { (( ${IMG_LIVE_MAX_BYTES:-0} <= 0 || bytes <= IMG_LIVE_MAX_BYTES )) && break; }
+        rid="${victims[$i]#* }"
+        [[ -s "${IMG_REF_DIR}/${rid}.url" ]] || continue
+        mv -f "${IMG_REF_DIR}/${rid}.url" "${IMG_REF_DIR}/${rid}.gone" 2>/dev/null \
+            || rm -f "${IMG_REF_DIR}/${rid}.url"
+        IMG_REFS=("${IMG_REFS[@]/${victims[$i]}}")
+        dropped=$(( dropped + 1 ))
+    done
+    # 和 img_refs_prune 同一件事:回收是**故意的**前缀作废(诚实的价格),要自报给刀1 作凭据
+    (( dropped > 0 )) && IMG_PRUNE_EVENTS=$(( IMG_PRUNE_EVENTS + dropped ))
+    # F-3:屏幕上说出口(与 🖼 提示同通道)。措辞只报事实:几张、由哪条判据触发 ——
+    # 不说"较早的图片已不可见"这类现在时断言(回收后事实还会变,见 F 臂纪律)。
+    (( dropped > 0 )) && printf ' ♻ 已回收 %d 张较早的图片(%s)\n' "$dropped" "$why"
+    return 0
+}
+
+# 挂一张原图:$1 原图路径 $2 展示名 $3=来源(user|tool,缺省 user)。
+# 成功 → inline_ref_id 置为引用号、rc=0;
 # 任何一步不满足(关了 inline / 端点不收图 / 压不下来 / 超预算)一律 rc=1,由调用方退回转述。
+# 来源的语义只有一件事:回收时**谁先被踢**(F-2,见 img_refs_prune_by_budget)。
+# 缺省按 user:宁可把"模型自读"错当"用户粘贴"多留一轮,也不把用户亲手粘的先踢 ——
+# 后者正是 2026-10-04 现场的伤(用户第一轮后粘贴图就被回收)。
 img_inline_attach() {
-    local orig="$1" label="$2" final size ext mime f prefix
+    local orig="$1" label="$2" src="${3:-user}" final size ext mime f prefix
+    [[ "$src" == "tool" ]] || src=user
     inline_ref_id=""
     (( IMG_CAPABLE )) || return 1
     (( IMG_INLINE )) || return 1
@@ -7366,6 +7730,21 @@ img_inline_attach() {
     [[ -f "$final" ]] || return 1
     size=$(wc -c < "$final" | tr -d ' ')
     if (( size > IMG_INLINE_MAX_BYTES )); then
+        [[ "$final" != "$orig" ]] && rm -f "$final"
+        return 1
+    fi
+    # 硬上限(刀3):轮内**不许回收**,但也不能让一个轮无限挂图,所以超上限时**拒绝这张**
+    # 并让调用方退回转述(轮边界才是合法的回收时机)。为什么不回收:回收会把上一条
+    # **已经发出去**的消息从"带图"改写成"已移除",等于在工具循环内部破不变量 I1,
+    # 断点落在最贵的位置。反面形状是实测的:20 张小图 = 每请求 49,920 token / 13~37s。
+    # 这里只判 token:单张交付件字节已被上面 IMG_INLINE_MAX_BYTES 挡过,
+    # 活图总字节的收口放在轮边界(那里回收合法)。
+    local _est _live _hard
+    _est=$(img_est_from_side "$(img_dims "$final" 2>/dev/null | awk '{print ($1>$2?$1:$2)}')")
+    _live=$(img_live_tokens)
+    _hard=${IMG_LIVE_HARD_TOKENS:-0}
+    (( _hard > 0 )) || _hard=$(( ${IMG_LIVE_BUDGET_TOKENS:-6000} * 2 ))
+    if (( ${IMG_LIVE_BUDGET_TOKENS:-0} > 0 )) && (( _live > 0 )) && (( _live + _est > _hard )); then
         [[ "$final" != "$orig" ]] && rm -f "$final"
         return 1
     fi
@@ -7389,9 +7768,31 @@ img_inline_attach() {
         rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"
         return 1
     fi
+    # 内容指纹 sidecar(刀2 去重的键)。**必须在删交付件之前算** —— 顺序写反不会报错,
+    # 只会让去重永远命中不了(与 #57 那条"谁负责让这个文件存在"同一个形状:
+    # 前置条件一旦从 || return 0 这类写法引入,就要问一句它由谁创建)。
+    # 记这些值(空格分隔,一行):
+    #   1) 原文件校验和 —— 刀2 去重预检只要 cksum 一次原文件就能判定,不必再跑 prepare_inline
+    #   2) 交付件校验和 —— 取证用;prepare_inline 是确定性的,故"同原文件+同边长档"必得同交付件
+    #   3) 当时的 IMG_INLINE_MAX_SIDE —— 少了它会**误判**:会话中途换过边长档时驻留的是缩小版,
+    #      而模型这次要的可能是全分辨率那张,不能拿"原文件相同"当成"这张已经给过你了"
+    #   4) 5) 交付件像素 "宽 高" —— 刀3 的预算取数(img_token_est)
+    #   6) 来源(user|tool) —— F-2 回收顺序分级(img_refs_prune_by_budget 先踢 tool)
+    # ⚠ 列序是契约:刀2 读 $1 与 $3,刀3 读 $4 $5,F-2 读 $6。**新列一律往末尾加,别插中间**。
+    # 取不到像素时按最大档估(宁可早回收,不要超载):这是保守方向的刻意选择。
+    local _fp_dims; _fp_dims=$(img_dims "$final" 2>/dev/null || echo "")
+    [[ "$_fp_dims" =~ ^[0-9]+\ [0-9]+$ ]] || _fp_dims="${IMG_INLINE_MAX_SIDE} ${IMG_INLINE_MAX_SIDE}"
+    printf '%s %s %s %s %s\n' \
+        "$(cksum < "$orig"  | awk '{printf "%s_%s", $1, $2}')" \
+        "$(cksum < "$final" | awk '{printf "%s_%s", $1, $2}')" \
+        "${IMG_INLINE_MAX_SIDE}" "${_fp_dims}" "${src}" > "$f.fp" 2>/dev/null
     [[ "$final" != "$orig" ]] && rm -f "$final"
     IMG_REFS+=("${IMG_REF_GROUP:-0} r${IMG_REF_SEQ}$$")   # 带轮号:按轮裁剪靠它(见 img_refs_prune)
-    img_refs_prune
+    # ⚠ 这里原来是**无条件 img_refs_prune**:那次回收会把上一条**已经发出去**的消息
+    # 从"带图"改写成"已移除",即在同一个工具循环内改写历史 → 破不变量 I1,断点还落在
+    # 最贵的位置。刀3 之后轮内一律不回收(硬上限由上面的"拒绝挂载"守),
+    # 只有**回退模式**(IMG_LIVE_BUDGET_TOKENS=0,沿用旧的逐轮 HOLD)才在这里裁。
+    (( ${IMG_LIVE_BUDGET_TOKENS:-0} > 0 )) || img_refs_prune
     inline_ref_id="r${IMG_REF_SEQ}$$"
     return 0
 }
@@ -7654,7 +8055,7 @@ describe_images() {
 # 退回链:inline 不成立(IMG_INLINE=0 / 端点判不收图 / 压不动 / 超预算)→ describe_images 转述。
 # 沙箱与 read_file 一致:路径必须解析后落在 WORK_ROOT 内。
 tool_read_image() {
-    local path resolved
+    local path resolved rid
     path=$(jq -r '.path // empty' <<< "$fn_args")
     # 沙箱内外同一个裁决入口(auto 下图片按只读放行;命中 P1 凭据类一律拒)
     resolved=$(resolve_path "$path") || resolved=""
@@ -7663,11 +8064,47 @@ tool_read_image() {
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path"; printf ' ⛔ 文件不存在:%s\n' "$path"; return 0; }
     is_image "$resolved" || { content="错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): $path"; printf ' ⛔ 非图片文件:%s\n' "$path"; return 0; }
 
+    # ---------- 0) 刀2:同一张图不挂第二份 ----------
+    # 【实测】驻留**不会**让模型停止重读:高密集六轮里它每轮都再调一次 read_image,
+    # 于是"驻留"实际跑成"再挂一份",一张 2048px 图挂到第 6 份 —— 图片计费 token
+    # 14,976 → 89,856(6.0×),请求体也跟着涨。所以"默认驻留"这个方案必须配这条才成立,
+    # 两条一起算才拿到那个 3.6×(见 docs/img-cache-policy.md §三 M1 / §十一)。
+    # 措辞纪律(六臂实验 F 臂:留现在时断言的那臂 2/3 坚持原结论,含一例读错后不再重读):
+    #   ✗ "该图已在上下文中,无需重读" —— 这句在它被回收之后变成假陈述;
+    #   ✓ 过去时 + 指向引用号 + 自带条件句,让这句话**在图被回收后仍然为真**。
+    if rid=$(img_live_ref_of "$resolved"); then
+        # 位置要指清楚:图上一次的挂载是**另一条消息**(用户粘贴或上一次工具结果),
+        # 不在本条里。实测:不指位置时模型会以为"这次没拿到图",于是再调一次
+        # (用户现场里同一张图连着试了两次)。
+        # 措辞纪律:只说过去时("已经给过你"),不写"画面就在当前上下文里"这类
+        # 现在时断言 —— 那条消息之后会被回收,断言就会变假(F 臂形状)。
+        if [[ -e "${IMG_REF_DIR}/${rid}.rt" ]]; then
+            # ---------- 两次原则(2026-10-04 现场三)----------
+            # 模型重读两次仍坚持"看不到" → 信它的感知自述:它是自己可见性的唯一证人,
+            # 而我们的系统无法验证"模型此刻看不看得见"。不重挂就是把人锁死在去重墙里:
+            # 话术承诺"看不到就再调用本工具重看",再调用却撞同一堵墙(死循环,现场实录)。
+            # 首次重读仍去重(惯性重读被挡一次就走开,刀2 的 6× 就是这么消掉的);
+            # 重挂时**收回旧引用**(改名 .gone + 自报合法改写):模型既称看不见,旧副本
+            # 就是纯负重,且旧消息展开成「原图已移除」恰好与它的感知一致(诚实分支)。
+            mv -f "${IMG_REF_DIR}/${rid}.url" "${IMG_REF_DIR}/${rid}.gone" 2>/dev/null \
+                || rm -f "${IMG_REF_DIR}/${rid}.url"
+            rm -f "${IMG_REF_DIR}/${rid}.rt"
+            IMG_PRUNE_EVENTS=$(( IMG_PRUNE_EVENTS + 1 ))
+            printf ' ♻ 收回旧引用 %s 并重新挂载(模型坚持看不到,两次原则)\n' "$rid"
+            # 不 return:落到下面的正常挂载流程,发新号
+        else
+            : > "${IMG_REF_DIR}/${rid}.rt" 2>/dev/null   # 两次原则的计数(一击即够)
+            content="read_image: $path —— 这张图本会话已经给过你了(见引用号 $rid 所在的那条消息),本次不再重复挂载。请回看那条消息里的画面作答;若那里已看不到图片本体(例如它被回收过,或你确实看不见),再调用一次本工具,我会收回旧引用并重新给你挂载。"
+            printf ' 🖼 同一张图已在上下文(引用号 %s),未重复挂载\n' "$rid"
+            return 0
+        fi
+    fi
+
     # 1) inline 优先。caption 只写**事实**(路径),刻意不写"本条附有图片/请以原图为准"
     #    这类现在时断言:图一旦被回收,那句话就变成假陈述,而实验证明假陈述的代价是
     #    模型**坚持自己上一轮的(可能读错的)结论**而不去重读(F 臂 2/3 坚持,含 1 例将错就错)。
     #    路径必须留在 caption 里 —— 它是模型"要不要重看"的唯一抓手。
-    if img_inline_attach "$resolved" "$path"; then
+    if img_inline_attach "$resolved" "$path" "tool"; then
         content="read_image: $path"$'\n'"[[IMGREF:$inline_ref_id]]"
         printf ' 🖼 原图已交给主模型 %s\n' "$path"
         return 0
@@ -8329,6 +8766,18 @@ ask_ai() {
             if (( is_record_usage )); then
                 usage_pt=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens // empty' 2>/dev/null)
                 [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
+                # 刀1 观测:缓存命中与图片计费。两个字段都可能在某些端点缺失,
+                # 缺失一律记 0 而**不要沿用上一轮的值**(沿用会把"这次没命中"
+                # 说成"上次命中了",正是这类计数器最容易自欺的地方)。
+                last_cached_tokens=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens_details.cached_tokens // 0' 2>/dev/null)
+                last_image_tokens=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens_details.image_tokens // 0' 2>/dev/null)
+                [[ "$last_cached_tokens" =~ ^[0-9]+$ ]] || last_cached_tokens=0
+                [[ "$last_image_tokens" =~ ^[0-9]+$ ]] || last_image_tokens=0
+                # 刀4:用网关回传的真实计费值标定单价估算器。
+                # 本函数是**唯一**"已知发了图、又已知真实 token"的地方,所以只能在这里采。
+                # 请求体直接读 $req_file(ask_ai 已把它落盘):MB 级 JSON 不进命令行参数(ARG_MAX)。
+                (( last_image_tokens > 0 )) && [[ -s "${req_file:-}" ]] \
+                    && img_token_sample "$(cat "$req_file" 2>/dev/null)" || true
             fi
 
             # 思考部分的输出也要显示出来:流箱内随流显示原文(无横幅装饰,
@@ -8540,7 +8989,11 @@ printContent() {
     # HOLD 的单位是**轮**不是张:同一轮内读过的图全部可见(按张裁会让用户一次甩来的
     # 四张面板里前三张当轮就消失);换轮后按 IMG_INLINE_HOLD 保留最近 N 轮。
     IMG_REF_GROUP=$(( ${IMG_REF_GROUP:-0} + 1 ))
-    img_refs_prune
+    # 刀3:轮边界不再"每轮剥一张",改由**活图堆积量**决定要不要降级(滞回 + 留底)。
+    # 一张图的会话因此全程驻留:零断点、零重读、零"原图已移除"。
+    # IMG_LIVE_BUDGET_TOKENS=0 时本函数直接回落到旧的 img_refs_prune(逐轮 HOLD),行为可回滚。
+    # 轮号照旧推进:它既是 IMG_REFS 条目的时间戳,也是"同一轮内全可见"的依据。
+    img_refs_prune_by_budget
 
     # 用户发图(@/-img):优先 **inline** —— 原图随本轮 user 消息交给主模型自己看;
     # 单张不成立(超预算/压不动)或 IMG_INLINE=0 时,那几张退回转述(describe_images)。
@@ -8553,10 +9006,22 @@ printContent() {
         # (原先在这儿 +1,纯文字轮就永远不推进;重复 +1 还会让 HOLD≥2 时提前误降级)
         if (( IMG_INLINE && IMG_CAPABLE )); then
             for img_path in "${input_images[@]}"; do
-                if img_inline_attach "$img_path" "$img_path"; then
+                if img_inline_attach "$img_path" "$img_path" "user"; then
                     img_ok=$(( img_ok + 1 ))
                     [[ $img_ok -eq 1 ]] && img_desc+=$'\n'"(用户发送了 $img_n 张图片)"
-                    img_desc+=$'\n'"read_image: $img_path"$'\n'"[[IMGREF:$inline_ref_id]]"
+                    # ⚠ caption 的形状**刻意不用** `read_image: <路径>` 那个前缀 ——
+                    #   那是 read_image 工具自己的返回形状(见 tool_read_image)。
+                    #   但实测(A/B 三臂 × 3,见 docs/img-cache-policy.md §十四):
+                    #   光去掉这个形状**没有用**(旧 5 次 / 名词式 7 次,理想值 3)——
+                    #   真正的诱因是"用户消息里出现了一个图片路径",模型照用户的话去做,
+                    #   这本身合理。有效的写法是补一句**条件式指引**(实测 3/3 归零):
+                    #   看得见就直接答,看不见(例如被回收)才再调工具。
+                    #   措辞纪律:只给条件、不声明"本条附有原图" —— 后者在图被回收后
+                    #   就是假陈述(F 臂实测:2/3 坚持原结论,含一例读错后不再重读)。
+                    #   路径必须留着:它是回收后唯一的重看抓手(#56⑤)。
+                    #   ⚠ ${img_path} 的花括号是必须的:brew bash 5 里 `$var` 紧跟全角标点
+                    #   会吃掉展开(见 parse_placeholders 里同一条注释)。
+                    img_desc+=$'\n'"用户粘贴的图片: ${img_path}（这张图已随本条消息附上:你现在看得到画面就直接作答,不要重复调用 read_image;看不到时(例如它已被回收)再调用本工具重看）"$'\n'"[[IMGREF:$inline_ref_id]]"
                 else
                     img_fb+=("$img_path")
                 fi
@@ -9041,6 +9506,13 @@ parse_placeholders() {
             "📋 [图片] "*)
                 path="${line#"📋 [图片] "}"
                 if [[ -f "$path" ]] && is_image "$path"; then
+                    # 与下面的 [文件] 分支对齐:Ctrl-F/@ 粘图是**人亲手把这张图给 AI 看**
+                    # 的手势,本身就是只读授权。缺它时的实测症状(用户现场):图已经随本轮
+                    # 附上去了,模型再 read_image 同一张 → 又弹一次"AI 请求访问工作目录外
+                    # 文件,是否放行?"——刚粘进来的东西还要人再批一遍。
+                    # 只给 r 不给 rw(同 [文件] 的理由:看 ≠ 许改);hard_deny 与"过宽不收"
+                    # 在 grant_file/path_access 内部照旧生效,这里不是放水。
+                    grant_file "$path" "r"
                     input_images+=("$path")
                     continue
                 fi

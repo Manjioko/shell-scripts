@@ -30,11 +30,11 @@ fail_hard() { printf '  BAD  %s\n' "$1"; exit "${2:-1}"; }
 #   "WORK_ROOT: unbound variable")。我那 3 条"判定崩溃"全是这个装载残缺造成的,
 #   不是产品漏洞 —— 报"崩溃"没错,但根因在自己身上。
 # 改成按标记行推:取到 harness 自己给 WORK_ROOT 赋值的那一行为止;标记不见了就红着退出。
-LOAD_END=$(grep -n '^WORK_ROOT="\$PWD"' test_hardwall.sh | head -1 | cut -d: -f1)
+LOAD_END=$(grep -n '^WORK_ROOT="\$PWD"' tests/test_hardwall.sh | head -1 | cut -d: -f1)
 [[ -n "$LOAD_END" ]] || fail_hard "harness 里找不到 WORK_ROOT 赋值行,装载范围无从推定(别退回写死行号)" 1
 LOADER=$(mktemp "${TMPDIR:-/tmp}/tr-loader.XXXXXX") || fail_hard "mktemp 失败" 1
 trap 'rm -f "$LOADER"' EXIT
-sed -n "1,${LOAD_END}p" test_hardwall.sh > "$LOADER" || fail_hard "装载片段抽取失败" 1
+sed -n "1,${LOAD_END}p" tests/test_hardwall.sh > "$LOADER" || fail_hard "装载片段抽取失败" 1
 
 ROWS=$(mktemp "${TMPDIR:-/tmp}/tr-rows.XXXXXX") || fail_hard "mktemp 失败" 1
 trap 'rm -f "$LOADER" "$ROWS"' EXIT

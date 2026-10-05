@@ -24,7 +24,7 @@
 #   bash test_history_render.sh .orig/wchat.sh
 
 set -uo pipefail
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源与 *_helper.py 都在根目录
 SRC="${1:-$PWD/wchat.sh}"
 [[ -f "$SRC" ]] || { echo "找不到被测脚本: $SRC"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"

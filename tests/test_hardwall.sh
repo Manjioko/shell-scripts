@@ -14,9 +14,9 @@
 #      历史上真出过 `local s="$1" n=${#s}` 在 set -u 下让提取器恒返回空的事。
 #
 # 用法:
-#   bash test_hardwall.sh                # 测当前 wchat.sh(应全绿)
+#   bash tests/test_hardwall.sh           # 测当前 wchat.sh(应全绿)
 #   # 负对照:证明这张表真能抓住被修的缺陷(旧版会 FAIL)
-#   mkdir -p /tmp/hw && git show HEAD:wchat.sh > /tmp/hw/wchat.sh && bash test_hardwall.sh /tmp/hw/wchat.sh
+#   mkdir -p /tmp/hw && git show HEAD:wchat.sh > /tmp/hw/wchat.sh && bash tests/test_hardwall.sh /tmp/hw/wchat.sh
 
 set -uo pipefail
 
@@ -42,13 +42,13 @@ if (( ${BASH_VERSINFO[0]:-0} < HW_NEED_BASH )) && [[ -z "${HW_BASH_REEXEC:-}" ]]
 fi
 unset _hw_self _hb 2>/dev/null
 
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源与 *_helper.py 都在根目录
 # 本表自身的绝对路径。历史上这里写死字面量 test_hardwall.sh:换台机器把文件改名
 # (Alpine 实跑就叫 hardwall.sh)之后,那条自检 grep 直接 "No such file or directory",
 # 于是 grep 的空输出被当成"0 命中之外的另一种东西",守卫既不红也不对 —— 「表内不许写死
 # /private 正例」这条当场失效,顺带把结构守卫的 ok 也跳过了(总数少 1 条)。
 # 教训:自我检查一律用 $0 的实际路径,不靠文件名。
-HW_SELF="$PWD/$(basename "$0")"
+HW_SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"   # 本表真实位置(搬进 tests/ 后不能再拼 $PWD/ basename,那会指到根下不存在的文件)
 SRC="${1:-$PWD/wchat.sh}"
 [[ -f "$SRC" ]] || { echo "找不到被测脚本: $SRC"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
@@ -1438,7 +1438,7 @@ esac
 # ── T23 第二轮 B:测试装载口(不再靠 stdin EOF 的巧合)──────────────────
 echo "T23 装载口 _WCHAT_LIB_ONLY"
 # 一律按 $SRC_ABS 取被测文件:写死 ./wchat.sh 时，这张表对着副本跑(负对照、
-# `bash test_hardwall.sh /tmp/hw/wchat.sh`)测的仍是工作副本 —— 改好了验不出、改坏了
+# `bash tests/test_hardwall.sh /tmp/hw/wchat.sh`)测的仍是工作副本 —— 改好了验不出、改坏了
 # 红不出来，最后就变成"这两条红大概是环境问题"(本轮就是这么误判过一次)。
 if grep -q '_WCHAT_LIB_ONLY' "$SRC_ABS"; then
     ok "主脚本里实现了装载口(此前只有本表注释在声称它有)"

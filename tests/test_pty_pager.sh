@@ -12,7 +12,7 @@
 # 保证同一串 env,不再重复起 pty。
 # 用法: bash test_pty_pager.sh [-v]
 set -u
-cd "$(dirname "$0")" || exit 1
+cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源与 *_helper.py 都在根目录
 TARGET=./wchat.sh
 [[ -f "$TARGET" ]] || { echo "找不到 $TARGET"; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "缺少 git"; exit 1; }

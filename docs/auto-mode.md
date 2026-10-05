@@ -378,7 +378,7 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
     就是这条），且空名单用例里自己展开 `"${granted_files[@]}"` 也要用 `+…` 形态。
     负对照（证明这张表有判别力，改硬墙后都要跑一次）：
     ```bash
-    git show HEAD:wchat.sh > /tmp/hw.sh && bash test_hardwall.sh /tmp/hw.sh   # 104/32
+    git show HEAD:wchat.sh > /tmp/hw.sh && bash tests/test_hardwall.sh /tmp/hw.sh   # 104/32
     ```
     前者=已含脱敏/归一化/记账/凭据那批修复的版本，32 红恰好全落在本次的临时目录断言
     （T8 16 + T9 15 + 总数守卫 1）。对 `a0bcd52^`（脱敏之前）跑则是**没有汇总行**：旧版
@@ -399,7 +399,7 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
        → 放过了产品里一处真崩溃：`"$name。"` 被 bash 当成变量名 `name。`（bash 认 ≥0x80 的字节
        为名字字符），`set -u` 下 `read_skill` 传错名字会当场猝死而不是打印"技能不存在"。
     所以跑这张表的判据是 **`FAIL=0` 且 stderr 一行都没有**：
-    `bash test_hardwall.sh >out 2>err; wc -l < err` 不为 0 就别当绿。
+    `bash tests/test_hardwall.sh >out 2>err; wc -l < err` 不为 0 就别当绿。
     **实跑基线（两边都已测）**：macOS `PASS=351`；Alpine 3.20（root、`:ro` 挂载）`PASS=353`。
     （347/349 → 349/351：主套件里测不出真相的两条 H5 移进本表 T3；→ 351/353：再加 T18
     两条 `bg_leak` 提示文案守卫。两批都与平台无关,所以两平台同步 +2。）
@@ -648,7 +648,7 @@ bash auto_test.sh e2e      # 仅端到端(桩网关 + pty)
         全部用 `pdn`（钉**规则号**）而不是 `pd`（只分 deny/allow）——② 的表现形式是"照样被拒、
         只是号从 P2 变 P3"，二值断言根本看不出来。新表+新码 **214/0**；新表+`HEAD` 负对照
         **203/11**（① 1 条 + ② 10 条）；`HEAD` 表+`HEAD` 码基线 **179/0**。
-        跑表**必须用 bash 5**（`/opt/homebrew/bin/bash test_hardwall.sh`）：`/bin/bash` 是 3.2，
+        跑表**必须用 bash 5**（`/opt/homebrew/bin/bash tests/test_hardwall.sh`）：`/bin/bash` 是 3.2，
         会因 `read -t 0.2` 与 `${1,,}` 在 T10 假红 6 条，与判据无关。
       - 本机无 docker，Linux 分支用**语义探针**实测而非推演：造一个"非链接、`pwd -P` 不改写"
         的目录冒充 Linux 的 `/tmp` 喂进 `auto_tmp_write_ok`/`hard_deny_path`，确认

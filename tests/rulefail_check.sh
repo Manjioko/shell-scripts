@@ -238,7 +238,7 @@ _seen_rules=$(grep -c 'hd_rule="H' wchat.sh)
 
 echo "语法"
 bash -n wchat.sh && ok "主脚本语法通过" || bad "主脚本语法" "bash -n 报错"
-bash -n test_hardwall.sh && ok "硬墙回归表语法通过" || bad "硬墙回归表语法" "bash -n 报错"
+bash -n tests/test_hardwall.sh && ok "硬墙回归表语法通过" || bad "硬墙回归表语法" "bash -n 报错"
 
 echo ""; echo "PASS=$pass FAIL=$fail"
 [[ "$fail" -eq 0 ]] || exit 1
