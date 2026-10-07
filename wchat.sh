@@ -109,6 +109,12 @@ pro_model="${PRO_MODEL:-}"
 #    IMG_MAX_BYTES / IMG_MAX_SIDE / IMG_MAX_BATCH / IMG_BATCH_MAX_BYTES  图片配额四件套
 #    IMG_INLINE / IMG_INLINE_MAX_SIDE / IMG_INLINE_MAX_BYTES / IMG_INLINE_HOLD
 #                              inline 通道(原图交主模型自己看)的开关与预算
+#    IMG_LIVE_BUDGET_TOKENS / IMG_LIVE_FLOOR_TOKENS / IMG_LIVE_HARD_TOKENS / IMG_LIVE_MAX_BYTES
+#                              活图预算(何时回收 / 何时拒这张);每张图退回转述时屏幕上那行
+#                              ⤷ 会点名到底是上面哪一个把事做了,不用来这里猜
+#    IMG_INLINE_SHRINK / IMG_INLINE_SHRINK_LADDER
+#                              撞字节/预算时先降档再挂(默认 1;"1536 1024 768")——
+#                              省 token 只有降**边长**这一维有效(按面积计费),压质量不省
 #    IMG_INLINE_GONE_MARK / IMG_INLINE_GONE_HINT  降级文案(措辞由实验定,见该节注释)
 #                              → 均见「图片理解」节
 #    TOKEN_THRESHOLD           上下文压缩阈值 → 详解见「上下文压缩」节
@@ -166,6 +172,17 @@ IMG_INLINE=${IMG_INLINE:-1}                            # 0=只用转述(改动�
 #   不同。所以"2048px≈2.5k token/轮"这种成本账只能按当前 BASE_URL 估;文件头部
 #   「IMG_MAX_SIDE=2048 → 约 4k token」那句同样是 qwen 口径,换 mimo 档会低一个量级。
 IMG_INLINE_MAX_SIDE=${IMG_INLINE_MAX_SIDE:-2048}
+# 降档阶梯:撞"交付件超字节"或"超活图硬上限"时,**先缩一档再挂**,而不是整张退回转述。
+# 为什么只有这一维值得做:图片按**面积**计费(IMG_TOKENS_PER_MEGAPIXEL/CAP),压 JPEG 质量
+# 只减上传字节、计费一分不减;实测同一把尺 2048px=2500(顶格) 1024px=1048 768px=589。
+# 而"退回转述"付的是"模型彻底看不见 + 精度被一次观察拍死",比降档贵得多。
+IMG_INLINE_SHRINK=${IMG_INLINE_SHRINK:-1}                    # 0=关掉阶梯(只走首档)
+# ⚠ 不要用 `${VAR:-"1536 1024 768"}` 这种写法给"带空格的默认值":${} 内部的那对双引号
+#   会把后面直到下一个双引号之间的**所有行**当成字符串吞掉 —— 实测本行原先这么写,
+#   结果 IMG_INLINE_MAX_BYTES 等一整片配置全变空值,每张图都被"超字节"误拒,
+#   而脚本语法完全正常(bash -n 挑不出来)。默认值单独一行赋,别在 ${} 里做带引号的默认值。
+IMG_INLINE_SHRINK_LADDER="${IMG_INLINE_SHRINK_LADDER-}"
+[[ -n "$IMG_INLINE_SHRINK_LADDER" ]] || IMG_INLINE_SHRINK_LADDER="1536 1024 768"   # 比首档小的档,从大到小
 IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES:-2097152}  # 交付件字节上限(2MB,超了退回转述)
 # 保留最近 **N 轮**的原图(单位是轮,不是张 —— 轮号由 printContent 每轮 +1 的 IMG_REF_GROUP 记)。
 # 更早轮次的引用文件被**改名成 .gone**(不是删掉:要靠它区分"我们发过号但已回收"与
@@ -681,6 +698,14 @@ MAX_TOOL_ROUNDS="${MAX_TOOL_ROUNDS:-250}"   # 原为 25:实测一轮正经任务
 AUTO_TIERS="read sandbox full"
 auto_mode=""                 # 空=关闭(默认,保持历史行为:越界弹人、判 N 弹人)
 auto_downgraded=0            # 连续被拒达到阈值后本轮降级人工(见 auto_maybe_downgrade)
+
+# ⚡ 常驻标记(auto / mcp 那一到两行)的"这一屏已经打过"标志,见 normal_line。
+# 打标记的前提是"屏幕往前走了一步":上一轮什么都没提交(空回车 / EOF / Ctrl+C)时
+# 标记还挂在原处,再打一遍就是同一行连打两遍。真机现象:启动 -mcp -auto=full 后
+# 标记出现两遍 —— 签字面板与 MCP 探测之间等了几秒,期间多按的那次回车被第一个输入框
+# 当成"空提交"吃掉了,于是紧接着又提示了一轮。
+# 复位点:printContent(真的一轮开始了)、handle_cmd_line(命令必然画了东西)。
+marker_shown=0
 
 # 越界访问白名单(启动时由人给定,一次批好,不让模型半路自己找文件):
 #   --allow <路径>        越界只读(任何档位,含非 auto)
@@ -3677,35 +3702,57 @@ retry_after_compact() {
     return $?
 }
 
-# 查看当前上下文用量
+# 查看当前上下文用量。
+# ⚠ 整块面板**不许挂在"精确值已到手"上**。真机退化过一次:精确值没到手时(新会话 /
+#   -l 加载历史 / -n 新对话 / 压缩后,以及端点根本不回 usage 的场合)-u 只剩一行字节粗算,
+#   百分比、窗口、越界判据、图片那几行一起消失 —— 而"-u 就是为了看我还剩多少"的场合
+#   恰恰常在会话刚开始时。所以这里改成:**数值来源降级,面板形状不变** —— 没有精确值
+#   就用粗算顶上,同一形状打印,并在行内把"这是粗算"标清楚(数字可比,来源不糊)。
 print_usage() {
-    local est pct wpct win
+    local est pct wpct win cur _th _brk _brktok
     est=$(printf '%s' "$messages" | wc -c | tr -d ' ')
     est=$((est * 2 / 5))
-    inp_msg "消息条数: $(echo "$messages" | jq length)"
     win="${CTX_WINDOW:-0}"
+    [[ "$win" =~ ^[0-9]+$ ]] || win=0
+    _th="${TOKEN_THRESHOLD:-0}"
+    [[ "$_th" =~ ^[0-9]+$ ]] || _th=0
+    inp_msg "消息条数: $(echo "$messages" | jq length)"
+    # 分母为 0 时不许当场崩算术(除法报错会被读成"-u 坏了"),百分比位置留空。
     if (( last_prompt_tokens > 0 )); then
-        pct=$((last_prompt_tokens * 100 / TOKEN_THRESHOLD))
-        inp_msg "上下文用量: ${last_prompt_tokens} tokens / 压缩点 ${TOKEN_THRESHOLD}(已用 ${pct}%)"
-        if (( win > 0 )); then
-            wpct=$((last_prompt_tokens * 100 / win))
-            inp_msg "  窗口 ${win} tokens(已用 ${wpct}%)· 越界判据 ${CTX_OVERFLOW_GATE}(仅失败时用作粗算兜底)"
+        cur=$last_prompt_tokens
+        if (( _th > 0 )); then
+            pct="$(( cur * 100 / _th ))%"
+        else
+            pct="?"
         fi
-                # 刀1 观测:图片可见性的两类历史改写。合法那次是"诚实的价格",意外那次是 bug。
-        # 只在挂过图或有过意外改写时才出声(纯文字会话不该看到这两行)。
-        local _brk _brktok
-        _brk=$(_img_obs_col 4); _brktok=$(_img_obs_col 5)
-        _brk=${_brk:-0}; _brktok=${_brktok:-0}
-        if [[ -n "${IMG_REF_DIR:-}" ]] || (( _brk > 0 )); then
-            inp_msg "  图片可见性: 合法改写 ${IMG_PRUNE_EVENTS} 次 · 意外改写 ${_brk} 次(累计约 ${_brktok} token 从打折变全价)"
-            inp_msg "  活图: $(ls "${IMG_REF_DIR:-}"/*.url 2>/dev/null | wc -l | tr -d ' ') 张在上下文(回收发生时屏幕必打 ♻,没打过 ♻ 就没回收过)"
-            inp_msg "  上次请求: 命中缓存 ${last_cached_tokens} / ${last_prompt_tokens} tokens · 图片计费 ${last_image_tokens} tokens"
-            # 刀4:单价是从网关回传值自标定的,不显示样本数就看不出"这一档到底标定过没有"
-            inp_msg "  单价自标定: $(img_token_calib_count 2>/dev/null) 条样本(model=${model:-?}，AUTOCAL=${IMG_TOKENS_AUTOCAL})"
-        fi
+        inp_msg "上下文用量: ${cur} tokens / 压缩点 ${_th}(已用 ${pct})"
     else
-        inp_msg "上下文用量: 约 ${est} tokens(字节粗算,漏算 tools schema;精确值在下次请求后显示,压缩点 ${TOKEN_THRESHOLD})"
+        cur=$est
+        if (( _th > 0 )); then
+            pct="$(( cur * 100 / _th ))%"
+        else
+            pct="?"
+        fi
+        inp_msg "上下文用量: 约 ${cur} tokens(字节粗算,漏算 tools schema;精确值在下次请求后刷新)/ 压缩点 ${_th}(已用 ${pct})"
     fi
+    if (( win > 0 )); then
+        wpct="$(( cur * 100 / win ))%"
+        inp_msg "  窗口 ${win} tokens(已用 ${wpct})· 越界判据 ${CTX_OVERFLOW_GATE}(仅失败时用作粗算兜底)"
+    fi
+    # 刀1 观测:图片可见性的两类历史改写。合法那次是"诚实的价格",意外那次是 bug。
+    # 这四行**无条件打印**:纯文字会话读到 0 也是信息(用户看 -u 就是要看数,
+    # 把数藏起来比给它读一个 0 更糟)。
+    _brk=$(_img_obs_col 4); _brktok=$(_img_obs_col 5)
+    _brk=${_brk:-0}; _brktok=${_brktok:-0}
+    inp_msg "  图片可见性: 合法改写 ${IMG_PRUNE_EVENTS:-0} 次 · 意外改写 ${_brk} 次(累计约 ${_brktok} token 从打折变全价)"
+    inp_msg "  活图: $(ls "${IMG_REF_DIR:-}"/*.url 2>/dev/null | wc -l | tr -d ' ') 张在上下文(回收发生时屏幕必打 ♻,没打过 ♻ 就没回收过)"
+    if (( last_prompt_tokens > 0 )); then
+        inp_msg "  上次请求: 命中缓存 ${last_cached_tokens:-0} / ${last_prompt_tokens} tokens · 图片计费 ${last_image_tokens:-0} tokens"
+    else
+        inp_msg "  上次请求: 本次会话还没有拿到带 usage 的请求(所以上面是粗算)· 图片计费 ${last_image_tokens:-0} tokens"
+    fi
+    # 刀4:单价是从网关回传值自标定的,不显示样本数就看不出"这一档到底标定过没有"
+    inp_msg "  单价自标定: $(img_token_calib_count 2>/dev/null) 条样本(model=${model:-?}，AUTOCAL=${IMG_TOKENS_AUTOCAL:-1})"
 }
 
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
@@ -7171,6 +7218,9 @@ tool_web_search() {
 #     判为不收图(切档预检 IMG_MAIN_VISION=0,或 ask_ai 里摘图重发那次)。
 #     用户发图(@/-img)与 read_image **同一条链路**(刀4 起):printContent 逐张 attach,
 #     单张超预算/压不动时只有那几张退回 describe —— 不再有"发图只走转述"的例外。
+#     ⚠ **每次退回都要在屏幕上说出是哪条判据**(⤷ 一行,带判据名 + 当时的读数 + 可调的
+#     旋钮,见 img_inline_reject)。这批出口原先全是哑的 return 1,用户只能问"为什么有时
+#     直接读图有时转述"而无处可查 —— 与 ♻ 那条"回收提示必须带触发判据名"是同一个口径。
 # 两条通道的取舍不是"谁更省":转述每张只付一次但精度被一次观察拍死,inline 精度高
 # 但图片 token 每轮重付(实测 2048px≈2502/轮)—— 所以 inline 必须配 HOLD 回收。
 
@@ -7223,22 +7273,44 @@ is_text_file() {
 
 # 图片体积检查/压缩:$1 原图路径,输出最终可用路径(原图或压缩后的临时文件)。
 # 超 IMG_MAX_BYTES 时依次尝试 sips(macOS 自带) → ffmpeg → python3(PIL),
-# 统一压缩为最长边 ≤ IMG_MAX_SIDE 的 JPEG。原文件永不改写;
+# 压缩为 JPEG(最长边 ≤ IMG_MAX_SIDE)。原文件永不改写;
 # 压缩产物由调用方负责清理。失败返回 1,进度提示走 stderr 不污染 stdout。
+#
+# ⚠ **不许放大**(2026-10-06 实测坐实):字节超限、但最长边已经 ≤ IMG_MAX_SIDE 的图,
+#   只重编码压字节,**不做重采样**。两条理由都不是洁癖:
+#     · token 按**面积**计费 —— 放大等于白烧钱(同一把尺:1024px=1048 / 2048px=2500);
+#     · 画质只会掉(放大不产生信息,却要吃一次重采样 + 一次 JPEG)。
+#   实测的坑:4.9MB 的 1600x1035 PNG 走到这里被 `sips -Z 2048` 放大成 2048x1324。
+#   三条兜底里**只有 sips 这条会放大** —— ffmpeg 写的是 `min(iw,side)`,PIL 用
+#   `thumbnail()`,两者天生"只缩不放"。所以这是三家行为不一致,不是"设计如此"。
 prepare_image() {
-    local in="$1" out size
+    local in="$1" out size w h longest=0
     size=$(wc -c < "$in" | tr -d ' ')
     if (( size <= IMG_MAX_BYTES )); then
         printf '%s\n' "$in"
         return 0
     fi
-    printf ' ⚠️  图片 %sMB 超限,尝试自动压缩(最长边 %s px)…\n' "$((size / 1024 / 1024))" "$IMG_MAX_SIDE" >&2
+    # 先读像素:它只用来决定"要不要重采样"这一步。读不出(longest 留 0)时**不做重采样** ——
+    # 宁可这一步少做(字节可能仍超,由调用方按体积再判),也不做一步可能白烧 token 又掉画质的
+    # 动作。方向与 _fp_dims 那条"取不到就按本档估"相反:那条是保守地**早回收**,这条是保守地**不动**。
+    read -r w h <<<"$(img_dims "$in")"
+    [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] && longest=$(( w > h ? w : h ))
+    if (( longest > IMG_MAX_SIDE )); then
+        printf ' ⚠️  图片 %sMB 超限,尝试自动压缩(最长边缩到 %s px)…\n' "$((size / 1024 / 1024))" "$IMG_MAX_SIDE" >&2
+    else
+        printf ' ⚠️  图片 %sMB 超限,尝试自动压缩(边长不超 %spx,只重编码压字节,不放大)…\n' "$((size / 1024 / 1024))" "$IMG_MAX_SIDE" >&2
+    fi
     out=$(mktemp "${TMPDIR:-/tmp}/ct_shrink_XXXXXX")
     # 依次尝试 sips → ffmpeg → python3(PIL),任一成功即停(前一工具失败
     # 留空文件时由下一工具覆盖写兜底)。全部失败返回 1。
     if command -v sips >/dev/null 2>&1; then
-        # macOS 自带:sips -Z 按最长边等比缩放;formatOptions 80 控制 JPEG 质量
-        sips -Z "$IMG_MAX_SIDE" -s format jpeg -s formatOptions 80 "$in" --out "$out" >/dev/null 2>&1
+        # macOS 自带;formatOptions 80 控 JPEG 质量。
+        # ⚠ `-Z` 只在"确实要缩"时才给 —— 它就是那条会放大的写法(见函数头注释)。
+        if (( longest > IMG_MAX_SIDE )); then
+            sips -Z "$IMG_MAX_SIDE" -s format jpeg -s formatOptions 80 "$in" --out "$out" >/dev/null 2>&1
+        else
+            sips -s format jpeg -s formatOptions 80 "$in" --out "$out" >/dev/null 2>&1
+        fi
         [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
     fi
     if command -v ffmpeg >/dev/null 2>&1; then
@@ -7272,8 +7344,35 @@ IMG_REF_DIR=""
 IMG_REFS=()
 IMG_REF_SEQ=0
 inline_ref_id=""
-
-# 读像素尺寸:$1 图片 → "宽 高";取不到输出空、rc=1(调用方据此放弃缩放,不编尺寸)。
+# 最近一次 img_inline_attach 为什么没挂上(点名判据 + 当时的读数 + 该调哪个旋钮);成功置空。
+# 这批出口原先全是**哑的 return 1**:用户只看见"这次又成转述了",看不出是哪条判据干的、
+# 也不知道调什么能变回去 —— 与 ♻ 那条立的口径("提示带触发判据名",#58)不一致。
+# ⚠ 必须是全局而不是返回值:返回值已经给了 rc,引用号已经走 inline_ref_id。
+img_inline_reject=""
+# 降档/缩图的两条回传(见 img_inline_attach):
+#   img_inline_shrank_to   非空 = 这张**缩过**才挂上的 —— 判据(刀9)是"交付件尺寸 ≠ 原文件尺寸",
+#                          **不再等同**于"降过档":原图最长边本就超过 IMG_INLINE_MAX_SIDE 时,首档
+#                          那一挂同样缩了、同样是精度损失。调用方拿它出声 —— 精度降了不说就是
+#                          骗人(这个工具的主用途是读丝印/线号)。
+#                          为什么弃掉"不是首档"这个旧判据:①漏掉最常见的那种(4K 截图/图纸渲染
+#                          一律在首档被缩);②反向也会假报:降过档、但交付件尺寸与原图相同(只是
+#                          重编码压字节)时,旧写法会说"降到 1024px",而模型手里那份其实还是
+#                          原尺寸 —— 一句假读数。新判据与交付事实句**同源**(同一处比尺寸)。
+#   img_inline_already     非空 = 同图同档已经活着、这次没挂第二份 —— 调用方走去重话术,
+#                          **不退转述**:图就在上下文里,再转述一遍是花钱买更差的信息
+#   img_inline_already_side  那句去重话术里要说出的驻留档
+img_inline_shrank_to=""
+img_inline_already=""
+img_inline_already_side=""
+# 交付件事实句(刀8):"模型收到的是多少像素 / 原文件是多少像素 / 中间只做过等比处理"。
+# 起因是 2026-10-06 现场:模型读到的是**完整原图**,却因为源 PDF 页盒比图稿小、那份渲染
+# 本来就只显示图稿的一部分,把"画面不完整"归因给了 read_image,并绕道自建裁剪工具;
+# 而链路这边既没有裁剪代码、也没有任何一句能让模型**自证**的事实,屏幕还把它叫"原图"。
+# → 给出一对尺寸,模型就能用"长宽比例是否一致"判"裁没裁",不必靠自己的感知自述。
+# ⚠ 只在两个尺寸都真取到时才写:取不到就一个字都不说(宁可不说,不许编一个尺寸出来)。
+# ⚠ 措辞纪律与其它图片文案一致:只陈述**已发生的事实**(尺寸/等比/未裁剪),不写任何
+#   "现在看不看得见"这类会被回收变假的现在时断言。
+img_inline_delivery=""
 # 为什么不用 PIL / ImageMagick:两个都不是必装(PIL 本机实测就没有)。sips 是 macOS 自带,
 # 拿不到再用 stdlib 读 PNG 的 IHDR / JPEG 的 SOF 段 —— 纯字节,零依赖。
 img_dims() {
@@ -7304,28 +7403,55 @@ if d[:2]==b"\xff\xd8":
     [[ -n "$out" ]]
 }
 
-# inline 专用压缩:$1 原图 → 交付路径。失败 rc=1(调用方退回转述)。
+# inline 专用压缩:$1 原图 [$2=本档最长边,缺省 IMG_INLINE_MAX_SIDE] → 交付路径。失败 rc=1。
 # 与 prepare_image 的分工要分清:那条按**字节**封顶(为一次转述请求省上传),
-# 这条按**像素**封顶(为每轮重付的 image_tokens 省钱)—— 两者互不替代。
+# 这条按**像素**封顶 —— ⚠ 能省 token 的只有像素这一维:图片按**面积**计费
+# (IMG_TOKENS_PER_MEGAPIXEL,顶到 IMG_TOKENS_CAP),压 JPEG 质量只减上传字节,计费一分不减。
+# 同一把尺实测:2048px=2500(顶格) 1536px=2359 1024px=1048 768px=589 —— 陡坡在 2048→1024,
+# 而 6000 的活图预算因此是"同时挂 4 张"和"挂 11 张"的差别。
+# $2 是给降档阶梯用的(见 img_inline_sides):撞线时先缩一档再挂,而不是整张退回转述。
 # IMG_MAX_* 是在 $() 的子 shell 里覆盖的,不会污染 describe_images 用的同一组全局。
 prepare_inline() {
-    local in="$1" out w h longest
-    in=$( IMG_MAX_BYTES="$IMG_INLINE_MAX_BYTES" IMG_MAX_SIDE="$IMG_INLINE_MAX_SIDE" \
+    local in="$1" side="${2:-${IMG_INLINE_MAX_SIDE:-2048}}" out w h longest
+    [[ "$side" =~ ^[0-9]+$ ]] || side="${IMG_INLINE_MAX_SIDE:-2048}"
+    in=$( IMG_MAX_BYTES="$IMG_INLINE_MAX_BYTES" IMG_MAX_SIDE="$side" \
           prepare_image "$1" 2>/dev/null ) || return 1
     [[ -f "$in" ]] || return 1
     read -r w h <<<"$(img_dims "$in")"
     [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || { printf '%s\n' "$in"; return 0; }
     longest=$(( w > h ? w : h ))
-    (( longest <= IMG_INLINE_MAX_SIDE )) && { printf '%s\n' "$in"; return 0; }
+    (( longest <= side )) && { printf '%s\n' "$in"; return 0; }
     out=$(mktemp "${TMPDIR:-/tmp}/ct_inl_XXXXXX")
     if command -v sips >/dev/null 2>&1; then
-        sips -Z "$IMG_INLINE_MAX_SIDE" -s format jpeg -s formatOptions 85 "$in" --out "$out" >/dev/null 2>&1
+        sips -Z "$side" -s format jpeg -s formatOptions 85 "$in" --out "$out" >/dev/null 2>&1
     elif command -v ffmpeg >/dev/null 2>&1; then
-        ffmpeg -y -loglevel error -i "$in" -vf "scale=${IMG_INLINE_MAX_SIDE}:-2" \
+        ffmpeg -y -loglevel error -i "$in" -vf "scale=${side}:-2" \
             -f image2 -c:v mjpeg -q:v 3 "$out" >/dev/null 2>&1
     fi
     [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
     printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
+}
+
+# 降档阶梯(从大到小,空格分隔):第一档恒为 IMG_INLINE_MAX_SIDE,其后是
+# IMG_INLINE_SHRINK_LADDER 里**比它小**的那些档。
+# ⚠ 阶梯只在"这一档被字节/预算挡下"时才往下走 —— 通道级判据(IMG_INLINE=0、
+# IMG_CAPABLE=0、已探明主模型不收图)与 IO 类失败**降多少档都没用**,那些地方直接返回,
+# 不许拿"再试一档"去掩盖(重试不可解决的问题 = 白烧一次压缩 + 一句误导性话术)。
+# 关掉整条阶梯:IMG_INLINE_SHRINK=0 → 只走首档,与加这个功能之前逐字节等价。
+img_inline_sides() {
+    # ⚠ 必须**分开写**再组数组:`local first=… out=("$first")` 里 $first 取到的是空 ——
+    #   local 会先把整串词展开完再逐个赋值,所以同一行引用自己刚设的变量必空。
+    #   现象不是报错而是"首档凭空消失"(默认那张全分辨率图从来没被试过),写出来给后来人。
+    local first s
+    first="${IMG_INLINE_MAX_SIDE:-2048}"
+    local out=("$first")
+    (( ${IMG_INLINE_SHRINK:-1} == 1 )) || { printf '%s' "$first"; return 0; }
+    for s in ${IMG_INLINE_SHRINK_LADDER:-1536 1024 768}; do
+        [[ "$s" =~ ^[0-9]+$ ]] || continue
+        (( s > 0 && s < first )) || continue
+        out+=("$s"); first="$s"          # 只准递减:名单写乱了也不会挂出比上一档更大的
+    done
+    printf '%s' "${out[*]}"
 }
 
 # ---------- "这次报错算不算模型不收图"的唯一判据 ----------
@@ -7501,29 +7627,53 @@ img_refs_prune() {
 # 本函数**只读不写**,因此可以被 $(...) 取返回值;凡是要改 IMG_REFS/IMG_REF_SEQ 的函数
 # 一律不许走命令替换(那正是本轮四次数据作废的原因)。
 # 这个内容是否已经有一张**活着的**图挂在上下文里?命中 → 打印引用号、rc=0;否则 rc=1。
-# 刀2 的去重靠它。三条设计决定都有实测依据,别再改回去:
+# 去重墙命中时**不**回传驻留档:img_live_ref_of 的调用点全在 $(...) 里,子 shell 里赋的
+# 全局父 shell 读不到(本脚本已有一条同族规矩:"要改 IMG_REFS/IMG_REF_SEQ 的函数一律不许
+# 走命令替换")。档位直接从 fp 第 3 列现读 —— 只读操作,两个调用点都能安全取值。
+img_ref_side() {
+    local s
+    s=$(awk 'NR==1{print $3}' "${IMG_REF_DIR}/$1.fp" 2>/dev/null)
+    [[ "$s" =~ ^[0-9]+$ ]] || s="${IMG_INLINE_MAX_SIDE:-2048}"
+    printf '%s' "$s"
+}
+
+# 刀2 的去重靠它。四条设计决定都有实测依据,别再改回去:
 #   · 键取**内容**而不是路径:#54 的"键同源"病 —— 同一文件的相对/绝对/软链三种写法会让
 #     按路径去重要么漏判要么误判;而"同一张图存成两个名字"本来就该算重复。
 #   · 只认 `.url` 还在的引用:已回收(`.gone`)的号**不参与命中** —— 这是不变量 I2
 #     (形态只能 带图→已回收,永不反向)的落地方式;复活旧号会让多条历史消息
 #     同时展开成同一张新图。
 #   · 比 "原文件校验和 + 边长档" 而不是只比原文件:见上条 IMG_INLINE_MAX_SIDE 的误判风险。
-# 本函数**只读不写**,因此可以被 $(...) 取返回值;凡是要改 IMG_REFS/IMG_REF_SEQ 的函数
-# 一律不许走命令替换(那正是本轮四次数据作废的原因)。
+#   · $2=本次要的档(缺省 IMG_INLINE_MAX_SIDE),命中条件是**驻留档 >= 本次要的档**:
+#     降档阶梯(img_inline_sides)会让驻留副本的档低于全局档,拿"原文件相同"就命中等于
+#     让 1024px 的副本冒充 2048px 的把请求吞掉 —— 那是**漏挂**,表现是"模型看得清却说看不见"。
+#     反过来驻留档更高时不挂是对的(已经有了更高清的那份)。
+# 本函数**只读不写**,因此可以被 $(...) 取返回值。⚠ 它**不**回传命中副本的档位:
+# 调用点全在 $(...) 里,函数内赋的全局父 shell 取不到(原先写过 img_ref_hit_side,
+# 现象是那句去重话术里"驻留 px"是空的)—— 要档位就用 img_ref_side 从 fp 现读。
+# ⚠ 凡是要改 IMG_REFS/IMG_REF_SEQ 的函数一律不许走命令替换(那正是本轮四次数据作废的原因)。
+img_ref_hit_side=""
 img_live_ref_of() {
-    local orig="$1" key e rid want
+    local orig="$1" want_side="${2:-${IMG_INLINE_MAX_SIDE:-2048}}" key e rid fpkey fpside best="" bestside=-1
     [[ -n "${IMG_REF_DIR:-}" && -f "$orig" ]] || return 1
     key=$(cksum < "$orig" 2>/dev/null | awk '{printf "%s_%s", $1, $2}')
     [[ -n "$key" ]] || return 1
-    want="${key}_${IMG_INLINE_MAX_SIDE}"
+    [[ "$want_side" =~ ^[0-9]+$ ]] || want_side=${IMG_INLINE_MAX_SIDE:-2048}
     for e in "${IMG_REFS[@]:-}"; do
         [[ -n "$e" && "$e" == *" "* ]] || continue
         rid="${e#* }"
         [[ -s "${IMG_REF_DIR}/${rid}.url" ]] || continue
-        [[ "$(awk '{printf "%s_%s", $1, $3}' "${IMG_REF_DIR}/${rid}.fp" 2>/dev/null)" == "$want" ]] \
-            && { printf '%s' "$rid"; return 0; }
+        # fp:1) 原文件 cksum 3) 挂载时的边长档(取不到当 IMG_INLINE_MAX_SIDE 看,旧行同值)
+        read -r fpkey fpside <<<"$(awk '{print $1, $3}' "${IMG_REF_DIR}/${rid}.fp" 2>/dev/null)"
+        [[ "$fpkey" == "$key" ]] || continue
+        [[ "$fpside" =~ ^[0-9]+$ ]] || fpside="${IMG_INLINE_MAX_SIDE:-2048}"
+        (( fpside >= want_side )) || continue
+        (( fpside > bestside )) && { bestside=$fpside; best="$rid"; }
     done
-    return 1
+    [[ -n "$best" ]] || return 1
+    img_ref_hit_side="$bestside"
+    printf '%s' "$best"
+    return 0
 }
 
 # 记一条标定:$1=model $2=引用号 $3=最长边 $4=网关回传的真实 image_tokens。
@@ -7716,36 +7866,113 @@ img_refs_prune_by_budget() {
 # 来源的语义只有一件事:回收时**谁先被踢**(F-2,见 img_refs_prune_by_budget)。
 # 缺省按 user:宁可把"模型自读"错当"用户粘贴"多留一轮,也不把用户亲手粘的先踢 ——
 # 后者正是 2026-10-04 现场的伤(用户第一轮后粘贴图就被回收)。
+# 通道级(与这张图本身无关)的三道关门 → 打印那句原因,rc=0;三道都过了 → rc=1 无输出。
+# ⚠ 为什么单独成一个函数:printContent 在 IMG_INLINE=0 / IMG_CAPABLE=0 时**根本不会**调
+# img_inline_attach(整轮直接进转述队列),那两处只能另算一遍原因。同一条规矩抄两处必漂
+# —— #59 里 img_reject_wording 三份漂移就是前车之鉴(那份多一个 `*vision*` 单条件,
+# 把整个会话的内联能力误杀了)。所以定义只留这一份,attach 与 printContent 都调它。
+img_inline_gate_reason() {
+    if (( ! IMG_CAPABLE )); then
+        printf '图片链路已关:IMG_PROVIDER=%s%s(调 VISION_MODEL 指向本端点上带视觉的型号)' \
+            "${IMG_PROVIDER:-none}" "${vision_disabled_reason:+ · 原因:${vision_disabled_reason}}"
+        return 0
+    fi
+    if (( ! IMG_INLINE )); then
+        printf 'inline 通道已关:IMG_INLINE=0(只用文字转述;改回 IMG_INLINE=1 即恢复原图)'
+        return 0
+    fi
+    if [[ "${IMG_MAIN_VISION:-}" == "0" ]]; then
+        printf '已探明主模型 %s 不收图(判据:usage 里没有 image_tokens 或接口明确否认;想强制内联用 IMG_MAIN_VISION=1)' \
+            "${model:-?}"
+        return 0
+    fi
+    return 1
+}
+
+# 挂一张原图:$1 原图路径 $2 展示名 $3=来源(user|tool,缺省 user)。
+# 成功 → inline_ref_id 置为引用号、rc=0;任何一步不满足一律 rc=1,由调用方退回转述。
+# ⚠ 每条 rc=1 出口都必须把原因写进 img_inline_reject —— 调用方那两行 ⤷ 全靠它,
+#   漏写一条就是"屏幕上出现一句没有原因的降级"(这条由闸门第 20 组逐出口钉)。
+# ⚠ **降档阶梯**(img_inline_sides):撞"交付件超字节"或"超活图硬上限"这两条时,先缩一档
+#   再试,而不是整张退回转述 —— 转述是"模型彻底看不见 + 精度被一次观察拍死",而 1024px 档
+#   只要 1048 token(2048px 顶格 2500),既省得多也远好过看不见。降过档必须出声
+#   (img_inline_shrank_to):用户拿这个工具读丝印/线号,精度降了不说就是骗人。
+#   其余失败(通道关 / 引用目录建不出来 / 压不动 / 落盘失败)降档无用,一律立即返回。
+# 来源的语义只有一件事:回收时**谁先被踢**(F-2,见 img_refs_prune_by_budget)。
+# 缺省按 user:宁可把"模型自读"错当"用户粘贴"多留一轮,也不把用户亲手粘的先踢 ——
+# 后者正是 2026-10-04 现场的伤(用户第一轮后粘贴图就被回收)。
 img_inline_attach() {
     local orig="$1" label="$2" src="${3:-user}" final size ext mime f prefix
     [[ "$src" == "tool" ]] || src=user
     inline_ref_id=""
-    (( IMG_CAPABLE )) || return 1
-    (( IMG_INLINE )) || return 1
-    # 已探明主模型不收图 → 直接退回转述,不试那一次必然 400 的主请求
-    # (未知=空值时照常尝试,由 ask_ai 的运行时兜底处理)
-    [[ "${IMG_MAIN_VISION:-}" == "0" ]] && return 1
-    img_ref_dir || return 1
-    final=$(prepare_inline "$orig") || return 1
-    [[ -f "$final" ]] || return 1
-    size=$(wc -c < "$final" | tr -d ' ')
-    if (( size > IMG_INLINE_MAX_BYTES )); then
-        [[ "$final" != "$orig" ]] && rm -f "$final"
+    img_inline_shrank_to=""
+    img_inline_already=""
+    img_inline_already_side=""
+    img_inline_delivery=""
+    # 每次进来先清:上一张的原因不许沿用到这一张(沿用 = 给一次成功挂载配一句假陈述,
+    # 而"这张为什么没上图"恰恰只有当轮的答案有用;同 last_cached_tokens 那条"缺失记 0
+    # 绝不沿用上一轮"的规矩)。
+    img_inline_reject=""
+    local _gate
+    _gate=$(img_inline_gate_reason) && { img_inline_reject="$_gate"; return 1; }
+    img_ref_dir || { img_inline_reject="引用目录建不出来(IMG_REF_DIR=${IMG_REF_DIR:-'(未设)'},查 \$TMPDIR 是否可写/满盘)"; return 1; }
+    # ---------- 逐档尝试 ----------
+    local -a _sides=()
+    read -r -a _sides <<<"$(img_inline_sides)"
+    (( ${#_sides[@]} )) || _sides=("${IMG_INLINE_MAX_SIDE:-2048}")
+    local _side="${_sides[0]}" _why="" _est _live _hard _dup _tried=""
+    for _side in "${_sides[@]}"; do
+        # ⚠ 每一档开头必须清 _why:它是"这一档为什么不行"的标记,不清的话
+        #   **降档成功那一档还带着上一档的 budget/bytes 标记** → 循环后按"走穿失败"报拒,
+        #   而图其实已经挂上了(探针实测:活图 11000 时 768px 明明塞得下,却报"拒")。
+        _why=""
+        _tried+="${_tried:+ > }${_side}px"
+        final=$(prepare_inline "$orig" "$_side") || {
+            img_inline_reject="压图失败(prepare_inline rc≠0:多为缺 sips/ffmpeg,或这张图本身不可读;试过的档:${_tried})"; return 1; }
+        [[ -f "$final" ]] || {
+            img_inline_reject="压图没产出交付件(prepare_inline 返回空/不存在路径;试过的档:${_tried})"; return 1; }
+        size=$(wc -c < "$final" | tr -d ' ')
+        if (( size > IMG_INLINE_MAX_BYTES )); then
+            [[ "$final" != "$orig" ]] && rm -f "$final"
+            _why="bytes"; continue          # 缩小能解:降一档再试
+        fi
+        # 硬上限(刀3):轮内**不许回收**,但也不能让一个轮无限挂图。为什么不回收:回收会把
+        # 上一条**已经发出去**的消息从"带图"改写成"已移除",等于在工具循环内部破不变量 I1,
+        # 断点落在最贵的位置。反面形状是实测的:20 张小图 = 每请求 49,920 token / 13~37s。
+        # 这里只判 token:单张交付件字节已被上面 IMG_INLINE_MAX_BYTES 挡过,
+        # 活图总字节的收口放在轮边界(那里回收合法)。
+        _est=$(img_est_from_side "$(img_dims "$final" 2>/dev/null | awk '{print ($1>$2?$1:$2)}')")
+        _live=$(img_live_tokens)
+        _hard=${IMG_LIVE_HARD_TOKENS:-0}
+        (( _hard > 0 )) || _hard=$(( ${IMG_LIVE_BUDGET_TOKENS:-6000} * 2 ))
+        if (( ${IMG_LIVE_BUDGET_TOKENS:-0} > 0 )) && (( _live > 0 )) && (( _live + _est > _hard )); then
+            [[ "$final" != "$orig" ]] && rm -f "$final"
+            _why="budget"; continue         # 也是缩小能解:降一档再试
+        fi
+        # 只在**降过档的那一档**查同图驻留,首档一律照旧挂。这不是省事,是两条语义的分界:
+        #   · 首档 = 今天的行为 —— 用户把同一张图粘两次本该各挂一份,HOLD/回收那套断言与
+        #     实机手感都依赖它(第一版这里查了首档,直接红 23 条,现象是"同轮 3 张只剩 1 张");
+        #   · 降档才需要查 —— 驻留的是 1024,而墙按请求档 2048 查不到它,于是每次重读都会
+        #     再挂一份 1024,这正是刀2 要防的"驻留→重读→再挂"成本泄漏。
+        # 命中就一说不挂(交回引用号,由调用方用去重话术,**不退转述** —— 图就在上下文里,
+        # 再转述一遍是花钱买更差的信息)。
+        if [[ "$_side" != "${_sides[0]}" ]] && _dup=$(img_live_ref_of "$orig" "$_side"); then
+            [[ "$final" != "$orig" ]] && rm -f "$final"
+            img_inline_already="$_dup"
+            # 档位**从 fp 现读**,不读 img_ref_hit_side:后者是在子 shell 里赋的,父 shell 取到空
+            img_inline_already_side=$(img_ref_side "$_dup")
+            img_inline_reject="同图已在上下文(引用号 $_dup,驻留 ${img_inline_already_side}px),本次不再挂第二份"
+            return 1
+        fi
+        break                              # 这一档成立,往下走真正落盘
+    done
+    # 阶梯走穿仍不成立 → 退回转述,并把**最后一次的真实读数**与试过的档一起说出口
+    if [[ "$_why" == "bytes" ]]; then
+        img_inline_reject="交付件仍 > IMG_INLINE_MAX_BYTES=${IMG_INLINE_MAX_BYTES}B(试过的档:${_tried};调大 IMG_INLINE_MAX_BYTES,或调小 IMG_INLINE_MAX_SIDE=${IMG_INLINE_MAX_SIDE} / 往 IMG_INLINE_SHRINK_LADDER 末尾加一档更小的)"
         return 1
     fi
-    # 硬上限(刀3):轮内**不许回收**,但也不能让一个轮无限挂图,所以超上限时**拒绝这张**
-    # 并让调用方退回转述(轮边界才是合法的回收时机)。为什么不回收:回收会把上一条
-    # **已经发出去**的消息从"带图"改写成"已移除",等于在工具循环内部破不变量 I1,
-    # 断点落在最贵的位置。反面形状是实测的:20 张小图 = 每请求 49,920 token / 13~37s。
-    # 这里只判 token:单张交付件字节已被上面 IMG_INLINE_MAX_BYTES 挡过,
-    # 活图总字节的收口放在轮边界(那里回收合法)。
-    local _est _live _hard
-    _est=$(img_est_from_side "$(img_dims "$final" 2>/dev/null | awk '{print ($1>$2?$1:$2)}')")
-    _live=$(img_live_tokens)
-    _hard=${IMG_LIVE_HARD_TOKENS:-0}
-    (( _hard > 0 )) || _hard=$(( ${IMG_LIVE_BUDGET_TOKENS:-6000} * 2 ))
-    if (( ${IMG_LIVE_BUDGET_TOKENS:-0} > 0 )) && (( _live > 0 )) && (( _live + _est > _hard )); then
-        [[ "$final" != "$orig" ]] && rm -f "$final"
+    if [[ "$_why" == "budget" ]]; then
+        img_inline_reject="活图已 ${_live} tokens,最小档这张仍估 ${_est} > 剩余额度(硬上限 ${_hard},IMG_LIVE_HARD_TOKENS 默认 2×IMG_LIVE_BUDGET_TOKENS=${IMG_LIVE_BUDGET_TOKENS};降档试过的档:${_tried})—— 轮内不许回收,所以拒这张;等轮边界 ♻ 或调大预算"
         return 1
     fi
     ext=$(printf '%s' "${final##*.}" | tr '[:upper:]' '[:lower:]')
@@ -7753,7 +7980,9 @@ img_inline_attach() {
     IMG_REF_SEQ=$((IMG_REF_SEQ + 1))
     f="${IMG_REF_DIR}/r${IMG_REF_SEQ}$$"
     prefix="data:${mime};base64,"
-    printf '%s' "$prefix" > "$f.url" || { rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"; return 1; }
+    printf '%s' "$prefix" > "$f.url" || {
+        img_inline_reject="引用文件创建失败(写 ${f}.url:磁盘满/权限/目录被删)"
+        rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"; return 1; }
     # base64 直接重定向进文件(几 MB 也不进 bash 变量:变量走 --arg 会撞 ARG_MAX,
     # 而 describe_images 那套 --rawfile 是为了"读",这里连读都省了)。
     # ⚠ **必须 tr -d '\n'**:实测(2026-10-02,xxd 打在字节上)macOS 的 base64 不折行但
@@ -7765,6 +7994,7 @@ img_inline_attach() {
     # 不能只靠 `||` 判管道成败:本脚本没开 pipefail,管道里 base64 失败时 tr 依然成功退出。
     # 所以直接量结果:data 前缀之后必须真有 base64 正文。
     if (( $(wc -c < "$f.url" | tr -d ' ') <= ${#prefix} )); then
+        img_inline_reject="base64 正文为空(交付件读不出内容:${final})"
         rm -f "$f.url"; [[ "$final" != "$orig" ]] && rm -f "$final"
         return 1
     fi
@@ -7774,18 +8004,47 @@ img_inline_attach() {
     # 记这些值(空格分隔,一行):
     #   1) 原文件校验和 —— 刀2 去重预检只要 cksum 一次原文件就能判定,不必再跑 prepare_inline
     #   2) 交付件校验和 —— 取证用;prepare_inline 是确定性的,故"同原文件+同边长档"必得同交付件
-    #   3) 当时的 IMG_INLINE_MAX_SIDE —— 少了它会**误判**:会话中途换过边长档时驻留的是缩小版,
-    #      而模型这次要的可能是全分辨率那张,不能拿"原文件相同"当成"这张已经给过你了"
+    #   3) **本张交付件实际用的边长档** —— 少了它会**误判**:驻留的是缩小版时,不能拿
+    #      "原文件相同"当成"这张已经给过你了"(原先这里写全局 IMG_INLINE_MAX_SIDE;加了
+    #      降档阶梯之后两者可以不相等,继续写全局值就等于让 1024px 的副本冒充 2048px 的
+    #      通过去重墙。img_live_ref_of 的匹配档也跟着改成"请求哪档比哪档")
     #   4) 5) 交付件像素 "宽 高" —— 刀3 的预算取数(img_token_est)
     #   6) 来源(user|tool) —— F-2 回收顺序分级(img_refs_prune_by_budget 先踢 tool)
     # ⚠ 列序是契约:刀2 读 $1 与 $3,刀3 读 $4 $5,F-2 读 $6。**新列一律往末尾加,别插中间**。
-    # 取不到像素时按最大档估(宁可早回收,不要超载):这是保守方向的刻意选择。
-    local _fp_dims; _fp_dims=$(img_dims "$final" 2>/dev/null || echo "")
-    [[ "$_fp_dims" =~ ^[0-9]+\ [0-9]+$ ]] || _fp_dims="${IMG_INLINE_MAX_SIDE} ${IMG_INLINE_MAX_SIDE}"
+    # 取不到像素时按本档估(宁可早回收,不要超载):这是保守方向的刻意选择。
+    local _fp_dims _fp_real=0
+    _fp_dims=$(img_dims "$final" 2>/dev/null || echo "")
+    if [[ "$_fp_dims" =~ ^[0-9]+\ [0-9]+$ ]]; then _fp_real=1; else _fp_dims="${_side} ${_side}"; fi
     printf '%s %s %s %s %s\n' \
         "$(cksum < "$orig"  | awk '{printf "%s_%s", $1, $2}')" \
         "$(cksum < "$final" | awk '{printf "%s_%s", $1, $2}')" \
-        "${IMG_INLINE_MAX_SIDE}" "${_fp_dims}" "${src}" > "$f.fp" 2>/dev/null
+        "${_side}" "${_fp_dims}" "${src}" > "$f.fp" 2>/dev/null
+    # 交付件事实句(刀8,给模型一个能自证的抓手;动机见 img_inline_delivery 的声明处)。
+    # 两条判据都必须真取到:**交付件尺寸**(本轮交付的这份)与**原文件尺寸**(调用方传进来的
+    # $orig)。_fp_dims 取不到时上面那个兜底值是为预算估的"宁可早回收"值,不是事实,故用
+    # _fp_real 分开 —— 拿兜底值去发一句"交付 WxH"就是编尺寸。
+    local _o_dims _shrunk=0; _o_dims=$(img_dims "$orig" 2>/dev/null || echo "")
+    if (( _fp_real )) && [[ "$_o_dims" =~ ^[0-9]+\ [0-9]+$ ]]; then
+        if [[ "${_o_dims// /x}" == "${_fp_dims// /x}" ]]; then
+            # 尺寸一致 = 没重采样。但字节超限时 prepare_image 会**重编码为 JPEG**(同尺寸、
+            # 不同字节)—— 那是一处真实的画质改动,得写进事实里,否则"同尺寸"会被读成
+            # "一个字节都没动"。
+            if [[ "$final" == "$orig" ]]; then
+                img_inline_delivery="交付 ${_fp_dims// /x},与原文件同尺寸"
+            else
+                img_inline_delivery="交付 ${_fp_dims// /x},与原文件同尺寸;已重编码为 JPEG 压字节(未裁剪)"
+            fi
+        else
+            img_inline_delivery="交付 ${_fp_dims// /x};原文件 ${_o_dims// /x},等比重采样,未裁剪"
+            _shrunk=1
+        fi
+    elif [[ "$_side" != "${_sides[0]}" ]]; then
+        # 尺寸读不出时退回旧口径(降过档 ⇒ 报缩):宁可多说一句,也不漏报一次精度损失。
+        _shrunk=1
+    fi
+    # "缩过"的**唯一**判据在这里算完:`交付件尺寸 ≠ 原文件尺寸`。调用方那两处话术与上面这句
+    # 事实用的必须是同一个结论,否则屏幕与正文会各说一套(见 img_inline_shrank_to 声明处)。
+    (( _shrunk )) && img_inline_shrank_to="$_side"
     [[ "$final" != "$orig" ]] && rm -f "$final"
     IMG_REFS+=("${IMG_REF_GROUP:-0} r${IMG_REF_SEQ}$$")   # 带轮号:按轮裁剪靠它(见 img_refs_prune)
     # ⚠ 这里原来是**无条件 img_refs_prune**:那次回收会把上一条**已经发出去**的消息
@@ -8094,25 +8353,66 @@ tool_read_image() {
             # 不 return:落到下面的正常挂载流程,发新号
         else
             : > "${IMG_REF_DIR}/${rid}.rt" 2>/dev/null   # 两次原则的计数(一击即够)
-            content="read_image: $path —— 这张图本会话已经给过你了(见引用号 $rid 所在的那条消息),本次不再重复挂载。请回看那条消息里的画面作答;若那里已看不到图片本体(例如它被回收过,或你确实看不见),再调用一次本工具,我会收回旧引用并重新给你挂载。"
-            printf ' 🖼 同一张图已在上下文(引用号 %s),未重复挂载\n' "$rid"
+            # 有了降档阶梯,"已经给过你"那份**可能是缩小版** —— 档位要一起说,否则模型以为
+            # 上下文里那张就是全分辨率,它读不清细节时只会怀疑自己而不是来要更高清的那张。
+            # 措辞纪律不变:只陈述"驻留的是哪一档"这个已发生的事实,不声明"现在看得见"。
+            local _rs _rsn="" _rsn2=""
+            _rs=$(img_ref_side "$rid")
+            if (( ${IMG_INLINE_MAX_SIDE:-2048} > _rs )); then
+                _rsn="驻留 ${_rs}px 档"
+                _rsn2="或需要比 ${_rs}px 更高的分辨率"
+            else
+                _rsn2="或你需要更高分辨率"
+            fi
+            content="read_image: $path —— 这张图本会话已经给过你了(见引用号 $rid 所在的那条消息${_rsn:+,${_rsn}}),本次不再重复挂载。请回看那条消息里的画面作答;若那里已看不到图片本体(例如它被回收过),${_rsn2},再调用一次本工具,我会收回旧引用并重新给你挂载。"
+            printf ' 🖼 同一张图已在上下文(引用号 %s%s),未重复挂载\n' "$rid" "${_rsn:+,${_rsn}}"
             return 0
         fi
     fi
 
-    # 1) inline 优先。caption 只写**事实**(路径),刻意不写"本条附有图片/请以原图为准"
+    # 1) inline 优先。caption 只写**事实**(路径),刻意不写"本条附有原图/请以原图为准"
     #    这类现在时断言:图一旦被回收,那句话就变成假陈述,而实验证明假陈述的代价是
     #    模型**坚持自己上一轮的(可能读错的)结论**而不去重读(F 臂 2/3 坚持,含 1 例将错就错)。
     #    路径必须留在 caption 里 —— 它是模型"要不要重看"的唯一抓手。
+    #    降过档时把**档位**写进 caption:它是关于这份交付件的一次性事实(不会随回收变假),
+    #    而模型判"线号读得清不清"需要这个信息。
     if img_inline_attach "$resolved" "$path" "tool"; then
-        content="read_image: $path"$'\n'"[[IMGREF:$inline_ref_id]]"
-        printf ' 🖼 原图已交给主模型 %s\n' "$path"
+        # 交付事实句放 caption 首行:模型拿到的这份与磁盘上那份是不是同尺寸,在这里一眼可比。
+        # 它是"关于这份交付件"的一次性事实,图被回收之后依然为真(不违 F 臂那条措辞纪律)。
+        local _dfact=""
+        [[ -n "$img_inline_delivery" ]] && _dfact="(${img_inline_delivery})"
+        content="read_image: $path${_dfact}"$'\n'"[[IMGREF:$inline_ref_id]]"
+        [[ -n "$img_inline_shrank_to" ]] && content+=$'\n'"(本张交付件已缩到最长边 ${img_inline_shrank_to}px;若判读细节需要更高分辨率,说明需要并调大 IMG_LIVE_BUDGET_TOKENS / IMG_INLINE_MAX_SIDE)"
+        if [[ -n "$img_inline_shrank_to" ]]; then
+            printf ' 🖼 原图已交给主模型 %s(已缩到 %spx%s)\n' "$path" "$img_inline_shrank_to" "${img_inline_delivery:+;${img_inline_delivery}}"
+        else
+            printf ' 🖼 原图已交给主模型 %s%s\n' "$path" "$_dfact"
+        fi
         return 0
     fi
 
-    # 2) 退回转述。provider=none(手工关或曾被接口拒)时 describe_images 不发请求,
-    #    直接把"不支持"作为工具结果回给模型,它才知道图没看成,而不是凭文件名猜内容。
+    # 1b) 同图同档已经活着 → 走去重话术,**不退转述**。
+    #     降档让"驻留档"可能低于全局档,如果这里退回转述,等于花一次视觉请求去换一份
+    #     上下文里本来就有的图的二手材料(而且精度更低)。
+    if [[ -n "$img_inline_already" ]]; then
+        content="read_image: $path —— 这张图本会话已经给过你了(引用号 $img_inline_already,驻留 ${img_inline_already_side}px 档),本次不再挂第二份。请回看那条消息里的画面作答;若那里已看不到图片本体(例如它被回收过),或你需要高于 ${img_inline_already_side}px 的分辨率,再调用一次本工具并说明要更高清 —— 我会收回旧引用并重新挂载。"
+        printf ' 🖼 同一张图已在上下文(引用号 %s,驻留 %spx),未重复挂载\n' \
+            "$img_inline_already" "$img_inline_already_side"
+        return 0
+    fi
+
+    # 2) 退回转述。**为什么要把原因打在屏幕上**:这五类判据(链已关 / inline 已关 /
+    #    已探明主模型不吃图 / 压不动或超字节 / 撞活图硬上限)原先全是哑的 return 1,
+    #    用户只看见"这次成转述了",既不知道是哪条,也不知道调什么能变回去 —— 与 ♻
+    #    那条立的口径一致(见 bugList #58:回收提示必须带触发判据名)。
+    #    IMG_INLINE=0/IMG_CAPABLE=0 时 describe_images 不发请求,直接回"不支持"给模型,
+    #    它才知道图没看成,而不是凭文件名猜内容。
     #    这里明写"精度低于直接看图":别让模型把转述当成它看过了原图。
+    if [[ -n "$img_inline_reject" ]]; then
+        printf ' ⤷ 原图未内联:%s\n' "$img_inline_reject"
+    else
+        printf ' ⤷ 原图未内联(原因未登记,请把这条连同上面的输出一起报出来)\n'
+    fi
     describe_images "$resolved"
     if (( describe_failed )); then
         content="图片未识别: $describe_result"
@@ -8978,6 +9278,8 @@ printContent() {
     # 降级标记也只对当轮有效(否则一次误判会让整个会话永久掉回人工)。
     tool_round=0
     auto_downgraded=0
+    # 屏幕要往前走一整轮了:下一轮提示前该重新看见 ⚡ 常驻标记(见 marker_shown)。
+    marker_shown=0
 
     # ---------- 轮边界:图片可见性的唯一分界线 ----------
     # 轮号 +1 并**马上降级**。两件都必须做,少任何一件 HOLD 都不兑现:
@@ -9000,7 +9302,7 @@ printContent() {
     # 机制与 read_image 完全同一套:消息里只写事实 + 引用标记,base64 由
     # make_request_body 发请求前展开(为什么用引用不用内联,见 IMG_INLINE_* 配置节)。
     if (( ${#input_images[@]} > 0 )); then
-        local img_n=${#input_images[@]} img_desc="" img_ok=0 img_path
+        local img_n=${#input_images[@]} img_desc="" img_ok=0 img_path img_shrunk_note="" img_shrunk_n=0
         local -a img_fb=()
         # 轮号已在 printContent 开头的"轮边界"处 +1 并降级过,这里**不再推进**
         # (原先在这儿 +1,纯文字轮就永远不推进;重复 +1 还会让 HOLD≥2 时提前误降级)
@@ -9022,12 +9324,52 @@ printContent() {
                     #   ⚠ ${img_path} 的花括号是必须的:brew bash 5 里 `$var` 紧跟全角标点
                     #   会吃掉展开(见 parse_placeholders 里同一条注释)。
                     img_desc+=$'\n'"用户粘贴的图片: ${img_path}（这张图已随本条消息附上:你现在看得到画面就直接作答,不要重复调用 read_image;看不到时(例如它已被回收)再调用本工具重看）"$'\n'"[[IMGREF:$inline_ref_id]]"
+                    # 交付事实句(与 read_image 同一份口径):这张交付件与磁盘上那份是不是同尺寸,
+                    # 摆成事实给模型 —— 起因见上面那句全局声明的注释,粘贴图同样可能被静默缩过。
+                    [[ -n "$img_inline_delivery" ]] && img_desc+=$'\n'"(${img_inline_delivery})"
+                    if [[ -n "$img_inline_shrank_to" ]]; then
+                        # 缩过必须逐张说出口:这张是**缩小版**(判据见 img_inline_shrank_to 声明处,
+                        # 首档就缩的也算),而本工具的主用途是读丝印/线号,精度降了不说等于骗人。
+                        # 汇总进 note,同时在正文里给模型留一句事实。
+                        img_shrunk_n=$(( img_shrunk_n + 1 ))
+                        img_desc+=$'\n'"(本张交付件已缩到最长边 ${img_inline_shrank_to}px;需要更高分辨率请说明,可调大 IMG_LIVE_BUDGET_TOKENS 或 IMG_INLINE_MAX_SIDE)"
+                        printf ' ⤷ %s 已缩到 %spx(精度随之下调)\n' \
+                            "${img_path##*/}" "$img_inline_shrank_to"
+                    fi
+                elif [[ -n "$img_inline_already" ]]; then
+                    # 同图同档已活着:复用那个引用号,**不花一次转述请求**。
+                    # 挂新副本与复用旧引用在计费上是同一份钱(两条消息各带一个 image 部件),
+                    # 但复用省掉一次压缩与一份 MB 级临时文件,也不会出现"同一张图两份 .url"。
+                    [[ $img_ok -eq 0 ]] && img_desc+=$'\n'"(用户发送了 $img_n 张图片)"
+                    img_ok=$(( img_ok + 1 ))
+                    img_desc+=$'\n'"用户粘贴的图片: ${img_path}（这张图本会话已经附上过一次,引用号 ${img_inline_already};你现在看得到画面就直接作答,不要重复调用 read_image;看不到时(例如它已被回收)再调用本工具重看）"$'\n'"[[IMGREF:$img_inline_already]]"
+                    printf ' ⤷ %s 未挂第二份:同图已在上下文(引用号 %s,驻留 %spx),复用该引用\n' \
+                        "${img_path##*/}" "$img_inline_already" "$img_inline_already_side"
                 else
                     img_fb+=("$img_path")
+                    # 逐张报:一批里常常只有某一张超字节/撞预算,只说"有 N 张退回转述"
+                    # 人就看不出是哪张、为什么(判据名见 img_inline_attach 各出口)。
+                    printf ' ⤷ %s 退回转述:%s\n' "${img_path##*/}" \
+                        "${img_inline_reject:-原因未登记(请把这条一起报出来)}"
                 fi
             done
-            (( img_ok > 0 )) && printf ' 🖼 %s/%s 张原图已随本轮消息交给主模型\n' "$img_ok" "$img_n"
+            # ⚠ 缩过的张数在**循环里**逐张记,不在循环后读 img_inline_shrank_to:
+            #   那个全局装的是"最后一次 attach"的状态,用它汇总是"只有最后一张缩过"的假话
+            #   (一批里缩的往往是第一张)。同理,汇总句只说**张数**,不逐张点档位 ——
+            #   逐张那句本来就各自打在屏幕上,汇总处再拼一遍既冗长又容易在"混合批次"里
+            #   把没缩的那几张也一起说成缩过。同 last_cached_tokens 那条"不许沿用上一轮"。
+            if (( img_ok > 0 )); then
+                [[ $img_shrunk_n -gt 0 ]] && img_shrunk_note="(其中 ${img_shrunk_n} 张已缩过,逐张档位见上面各行的说明)"
+                printf ' 🖼 %s/%s 张原图已随本轮消息交给主模型%s\n' "$img_ok" "$img_n" \
+                    "${img_shrunk_note}"
+            fi
         else
+            # 整轮都没走 inline = 通道级关门(IMG_INLINE=0 / IMG_CAPABLE=0),与具体哪张图无关。
+            # 原因只能现问 img_inline_gate_reason:img_inline_reject 这里可能是**上一轮**残留,
+            # 拿它说话就是假陈述(同"缺失记 0 不沿用上一轮"那条规矩)。
+            local _gr
+            _gr=$(img_inline_gate_reason)
+            printf ' ⤷ 本轮 %s 张全部退回转述:%s\n' "$img_n" "${_gr:-原因未登记(请把这条一起报出来)}"
             img_fb=("${input_images[@]}")
         fi
         input_images=()
@@ -9565,18 +9907,23 @@ normal_line() {
 
     # auto 模式常驻标记:每轮输入框上方一行。开着 auto 却忘了,是这类模式最
     # 经典的事故来源;标记里同时给出关闭方法与急停方式,不必去翻帮助。
-    if [[ -n "$auto_mode" ]]; then
-        printf '\033[2m⚡ auto=%s · 本次会话已自动放行 %s 次 · 审计 ~/.ct/auto/audit.log · -noauto 关闭 · Ctrl+C 两次中止并急停\033[0m\n' \
-            "$auto_mode" "$auto_approvals"
-    fi
-    # MCP 授权是**会话级全域**的(一次点头 = 该 server 全部工具不再问),所以必须常驻可见。
-    # 授权换走了逐次弹窗这道兜底,剩下的三条(次数上限、审计、可随时中止)就得写在脸上,
-    # 否则"我什么时候放行的、现在还在放行"会变成只有翻日志才知道的事。
-    if (( MCP_ENABLE == 1 )) && [[ -n "${MCP_GRANTED// /}" ]]; then
-        local _mq=""   # 不限时不能带分母:"3/0 次"会被读成"配额只剩 0"
-        (( MCP_MAX_CALLS > 0 )) && _mq="/${MCP_MAX_CALLS}"   # 判据与 mcp_quota_text 同一个变量
-        printf '\033[2m⚡ mcp 已授权本会话:%s · 已调用 %s%s 次 · 审计 ev=mcp · Ctrl+C 中止当前调用\033[0m\n' \
-            "${MCP_GRANTED# }" "$MCP_CALLS" "${_mq}"
+    # ⚠ 受 marker_shown 管:上一轮什么都没提交时不重打(见该变量的注释)。
+    if (( ! marker_shown )); then
+        if [[ -n "$auto_mode" ]]; then
+            printf '\033[2m⚡ auto=%s · 本次会话已自动放行 %s 次 · 审计 ~/.ct/auto/audit.log · -noauto 关闭 · Ctrl+C 两次中止并急停\033[0m\n' \
+                "$auto_mode" "$auto_approvals"
+            marker_shown=1
+        fi
+        # MCP 授权是**会话级全域**的(一次点头 = 该 server 全部工具不再问),所以必须常驻可见。
+        # 授权换走了逐次弹窗这道兜底,剩下的三条(次数上限、审计、可随时中止)就得写在脸上,
+        # 否则"我什么时候放行的、现在还在放行"会变成只有翻日志才知道的事。
+        if (( MCP_ENABLE == 1 )) && [[ -n "${MCP_GRANTED// /}" ]]; then
+            local _mq=""   # 不限时不能带分母:"3/0 次"会被读成"配额只剩 0"
+            (( MCP_MAX_CALLS > 0 )) && _mq="/${MCP_MAX_CALLS}"   # 判据与 mcp_quota_text 同一个变量
+            printf '\033[2m⚡ mcp 已授权本会话:%s · 已调用 %s%s 次 · 审计 ev=mcp · Ctrl+C 中止当前调用\033[0m\n' \
+                "${MCP_GRANTED# }" "$MCP_CALLS" "${_mq}"
+            marker_shown=1
+        fi
     fi
 
     # 输入阶段的前置条件,三种原因**分开报**:以前合并成一条"缺组件",而真因往往是
@@ -9634,7 +9981,8 @@ normal_line() {
                 if (( cmd_ok )) && [[ "$ptk_text" != *$'\n'* ]]; then
                     handle_cmd_line "$ptk_text"
                     case $? in
-                        0|2) return 0 ;;
+                        # 已处理/未知命令这两条路径都必然画了东西,标记下一轮要重新打
+                        0|2) marker_shown=0; return 0 ;;
                     esac
                 fi
                 parse_placeholders "$ptk_text"
@@ -9650,7 +9998,7 @@ normal_line() {
             # 全新首行且单行:命令解析
             handle_cmd_line "$ptk_text"
             case $? in
-                0|2) return 0 ;;   # 已处理(结束本轮输入)/未知命令(重新提示)
+                0|2) marker_shown=0; return 0 ;;   # 已处理(结束本轮输入)/未知命令(重新提示)
             esac
         fi
         parse_placeholders "$ptk_text"

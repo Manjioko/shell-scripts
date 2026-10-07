@@ -315,8 +315,10 @@ reject_case no   "空文本不能判不收图"   ''
 # 规矩只许有一处定义、其余全走调用(三处各抄一份已经漂过一次:ask_ai 那份多了
 # `*vision*` 单条件,就是上面那条负锁要拦的形状)
 ck "判据定义恰好 1 处" "$(grep -c '^img_reject_wording() {' "$SRC")" "1"
+# ⚠ 这条原先写成"匹配数 - 1",那个 -1 是在给注释让路(定义行不匹配,而注释里有两处
+# 提到这个名字)。改成显式滤掉纯注释行,以后谁在注释里提一句判据名都不会把闸门弄红。
 ck "判据至少 3 处调用(probe/ask_ai/describe_images 都走它)" \
-   "$(( $(grep -c 'img_reject_wording ' "$SRC") - 1 ))" "3"
+   "$(grep 'img_reject_wording ' "$SRC" | grep -vc '^[[:space:]]*#')" "3"
 ck "兜底不得再用 rm 删 .url(必须改名 .gone,否则标记变孤儿、正文留裸标记)" \
    "$(grep -c 'rm -f "${IMG_REF_DIR:?}"' "$SRC")" "0"
 ck "正向判据必须看 image_tokens 而不是只看有回复" \
@@ -425,10 +427,18 @@ ck "caption 不声明'本条附有原图'类现在时断言(F 臂纪律)" \
 ck "caption 仍带 IMGREF 标记(展开契约)" \
    "$(awk '/img_desc\+=.*IMGREF:\$inline_ref_id/{print}' "$SRC" | grep -c '用户粘贴的图片')" "1"
 # 负对照:HEAD 版确实是旧形状 —— 证明上面几条测的是真改动,不是空 grep
+# ⚠ 锚点不能写死 `HEAD`:这条断言要求"被对照的那个版本**还带着**旧形状",而 HEAD 是
+# 会往前走的。实况:旧形状在 64b6b52 还在、到 HEAD(45895df「更新图片上传机制」)已被
+# 这次改动删掉 → 写死 HEAD 时它恒判 no,闸门长期挂一条与我们无关的红。
+# 改成"沿 HEAD 向前找最近一个仍含旧形状的提交",找不到才红(那说明真没改动可对照)。
 if git -C "$(dirname "$SRC")" rev-parse HEAD >/dev/null 2>&1; then
-    _head_line=$(git -C "$(dirname "$SRC")" show HEAD:wchat.sh 2>/dev/null | awk '/read_image: \$img_path/{print}' | head -1)
-    ck "负对照:HEAD 上旧形状确实存在(证明这条锁在管事)" \
-       "$([[ -n "$_head_line" ]] && echo yes || echo no)" "yes"
+    _old_rev=$(git -C "$(dirname "$SRC")" rev-list HEAD 2>/dev/null | while read -r _r; do
+        if git -C "$(dirname "$SRC")" show "$_r:wchat.sh" 2>/dev/null | grep -q 'read_image: \$img_path'; then
+            echo "$_r"; break
+        fi
+    done)
+    ck "负对照:历史版本上旧形状确实存在(证明这条锁在管事)" \
+       "$([[ -n "$_old_rev" ]] && echo yes || echo no)" "yes"
 fi
 
 # --- 14.2 F2 行为:粘贴图片 = 只读授权,不再二次询问 ---
@@ -541,7 +551,7 @@ img_refs_prune_by_budget > /dev/null
 ck "负对照:全 user 时按年龄先踢最老(rN1 死)" "$([[ -e "$IMG_REF_DIR/rN1.gone" ]] && echo yes)" "yes"
 ck "负对照:全 user 时最年轻的活(rN3 在)" "$([[ -s "$IMG_REF_DIR/rN3.url" ]] && echo yes)" "yes"
 ck "结构锁:.fp 写入带第 6 列来源(列序契约只准往后加)" \
-   "$(grep -cF '"${IMG_INLINE_MAX_SIDE}" "${_fp_dims}" "${src}"' "$SRC")" "1"
+   "$(grep -cF '"${_side}" "${_fp_dims}" "${src}"' "$SRC")" "1"
 ck "结构锁:read_image 挂载标 tool 来源" "$(grep -cF 'img_inline_attach "$resolved" "$path" "tool"' "$SRC")" "1"
 ck "结构锁:用户粘贴挂载标 user 来源" "$(grep -cF 'img_inline_attach "$img_path" "$img_path" "user"' "$SRC")" "1"
 
@@ -607,6 +617,434 @@ content=""; tool_read_image </dev/null >/dev/null 2>&1
 content=""; tool_read_image </dev/null >/dev/null 2>&1
 ck "负对照:只重读一次时零重挂(0 个 .gone、仍 1 份 .url)" \
    "$(ls "$IMG_REF_DIR"/*.gone 2>/dev/null | wc -l | tr -d ' ')/$(ls "$IMG_REF_DIR"/*.url 2>/dev/null | wc -l | tr -d ' ')" "0/1"
+
+echo "=== 19. -u 面板形状契约:用量那几行不许挂在「精确值已到手」上 ==="
+# 真机退化(用户报):-u 只剩一行简单文字,看不出用了多少 token、百分比多少。
+# 病根不是"少打了几行",而是整块面板被 if (( last_prompt_tokens > 0 )) 门控 ——
+# 精确 usage 没到手的场合(新会话 / -l 加载历史 / -n 新对话 / 压缩后 / 端点根本不回
+# usage)一律退回那行字节粗算,而这些恰是人最想敲 -u 的时刻。
+# 修法:来源降级、形状不变 —— 粗算顶上,同一形状打印,行内标清它是粗算。
+_up_panel() {   # $1=last_prompt_tokens → stdout = -u 面板原文
+    messages=$(jq -n '[{role:"system",content:"x"}]')
+    last_prompt_tokens="${1:-0}"; last_cached_tokens=0; last_image_tokens=0
+    CTX_WINDOW=1000000; TOKEN_THRESHOLD=750000; CTX_OVERFLOW_GATE=625000
+    print_usage 2>/dev/null
+}
+_u0=$(_up_panel 0)          # 没有精确值:曾经只剩一行
+_u1=$(_up_panel 9580)       # 有精确值
+ck "无精确值时仍有「上下文用量」行"   "$(grep -c '上下文用量' <<<"$_u0")" "1"
+ck "无精确值时行内带百分比(压缩点口径)"   "$(grep -cE '压缩点 [0-9]+.*已用 [0-9]+%' <<<"$_u0")" "1"
+ck "无精确值时行内带窗口百分比"           "$(grep -cE '窗口 [0-9]+ tokens.*已用 [0-9]+%' <<<"$_u0")" "1"
+ck "无精确值时行内带压缩点分母"       "$(grep -c '压缩点 750000' <<<"$_u0")" "1"
+ck "无精确值时窗口/越界判据行还在"    "$(grep -c '越界判据 625000' <<<"$_u0")" "1"
+ck "无精确值时图片可见性行还在"       "$(grep -c '图片可见性' <<<"$_u0")" "1"
+ck "无精确值时活图行还在"             "$(grep -c '张在上下文' <<<"$_u0")" "1"
+ck "无精确值时上次请求行还在"         "$(grep -c '上次请求' <<<"$_u0")" "1"
+ck "无精确值时老实标出这是粗算"       "$(grep -c '字节粗算' <<<"$_u0")" "1"
+ck "面板至少 6 行(不是退化成一两行)" "$(( $(wc -l <<<"$_u0") >= 6 ? 1 : 0 ))" "1"
+ck "有精确值时不再写「字节粗算」"     "$(grep -c '字节粗算' <<<"$_u1")" "0"
+ck "有精确值时报的正是 usage 那个数"  "$(grep -c '9580 tokens / 压缩点' <<<"$_u1")" "1"
+# 负对照:面板若真退化成一行,上面这批判据必须转红(否则它们恒真)
+_degraded='│ 上下文用量: 约 41 tokens(字节粗算,漏算 tools schema;精确值在下次请求后显示,压缩点 750000)'
+ck "负对照:退化样本判不出窗口行"     "$(grep -c '越界判据' <<<"$_degraded")" "0"
+ck "负对照:退化样本判不出百分比"     "$(grep -cE '压缩点 [0-9]+.*已用 [0-9]+%' <<<"$_degraded")" "0"
+# 分母被人在 env 里写坏时,不许把整个面板一起带走:算术崩 = -u 看起来"坏了"
+messages=$(jq -n '[{role:"system",content:"x"}]')
+last_prompt_tokens=0; CTX_WINDOW=abc; TOKEN_THRESHOLD=xyz
+_ubad=$(print_usage 2>&1)
+ck "分母非法时仍打出用量行(面板没被带走)" "$(grep -c '上下文用量' <<<"$_ubad")" "1"
+ck "分母非法时没有把算术报错吐给用户"     "$(grep -c 'division by zero\|syntax error' <<<"$_ubad")" "0"
+
+echo "=== 20. 退回转述必须说出口:每条判据都要报出自己(名字 + 读数 + 旋钮) ==="
+# 用户现场:同一张图"有时直接读图、有时走转述",屏幕上看不出为什么 —— 因为
+# img_inline_attach 的每条出口原先都是**哑的 return 1**。与 ♻ 那条立的口径补齐
+# (回收提示必须带触发判据名)。这批断言钉两件事:
+#   ① 每条判据都报出自己的**变量名**(用户据此能自己去调),不是笼统一句"超预算";
+#   ② 两个调用点真把它打在屏幕上(结构锁 + 真调 normal/tool 的行为断言)。
+budget_env why20
+p_a="$W/w20a.png"; p_b="$W/w20b.png"; cp "$del" "$p_a"; cp "$del" "$p_b"
+IMG_INLINE_MAX_BYTES=2097152; IMG_MAIN_VISION=""; IMG_PROVIDER=auto; vision_disabled_reason=""
+# ① 成功时原因必须为空,且**不得沿用上一张的原因**
+img_inline_attach "$p_a" a user; _rc=$?
+ck "成功臂:rc=0" "$_rc" "0"
+ck "成功臂:原因为空(不许残留上一张的话)" "${img_inline_reject:-EMPTY}" "EMPTY"
+# ② 三条通道级判据:各自报出自己的变量名
+IMG_INLINE=0; img_inline_attach "$p_a" a user; _rc=$?
+ck "IMG_INLINE=0 → 原因点名 IMG_INLINE" "$(grep -c 'IMG_INLINE=0' <<<"$img_inline_reject")" "1"
+ck "IMG_INLINE=0 → rc=1" "$_rc" "1"
+IMG_INLINE=1; IMG_CAPABLE=0; vision_disabled_reason="接口判不收图"; IMG_PROVIDER=none
+img_inline_attach "$p_a" a user; _rc=$?
+ck "IMG_CAPABLE=0 → 点名 IMG_PROVIDER" "$(grep -c 'IMG_PROVIDER=none' <<<"$img_inline_reject")" "1"
+ck "IMG_CAPABLE=0 → 带上降级原因(接口说的是哪句)" "$(grep -c '接口判不收图' <<<"$img_inline_reject")" "1"
+ck "IMG_CAPABLE=0 → rc=1" "$_rc" "1"
+IMG_CAPABLE=1; IMG_MAIN_VISION=0; model=fake-text-only
+img_inline_attach "$p_a" a user; _rc=$?
+ck "探明不收图 → 点名 IMG_MAIN_VISION 与当前 model" \
+   "$(grep -c 'IMG_MAIN_VISION' <<<"$img_inline_reject")/$(grep -c 'fake-text-only' <<<"$img_inline_reject")" "1/1"
+ck "探明不收图 → rc=1" "$_rc" "1"
+# 未知(空值)不算探明 → 不该被这条挡下
+IMG_MAIN_VISION=""; img_live_tokens(){ printf '0'; }
+img_inline_attach "$p_a" a user; _rc=$?
+ck "负对照:model 未知时不因这条被拒" "$_rc" "0"
+# ③ 三条图本身的原因:超字节 / 压不动 / 超活图硬上限
+IMG_INLINE_MAX_BYTES=8; img_inline_attach "$p_a" a user; _rc=$?
+ck "超字节 → 报出上限那个数" \
+   "$(grep -cE 'IMG_INLINE_MAX_BYTES=8B' <<<"$img_inline_reject")" "1"
+ck "超字节 → 把试过的每一档都列出来(降档阶梯走穿了才说这句)" \
+   "$(grep -c '试过的档:' <<<"$img_inline_reject")" "1"
+ck "超字节 → 给出可调的旋钮名" "$(grep -c 'IMG_INLINE_MAX_SIDE' <<<"$img_inline_reject")" "1"
+ck "超字节 → rc=1" "$_rc" "1"
+IMG_INLINE_MAX_BYTES=2097152
+prepare_inline(){ return 1; }
+img_inline_attach "$p_a" a user; _rc=$?
+ck "压图失败 → 说出是 prepare_inline 并给出常见成因" \
+   "$(grep -c 'prepare_inline' <<<"$img_inline_reject")" "1"
+ck "压图失败 → rc=1" "$_rc" "1"
+prepare_inline(){ printf '%s\n' "$1"; }          # 桩:原样交回(真实现在第 20 组末尾 source 回来)
+unset -f img_live_tokens img_est_from_side      # 第 20 组的桩必须撤掉,否则第 21 组的"真实降档"会被假读数骗成假绿
+img_est_from_side(){ printf '500'; }             # 估算数钉死,别让断言跟着真缩放器漂
+IMG_LIVE_BUDGET_TOKENS=6000; IMG_LIVE_HARD_TOKENS=0
+img_live_tokens(){ printf '11900'; }              # 硬上限默认 = 2×6000 = 12000
+img_inline_attach "$p_b" b user; _rc=$?
+ck "撞活图硬上限 → 报出活图数/这张估算/上限三个数" \
+   "$(grep -cE '活图已 11900 tokens.*500.*12000' <<<"$img_inline_reject")" "1"
+ck "撞活图硬上限 → 点名 IMG_LIVE_HARD_TOKENS" "$(grep -c 'IMG_LIVE_HARD_TOKENS' <<<"$img_inline_reject")" "1"
+ck "撞活图硬上限 → 说明为什么不回收而是拒这张(轮内不许改历史)" \
+   "$(grep -c '轮内不许回收' <<<"$img_inline_reject")" "1"
+ck "撞活图硬上限 → rc=1" "$_rc" "1"
+img_live_tokens(){ printf '0'; }
+# ⚠ 打桩的还原**不要靠"手写一个同名函数"**——上一版就是这么把真 prepare_inline 永久丢掉的
+# (写 `prepare_inline(){ printf '%s\n' "$1"; }` 当"恢复",那只是另一个桩)。
+# 也不要靠 `unset -f`:那会把真实现一起删掉,现象是"函数没定义 → 判据读到空值 → 整条
+# 预算判断静默失效"(第 21 组第一版就是这样全绿的假象)。
+# 唯一可靠的还原办法:**重新装载一次库**(_WCHAT_LIB_ONLY 口),再用桩显式覆盖想要的部分。
+
+# ④ 调用点真把它说出口(不是只有变量赋了值)。
+#    ⚠ 夹具图在 $W(仓库外),必须走粘贴流程拿只读授权 —— 直接调 tool_read_image 会被
+#    path_access 拦下要交互确认,非 tty 时整道闸门挂死(见 14.3 同一条注释)。
+describe_images(){ describe_failed=0; describe_result='(打桩转述)'; }
+budget_env why20c; IMG_INLINE=0; IMG_MAIN_VISION=""; IMG_CAPABLE=1
+p_r="$W/w20r.png"; cp "$del" "$p_r"
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_r"          # 拿授权(顺带验证粘贴链没坏)
+fn_args=$(jq -nc --arg p "$p_r" '{path:$p}'); content=""
+_tr_out=$(tool_read_image </dev/null 2>&1)
+ck "read_image 臂:⤷ 行真出现在屏幕上" "$(printf '%s' "$_tr_out" | grep -c '⤷ 原图未内联')" "1"
+ck "read_image 臂:⤷ 行带着判据名(不是空话)" "$(printf '%s' "$_tr_out" | grep -c '⤷ 原图未内联:.*IMG_INLINE=0')" "1"
+ck "read_image 臂:转述照旧发生(没把兜底通道一起关掉)" \
+   "$(printf '%s' "$_tr_out" | grep -c '转述兜底')" "1"
+#    负对照:正常内联成功时**不许**出现 ⤷(否则就是"永远喊降级"的恒真噪声)
+budget_env why20d; IMG_INLINE=1
+p_ok="$W/w20ok.png"; cp "$del" "$p_ok"
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_ok"
+fn_args=$(jq -nc --arg p "$p_ok" '{path:$p}'); content=""
+_tr_ok=$(tool_read_image </dev/null 2>&1)
+ck "负对照:内联成功时没有 ⤷ 行" "$(printf '%s' "$_tr_ok" | grep -c '⤷')" "0"
+ck "负对照:内联成功走的是 🖼 那行" "$(printf '%s' "$_tr_ok" | grep -c '原图已交给主模型')" "1"
+#    printContent 逐张臂:通道是开的,但主模型被探明不吃图 → 每张各自报一次
+budget_env why20e; IMG_INLINE=1; IMG_MAIN_VISION=0; model=fake-text-only
+messages=$(jq -n '[{role:"system",content:"s"}]')
+p_u1="$W/w20u1.png"; p_u2="$W/w20u2.png"; cp "$del" "$p_u1"; cp "$del" "$p_u2"
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_u1"$'\n'"📋 [图片] $p_u2"
+_pc_out=$( { ask_ai(){ return 0; }; overview(){ printf 't\n'; }
+            content="发图"; printContent; } 2>&1 )
+ck "printContent 逐张臂:两张各报一次(不是只报总数)" \
+   "$(printf '%s' "$_pc_out" | grep -c '⤷ w20u[12].png 退回转述:')" "2"
+ck "printContent 逐张臂:原因里带着当前 model 名" \
+   "$(printf '%s' "$_pc_out" | grep -c 'fake-text-only')" "2"
+ck "printContent 逐张臂:不该出现整轮级那句(通道是开的,只是这张被拒)" \
+   "$(printf '%s' "$_pc_out" | grep -c '全部退回转述')" "0"
+#    printContent 整轮臂:IMG_INLINE=0/IMG_CAPABLE=0 时压根不调 attach,原因必须**现算**
+budget_env why20f; IMG_INLINE=1; IMG_MAIN_VISION=""; IMG_PROVIDER=none; IMG_CAPABLE=0
+input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_u1"$'\n'"📋 [图片] $p_u2"
+_pc2=$( { ask_ai(){ return 0; }; overview(){ printf 't\n'; }
+         content="发图"; printContent; } 2>&1 )
+ck "printContent 整轮臂:报出张数(2 张一起退)" "$(printf '%s' "$_pc2" | grep -c '⤷ 本轮 2 张全部退回转述')" "1"
+ck "printContent 整轮臂:原因现算,点名 IMG_PROVIDER" \
+   "$(printf '%s' "$_pc2" | grep -c 'IMG_PROVIDER=none')" "1"
+ck "printContent 整轮臂:逐张那两句此时不该出现(没走 attach,原因不该是残留)" \
+   "$(printf '%s' "$_pc2" | grep -c '⤷ w20u')" "0"
+# ⑤ 结构锁:原因由一处定义、两个调用点各自消费;通道级措辞只有一份
+ck "原因全局只声明 1 处" "$(grep -c '^img_inline_reject=' "$SRC")" "1"
+# 每个 rc=1 出口都必须配一句原因(漏一条 = 屏幕上出现"没有原因的降级")。
+# 注意别写成"自己等于自己"的恒真断言:两个数是分别算出来的。
+_ae=$(awk '/^img_inline_attach\(\)/,/^}/' "$SRC" | grep -c 'return 1')
+_ar=$(awk '/^img_inline_attach\(\)/,/^}/' "$SRC" | grep -c 'img_inline_reject="[^"]')
+ck "attach 每个 rc=1 出口都写了原因(出口 $_ae 条 / 写原因 $_ar 次)" "$_ar" "$_ae"
+ck "attach 至少 6 条出口(少于此说明有人合并了判据却没核对措辞覆盖)" \
+   "$(( _ae >= 6 ? 1 : 0 ))" "1"
+# 反向锁:清空那行不算原因(否则上面两条会被"入口清一次"糊过去)
+ck "入口先清空原因(不许沿用上一张)" \
+   "$(awk '/^img_inline_attach\(\)/,/^}/' "$SRC" | grep -c '^    img_inline_reject=""$')" "1"
+ck "通道级措辞收成一份(定义 1 处 + 调用 2 处)" \
+   "$(grep -c '^img_inline_gate_reason() {' "$SRC")/$(grep -c 'img_inline_gate_reason)' "$SRC")" "1/2"
+ck "两个调用点各自都在屏幕上说出口(read_image 2 行 + printContent 4 行:降档/复用/逐张/整轮)" \
+   "$(awk '/^tool_read_image\(\)/,/^}/' "$SRC" | grep -c '⤷ 原图未内联')/$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c '⤷')" "2/4"
+
+echo "=== 21. 降档阶梯:撞线先缩一档,而不是整张退回转述 ==="
+# 用户诉求原话是"新系统也能预先压缩图片,省 token"。事实核对下来:inline **早就在压**
+# (prepare_inline → prepare_image,sips→ffmpeg→PIL,封到 IMG_INLINE_MAX_SIDE)。但压的是
+# 字节/质量,而图片按**面积**计费 —— 实测同一把尺 2048px=2500(顶格) 1024px=1048 768px=589,
+# 压 JPEG 质量计费一分不减。所以能省 token 的改动只有一种:撞线时**降边档再挂**。
+# 本组同时钉这次实现踩到的三个真 bug(都是探针抓的,不是推演):
+#   ① ${VAR:-"a b c"} 里那对引号会把后面几行整段吞成字符串(配置区被吃掉,
+#      IMG_INLINE_MAX_BYTES 变空 → 每张图都"超字节"误拒,而 bash -n 全绿);
+#   ② `local first=X out=("$first")` 同一行引用自己刚设的变量取到空 → 首档凭空消失;
+#   ③ 循环里的 _why 不在每轮开头清 → **降档成功那一档仍带着上一档的拒绝标记**,
+#      表现为"图挂上了却报拒"。
+
+# --- 21.1 配置区默认值 ---
+ck "阶梯开关与名单各占一行(不许用 \${:-\"…\"} 写法)" \
+   "$(grep -c 'IMG_INLINE_SHRINK_LADDER=\${IMG_INLINE_SHRINK_LADDER:-\"' "$SRC")" "0"
+# 负对照:那个写法确实会吞行 —— 不是我在猜的坑,是在同一台 bash 上复现过的
+# 负对照:那个写法确实会吞行 —— 原样复现一次(不是推测)。用文件而不是 bash -c,
+# 因为坑的形态是"跨行被吞",单行里看不出。
+printf 'X=\nL=${X:-"1536 1024 768}"   # 比首档小的档\nB=2097152\nprintf "L=[%%s] B=[%%s]\\n" "$L" "$B"\n' > "$W/swbad.sh"
+_sw_err=$(bash "$W/swbad.sh" 2>&1)
+ck "负对照:坏写法要么当场报错、要么把后一行的值吞成空" \
+   "$( { [[ "$_sw_err" == *"unexpected EOF"* ]] || [[ "$_sw_err" != *"B=[2097152]"* ]]; } && echo bad || echo ok)" "bad"
+
+# 还原 = **重新装载一次库**(_WCHAT_LIB_ONLY 口)。手写同名函数当"恢复"、或 unset -f,
+# 都会把真实现弄丢或换成桩 —— 两种都让后面的断言跑在假读数上(见上面的教训)。
+_WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" source "$SRC" < /dev/null > /dev/null 2>&1
+for _f in prepare_inline img_live_tokens img_est_from_side img_inline_attach img_ref_side img_inline_sides; do
+    ck "重装载后函数已就位 $_f" "$(declare -F "$_f" >/dev/null && echo yes || echo no)" "yes"
+done
+# 真实现的形状锁:img_live_tokens 必须遍历 IMG_REFS(桩不是这个形状)
+ck "img_live_tokens 是真实现(遍历活引用求和)" \
+   "$(declare -f img_live_tokens | grep -c 'IMG_REFS')" "1"
+budget_env lad21
+IMG_INLINE_SHRINK=1; IMG_INLINE_MAX_SIDE=2048; IMG_INLINE_SHRINK_LADDER="1536 1024 768"
+ck "首档必须是 IMG_INLINE_MAX_SIDE(负对照②:同行 local 会把它吞成空)" \
+   "$(img_inline_sides | awk '{print $1}')" "2048"
+ck "默认阶梯四档且递减" "$(img_inline_sides)" "2048 1536 1024 768"
+IMG_INLINE_SHRINK_LADDER="1024 1536 768"
+ck "名单写乱时输出仍严格递减(1536 因不比 1024 小而丢弃)" "$(img_inline_sides)" "2048 1024 768"
+IMG_INLINE_SHRINK_LADDER="3000 1536"
+ck "比首档大的档一律丢弃" "$(img_inline_sides)" "2048 1536"
+IMG_INLINE_SHRINK_LADDER="abc 1024"
+ck "非数字档被滤掉" "$(img_inline_sides)" "2048 1024"
+IMG_INLINE_SHRINK_LADDER="1536 1024 768"; IMG_INLINE_MAX_SIDE=1024
+ck "首档变低时只留比它小的档(不会反向放大)" "$(img_inline_sides)" "1024 768"
+IMG_INLINE_MAX_SIDE=2048; IMG_INLINE_SHRINK=0
+ck "IMG_INLINE_SHRINK=0 → 只走首档(整条策略可关)" "$(img_inline_sides)" "2048"
+
+# --- 21.3 prepare_inline 认 $2 档 ---
+del_side() { img_dims "$(prepare_inline "$1" "$2" 2>/dev/null)" | awk '{print ($1>$2?$1:$2)}'; }
+ck "交付件边档 = 传进去的档(1024)" "$(del_side "$del" 1024)" "1024"
+ck "交付件边档 = 传进去的档(768,不是全局值)" "$(del_side "$del" 768)" "768"
+ck "不传第二参数时仍按 IMG_INLINE_MAX_SIDE(旧调用点语义不变)" \
+   "$(IMG_INLINE_MAX_SIDE=2048; del_side "$del" "")" "2048"
+
+# --- 21.4 端到端:不同水位下降到哪一档 ---
+budget_env lad21e
+IMG_INLINE_MAX_SIDE=2048; IMG_INLINE_SHRINK=1; IMG_INLINE_SHRINK_LADDER="1536 1024 768"
+IMG_TOKENS_AUTOCAL=0; IMG_LIVE_BUDGET_TOKENS=6000; IMG_LIVE_HARD_TOKENS=0
+p_l="$W/w21big.png"; cp "$del" "$p_l"
+# 桩必须读**外层捕获的变量**:函数体内的 $1 是它自己的参数(img_live_tokens 被调用时
+# 不带参数),写成 "$1" 会在 set -u 下当场 unbound —— 现象是"断言拿到空读数、水位失效"。
+_LAD_LIVE=0
+img_live_tokens() { printf '%s' "$_LAD_LIVE"; }
+run_at() { budget_env "lad_$1"; IMG_REFS=(); IMG_REF_SEQ=0
+    _LAD_LIVE="$1"
+    img_inline_attach "$p_l" big tool
+    _rc=$?; _fp=""
+    [[ -n "${inline_ref_id:-}" ]] && _fp=$(img_ref_side "$inline_ref_id")
+    printf '%s/%s/%s' "$_rc" "${img_inline_shrank_to:-no}" "${_fp:-none}"; }
+ck "水位 0 → 首档挂上,不算降档"      "$(run_at 0)"    "0/no/2048"
+ck "水位 11000 → 降到 768 档挂上"     "$(run_at 11000)" "0/768/768"
+ck "水位 11990 → 整条阶梯都不够,拒"   "$(run_at 11990)" "1/no/none"
+ck "拒的时候报出试过的整条阶梯" \
+   "$(budget_env lad_12k2; IMG_REFS=(); IMG_REF_SEQ=0; _LAD_LIVE=11990
+     img_inline_attach "$p_l" big tool || printf '%s' "$img_inline_reject" | grep -c '2048px > 1536px > 1024px > 768px')" "1"
+ck "关掉阶梯 → 同一水位直接拒(等价于加这功能之前)" \
+   "$(budget_env lad_off; IMG_REFS=(); IMG_REF_SEQ=0; _LAD_LIVE=11000; IMG_INLINE_SHRINK=0; \
+      img_inline_attach "$p_l" big tool && echo 挂上 || echo 拒)" "拒"
+IMG_INLINE_SHRINK=1
+
+# --- 21.5 降档不许破坏刀2(重读同一张不叠第二份) ---
+budget_env lad21d; IMG_INLINE_SHRINK=1
+_LAD_LIVE=11000
+img_inline_attach "$p_l" big tool; r1="$inline_ref_id"
+ck "前置:降档挂上了 768 档" "$(img_ref_side "$r1")" "768"
+img_inline_attach "$p_l" big tool; rc2=$?
+ck "第二次读同一张 → rc=1(没挂新份)" "$rc2" "1"
+ck "第二次的原因点名 img_inline_already(调用方靠它不退转述)" "${img_inline_already:-EMPTY}" "$r1"
+ck "第二次的驻留档说得出数(不许是空的 img_ref_hit_side)" \
+   "$(grep -c '驻留 768px' <<<"$img_inline_reject")" "1"
+ck "活引用仍只有一份(成本泄漏没被降档打开)" "$(ls "$IMG_REF_DIR"/*.url 2>/dev/null | wc -l | tr -d ' ')" "1"
+# 反向锁:那条"子 shell 里赋全局"的假通道必须已经拆掉(声明/写入/注释可以留,不许有人读它取值)
+ck "没有任何地方读 img_ref_hit_side 取值" \
+   "$(grep -c '="\?\$img_ref_hit_side' "$SRC")" "0"
+
+# --- 21.6 话术:降过档必须说出口 ---
+ck "read_image 成功但缩过时,正文行与屏幕行都带档位" \
+   "$(awk '/^tool_read_image\(\)/,/^}/' "$SRC" | grep -c '已缩到')/$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c '已缩到')" "2/2"
+ck "模型侧也拿到档位事实(caption/content 里写了缩过)" \
+   "$(awk '/^tool_read_image\(\)/,/^}/' "$SRC" | grep -c '本张交付件已缩到最长边')/$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c '本张交付件已缩到最长边')" "1/1"
+# 旧文案"按活图预算降到…"是**假原因**:bytes 档与首档都不是活图预算干的,已换成不点原因的
+# "已缩到最长边 Npx"。这条锁防止有人把它改回去(那句在 docs 与 bugList 里都引用过)。
+ck "缩过的话术不再声称是活图预算干的" \
+   "$(awk '/^tool_read_image\(\)/,/^}/' "$SRC" | grep -c '按活图预算')/$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c '按活图预算')" "0/0"
+# 汇总句不许读"最后一次 attach"的全局(那样只有最后一张降档时才报,是假话)
+ck "降档汇总在循环里逐张累计(声明+逐张追加+汇总=3 处引用)" \
+   "$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c 'img_shrunk_note')" "3"
+# 结构锁:.fp 第 3 列改成"实际档"(原来是全局值,降档后写全局值 = 缩小版冒充全分辨率)
+ck "fp 第 3 列写实际档(列序契约未变)" \
+   "$(grep -cF '"${_side}" "${_fp_dims}" "${src}"' "$SRC")" "1"
+ck "旧的全局值写法已消失(否则去重会误判)" \
+   "$(grep -cF '"${IMG_INLINE_MAX_SIDE}" "${_fp_dims}" "${src}"' "$SRC")" "0"
+
+# --- 21.6 降档不许动"首档"那条既有语义(同一张图粘两次本该各挂一份) ---
+# 这条是上一轮的真回归留下的疤:去重检查当时写在**每一档**前面,于是水位宽裕时第二次粘贴
+# 也被吞成一个引用 → 全表红 23 条(现象是"同轮 3 张只剩 1 张")。钉死分界:首档不查,降档才查。
+budget_env lad21f; IMG_INLINE_SHRINK=1; IMG_LIVE_BUDGET_TOKENS=6000; _LAD_LIVE=0
+img_inline_attach "$p_l" 甲 user; ra="$inline_ref_id"
+img_inline_attach "$p_l" 乙 user; rb="$inline_ref_id"
+ck "水位宽裕 → 同图两次粘贴各挂一份(不是复用)" \
+   "$(ls "$IMG_REF_DIR"/*.url 2>/dev/null | wc -l | tr -d ' ')" "2"
+ck "两次是不同引用号" "$([[ -n "$ra" && "$ra" != "$rb" ]] && echo yes || echo no)" "yes"
+ck "两份 .fp 记的都是首档 2048(没被误判成降档)" \
+   "$(img_ref_side "$ra")/$(img_ref_side "$rb")" "2048/2048"
+# 反向锁:降过档那一档必须查 —— 不查就会每轮叠一份缩小版(刀2 的 6× 泄漏换了个尺寸复发)
+budget_env lad21g; IMG_INLINE_SHRINK=1; _LAD_LIVE=11000
+img_inline_attach "$p_l" 甲 tool; rc_a="$inline_ref_id"
+img_inline_attach "$p_l" 乙 tool; rc_b=$?
+ck "降档那一档仍查驻留(第 2 次不挂新份)" "$([[ $rc_b -eq 1 && -n "${img_inline_already:-}" ]] && echo yes)" "yes"
+ck "驻留的那份还是同一个号(没叠第二份缩小版)" "$(ls "$IMG_REF_DIR"/*.url 2>/dev/null | wc -l | tr -d ' ')" "1"
+# read_image 出口:命中驻留时走的是**去重话术**,不是转述(转述=花钱买更差的信息)
+# ⚠ 夹具图在 $W(仓库外),必须走粘贴拿授权,否则 path_access 先拦下,后面全是空断言
+_LAD_LIVE=11000
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_l"
+fn_args=$(jq -nc --arg p "$p_l" '{path:$p}'); content=""
+# ⚠ 不能写成 _w_out=$(tool_read_image …):tool_* 是靠**全局 content** 回传的,
+#   命令替换在子 shell 里赋值,父 shell 拿到的 content 永远是空的(这条坑本文件注释里记过)。
+#   屏幕输出落盘再读,content 留在当前 shell。
+tool_read_image </dev/null > "$W/w_reuse.out" 2>&1
+_w_out=$(cat "$W/w_reuse.out")
+ck "read_image 复用臂:屏幕说得出驻留档位" "$(printf '%s' "$_w_out" | grep -c '已在上下文(引用号 .*,驻留 768px)')" "1"
+ck "read_image 复用臂:没有退去转述(不白花一次视觉请求)" \
+   "$(printf '%s' "$_w_out" | grep -c '转述兜底')" "0"
+ck "read_image 复用臂:给模型的正文也带档位" "$(printf '%s' "$content" | grep -c '驻留 768px')" "1"
+# 负对照:驻留是首档时**不许**凭空冒出"驻留 XXXXpx 档"那句话(那是无信息的噪声)
+budget_env lad21h; IMG_INLINE_SHRINK=1; _LAD_LIVE=0
+img_inline_attach "$p_l" 甲 tool >/dev/null 2>&1
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_l"
+fn_args=$(jq -nc --arg p "$p_l" '{path:$p}'); content=""
+tool_read_image </dev/null >/dev/null 2>&1
+ck "负对照:首档命中时正文不提降档(只有真降过才说)" "$(printf '%s' "$content" | grep -c '驻留')" "0"
+ck "负对照:但去重话术本身仍要说得出引用号" "$(printf '%s' "$content" | grep -c '本会话已经给过你了')" "1"
+_LAD_LIVE=0
+
+echo "=== 22. 交付事实句(刀8):把尺寸摆成事实,让模型能自证「裁没裁」 ==="
+# 起因是 2026-10-06 现场:模型读到的是**完整原图**,却因为源 PDF 的页盒比图稿小(它自己那份
+# 渲染就只显示图稿的一部分),把「画面不完整」归因给 read_image,还绕道自建裁剪工具。
+# 链路这边一个字节都没动,但**没有任何一句能让模型自证的事实**,屏幕还把它叫「原图」。
+# 本节钉的就是这句事实。判据纪律:只写尺寸/等比/未裁剪这类已发生的事实;取不到宁可不说。
+
+# --- 22.1 结构锁:声明与入口清零各一处;两个调用点各自消费 ---
+ck "交付事实句的声明恰好 1 处" "$(grep -c '^img_inline_delivery=' "$SRC")" "1"
+ck "attach 入口清零(不许沿用上一张的尺寸)" \
+   "$(awk '/^img_inline_attach\(\)/,/^}/' "$SRC" | grep -c '^    img_inline_delivery=""$')" "1"
+ck "两个调用点各自把它说出口(read_image 2 处 / 用户发图 1 处)" \
+   "$(awk '/^tool_read_image\(\)/,/^}/' "$SRC" | grep -c 'img_inline_delivery')/$(awk '/^printContent\(\)/,/^}/' "$SRC" | grep -c 'img_inline_delivery')" "2/1"
+
+# --- 22.2 没被动过那份:同尺寸 ---
+budget_env kn8a; IMG_INLINE_SHRINK=1
+_capdel=$(img_dims "$del" | tr ' ' x)
+img_inline_attach "$del" same tool
+ck "同尺寸 → 事实句说与原文件同尺寸" "${img_inline_delivery}" "交付 ${_capdel},与原文件同尺寸"
+
+# --- 22.3 首档就缩:判据改成"交付件尺寸 ≠ 原文件尺寸",档位与事实都要出声(本节承重) ---
+# 旧判据是"不是首档" → >2048px 的原图在**首档**被缩掉,shrank_to 为空、一个字都不说
+# (实测 3672x2376 → 交付 2048x1325,屏幕仍写"原图")。新判据与交付事实句同源。
+budget_env kn8b; IMG_INLINE_SHRINK=1
+img_inline_attach "$W/big.png" scaled tool
+ck "新口径:首档缩过 ⇒ img_inline_shrank_to 非空" "${img_inline_shrank_to:-EMPTY}" "2048"
+ck "首档缩过也出声(交付尺寸 / 原文件尺寸 / 等比未裁剪)" \
+   "${img_inline_delivery}" "交付 2048x2048;原文件 2600x2600,等比重采样,未裁剪"
+# 端到端:首档缩过时正文与屏幕都要说出口(旧版只在阶梯第 2 档起才说)
+budget_env kn8b3; IMG_INLINE_SHRINK=1
+p_d8b="$W/kn8b3.png"; cp "$W/big.png" "$p_d8b"
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_d8b"
+fn_args=$(jq -nc --arg p "$p_d8b" '{path:$p}'); content=""
+tool_read_image </dev/null > "$W/kn8b3.out" 2>&1
+_d8b_screen=$(cat "$W/kn8b3.out")
+ck "首档缩过:正文写清缩到哪一档" "$(printf '%s' "$content" | grep -c '本张交付件已缩到最长边 2048px')" "1"
+ck "首档缩过:屏幕行也说出口" "$(printf '%s' "$_d8b_screen" | grep -c '已缩到 2048px')" "1"
+
+# --- 22.4 端到端:正文与屏幕行都要带这句(否则模型仍只能靠自述「我看到的是局部」) ---
+# ⚠ 不能写 _screen=$(tool_read_image …):tool_* 靠**全局 content** 回传,命令替换在子 shell
+#   里赋值,父 shell 拿到的 content 永远是空的(本文件 21 节记过同一条坑)。落盘再读。
+budget_env kn8c; IMG_INLINE_SHRINK=1
+p_d8="$W/kn8c.png"; cp "$del" "$p_d8"
+granted_files=(); input_images=(); PARSE_OUT=""
+parse_placeholders "📋 [图片] $p_d8"     # 走粘贴拿只读授权(仓库外夹具直接调会被 path_access 拦)
+fn_args=$(jq -nc --arg p "$p_d8" '{path:$p}'); content=""
+tool_read_image </dev/null > "$W/kn8c.out" 2>&1
+_d8_screen=$(cat "$W/kn8c.out")
+ck "给模型的正文带交付事实" "$(printf '%s' "$content" | grep -c "交付 ${_capdel},与原文件同尺寸")" "1"
+ck "屏幕上那行也带同一句" "$(printf '%s' "$_d8_screen" | grep -c "交付 ${_capdel},与原文件同尺寸")" "1"
+ck "事实句里没有「看不看得见」类现在时断言(F 臂纪律)" \
+   "$(printf '%s' "$content" | grep -Ec '现在看得见|就在当前上下文|本条附有')" "0"
+
+# --- 22.5 负对照:尺寸取不到时一个字都不说(不许编一个尺寸) ---
+img_dims(){ printf ''; }                 # 桩:模拟 sips 与 python3 都读不出尺寸
+budget_env kn8d; IMG_INLINE_SHRINK=1
+img_inline_attach "$W/big.png" nodims tool
+ck "负对照:尺寸读不出 → 事实句为空(没有编尺寸)" "${img_inline_delivery:-EMPTY}" "EMPTY"
+# 还原唯一可靠的办法:**重装载库**(手写同名函数 / unset -f 都会把真实现弄丢,见 21 节教训)
+img_dims(){ :; }
+_WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" source "$SRC" < /dev/null > /dev/null 2>&1
+ck "负对照后 img_dims 回到真实现(读得出 big.png 的尺寸)" "$(img_dims "$W/big.png")" "2600 2600"
+
+echo "=== 23. 字节通道不许放大(刀8 顺带修):边长已达标时只重编码 ==="
+# 起因:prepare_image 的 sips 分支原先写的是**无条件** `sips -Z IMG_MAX_SIDE`,而 ffmpeg 分支
+# 是 `min(iw,side)`、PIL 是 `thumbnail()` —— 三条兜底里只有 sips 会**放大**。实测:4.9MB 的
+# 1600x1035 PNG 被放到 2048x1324,token 按面积白烧一次、画质再掉一次。
+# 夹具刻意做成"字节肥(>2MB)但边长小(1600<2048)"——这才是触发这条的形态(尺寸大的那种,
+# 本来就要缩,测不出"放大")。
+python3 - "$W/fat_small.png" <<'PY'
+import sys, zlib, struct, random
+W, H = 1600, 1035
+random.seed(11)                      # 定种子:体积与像素每次都一样,期望值不靠猜
+rows = b''.join(b'\x00' + bytes(random.getrandbits(8) for _ in range(W*3)) for _ in range(H))
+def ch(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t+d) & 0xffffffff)
+open(sys.argv[1], 'wb').write(b'\x89PNG\r\n\x1a\n'
+    + ch(b'IHDR', struct.pack('>IIBBBBB', W, H, 8, 2, 0, 0, 0))
+    + ch(b'IDAT', zlib.compress(rows, 6)) + ch(b'IEND', b''))
+PY
+_fat_in=$(wc -c < "$W/fat_small.png" | tr -d ' ')
+ck "夹具前提:字节超 2MB 而最长边 1600(< 2048)" \
+   "$(( _fat_in > 2097152 ? 1 : 0 ))$(img_dims "$W/fat_small.png" | awk '{print ($1>$2?$1:$2)}')" "11600"
+_pi_same=$(IMG_MAX_BYTES=2097152 IMG_MAX_SIDE=2048 prepare_image "$W/fat_small.png" 2>/dev/null)
+ck "字节超限但边长达标 → 尺寸一点不改(不放大)" "$(img_dims "$_pi_same")" "1600 1035"
+ck "同一条路仍然真压了字节(不是原样交回)" \
+   "$(( $(wc -c < "$_pi_same") < _fat_in ? 1 : 0 ))" "1"
+# 负对照:目标边长真比原图小时必须照缩 —— 证明上一条不是"永远不缩"的恒真断言
+_pi_small=$(IMG_MAX_BYTES=2097152 IMG_MAX_SIDE=1024 prepare_image "$W/fat_small.png" 2>/dev/null)
+ck "负对照:目标 1024 时确实缩到 1024(缩这条路没被改坏)" \
+   "$(img_dims "$_pi_small" | awk '{print ($1>$2?$1:$2)}')" "1024"
+# 端到端:inline 交付件尺寸与原件一致(修前这里会是 2048x1324)
+budget_env kn8e; IMG_INLINE_SHRINK=1; IMG_INLINE_MAX_BYTES=2097152; IMG_INLINE_MAX_SIDE=2048
+img_inline_attach "$W/fat_small.png" fat tool
+ck "端到端:交付件仍是 1600x1035(修前被放大成 2048x1324)" \
+   "${img_inline_delivery}" "交付 1600x1035,与原文件同尺寸;已重编码为 JPEG 压字节(未裁剪)"
+# 反向锁:同尺寸、只是重编码压字节 ⇒ **不算缩**。"缩过"说的是"模型手里那份小了一圈",
+# 而这份尺寸没变 —— 旧判据(降过档)在这条路上会报"降到 Npx",那是假读数。
+ck "同尺寸只重编码 ⇒ 不报缩过(判据是尺寸,不是档位)" "${img_inline_shrank_to:-EMPTY}" "EMPTY"
+# 结构锁:会放大的那种写法只准出现在条件分支里(且无 -Z 的纯重编码分支必须在)
+ck "结构锁:prepare_image 里 sips -Z 恰好 1 处" \
+   "$(awk '/^prepare_image\(\)/,/^}/' "$SRC" | grep -c 'sips -Z')" "1"
+ck "结构锁:无 -Z 的纯重编码分支也在(两条路都得留着)" \
+   "$(awk '/^prepare_image\(\)/,/^}/' "$SRC" | grep -c 'sips -s format jpeg')" "1"
+rm -f "$_pi_same" "$_pi_small"
 
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"

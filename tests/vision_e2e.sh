@@ -23,7 +23,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     echo "❌ 需要 bash 5+(与生产一致)。brew install bash,或 WCHAT_BASH=/path/to/bash5 $0" >&2
     exit 1
 fi
-REAL=${REAL:-/Users/jwan/bin/wchat.sh}
+REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat.sh"}
 W=$(mktemp -d)
 
 {

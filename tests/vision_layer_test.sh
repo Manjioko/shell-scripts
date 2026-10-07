@@ -21,7 +21,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     exit 1
 fi
 export LC_ALL=C
-REAL=/Users/jwan/bin/wchat.sh
+REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat.sh"}
 [[ -f "$REAL" ]] || { echo "❌ 找不到被测源文件:$REAL"; exit 1; }
 W=$(mktemp -d)
 

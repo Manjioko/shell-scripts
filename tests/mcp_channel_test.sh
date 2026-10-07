@@ -640,6 +640,42 @@ ck "有上限时标记带分母 3/40"                   "$(printf '%s' "$_ml_on"
 # 新默认(不限)下**不许出现 "/0"** —— 那会被读成"配额已耗尽",比不写更糟
 ck "不限时不带 /0 分母"                        "$(printf '%s' "$_ml_nolimit" | grep -c '/0')" "0"
 ck "不限时仍显示已调用次数(刹车关了≠不记账)"   "$(printf '%s' "$_ml_nolimit" | grep -c '已调用 3 次')" "1"
+
+# —— 常驻标记的「同一屏不许打两遍」契约(真机:-mcp + -auto=full 启动后标记出现两遍)——
+# 病根:标记打在 normal_line 开头,而主循环对"什么都没提交"的一轮(空回车 / EOF /
+# Ctrl+C)直接 continue 重新提示。启动时多按的那次回车被第一个输入框当空提交吃掉,
+# 于是紧接着又走一遍 normal_line → 同一行原样重打。修法:标记受 marker_shown 管,
+# 只在屏幕真正往前走了一步之后重打(printContent / 命令路径复位)。
+marker_line2() {   # $1=MCP_GRANTED $2=auto_mode $3=marker_shown
+    env W="$W" GS="$W/h-grant/state" WCHAT_SRC="$REAL" HOME="$W/h-grant/home" \
+        TMPDIR="$W/h-grant/tmp" CLIP_DIR="$W/h-grant/clip" \
+        GR="$1" AM="$2" MK="$3" \
+        "$BASHX" -c "
+set +u
+_mcp_load(){ _WCHAT_LIB_ONLY=1 source '$REAL' >/dev/null 2>&1; }   # ⚠ 必须函数上下文里 source
+_mcp_load
+MCP_ENABLE=1; MCP_GRANTED=\" \$GR\"; MCP_CALLS=1; MCP_MAX_CALLS=0
+MCP_STATE_DIR=''; MCP_EXPOSED=''; CLIP_DIR='$W/clip'; AUDIT_FILE='$W/audit.txt'
+auto_mode=\"\$AM\"; auto_approvals=0; auto_session_id=probe
+marker_shown=\$MK
+ask_ai(){ :; }; tput(){ :; }
+normal_line 2>/dev/null
+" </dev/null | sed -e 's/\x1b\[[0-9;?]*[a-zA-Z]//g'
+}
+_m0=$(marker_line2 'chrome' 'full' 0)     # 屏幕走过一整轮后:两个标记都该在
+_m1=$(marker_line2 'chrome' 'full' 1)     # 上一轮什么都没提交:一个都不许重打
+ck "marker_shown=0 时 auto 标记打得出"        "$(printf '%s' "$_m0" | grep -c '⚡ auto=full')" "1"
+ck "marker_shown=0 时 mcp 标记打得出"         "$(printf '%s' "$_m0" | grep -c 'mcp 已授权本会话')" "1"
+ck "marker_shown=1 时不重打 auto 标记"        "$(printf '%s' "$_m1" | grep -c '⚡ auto=')" "0"
+ck "marker_shown=1 时不重打 mcp 标记"         "$(printf '%s' "$_m1" | grep -c 'mcp 已授权本会话')" "0"
+# 负对照:两臂必须只差在 marker_shown 上,否则上面四条红/绿说明不了任何问题
+ck "负对照:两臂除 marker_shown 外内容一致" \
+   "$(diff <(printf '%s\n' "$_m0" | grep -v '⚡') <(printf '%s\n' "$_m1" | grep -v '⚡') >/dev/null && echo same || echo diff)" "same"
+# 复位点必须在"屏幕往前走"的那两处(少了它标记就永远只打一次,比打两遍更糟)
+ck "printContent 每轮开头复位 marker_shown" \
+   "$(awk '/^printContent\(\)/,/^}/' "$REAL" | grep -c 'marker_shown=0')" "1"
+ck "normal_line 两条标记各自记账 marker_shown=1" \
+   "$(awk '/^normal_line\(\)/,/^}/' "$REAL" | grep -c 'marker_shown=1')" "2"
 ck "授权表不用 declare -A(函数内 source 会 local 化)" \
    "$(awk '/^MCP_GRANTED=/,0' "$REAL" | head -3 | grep -c 'declare -A')" "0"
 
