@@ -9514,6 +9514,18 @@ overview() {
     printf "%s" "$title"
 }
 
+# 手动保存(-fs)与退出保存(-q)前确保有标题。标题平时只在首轮成功后由主循环
+# 生成(见 `[[ -z "$chat_title" ]] && chat_title=$(overview)`):首轮被打断就
+# 保存时 chat_title 仍为空,save_history 会因无标题静默跳过——这正是"手动
+# 保存存不上 / 退出没存上"的根因。这里当场补生成一次,让保存名副其实。
+# overview 内部自带兜底名("未命名对话"),接口失败也不会卡住保存;生成要打一次
+# API(几秒),所以先回显一行提示,免得看着像卡死。
+ensure_chat_title() {
+    [[ -n "$chat_title" ]] && return 0
+    inp_msg "⏳ 还没有标题,正在生成..."
+    chat_title=$(overview) && first_time=0
+}
+
 # 检测当前运行环境：macos / wsl / linux
 detect_os() {
     if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -9660,14 +9672,25 @@ read_file() {
 handle_cmd_line() {
     local line="$1"
     if [[ "$line" == "-q" ]]; then
-        # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才
-        # 不保存;-f 模式或无对话内容时不询问,按默认处理)。#18
-        if [[ $forget_history != 1 && -n "$chat_title" && -n "$messages" ]]; then
-            local save_ans
-            printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
-            IFS= read -r save_ans
-            [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]] && save_history
-        else
+        # 唯一退出方式:退出前询问是否保存(默认保存,明确输入 N/n 才不保存)。
+        # -f 模式不保存历史、还没聊过(只有 system 段)时无内容可存——两种情况都
+        # 不询问,直接退出(此时 save_history 也会被自身守卫跳过,不必白跑一趟)。#18
+        if [[ $forget_history == 1 ]]; then
+            exit 0
+        fi
+        local msg_count
+        msg_count=$(printf '%s' "$messages" | jq 'length' 2>/dev/null)
+        [[ "$msg_count" =~ ^[0-9]+$ ]] || msg_count=0
+        if (( msg_count <= 1 )); then
+            exit 0
+        fi
+        local save_ans
+        printf '\033[2m│\033[0m 退出前保存对话? [Y/n] '
+        IFS= read -r save_ans
+        if [[ "$save_ans" != [Nn] && "$save_ans" != [Nn]* ]]; then
+            # 确认要存之后再补标题:选 n 就不白打这次 API。首轮被打断就直接退
+            # 时 chat_title 为空,save_history 会静默跳过——补完才存得上。
+            ensure_chat_title
             save_history
         fi
         exit 0
@@ -9768,19 +9791,30 @@ handle_cmd_line() {
         return 0
     fi
     if [[ "$line" == "-fs" ]]; then
-        if [[ -z "$chat_title" ]]; then
-            inp_msg "⚠️  当前无对话标题，无法保存"
-        elif [[ $forget_history == 1 ]]; then
-            : # -f 模式，静默跳过
+        if [[ $forget_history == 1 ]]; then
+            : # -f 模式不保存历史,静默跳过(也无须为保存去生成标题)
         else
-            # 不能写 save_history && echo 已保存:messages 为空时 save_history
-            # 静默不写盘但仍返回 0,提示会沿用上一轮的旧文件名报假成功。
-            # 现在按 save_history 回传的真实落盘路径判。
-            save_history
-            if [[ -n "$last_saved_history" ]]; then
-                inp_msg "✅ 已保存: $last_saved_history"
-            else
+            # 只有 system 段(还没聊过)时无内容可存,先挡掉——省得还让模型给
+            # 空对话起个标题
+            local msg_count
+            msg_count=$(printf '%s' "$messages" | jq 'length' 2>/dev/null)
+            [[ "$msg_count" =~ ^[0-9]+$ ]] || msg_count=0
+            if (( msg_count <= 1 )); then
                 inp_msg "⚠️  未保存:当前对话内容为空"
+            else
+                # 标题平时只在首轮成功后生成,首轮被打断就直接 -fs 时 chat_title
+                # 仍为空,save_history 会因无标题静默跳过——当场补生成再存(见
+                # ensure_chat_title),让 -fs 名副其实。
+                ensure_chat_title
+                # 不能写 save_history && echo 已保存:messages 为空时 save_history
+                # 静默不写盘但仍返回 0,提示会沿用上一轮的旧文件名报假成功。
+                # 现在按 save_history 回传的真实落盘路径判。
+                save_history
+                if [[ -n "$last_saved_history" ]]; then
+                    inp_msg "✅ 已保存: $last_saved_history"
+                else
+                    inp_msg "⚠️  未保存:当前对话内容为空"
+                fi
             fi
         fi
         return 0
