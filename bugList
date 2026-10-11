@@ -223,5 +223,72 @@
   测试:inline 闸门 262→**284**(第 22 组交付事实句 11 条 + 第 23 组"字节通道不许放大"8 条);负对照与结构锁都配了
   (尺寸读不出 ⇒ 不写事实句;同尺寸只重编码 ⇒ **不许**报缩过;目标真变小时照缩);`run_gates --main` = 12/12。
   记两条**没做**的:措辞里的"原图"二字在缩过时仍保留(靠后面的括号限定,不改词是为了不动那批已调好的话术);
-  转述(describe)那条通道的 `prepare_image` 上限仍是**字节**、不封像素 —— 4000px 的图只要 ≤10MB 就整张发出去。
+  转述(describe)那条通道的 `prepare_image` 上限仍是**字节**、不封像素 —— 4000px 的图只要 ≤10MB 就整张发出去
+  (→ 已在本轮 #66 修掉)。
 [v]65. 【done·用户提出】"标题未存在时无法正常保存 history,能否让 -fs 在没有标题时先生成标题再正常保存"。根因:标题只在**首轮对话成功后**由主循环 `chat_title=$(overview)` 生成,而首轮被打断(Ctrl-C)或对话还没跑完就 -fs 时 chat_title 仍为空 → save_history 首道守卫 `[[ -z "$chat_title" ]] && return 0` 静默跳过,表现为"手动保存存不上"。原 -fs 分支的判断顺序还是先查标题(空即报"当前无对话标题,无法保存"),把这句也盖在 -f 模式(不存历史、本该静默)上成了噪音。改法(handle_cmd_line 的 -fs 分支):① `forget_history==1` 提到最前,与注释声明的"静默跳过"对齐;② 用 `jq length` 挡掉"只有 system 段"的空对话(`msg_count<=1` 直接报"未保存:当前对话内容为空"),省得还让模型给空对话起标题;③ 其余情况先 `ensure_chat_title`(内部 `chat_title=$(overview) && first_time=0`)补标题,再走原 save_history + last_saved_history 判决。overview 自带兜底名("未命名对话"),接口失败也不会卡住保存;生成期打一行"⏳ 还没有标题,正在生成..."免看起来卡死。验证:`bash -n` OK;`jq length` 对空/仅 system/仅 system+user/含 assistant 四组输入判定符合预期;tests/auto_test.sh unit 全绿(第 12 节只管 save_history 自身,未受影响)。**同类现象一并处理(第二轮)**:-q 退出原来也是"无标题就跳过"(else 直接 save_history → 被守卫跳过,用户以为存了其实没存)。改为:先按 `-f`/`msg_count<=1` 挡掉 -f 模式与无内容(直接 exit,不询问、也不调 jq 之外的 API);有内容则先问"退出前保存对话?[Y/n]",**确认要存之后**才 `ensure_chat_title`(选 n 就不白打这次 API)再 save_history。补标题逻辑从 -fs/-q 两处内联抽成共用函数 `ensure_chat_title`。验证:探针 `.scratch/q_save_probe.sh`(库模式装载真脚本 + 桩 overview/save_history;stdin 必须用 `<<<` 而非管道——handle_cmd_line 在管道右侧会落进管道子 shell,桩的调用记录传不回父 shell,会看到"什么都没调"的假象)五条路径实测:y/无标题→overview,save_history;n/无标题→都不调;y/有标题→仅 save_history;只有 system→不询问不存;-f→不询问不存。`run_gates --main` = 12/12(pass=12 fail=0 skip=0)。
+[v]66. 【done·用户要求"转述部分也优化一下",顺带逮到判据表丢了一层排除】三件事:
+  ① **转述也封像素**:原先转述只调 `prepare_image`,而它只在**字节**超限时才动手 ⇒ 4000px 的图原样上传
+  (体积/延迟白付、按面积计费白付钱;有些网关还会对超长边自己截断/分块,转述质量反而下降)。函数头那句
+  "压缩为最长边 ≤ IMG_MAX_SIDE"原先只有字节那条路兑现。改法不是再抄一份压缩器,而是抽出共用 core
+  `prepare_delivery <原图> <字节上限> <最长边上限>`(顺序 sips→ffmpeg→PIL 与"缩不动就原样交回"这个兜底
+  必须两边逐字一致,抄两份必漂),`prepare_inline` 与 `describe_images` 各自只喂自己那组上限
+  (inline: IMG_INLINE_MAX_*;转述: IMG_MAX_*)。实测:2600px 的图到请求体里已经是 2048px 那档。
+  ② **转述前动过也要出声**:新增 `describe_note`(空=全都没动),事实句与 inline 共用同一个 helper
+  `img_delivery_fact`(它同时回传"尺寸变没变"这个结论 —— 事实句与话术各算一遍必漂,而且会漂出
+  "事实说缩了、话术说没缩"这种自相矛盾);两个调用点把它写进给模型的正文,屏幕上另打一行
+  `⤷ … 转述前先过一刀(交付 …;原文件 …)`。顺带把"同尺寸但重编码过"也写进事实句 —— 否则"同尺寸"
+  会被读成"一个字节都没动"。
+  ③ **判据表丢过一层排除(真 bug)**:`img_reject_wording` 第一组只要同时出现"image/vision/图片"与
+  "not support/不支持"就判"端点不收图",于是 `This image format is not supported by the decoder` 这类
+  **文件问题**会被判成能力问题 → `vision_disable` 把整个会话的内联/转述能力**永久关掉**;而代码注释与
+  vision_layer 探针第 6 节都写着"格式不支持不许判成模型不支持"。根因:收成统一判据时丢了旧 `case` 表里
+  那层排除,而**唯一钉着它的那张探针不在 run_gates 里** → 漂了没人红(逮到它的是给探针换锚点时的复跑)。
+  修:第一组加 `format/decoder/file type/格式` 排除,并把两条反向锁搬进 inline 闸门第 12 组(套件内,跑得到)。
+  顺带修掉那张探针自己的两条**过期说明**:一条把抽取锚点钉在已被收走的 `case ${err,,}` 上(抠出空串 →
+  第 6 节四条断言常年全红且与产品无关),改锚到实现本体的调用点 `if img_reject_wording "$err"; then`;
+  一条从没把 `IMG_CAPABLE` 抽进沙箱(第 0 节"默认可用"恒为空)。两张探针的沙箱名单同时补上
+  `img_dims / prepare_delivery / img_reject_wording` 并加"漏抽即拒跑"自检 —— describe_images 一依赖新函数,
+  漏抽的后果不是报错而是 `command not found` 被当成压图失败,断言全跑在假路径上。
+  测试:inline 闸门 284→**293**(第 24 组"转述通道也封像素":真跑 describe_images 本体、只把 curl 打桩,
+  从**请求体里**解出那张图量尺寸;含"小图不缩也不出声"负对照与两条结构锁);vision_layer 探针回到全绿;
+  `test_hardwall.sh` 569/569、`run_gates --main` = 12/12。**全表逮到我自己写的一处**:两处
+  `$describe_note` 紧跟全角括号(`（转述输入:$describe_note）`)→ set -u 下会被吃掉展开,正是本仓库
+[v]67. 【done·用户报"回车一个键两个职责"】现象:输入框里"有内容则回车=换行,空行则回车=发送"——
+单行消息必须按**两遍**回车;而"想发送时按的第一遍"与"想换行"在屏幕上完全看不出区别,该发的发不出去、
+不想续行的被迫续行。用户定的新语义:**回车恒发送;想换行就在行尾写 `\` 再回车**。
+  这不是新发明,是**把旧实现搬回来**:read -e 时代 `fdc1937^:wchat.sh:3445-3454` 就有
+  `if [[ "$line" == *\\ ]]; then line="${line%?}"; input+="$line"$'\n'; cmd_ok=0; continue; fi`
+  —— 行尾反斜杠 → **吃掉它** + 换行 + 绝不发送;注释里还记着"用 ${line%?} 而不是 ${line%\\},
+  避开 bash 版本对 pattern 转义解析差异导致删多"这个坑。换成 prompt_toolkit 时这条语义丢了,
+  帮助里那句"行尾 \ 也可续行(现在已非必需)"就此变成**过期说明** —— 实测(旧版 helper):
+  `foo\` + 回车 + 回车 交回的是 `foo\\n`,**反斜杠留在正文里**,只是碰巧"能续行"(那时回车本来就换行)。
+  改法(三处,都很小):
+   ① `input_helper.py` 的 enter 处理:光标所在行以 `\` 结尾 → `delete_before_cursor(count=1)` +
+      `insert_text("\n")` 后 return(按**个数**删,不按内容替换 —— 同旧版注释的理由);否则
+      缓冲区非空白就 `exit(result=text)`(空缓冲区回车=不动,不发空消息)。
+      旧规则里"单行命令立即返回"那条快速路随之变冗余(Enter 恒发送,单行文本回到 bash 照样被
+      `handle_cmd_line` 精确匹配,结果逐字相同),已删;`--commands/--no-commands` 保留为调用契约
+      (助手不再消费),wchat 侧调用点与闸门启动参数一字未动。
+   ② `wchat.sh` 帮助文本(1516-1520)改为新规则;两处 `ptk_text="${ptk_text%$'\n'}"` 的注释更正
+      (新语义下尾换行只可能来自"行尾 \ + 回车"那次续行,剥掉是旧行为保留);PTK_COMMANDS 旁
+      "输入助手按它识别单行命令"那句改为"命令判定的唯一执行点是 handle_cmd_line"。
+   ③ 闸门 `tests/tty_osc_input_test.sh`:驱动原来用 `\r\r` 提交(= 旧契约,正是本次拆掉的双职责),
+      改为单次 `\r`;期望值 `hello\n` → `hello`;新增第 7 节 4 条端到端断言(回车=发送 /
+      行尾 \+回车=续行且**反斜杠不许留在正文里** / 空缓冲区回车不发送也不退出 / 行中反斜杠不触发续行)。
+  为什么不做 Ctrl+J / Option+Enter / Shift+Enter(用户拍板):传统编码下 Shift+Enter 与 Enter 同码
+  (0x0D),要区分必须改终端配置或开 kitty 键盘协议 —— 而 **PTK 3.0.53 完全不支持 kitty 协议**
+  (实测:喂 `ESC[13;2u` 会被拆成 7 个字符塞进缓冲区;PTK 也不会主动请求该协议),且 xterm 的
+  `ESC[27;2;13~` 在 PTK 源码里就被映射成 Enter(`ansi_escape_sequences.py:129`)。`\`+回车每台键盘都有、
+  零配置、且**看得见**。
+  验证:闸门 `tests/tty_osc_input_test.sh` 全绿(含第 7 节 4 条新断言);**负对照**——拿 HEAD 版
+  helper 跑同表 8 条红(4 条新增全红,因为旧版单次回车不提交);**变异验证**——只去掉
+  `delete_before_cursor` 一行,恰好红 1 条且正是"反斜杠被吃掉"那条(实得 `abc\\\ndef`),
+  证明断言承重不是空跑;真 wchat 端到端(桩网关,`.scratch/exp/stub_slow_gateway.py` 记账请求体):
+  `第一行\` + 回车 + `第二行` + 回车 → 桩收到 last_user=`第一行\n第二行`(反斜杠已吃掉、两行完整);
+  单行消息**单次回车**即送达模型;`-u` 仍按命令处理(渲染用量面板、**零**请求);
+  `bash tests/run_gates.sh --main` = 12/12。
+  边界与未采纳:粘贴多行走占位符+侧表(提交时才展开),**粘贴正文里的行尾反斜杠不会被吃掉**;
+  单行粘贴以 `\` 结尾会触发续行(与大原则一致,可接受);"偶数个反斜杠=转义成真正的反斜杠"
+  (oddeven 变体,实测已跑过)未采纳,记在这里备选 —— 代价是"想发一个真的以 \ 结尾的正文"
+  只能靠"行尾补空格"或先 Ctrl+J 之类手段,与旧版完全一致。
+  反复记的那条坑;改成 `${describe_note}` 后 569/569 复绿 —— 这条断言值钱,别嫌它啰嗦。

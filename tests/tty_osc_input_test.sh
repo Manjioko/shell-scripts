@@ -23,6 +23,11 @@
 #        读者侧丢了输入框会重排错行(实测,见第 5 节那条 CPR 警告断言)
 # 一律**不做"半截滞留等下片"**:扣着没判完的字节可能永远等不到下一片(用户只按一个 ESC),
 # 那是拿真按键换噪声。
+#
+# 第 7 节另管一件事:输入语义(回车=发送;行尾反斜杠+回车=续行)。它与应答过滤同属
+# 输入助手的行为主线,且**旧契约(driver 用 \r\r 提交)正是被它替换掉的** —— 不回归
+# 就会静默回退成"按两遍回车"。判据:反斜杠必须被吃掉(不许留在正文里)、空缓冲区
+# 回车不许发送或退出、行中反斜杠不许触发续行。
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     for _b in "${WCHAT_BASH:-}" /opt/homebrew/bin/bash /usr/local/bin/bash "${HOME}/.linuxbrew/bin/bash"; do
         [[ -x "$_b" ]] || continue
@@ -240,6 +245,34 @@ def pump(dur):
                     cpr[0] += 1
                     os.write(master, b"\x1b[2;1R")
 
+
+def press(data, wait=0.35):
+    os.write(master, data); pump(wait)
+
+
+def finish():
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    for _ in range(20):
+        p, st = os.waitpid(pid, os.WNOHANG)
+        if p:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0)
+    # 结果文本本身可能含真换行,会把字段切开 → 转义后再交回 bash 比较。
+    # 残留只对"框自己的渲染帧"判:PTK 进 raw+noecho 之前,预写在队列里的字节会被行规程
+    # 回显到屏上(真终端同样如此),那不是过滤层能拦的东西,算成泄漏会永久误红。
+    raw_at = frames.find(b"\x1b[?2004h")           # PTK 启用 bracketed paste = 已进 raw
+    scr = frames[raw_at:] if raw_at >= 0 else frames[frames.find(b"\x1b[?25l"):]
+    leak = (b"rgb:2828" in scr or b"rgb:2828" in result or b"24;1R" in result)
+    print("RESULT\t%s\t%s" % (bytes(result).decode("utf-8", "replace").encode("unicode_escape").decode(),
+                              "LEAK" if leak else "CLEAN"))
+    print("CPRWARN\t%s" % ("yes" if b"doesn't support cursor position" in frames else "no"))
+    print("CPRQ\t%d" % frames.count(b"\x1b[6n"))
+
 # 残留的真实时序是"开框前就压在 pty 队列里"。leftover 类必须先写后起框:
 # 若等框画出来再写,陈旧的 ESC[..R 会赶在 PTK 自己的 CPR 之后吃掉配额,
 # 那就不再是在测残留,而是在测时序运气。
@@ -248,6 +281,29 @@ if mode == "leftover":
 elif mode == "leftover_dsr":
     os.write(master, RESP * 4 + b"\x1b[24;1R")
 pump(1.0)
+# ── 新输入语义(回车=发送;行尾反斜杠+回车=续行)的按键脚本 ──────────────────
+# 这三个 mode 必须在旧流程(以 \r\r 提交)之前分流:它们的提交键是**单次回车**,
+# 而旧契约"内容+回车 / 空行回车"正是本次要拆掉的那个双职责。
+if mode == "enter_sends":                 # 单次回车就该把 hello 交回来
+    press(b"hello")
+    press(b"\r", 1.5)
+    finish(); sys.exit(0)
+if mode == "slash_cont":                  # 行尾 \ + 回车 = 续行(吃掉反斜杠),再回车才发送
+    press(b"abc")
+    press(b"\\")
+    press(b"\r", 0.8)                     # 这一下不得提交
+    press(b"def")
+    press(b"\r", 1.5)
+    finish(); sys.exit(0)
+if mode == "empty_enter":                 # 空缓冲区回车:不发送、不退出,后续输入照常
+    press(b"\r", 0.8)
+    press(b"hi")
+    press(b"\r", 1.5)
+    finish(); sys.exit(0)
+if mode == "slash_mid":                   # 反斜杠不在行尾 → 不许触发续行,原样发送
+    press(b"a\\b")
+    press(b"\r", 1.5)
+    finish(); sys.exit(0)
 if mode == "typing":
     os.write(master, b"h"); pump(0.3); os.write(master, RESP); pump(0.4); os.write(master, b"i")
 elif mode == "clean":
@@ -255,28 +311,8 @@ elif mode == "clean":
 else:                                   # leftover / leftover_dsr:上面已预写,这里只补按键
     os.write(master, b"hello")
 pump(0.4)
-os.write(master, b"\r\r"); pump(1.5)    # 空行回车 = 提交
-try:
-    os.kill(pid, signal.SIGTERM)
-except ProcessLookupError:
-    pass
-for _ in range(20):
-    p, st = os.waitpid(pid, os.WNOHANG)
-    if p:
-        break
-    time.sleep(0.05)
-else:
-    os.kill(pid, signal.SIGKILL); os.waitpid(pid, 0)
-# 结果文本本身可能含真换行,会把字段切开 → 转义后再交回 bash 比较。
-# 残留只对"框自己的渲染帧"判:PTK 进 raw+noecho 之前,预写在队列里的字节会被行规程
-# 回显到屏上(真终端同样如此),那不是过滤层能拦的东西,算成泄漏会永久误红。
-raw_at = frames.find(b"\x1b[?2004h")           # PTK 启用 bracketed paste = 已进 raw
-scr = frames[raw_at:] if raw_at >= 0 else frames[frames.find(b"\x1b[?25l"):]
-leak = (b"rgb:2828" in scr or b"rgb:2828" in result or b"24;1R" in result)
-print("RESULT\t%s\t%s" % (bytes(result).decode("utf-8", "replace").encode("unicode_escape").decode(),
-                          "LEAK" if leak else "CLEAN"))
-print("CPRWARN\t%s" % ("yes" if b"doesn't support cursor position" in frames else "no"))
-print("CPRQ\t%d" % frames.count(b"\x1b[6n"))
+os.write(master, b"\r"); pump(1.5)      # 回车 = 发送(新语义:单次;旧契约的 \r\r 已废)
+finish()
 PY
 e2e_ok=1
 if ! "$PYBIN" -c "import prompt_toolkit" 2>/dev/null; then
@@ -288,24 +324,38 @@ if (( e2e_ok )); then
     "$PYBIN" "$DRIVER" "$HELP" leftover > "$W/e1.out" 2>&1
     got=$(awk -F'\t' '/^RESULT/{print $2}' "$W/e1.out")
     leak=$(awk -F'\t' '/^RESULT/{print $3}' "$W/e1.out")
-    ck "交回 bash 的文本恰好是 hello" "$got" 'hello\n'
+    ck "交回 bash 的文本恰好是 hello" "$got" 'hello'
     ck "屏上无应答残留" "$leak" "CLEAN"
     # 这条钉住"DSR 不过滤"的不对称:谁要是照抄 bash 判据把 ESC[..R 也丢了,PTK 拿不到
     # 自己 CPR 的应答,这里立刻变红 —— 而上面几条"应答丢弃"用例全绿,抓不到它。
     ck "PTK 的 CPR 仍能拿到应答(无降级警告)" "$(awk -F'\t' '/^CPRWARN/{print $2}' "$W/e1.out")" "no"
     has "PTK 确实发了 CPR(证明这条断言不是空跑)" "$(awk -F'\t' '/^CPRQ/{print $2}' "$W/e1.out")" "1"
     "$PYBIN" "$DRIVER" "$HELP" leftover_dsr > "$W/e4.out" 2>&1
-    ck "掺入陈旧 DSR 后交回的文本仍是 hello" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e4.out")" 'hello\n'
+    ck "掺入陈旧 DSR 后交回的文本仍是 hello" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e4.out")" 'hello'
     ck "掺入陈旧 DSR 后屏上无残留" "$(awk -F'\t' '/^RESULT/{print $3}' "$W/e4.out")" "CLEAN"
     ck "掺入陈旧 DSR 后 PTK 的 CPR 仍未被误杀" "$(awk -F'\t' '/^CPRWARN/{print $2}' "$W/e4.out")" "no"
     echo "5) 端到端:应答夹在真按键中间 → 丢应答留按键"
     "$PYBIN" "$DRIVER" "$HELP" typing > "$W/e2.out" 2>&1
-    ck "交回的文本恰好是 hi" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e2.out")" 'hi\n'
+    ck "交回的文本恰好是 hi" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e2.out")" 'hi'
     ck "屏上无应答残留" "$(awk -F'\t' '/^RESULT/{print $3}' "$W/e2.out")" "CLEAN"
     echo "6) 端到端:没有应答时正常输入不受影响"
     "$PYBIN" "$DRIVER" "$HELP" clean > "$W/e3.out" 2>&1
-    ck "交回的文本恰好是 hello" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e3.out")" 'hello\n'
+    ck "交回的文本恰好是 hello" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e3.out")" 'hello'
     ck "屏上无 CPR 降级警告" "$(awk -F'\t' '/^CPRWARN/{print $2}' "$W/e3.out")" "no"
+    echo "7) 端到端:新输入语义(回车=发送;行尾反斜杠+回车=续行)"
+    # 这一节钉的是"一个键两个职责"被拆掉之后的行为。四条都是 pty 里真按键、真进程:
+    #   ① 单次回车必须发送(旧契约要按两遍 —— 就是用户报的那个毛病)
+    #   ② 行尾 \ + 回车必须续行,且**反斜杠不许留在正文里**(旧版 ${line%?} 的语义)
+    #   ③ 空缓冲区回车:不发送、不退出(不能把它变成"退出/提交空消息"的一条路)
+    #   ④ 反斜杠不在行尾时不许误触发续行
+    "$PYBIN" "$DRIVER" "$HELP" enter_sends > "$W/e5.out" 2>&1
+    ck "回车=发送:单次回车交回 hello" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e5.out")" 'hello'
+    "$PYBIN" "$DRIVER" "$HELP" slash_cont > "$W/e6.out" 2>&1
+    ck "行尾 \\+回车=续行:反斜杠被吃掉,两行一起交回" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e6.out")" 'abc\ndef'
+    "$PYBIN" "$DRIVER" "$HELP" empty_enter > "$W/e7.out" 2>&1
+    ck "空缓冲区回车不发送也不退出(后续输入照常发送)" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e7.out")" 'hi'
+    "$PYBIN" "$DRIVER" "$HELP" slash_mid > "$W/e8.out" 2>&1
+    ck "反斜杠不在行尾不触发续行(原样交回)" "$(awk -F'\t' '/^RESULT/{print $2}' "$W/e8.out")" 'a\\b'
 fi
 
 echo

@@ -39,9 +39,14 @@ W=$(mktemp -d)
     grep -E "^IMG_DESC_PROMPT=.*'$" "$REAL" \
         || awk '/^IMG_DESC_PROMPT="/{p=1} p{print} p && /^"""$/{exit}' "$REAL"
 } > "$W/sandbox.sh"
-for fn in img_mime is_image prepare_image vision_extra_fields vision_build_body \
-    vision_parse_resp vision_disable describe_images; do
+for fn in img_mime is_image img_dims prepare_image prepare_delivery img_reject_wording \
+    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images; do
     awk -v name="$fn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
+done
+# describe_images 现在共用 prepare_delivery(而它要用 img_dims)。漏抽的后果不是报错,是
+# "command not found" 被当成压图失败 —— 断言全跑在假路径上,所以这里显式自检依赖。
+for fn in img_dims prepare_delivery img_reject_wording; do
+    grep -q "^${fn}() {" "$W/sandbox.sh" || { echo "❌ 沙箱没抽到 ${fn}(describe_images 的依赖)"; exit 1; }
 done
 # shellcheck disable=SC1090
 source "$W/sandbox.sh"

@@ -36,6 +36,12 @@ GUARD_E=$(awk -v s="$GUARD_S" 'NR>s && /^fi$/{print NR; exit}' "$REAL")
 
 {
     sed -n "1,${GUARD_E}p" "$REAL"                    # 头部 + 默认配置 + 兜底段
+    # ⚠ 这段必须抽、且顺序要跟生产一致(先赋 1、再由落地那行压成 0):原先整段没抽 →
+    #   沙箱里 IMG_CAPABLE 恒空,第 0 节"默认可用"那条断言常年是红的空转(与产品无关,
+    #   却让人以为探针坏了);而 IMG_PROVIDER=none 那一档本来是靠落地那行变 0 的,
+    #   只抽赋值不抽落地,反过来会把 none 档抬成"可用"。
+    grep -E '^(IMG_CAPABLE|vision_disabled_reason)=' "$REAL"
+    grep -E '^\[\[ "\$IMG_PROVIDER" == "none" \]\] && IMG_CAPABLE=0$' "$REAL"
     awk '/^# ---------- 图片理解\(多模态,转述架构\)配置/{s=1} /^IMG_DESC_PROMPT=/{s=0} s' "$REAL"
     # 坑(本轮实测):旧写法拿 /^IMG_DESC_PROMPT=/ 当区间**结束**标记,而实现里它是
     # 第 544 行的**单行**赋值 → 声明整条被跳过,沙箱里 IMG_DESC_PROMPT 为空串,
@@ -44,9 +50,14 @@ GUARD_E=$(awk -v s="$GUARD_S" 'NR>s && /^fi$/{print NR; exit}' "$REAL")
     grep -E "^IMG_DESC_PROMPT=.*'$" "$REAL" \
         || awk '/^IMG_DESC_PROMPT="/{p=1} p{print} p && /^"""$/{exit}' "$REAL"
 } > "$W/sandbox.sh"
-for fn in img_mime is_image prepare_image vision_extra_fields vision_build_body \
-    vision_parse_resp vision_disable describe_images; do
+for fn in img_mime is_image img_dims prepare_image prepare_delivery img_reject_wording \
+    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images; do
     awk -v name="$fn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
+done
+# describe_images 现在共用 prepare_delivery(而它要用 img_dims)。漏抽的后果不是报错,是
+# "command not found" 被当成压图失败 —— 断言全跑在假路径上,所以这里显式自检依赖。
+for fn in img_dims prepare_delivery img_reject_wording; do
+    grep -q "^${fn}() {" "$W/sandbox.sh" || { echo "❌ 沙箱没抽到 ${fn}(describe_images 的依赖)"; exit 1; }
 done
 got=$(grep -c '() {' "$W/sandbox.sh")
 curl() { echo "NETWORK-LEAK" >&2; return 99; }        # 桩:被测路径不该触网
@@ -124,12 +135,15 @@ ck "没有触网(桩未被调用)" "$(grep -c NETWORK-LEAK <<<"$describe_result"
 
 echo '=== 6. 接口报"不支持图片" → 进程内降级(判的是实现本体,不是副本) ==='
 # 第 6 节一度长驻一个 ✗:测试里另抄了一份 classify_unsupported(用 ${e,,}),
-# 实现里是 ${err,,},断言按字面量比就成了假失败。现在直接把实现里那段 case 抠出来
-# 跑 —— 判定本体与实现不可能漂移,而且顺带验证它在生产解释器(5.x)下真能执行。
+# 实现里是 ${err,,},断言按字面量比就成了假失败。现在直接把实现里那段调用点抠出来跑 ——
+# 判定本体与实现不可能漂移,而且顺带验证它在生产解释器(5.x)下真能执行。
+# ⚠ 锚点已换成**调用点**(`if img_reject_wording "$err"; then` … fi):原先锚的是实现里的
+#   `case ${err,,}`,而那段判定后来被收进 img_reject_wording(三份漂移收成一处),锚点没人跟着改
+#   → 抠出空串、本节四条断言**常年全红且与产品无关**(探针自己的过期说明,别再按 case 找)。
 DI_BODY=$(sed -n '/^describe_images()/,/^}/p' "$REAL")
-IMPL_CASE=$(printf '%s\n' "$DI_BODY" | awk '/err,,/ && /case /{c=1} c{print} c && /^[[:space:]]*esac$/{exit}')
-[[ -n "$IMPL_CASE" ]] || { echo "  ✗ 抠不出实现里的降级判定 case(第 6 节没有可测对象)"; fail=$((fail + 1)); }
-{ echo 'classify_impl() {'; echo '    local err="$1"'; printf '%s\n' "$IMPL_CASE"; echo '}'; } > "$W/classify.sh"
+IMPL_BLOCK=$(printf '%s\n' "$DI_BODY" | awk '/if img_reject_wording "\$err"; then/{c=1} c{print} c && /^[[:space:]]*fi$/{exit}')
+[[ -n "$IMPL_BLOCK" ]] || { echo "  ✗ 抠不出实现里的降级调用点(第 6 节没有可测对象)"; fail=$((fail + 1)); }
+{ echo 'classify_impl() {'; echo '    local err="$1"'; printf '%s\n' "$IMPL_BLOCK"; echo '}'; } > "$W/classify.sh"
 # shellcheck disable=SC1090
 source "$W/classify.sh" 2>/dev/null
 mk_err() { printf '{"error":{"message":"%s"}}' "$1"; }
@@ -146,7 +160,7 @@ ck "格式类报错 → 不全会话降级(是文件问题)" "$IMG_PROVIDER/$IMG
 IMG_PROVIDER=auto IMG_CAPABLE=1 vision_disabled_reason="" describe_result=""
 classify_impl "'reasoning_effort' must be 'none' when 'enable_thinking' is false" >/dev/null 2>&1
 ck "400 reason 字段冲突 → 不降级(是形状问题不是能力问题)" "$IMG_PROVIDER/$IMG_CAPABLE" "auto/1"
-ck "判定确实来自实现本体(不是测试里抄的副本)" "$(grep -c 'err,,' "$W/classify.sh")" "1"
+ck "判定确实来自实现本体(不是测试里抄的副本)" "$(grep -cF -- 'img_reject_wording "$err"' "$W/classify.sh")" "1"
 
 echo "=== 7. bash5 兜底与解释器耦合(硬断言:前提塌了就红) ==="
 shb=$(sed -n '1p' "$REAL"); she=${shb#\#!}

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""wchat 输入助手:prompt_toolkit 多行输入框(替代 read -e)。
+r"""wchat 输入助手:prompt_toolkit 多行输入框(替代 read -e)。
 
 渲染输出到 /dev/tty(避免渲染序列混进结果),结果文本经 stdout 交回 bash。
-语义与 wchat 的 read -e 输入一致:
-  回车 = 换行继续;空行回车 = 提交整段;
-  单行命令(-x,经 --commands 传入)回车立即返回,由 bash 执行;
+输入语义:
+  回车 = 发送整段(缓冲区全是空白时不动,不发空消息);
+  行尾反斜杠 + 回车 = 续行(吃掉那个反斜杠,不发送)—— 与旧 read -e 流同义;
+  命令(-x)不由本助手识别:单行文本交回 bash 后照旧按命令解析,多行一律按正文
+  (判据在 wchat 侧 `[[ "$ptk_text" != *$'\n'* ]]`,本助手只负责"送出去");
   Ctrl+F 选择文件(退出码 4,携带缓冲区文本交 bash 走旧文件选择逻辑);
   Ctrl+G / Ctrl+V 粘贴剪贴板图片(截图直接附加,与 Ctrl+F 同管线统一转述);
   粘贴时若剪贴板装着图片(常见:截图后 Cmd+V/Ctrl+V),空粘贴自动嗅探并附加;
@@ -349,7 +351,8 @@ def _insert_clip_image(event, clip_dir):
     (占位删除机制免费复用)。占位行必须独占一行:parse 只认行首前缀,
     光标所在行已有内容时先补一个换行,否则占位与文字挤在同一行,提交时
     整行按字面文本进消息、图片丢失(AI 转而用 read_image 猜路径,真机
-    复现)。行尾补换行,光标落空行,一次回车即提交。
+    复现)。行尾补换行,光标落空行,便于继续输入;发送仍是回车(不再依赖旧流
+    的"空行提交"约定)。
     返回 True=已附加;False=剪贴板无图。"""
     path = _clip_image_file(clip_dir)
     if not path:
@@ -365,10 +368,13 @@ def _insert_clip_image(event, clip_dir):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--history", default="", help="历史文件路径(空=不持久)")
-    ap.add_argument("--commands", default="", help="空格分隔的单行命令集")
+    # --commands/--no-commands 保留为**调用契约**:回车恒发送之后,本助手不再需要
+    # "识别单行命令立即返回"那条快速路(单行文本交回 bash,handle_cmd_line 照样解析,
+    # 结果逐字相同)。参数留着是为了不动 wchat 侧的调用点与闸门启动参数;助手侧不消费。
+    ap.add_argument("--commands", default="", help="[保留]空格分隔的单行命令集(助手不再消费)")
     ap.add_argument("--default", default="", help="初始缓冲区文本(文件选择取消后带回)")
     ap.add_argument("--no-commands", action="store_true",
-                    help="续行/补输模式:一切输入按正文")
+                    help="[保留]续行/补输模式(助手不再消费)")
     ap.add_argument("--clip-dir", default="",
                     help="剪贴板图片落盘的会话级临时目录(空=禁用图片嗅探)")
     args = ap.parse_args()
@@ -386,7 +392,8 @@ def main() -> int:
     except ImportError:
         return 2
 
-    commands = [] if args.no_commands else args.commands.split()
+    # 命令清单不再由助手消费(--commands 保留为调用契约,见 main 开头的说明):
+    # 单行命令现在也走"回车=发送"同一条路,回 bash 后由 handle_cmd_line 精确分发。
     try:
         history = FileHistory(args.history) if args.history else InMemoryHistory()
     except OSError:
@@ -401,7 +408,7 @@ def main() -> int:
     def _(event):
         """多行粘贴只插入一行占位:缓冲区保持短小,上方已输入的行不被
         顶出屏幕;内容存入侧表,提交时换回。占位后补一个换行让光标落在
-        空行——一次回车即提交(与旧流"空行提交"一致)。单行粘贴原样插入。
+        空行,便于继续输入(发送一律靠回车)。单行粘贴原样插入。
         粘贴结尾的 \n 是终止符非内容,按旧流归一化剥掉一个。占位尾部拼
         上序号个零宽空格(U+200B,不可见)作唯一标记,提交时按整个占位串
         换回,多次同规模粘贴互不混淆。
@@ -425,20 +432,31 @@ def main() -> int:
 
     @kb.add("enter")
     def _(event):
-        """回车:空行=提交整段;单行命令=立即返回;否则换行继续"""
+        r"""回车 = 发送;行尾反斜杠 + 回车 = 续行(吃掉反斜杠,不发送)。
+
+        为什么要拆开这两个职责(用户实报):旧规则是"内容+回车=换行继续,空行回车
+        =发送",一个键两种含义 —— 想发一条单行消息必须按两遍回车,而"想发送时的
+        第一遍"和"想换行"在屏幕上完全看不出区别。现在回车恒发送,续行改成显式的
+        行尾反斜杠,与 bash/readline 的习惯一致,而且**看得见**(反斜杠就在屏上)。
+
+        这个语义不是新发明:输入框换成 prompt_toolkit 之前,read -e 流里就是这么
+        做的(fdc1937^:wchat.sh 的 `if [[ "$line" == *\\ ]]; then line="${line%?}"
+        ... continue; fi`),换成 PTK 时丢了 —— 帮助里"行尾 \ 也可续行"那句话因此
+        变成过期说明(实测:产品版交回的是 `foo\\n`,反斜杠留在正文里)。
+        """
         b = event.current_buffer
         doc = b.document
         line_before = doc.text_before_cursor.split("\n")[-1]
-        line_after = doc.text_after_cursor.split("\n")[0]
-        if not line_before.strip() and not line_after.strip():
-            event.app.exit(result=b.text)
+        if line_before.endswith("\\"):
+            # 只删最后一个字符(即那个反斜杠),再插入换行 —— 与旧版 ${line%?} 同义。
+            # 按**个数**删而不是按内容替换:不同实现对反斜杠的转义/正则语义有差异,
+            # 按内容删容易删多(旧版注释里记的就是这个坑,故用 %? 而非 %\\)。
+            b.delete_before_cursor(count=1)
+            b.insert_text("\n")
             return
-        if "\n" not in b.text:
-            t = b.text.strip()
-            if any(t == c or t.startswith(c + " ") for c in commands):
-                event.app.exit(result=b.text)
-                return
-        b.insert_text("\n")
+        if not b.text.strip():
+            return                      # 空缓冲区回车=不动,避免发出空消息
+        event.app.exit(result=b.text)
 
     def placeholder_ranges(text):
         """粘贴占位行(含零宽标记的行)的 [start, end) 区间列表。每次删除

@@ -311,6 +311,12 @@ reject_case no   "含 vision 的无关报错(旧 ask_ai 那份 *vision* 单条�
   'The requested vision model was not found, check the model name.'
 reject_case no   "鉴权失效不能算能力问题" 'AuthenticationError: Incorrect API key provided.'
 reject_case no   "空文本不能判不收图"   ''
+# 格式/解码器类是**文件问题**,不是端点不吃图 —— 收成统一判据时曾把这条排除丢掉
+# (当时只有 vision_layer 探针里那一条反向锁,而那张表不在套件里 → 漂了没人红)。
+# 逮到它的是 2026-10-06 那轮给探针换锚点时的复跑;现在两边都钉住。
+reject_case no   "格式/解码器类不算能力问题(文件问题)" \
+  'This image format is not supported by the decoder'
+reject_case no   "中文的格式类报错同样不算" '图片格式不支持'
 
 # 规矩只许有一处定义、其余全走调用(三处各抄一份已经漂过一次:ask_ai 那份多了
 # `*vision*` 单条件,就是上面那条负锁要拦的形状)
@@ -722,7 +728,7 @@ img_live_tokens(){ printf '0'; }
 # ④ 调用点真把它说出口(不是只有变量赋了值)。
 #    ⚠ 夹具图在 $W(仓库外),必须走粘贴流程拿只读授权 —— 直接调 tool_read_image 会被
 #    path_access 拦下要交互确认,非 tty 时整道闸门挂死(见 14.3 同一条注释)。
-describe_images(){ describe_failed=0; describe_result='(打桩转述)'; }
+describe_images(){ describe_failed=0; describe_result='(打桩转述)'; describe_note=""; }
 budget_env why20c; IMG_INLINE=0; IMG_MAIN_VISION=""; IMG_CAPABLE=1
 p_r="$W/w20r.png"; cp "$del" "$p_r"
 granted_files=(); input_images=(); PARSE_OUT=""
@@ -1045,6 +1051,59 @@ ck "结构锁:prepare_image 里 sips -Z 恰好 1 处" \
 ck "结构锁:无 -Z 的纯重编码分支也在(两条路都得留着)" \
    "$(awk '/^prepare_image\(\)/,/^}/' "$SRC" | grep -c 'sips -s format jpeg')" "1"
 rm -f "$_pi_same" "$_pi_small"
+
+echo "=== 24. 转述通道也封像素(与 inline 共用核心):大图不再原样上传 ==="
+# 起因:转述原先只调 prepare_image,而它只在**字节**超限时才动手 ⇒ 4000px 的图整张上传
+# (体积/延迟白付、按面积计费白付钱;有些网关还会对超长边自己截断/分块,转述质量反而下降)。
+# 现在两条链路共用 prepare_delivery,只是两组上限不同(inline: IMG_INLINE_MAX_*;转述: IMG_MAX_*)。
+# 这一组真跑 describe_images **本体**,只把网络挡掉(桩 curl),所以量到的是真交付件。
+budget_env kn9a; IMG_INLINE_SHRINK=1
+IMG_MAX_SIDE=2048; IMG_MAX_BYTES=10485760
+_KN9_REQ="$W/kn9_req.json"; rm -f "$_KN9_REQ"
+curl() {   # 桩:把请求体(@"file")拷出来,再回一条假响应、吐 200
+    local _o="" _d="" 
+    while (( $# )); do
+        case "$1" in
+            -o) _o="$2"; shift 2 ;;
+            --data-binary) _d="${2#@}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [[ -n "$_d" && -f "$_d" ]] && cp "$_d" "$_KN9_REQ"
+    [[ -n "$_o" ]] && printf '{"choices":[{"message":{"content":"(桩转述)"}}]}' > "$_o"
+    printf '200'
+}
+_pc_body() {  # $1=请求体文件 → 打印"请求里那张图"的尺寸(真解出来量,不看中间变量)
+    # ⚠ 取 user 那条消息里的图:vision_build_body 把 system 放在 messages[0],
+    #   直接写 content[0] 会拿到系统提示词那串字符串(jq 报 "Cannot iterate over string")。
+    jq -r '[.messages[] | select(.role=="user")] | .[0].content[0].image_url.url' "$1" 2>/dev/null \
+        | sed 's/^data:[^,]*;base64,//' | tr -d '\n' | base64 -D > "$W/kn9_img.bin"
+    img_dims "$W/kn9_img.bin"
+}
+IMG_PROVIDER=auto; IMG_CAPABLE=1; describe_note=""
+# ⚠ 不能写 _screen=$(describe_images …):命令替换在**子 shell** 里跑,describe_note 出不来
+#   (#56 ④ 那条假通道的同款)。落盘再读。
+describe_images "$W/big.png" > "$W/kn9.out" 2>&1
+_kn9_screen=$(cat "$W/kn9.out")
+ck "2600px 的图:请求里的图已被缩到 IMG_MAX_SIDE" \
+   "$(_pc_body "$_KN9_REQ" | awk '{print ($1>$2?$1:$2)}')" "2048"
+ck "转述前动过就写在事实句里(原尺寸一起带上)" \
+   "$(printf '%s' "$describe_note" | grep -c '原文件 2600x2600')" "1"
+ck "屏幕上说得出'转述前先过一刀'" "$(printf '%s' "$_kn9_screen" | grep -c '转述前先过一刀')" "1"
+# 负对照:本来就不超 IMG_MAX_SIDE 的图 ⇒ 一个字都不说,且请求里的图尺寸不变
+# ⚠ 夹具必须带图片扩展名:$del 是 mktemp 出来的无后缀临时文件,而 is_image 按扩展名判
+#   (设计如此,不做内容嗅探)→ 直接喂它会走"不支持的图片格式"早退,根本到不了压缩那步。
+budget_env kn9b; IMG_MAX_SIDE=2048; IMG_MAX_BYTES=10485760; rm -f "$_KN9_REQ"
+cp "$del" "$W/kn9b_small.png"
+describe_images "$W/kn9b_small.png" > "$W/kn9b.out" 2>&1
+ck "负对照:小图不缩也不出声(note 为空)" "${describe_note:-EMPTY}" "EMPTY"
+ck "负对照:请求里的图就是原尺寸(没被无谓重采样)" \
+   "$(_pc_body "$_KN9_REQ" | tr ' ' x)" "$(img_dims "$W/kn9b_small.png" | tr ' ' x)"
+# 结构锁:两条链路共用同一个核心(抄两份必漂),且转述点的是 IMG_MAX_* 那组上限
+ck "结构锁:describe_images 不再自己直接调 prepare_image" \
+   "$(awk '/^describe_images\(\)/,/^}/' "$SRC" | grep -vE '^[[:space:]]*#' | grep -c 'prepare_image')" "0"
+ck "结构锁:转述走 core 且点名 IMG_MAX_BYTES / IMG_MAX_SIDE" \
+   "$(awk '/^describe_images\(\)/,/^}/' "$SRC" | grep -cF 'prepare_delivery "$path" "$IMG_MAX_BYTES" "$IMG_MAX_SIDE"')" "1"
 
 printf '\nRESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"

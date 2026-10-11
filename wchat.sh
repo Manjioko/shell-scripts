@@ -987,8 +987,11 @@ INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 # 恢复(见该函数 set -m 注释)构成双保险。
 SSE_STALL_TIMEOUT=120      # 2 分钟
 
-# 会话内命令的唯一清单是下面 PTK_COMMANDS(输入助手按它识别"单行命令"),
-# 调度与"未知命令"兜底都在 handle_cmd_line 里。这里**不再放第二份 options_list**:
+# 会话内命令的唯一清单是下面 PTK_COMMANDS。**命令判定的唯一执行点**是
+# handle_cmd_line(精确匹配 + "未知命令"兜底);PTK_COMMANDS 现在只作为调用契约
+# 传给输入助手(助手侧已不消费它 —— 回车恒发送后不再需要"单行命令立即返回"那条
+# 快速路,单行文本回到这里照样被 handle_cmd_line 精确匹配,结果逐字相同)。
+# 这里**不再放第二份 options_list**:
 # 旧定义只列了 -l/-msgs/-h/-c/-u/-img/-skill,比 PTK_COMMANDS 少 -q/-n/-cl/-stp/…,
 # 两份不一致迟早有人照着少的改。它原先唯一的用途是 ask_ai 入口那条选项拦截,
 # 而那条拦截会在工具链续发时把工具结果误当命令、静默吞掉整轮(详见 ask_ai 开头注释)。
@@ -1513,9 +1516,10 @@ help_user() {
     inp_msg "  -h    显示帮助信息"
     inp_msg
     inp_msg "输入规则:"
-    inp_msg "  - 提示符(灰色 │)下输入内容后回车 = 换行继续,空行回车 = 发送"
-    inp_msg "  - 粘贴多行文本自动进入续行;行尾 \\ 也可续行(现在已非必需)"
-    inp_msg "  - 以上 -x 命令仅在全新消息首行生效,续行中输入 -x 按正文处理"
+    inp_msg "  - 回车 = 发送整段(缓冲区为空时不动)"
+    inp_msg "  - 想换行:把行尾写成 \\ 再回车(反斜杠会被吃掉,不发送,继续输入)"
+    inp_msg "  - 粘贴多行文本会自动折叠成一行占位,回车发送时原样展开"
+    inp_msg "  - -x 命令仅在单行输入时生效;多行/续行中输入 -x 按正文处理"
     inp_msg "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入"
 }
 
@@ -7403,19 +7407,48 @@ if d[:2]==b"\xff\xd8":
     [[ -n "$out" ]]
 }
 
-# inline 专用压缩:$1 原图 [$2=本档最长边,缺省 IMG_INLINE_MAX_SIDE] → 交付路径。失败 rc=1。
-# 与 prepare_image 的分工要分清:那条按**字节**封顶(为一次转述请求省上传),
-# 这条按**像素**封顶 —— ⚠ 能省 token 的只有像素这一维:图片按**面积**计费
-# (IMG_TOKENS_PER_MEGAPIXEL,顶到 IMG_TOKENS_CAP),压 JPEG 质量只减上传字节,计费一分不减。
-# 同一把尺实测:2048px=2500(顶格) 1536px=2359 1024px=1048 768px=589 —— 陡坡在 2048→1024,
-# 而 6000 的活图预算因此是"同时挂 4 张"和"挂 11 张"的差别。
-# $2 是给降档阶梯用的(见 img_inline_sides):撞线时先缩一档再挂,而不是整张退回转述。
-# IMG_MAX_* 是在 $() 的子 shell 里覆盖的,不会污染 describe_images 用的同一组全局。
-prepare_inline() {
-    local in="$1" side="${2:-${IMG_INLINE_MAX_SIDE:-2048}}" out w h longest
-    [[ "$side" =~ ^[0-9]+$ ]] || side="${IMG_INLINE_MAX_SIDE:-2048}"
-    in=$( IMG_MAX_BYTES="$IMG_INLINE_MAX_BYTES" IMG_MAX_SIDE="$side" \
-          prepare_image "$1" 2>/dev/null ) || return 1
+# ---------- 交付事实句:一份口径,两处消费(inline 给主模型 / 转述给视觉模型) ----------
+# $1=原图 $2=交付件 → 置两个全局。**不能走命令替换**:函数要回传两件东西,而命令替换会把它
+# 扔进子 shell,子 shell 里赋的全局父 shell 拿不到(#56 ④ 那条假通道就是这么来的)。
+#   img_fact_text   事实句原文(空 = 两个尺寸没取全,调用方一个字都不说)
+#   img_fact_shrunk 1 = 交付件尺寸 ≠ 原文件尺寸(被重采样过)
+# 为什么"缩过"的结论也由它给:调用方的话术与这句事实必须同源,各算一遍必漂,
+# 而且会漂出"事实说缩了、话术说没缩"这种自相矛盾。
+img_fact_text=""
+img_fact_shrunk=0
+img_delivery_fact() {
+    local _o _f
+    img_fact_text=""; img_fact_shrunk=0
+    _o=$(img_dims "$1" 2>/dev/null | tr ' ' x)
+    _f=$(img_dims "$2" 2>/dev/null | tr ' ' x)
+    [[ -n "$_o" && -n "$_f" ]] || return 0
+    if [[ "$_o" == "$_f" ]]; then
+        # 尺寸一致 = 没重采样。但字节超限时 prepare_image 会**重编码为 JPEG**(同尺寸、
+        # 不同字节)—— 那是一处真实的画质改动,得写进事实里,否则"同尺寸"会被读成
+        # "一个字节都没动"。
+        if [[ "$1" == "$2" ]]; then
+            img_fact_text="交付 ${_f},与原文件同尺寸"
+        else
+            img_fact_text="交付 ${_f},与原文件同尺寸;已重编码为 JPEG 压字节(未裁剪)"
+        fi
+    else
+        img_fact_text="交付 ${_f};原文件 ${_o},等比重采样,未裁剪"
+        img_fact_shrunk=1
+    fi
+}
+
+# 图 → 交付件:按**字节**($2)与**像素**($3=最长边)双封顶。失败 rc=1。
+# 为什么抽成一个 core 而不是让两条链路各写一份:顺序(sips→ffmpeg→PIL)与"缩不动就原样交回"
+# 这个兜底必须两边逐字一致 —— 抄两份必漂(#59 的三份漂移就是前车之鉴)。
+# 两个调用点:
+#   · inline:字节 IMG_INLINE_MAX_BYTES、像素该轮的档(见 img_inline_sides)——原图交给主模型,每轮重付;
+#   · 转述:  字节 IMG_MAX_BYTES、像素 IMG_MAX_SIDE —— 交给视觉模型,一次性。
+# ⚠ 转述这条以前**只**走 prepare_image,而它仅在字节超限时才动手 → 4000px 的图原样上传
+#   (体积/延迟白付,按面积计费还白付钱;有些网关对超长边自己截断分块,转述质量反而下降)。
+#   函数头那句"压缩为最长边 ≤ IMG_MAX_SIDE"原先只有字节那条路兑现,这里才算补齐。
+prepare_delivery() {
+    local in side="$3" out w h longest
+    in=$( IMG_MAX_BYTES="$2" IMG_MAX_SIDE="$side" prepare_image "$1" 2>/dev/null ) || return 1
     [[ -f "$in" ]] || return 1
     read -r w h <<<"$(img_dims "$in")"
     [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || { printf '%s\n' "$in"; return 0; }
@@ -7430,6 +7463,20 @@ prepare_inline() {
     fi
     [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
     printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
+}
+
+# inline 专用压缩:$1 原图 [$2=本档最长边,缺省 IMG_INLINE_MAX_SIDE] → 交付路径。失败 rc=1。
+# 与 prepare_image 的分工要分清:那条按**字节**封顶(为一次转述请求省上传),
+# 这条按**像素**封顶 —— ⚠ 能省 token 的只有像素这一维:图片按**面积**计费
+# (IMG_TOKENS_PER_MEGAPIXEL,顶到 IMG_TOKENS_CAP),压 JPEG 质量只减上传字节,计费一分不减。
+# 同一把尺实测:2048px=2500(顶格) 1536px=2359 1024px=1048 768px=589 —— 陡坡在 2048→1024,
+# 而 6000 的活图预算因此是"同时挂 4 张"和"挂 11 张"的差别。
+# $2 是给降档阶梯用的(见 img_inline_sides):撞线时先缩一档再挂,而不是整张退回转述。
+# 实现整体委派给 prepare_delivery(两条链路共用同一个 core,只是两组上限不同)。
+prepare_inline() {
+    local side="${2:-${IMG_INLINE_MAX_SIDE:-2048}}"
+    [[ "$side" =~ ^[0-9]+$ ]] || side="${IMG_INLINE_MAX_SIDE:-2048}"
+    prepare_delivery "$1" "${IMG_INLINE_MAX_BYTES:-2097152}" "$side"
 }
 
 # 降档阶梯(从大到小,空格分隔):第一档恒为 IMG_INLINE_MAX_SIDE,其后是
@@ -7473,10 +7520,16 @@ img_reject_wording() {  # $1=错误文本 → 0=算"不收图" 1=不算
     local t="${1:-}" lc="${1,,}"
     [[ -n "$t" ]] || return 1
     # 一组:图片或视觉能力被明确说"不支持/不接受"
+    # ⚠ 先排掉"格式 / 解码器 / 文件类型"这一类:**文件问题是文件问题,不是端点不收图** ——
+    #   判成不收图会把整个会话的内联能力永久关掉(这条错判比漏判贵得多:漏判只多付一次失败)。
+    #   实测踩过:旧 describe_images 那份 case 表里本来有这层排除,收成统一判据时丢了,
+    #   于是 'This image format is not supported by the decoder' 会被判成"端点不吃图"
+    #   —— 反向锁在 inline 闸门第 12 组与 vision_layer 探针第 6 节,别再丢。
     if [[ ( "$lc" == *image* || "$lc" == *vision* || "$lc" == *multimodal* || "$t" == *图片* || "$t" == *多模态* ) \
        && ( "$lc" == *"not support"* || "$lc" == *"not"*"support"* || "$lc" == *unsupport* \
          || "$lc" == *"do not accept"* || "$lc" == *"does not accept"* || "$lc" == *unsupported* \
-         || "$t" == *不支持* || "$t" == *不接受* ) ]]; then
+         || "$t" == *不支持* || "$t" == *不接受* ) \
+       && "$lc" != *format* && "$lc" != *decoder* && "$lc" != *"file type"* && "$t" != *格式* ]]; then
         return 0
     fi
     # 二组:数组 content 被拒(纯文字档的典型回法),必须两个词同时在场
@@ -8012,39 +8065,19 @@ img_inline_attach() {
     #   6) 来源(user|tool) —— F-2 回收顺序分级(img_refs_prune_by_budget 先踢 tool)
     # ⚠ 列序是契约:刀2 读 $1 与 $3,刀3 读 $4 $5,F-2 读 $6。**新列一律往末尾加,别插中间**。
     # 取不到像素时按本档估(宁可早回收,不要超载):这是保守方向的刻意选择。
-    local _fp_dims _fp_real=0
-    _fp_dims=$(img_dims "$final" 2>/dev/null || echo "")
-    if [[ "$_fp_dims" =~ ^[0-9]+\ [0-9]+$ ]]; then _fp_real=1; else _fp_dims="${_side} ${_side}"; fi
+    local _fp_dims; _fp_dims=$(img_dims "$final" 2>/dev/null || echo "")
+    [[ "$_fp_dims" =~ ^[0-9]+\ [0-9]+$ ]] || _fp_dims="${_side} ${_side}"
     printf '%s %s %s %s %s\n' \
         "$(cksum < "$orig"  | awk '{printf "%s_%s", $1, $2}')" \
         "$(cksum < "$final" | awk '{printf "%s_%s", $1, $2}')" \
         "${_side}" "${_fp_dims}" "${src}" > "$f.fp" 2>/dev/null
-    # 交付件事实句(刀8,给模型一个能自证的抓手;动机见 img_inline_delivery 的声明处)。
-    # 两条判据都必须真取到:**交付件尺寸**(本轮交付的这份)与**原文件尺寸**(调用方传进来的
-    # $orig)。_fp_dims 取不到时上面那个兜底值是为预算估的"宁可早回收"值,不是事实,故用
-    # _fp_real 分开 —— 拿兜底值去发一句"交付 WxH"就是编尺寸。
-    local _o_dims _shrunk=0; _o_dims=$(img_dims "$orig" 2>/dev/null || echo "")
-    if (( _fp_real )) && [[ "$_o_dims" =~ ^[0-9]+\ [0-9]+$ ]]; then
-        if [[ "${_o_dims// /x}" == "${_fp_dims// /x}" ]]; then
-            # 尺寸一致 = 没重采样。但字节超限时 prepare_image 会**重编码为 JPEG**(同尺寸、
-            # 不同字节)—— 那是一处真实的画质改动,得写进事实里,否则"同尺寸"会被读成
-            # "一个字节都没动"。
-            if [[ "$final" == "$orig" ]]; then
-                img_inline_delivery="交付 ${_fp_dims// /x},与原文件同尺寸"
-            else
-                img_inline_delivery="交付 ${_fp_dims// /x},与原文件同尺寸;已重编码为 JPEG 压字节(未裁剪)"
-            fi
-        else
-            img_inline_delivery="交付 ${_fp_dims// /x};原文件 ${_o_dims// /x},等比重采样,未裁剪"
-            _shrunk=1
-        fi
-    elif [[ "$_side" != "${_sides[0]}" ]]; then
-        # 尺寸读不出时退回旧口径(降过档 ⇒ 报缩):宁可多说一句,也不漏报一次精度损失。
-        _shrunk=1
-    fi
-    # "缩过"的**唯一**判据在这里算完:`交付件尺寸 ≠ 原文件尺寸`。调用方那两处话术与上面这句
-    # 事实用的必须是同一个结论,否则屏幕与正文会各说一套(见 img_inline_shrank_to 声明处)。
-    (( _shrunk )) && img_inline_shrank_to="$_side"
+    # 交付事实句 + "缩过"结论:同一个 helper 给(口径与判据的说明见 img_delivery_fact 处)。
+    # ⚠ 必须在下面 rm 掉临时交付件**之前**量尺寸。
+    img_delivery_fact "$orig" "$final"
+    img_inline_delivery="$img_fact_text"
+    # 尺寸读不出时的退路:降过档 ⇒ 仍按"缩过"报(宁可多说一句,也不漏报一次精度损失)。
+    [[ -z "$img_inline_delivery" && "$_side" != "${_sides[0]}" ]] && img_fact_shrunk=1
+    (( img_fact_shrunk )) && img_inline_shrank_to="$_side"
     [[ "$final" != "$orig" ]] && rm -f "$final"
     IMG_REFS+=("${IMG_REF_GROUP:-0} r${IMG_REF_SEQ}$$")   # 带轮号:按轮裁剪靠它(见 img_refs_prune)
     # ⚠ 这里原来是**无条件 img_refs_prune**:那次回收会把上一条**已经发出去**的消息
@@ -8150,8 +8183,18 @@ vision_parse_resp() {
           else . end // ""' <<<"$1" 2>/dev/null
 }
 
+# 转述通道的两条回传(**顶层声明**,理由同 img_inline_reject):调用方与夹具里的桩都会先读它们,
+# 不声明的话 set -u 下会把一次正常转述打成 "unbound variable"(闸门里已经踩过一次:
+# 桩替换了 describe_images 却没设新变量 → 读它当场炸 → 屏幕上一行都没有)。
+#   describe_result / describe_failed  转述文本 / 失败标志(既有)
+#   describe_note                      "转述前被动过"的事实句(空 = 没动过);两个调用方把它写进正文
+describe_result=""
+describe_failed=0
+describe_note=""
+
 # 图片转述核心:批量图片路径 → 一次视觉 API 请求 → 文字转述。
 # 结果写全局 describe_result,失败置 describe_failed=1(不阻塞对话)。
+# describe_note 收集"转述前被动过"的事实(空=全都没动),由两个调用方写进给模型的正文。
 # 关键实现点:
 #   - 图片 base64 可能达数十 MB,绝不能走 jq --arg / curl -d 传参
 #     (exec 参数受 ARG_MAX 限制,macOS 仅约 1MB):parts 经 jq --rawfile
@@ -8163,6 +8206,7 @@ describe_images() {
     local -a files=("$@") cleanup=()
     local i n path new_path ext mime b64 parts sep tmpdir req_file resp err http_status
     local size total_size=0 prompt request_body
+    describe_note=""
 
     describe_result=""
     describe_failed=0
@@ -8209,14 +8253,26 @@ describe_images() {
             _img_cleanup
             return 0
         }
-        # 超体积自动压缩;成功时可能返回新的临时文件路径,记入清理列表
-        new_path=$(prepare_image "$path") || {
+        # 压一刀:字节(IMG_MAX_BYTES)与像素(IMG_MAX_SIDE)双封顶 —— 与 inline 共用同一个 core。
+        # ⚠ 这里原先只调 prepare_image,而它只在**字节**超限时才动手 ⇒ 4000px 的图原样上传:
+        #   体积与延迟白付、按面积计费还白付钱,更坏的是有些网关对超长边自己截断/分块,
+        #   转述质量反而下降。函数头那句"压缩为最长边 ≤ IMG_MAX_SIDE"原先只有字节那条路兑现。
+        new_path=$(prepare_delivery "$path" "$IMG_MAX_BYTES" "$IMG_MAX_SIDE") || {
             describe_failed=1
             describe_result="图片超单次上限 $((IMG_MAX_BYTES / 1024 / 1024))MB 且本机无 sips/ffmpeg/python3(PIL) 可自动压缩: $path(上限可用环境变量 IMG_MAX_BYTES 调高)"
             _img_cleanup
             return 0
         }
-        [[ "$new_path" != "$path" ]] && cleanup+=("$new_path")
+        if [[ "$new_path" != "$path" ]]; then
+            cleanup+=("$new_path")
+            # 转述前被动过就得说出口(与 inline 同一份事实句):转述的精度本来就低于直接看图,
+            # 再叠一次重采样而不声明,模型读错丝印/线号时无从归因。
+            img_delivery_fact "$path" "$new_path"
+            if [[ -n "$img_fact_text" ]]; then
+                describe_note+="${describe_note:+; }${path##*/} $img_fact_text"
+                printf ' ⤷ %s 转述前先过一刀(%s)\n' "${path##*/}" "$img_fact_text"
+            fi
+        fi
         path="$new_path"
 
         size=$(wc -c < "$path" | tr -d ' ')
@@ -8418,7 +8474,11 @@ tool_read_image() {
         content="图片未识别: $describe_result"
         printf ' ⚠️ 图片未识别:%s\n' "$path"
     else
-        content="图片 $path 的文字转述(本次未能提供原图,转述精度低于直接看图,细节需重看时再次调用本工具):"$'\n\n'"$describe_result"
+        content="图片 $path 的文字转述(本次未能提供原图,转述精度低于直接看图,细节需重看时再次调用本工具):"
+        # 转述前动过图就说一句:精度本来就低于直接看图,再叠一次重采样还瞒着,读错细节时无从归因。
+        # ⚠ ${describe_note} 的花括号是必须的:紧跟全角括号时 $var 会被吃掉展开(全表断言在盯这条)。
+        [[ -n "$describe_note" ]] && content+=$'\n'"（转述输入:${describe_note}）"
+        content+=$'\n\n'"$describe_result"
         printf ' 已识别图片 %s(转述兜底)\n' "$path"
     fi
 }
@@ -9390,7 +9450,10 @@ printContent() {
                 # 这里把可重看的路径留在正文里,它才有"再调一次"的抓手。
                 img_desc+=$'\n[有 '"${#img_fb[@]}"' 张图未能识别: '"$describe_result"'。你看不到这些图的内容,不要臆测;确需再看时按上面的路径重新调用 read_image]'
             else
-                img_desc+=$'\n(以下 '"${#img_fb[@]}"' 张图本次未能提供原图,下面是文字转述,精度低于直接看图)\n'"$describe_result"
+                img_desc+=$'\n(以下 '"${#img_fb[@]}"' 张图本次未能提供原图,下面是文字转述,精度低于直接看图)'
+                # 转述前动过图就说一句(与 read_image 那条同一份):不然模型读错细节时无从归因。
+                [[ -n "$describe_note" ]] && img_desc+=$'\n'"（转述输入:${describe_note}）"
+                img_desc+=$'\n'"$describe_result"
             fi
         fi
         if [[ -n "$img_desc" ]]; then
@@ -9977,7 +10040,9 @@ normal_line() {
         exit 1
     fi
 
-    # 整个多行输入会话(首行+续行+粘贴+空行提交)在助手内完成,一次返回全文
+    # 整个多行输入会话(首行+续行+粘贴)在助手内完成,回车发送,一次返回全文。
+    # ⚠ 助手侧不再识别命令(--commands 只是保留的调用契约,见 input_helper.py 的
+    #   说明):单行文本回到这里由下方 handle_cmd_line 精确分发,与改造前同结果。
     local ptk_text ptk_args rc
     if (( cmd_ok )); then
         # = 形式:命令集以 - 开头,拆开传会被 argparse 当成选项拒绝
@@ -10011,6 +10076,7 @@ normal_line() {
                 continue
             fi
             if (( rc == 0 )); then
+                # 尾换行只可能来自"行尾 \ + 回车"那次续行(见 10091 行注释)
                 ptk_text="${ptk_text%$'\n'}"
                 if (( cmd_ok )) && [[ "$ptk_text" != *$'\n'* ]]; then
                     handle_cmd_line "$ptk_text"
@@ -10026,7 +10092,9 @@ normal_line() {
         done
     fi
     if (( rc == 0 )); then
-        # 助手文本行尾带 \n(提交前最后一行由回车产生),剥一个
+        # 剥一个尾部换行。新语义下它只可能来自"行尾 \ + 回车"的续行:用户续行后
+        # 又直接发送,缓冲区末尾就挂着一个换行,留着等于给模型送个尾随空行。
+        # (旧注释写"提交前最后一行由回车产生"—— 那是"空行提交"时代的说法,已过期)
         ptk_text="${ptk_text%$'\n'}"
         if (( cmd_ok )) && [[ "$ptk_text" != *$'\n'* ]]; then
             # 全新首行且单行:命令解析
