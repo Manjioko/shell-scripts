@@ -1,0 +1,50 @@
+{
+    "imports": [],
+    "mcpServers": {
+        "chrome": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "chrome-devtools-mcp@1.10.1",
+                "--performanceCrux=false",
+                "--usageStatistics=false",
+                "--redactNetworkHeaders"
+            ],
+            "description": "浏览器(全量+安全开关)",
+            "lifecycle": {
+                "mode": "keep-alive",
+                "idleTimeoutMs": 900000
+            }
+        },
+        "git": {
+            "command": "uvx",
+            "args": ["mcp-server-git"],
+            "description": "Git 仓库操作。限制:git_log 默认只回 10 条(要全量必须显式给 max_count)、repo_path 必须是绝对路径且不展开 ~。能用本地 git 命令做的优先本地 git；只有在跨仓库统一接口、或宿主环境不给用 shell 时才用我。",
+            "lifecycle": {
+                "mode": "keep-alive",
+                "idleTimeoutMs": 900000
+            }
+        },
+        "blender": {
+            "command": "uvx",
+            "args": ["blender-mcp"],
+            "description": "操作 blender",
+            "lifecycle": {
+                "mode": "keep-alive",
+                "idleTimeoutMs": 900000
+            }
+        },
+        "figma-mcp": {
+            "command": "npx",
+            "args": [ "-y", "figma-developer-mcp", "--stdio" ],
+            "env": {
+                "FIGMA_API_KEY": "figd_bnZq4uHFW-QMr0EDKyZOuNEweL1mNPjVPtZZ_ntf"
+            },
+            "description": "Figma 开发者接口操作",
+            "lifecycle": {
+                "mode": "keep-alive",
+                "idleTimeoutMs": 900000
+            }
+        }
+    }
+}
