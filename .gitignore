@@ -12,6 +12,10 @@ dist
 dist-ssr
 *.local
 
+# Python 字节码缓存(迁移到 python3 后产生)
+__pycache__/
+*.pyc
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

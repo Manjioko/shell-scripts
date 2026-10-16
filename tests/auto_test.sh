@@ -11,6 +11,9 @@ export LC_ALL=C
 REAL=${REAL:-"$(cd "$(dirname "$0")/.." && pwd -P)"/wchat.sh}   # 必须 pwd -P:从 ~/.cache/wchat-tests(符号链接)进来时,逻辑 pwd 会把 .. 算成 ~/.cache,REAL 就指到不存在的地方
 STUB_DIR=$(cd "$(dirname "$0")" && pwd)
 BASH5=$(command -v /opt/homebrew/bin/bash || command -v bash)
+# 让被测依赖(openai 常装在 user-site=$HOME/...)在测试**覆写 HOME 之后**仍可 import:
+# 顶部(真实 HOME 还在)先把 user-site 记进 PYTHONPATH,子进程一路继承。
+[[ -n "${PYTHONPATH:-}" ]] || export PYTHONPATH="$(python3 -c 'import site;print(site.getusersitepackages())' 2>/dev/null)"
 PART=${1:-all}
 # unit 段也要在 bash 5.x 下跑:macOS 自带 3.2 会把 `"$(case "$x" in *中文模式*)"` 里的
 # `(*` 当成命令替换收尾(实测 3.2 红 4 项、5.x 全绿,红的全是测试自身的解析差异,
@@ -48,7 +51,7 @@ grep -E '^hd_re_[a-z_]+=' "$REAL" >> "$W/sandbox.sh"
 for fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_cmd \
           auto_allow_hit auto_audit auto_note_deny auto_note_allow path_access \
           ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
-          save_history parse_options auto_tmp_write_ok auto_install_allowed \
+          save_history _py_on py_run parse_options auto_tmp_write_ok auto_install_allowed \
           policy_self_check _policy_hash_of _policy_stat \
           in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
           hd_note_hit hd_h11_scan hd_strip_noncode \
@@ -77,7 +80,7 @@ inp_msg() { :; }
 for _fn in norm_path expand_tilde grant_file is_granted hard_deny_path hard_deny_cmd \
            auto_allow_hit auto_audit auto_note_deny auto_note_allow path_access \
            ask_path_grant auto_final_judge auto_checkpoint inject_auto auto_takes_shell \
-           save_history parse_options auto_tmp_write_ok auto_install_allowed \
+           save_history _py_on py_run parse_options auto_tmp_write_ok auto_install_allowed \
           policy_self_check _policy_hash_of _policy_stat \
            in_root_exempt hd_foreign_cred_path hd_write_targets hd_creds_all_exempt link_escapes_root \
            hd_note_hit hd_h11_scan hd_strip_noncode \
@@ -108,6 +111,13 @@ unset _fn _at_miss
 # 兜住,它的取值本身另有断言(见 policy 自检那条)。
 # shellcheck disable=SC1090
 source "$W/sandbox.sh" || { echo "沙箱 source 失败"; return 1; }
+# Python 迁移通道接线:sandbox.sh 是 wchat.sh 的**副本**,默认 PY_HELPER_DIR 会落在 $W
+# (副本目录),找不到 wchat_py/_run.py → 守卫把 WCHAT_PY 清零 → save_history 走"组件
+# 不可用"分支(旧 bash jq 回退已在收口时删除)。显式指回真实仓库根,并补上 pack 需要的
+# 注入标记(它们定义在区域外,没被抽进来)。
+PY_HELPER_DIR="$(dirname "$REAL")"; WCHAT_PY=1
+SKILLS_MARK="## 可用技能(Skills)"; AUTO_MARK="## auto 模式(权限全自动)生效中"
+MCP_MARK="## 可用外部能力(MCP)"; thinking="disabled"
 
 BASE_URL="https://stub.invalid/v1"; API_KEY="sk-stub"
 flash_model=stub-flash; pro_model=stub-pro; AUTH_MODEL=stub-pro; model=stub-flash

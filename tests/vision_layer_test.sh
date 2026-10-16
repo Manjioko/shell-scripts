@@ -51,7 +51,7 @@ GUARD_E=$(awk -v s="$GUARD_S" 'NR>s && /^fi$/{print NR; exit}' "$REAL")
         || awk '/^IMG_DESC_PROMPT="/{p=1} p{print} p && /^"""$/{exit}' "$REAL"
 } > "$W/sandbox.sh"
 for fn in img_mime is_image img_dims prepare_image prepare_delivery img_reject_wording \
-    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images; do
+    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images _py_on py_run; do
     awk -v name="$fn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
 done
 # describe_images 现在共用 prepare_delivery(而它要用 img_dims)。漏抽的后果不是报错,是
@@ -70,6 +70,8 @@ done
 export WCHAT_API_KEY="${WCHAT_API_KEY:-sk-sandbox-not-a-real-key}"
 # shellcheck disable=SC1090
 source "$W/sandbox.sh" || { echo "沙箱 source 失败"; exit 1; }
+# 迁移通道:vision_build_body/parse_resp 已收口(旧 bash jq 回退已删)→ 必须走 Python 生产路。
+PY_HELPER_DIR="$(dirname "$REAL")"; WCHAT_PY=1
 echo "解释器:$BASH_VERSION($BASH)  抽到函数 $got 个(含 vision_disable/describe_images)"
 
 fail=0

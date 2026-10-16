@@ -58,10 +58,13 @@ cd "$(dirname "$0")/.." || exit 1
 eval "$(grep -E '^(hd_[a-z0-9_]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' wchat.sh | grep -vF '$(')" 2>/dev/null
 # 逐个抽函数:必须 `/^}$/ {exit}`,不能 {p=0} 拼段 —— 函数体内嵌的 awk/sed 程序里有顶格 `}`,
 # 拼段会在那里截断,eval 语法失败后一个函数都装不上(与 3) 同类的"静默空转")。
-for _fn in $(grep -oE '^(hd_[a-z0-9_]*|hard_deny_cmd)\(\) \{' wchat.sh | sed 's/() {//'); do
+for _fn in $(grep -oE '^(_py_on|py_run|hd_[a-z0-9_]*|hard_deny_cmd)\(\) \{' wchat.sh | sed 's/() {//'); do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' wchat.sh)" 2>/dev/null
 done
 unset _fn
+# 迁移通道:hd_* 已收口(铁律 3,旧 bash 回退已删)→ 必须装载真实 _py_on/py_run 走 **Python
+# 生产路**;缺了它 hd_* 会走"组件不可用"降级 → H11 落点等判据漏判,表出现假红/假绿。
+PY_HELPER_DIR="$PWD"; WCHAT_PY=1
 
 pass=0; fail=0
 ok()  { pass=$((pass+1)); printf '  \033[32mPASS\033[0m %s\n' "$1"; }

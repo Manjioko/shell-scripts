@@ -1,6 +1,6 @@
 ---
 name: wchat-gates-runbook
-description: 改过 wchat.sh 或 tests/ 后要跑哪几道闸门、各道期望值、红了先怀疑什么、断言基线数怎么重固化。
+description: 改过 wchat.sh 或 tests/ 后要跑哪几道闸门、各道期望值、红了先怀疑什么、断言基线数怎么重新固化。
 ---
 
 # 闸门跑批手册(改完代码怎么证明它没坏)
@@ -20,11 +20,14 @@ bash tests/run_gates.sh --main          # 额外加主套件 auto_test.sh unit(�
 
 单独调试某道的原始输出时,直接跑它自己(`test_hardwall.sh`、`tests/rulefail_check.sh`、
 `tests/compaction_pin_probe.sh`、`tests/audit_field_probe.sh`、`tests/probe_shapes.sh`、
-`tests/skills_dir_test.sh`、`tests/traffic_replay.sh`)。
+`tests/skills_dir_test.sh`、`tests/traffic_replay.sh`)。迁移期还有各模块闸门
+`tests/py_<模块>_test.sh`(机械拆分;`py_hd` 与 `test_hardwall.sh` 最慢,务必后台跑)。
 
 `run_gates` 判"通过"的条件是 **rc=0 且匹配到该道自己的结论行**,只满足一半都不算:
 - rc=0 但没有结论行 ⇒ 中途静默退出(本项目真出过两次,一次是 `$(` 抽取过滤器把算术派生扔了);
 - 有结论行但 rc≠0 ⇒ 通常它在说"该重固化基线"(回放遇到语料增长就是这个形状),别当跑过。
+- ⚠ 跑长闸门时**别并发编辑被测脚本或 `run_gates.sh` 本体**:bash 是增量读文件的,改到一半会让它报
+  "unexpected EOF" 之类 —— 看着像判据坏了,其实是自伤。改完再重跑一次。
 
 它刻意**不重复各道的期望数字**:总数由 `EXPECT_TOTAL` 守、规则出口数由 rulefail 的
 `_seen_rules` 守 —— 抄第二份必然漂移。两个实现坑也记在这:跑子闸门不要套 `bash -c`
@@ -35,20 +38,21 @@ bash tests/run_gates.sh --main          # 额外加主套件 auto_test.sh unit(�
 
 | 闸门 | 看它的哪一行 | 红了的第一个假设 |
 |---|---|---|
-| 全表 | `RESULT total=… pass=… fail=0 expect=517… src=<12hex>` | `expect` 与 `total` 不等 ⇒ **有断言没产生判定**(被测版本缺函数/装载缺口),不是判据错 |
+| 全表 | `RESULT total=… pass=… fail=0 expect=… src=<12hex>` | `expect` 与 `total` 不等 ⇒ **有断言没产生判定**(被测版本缺函数/装载缺口),不是判据错 |
 | 全表 | 红条写"命令不存在:[X]" | 夹具按名字抽函数,X 没登记 —— 去 `test_hardwall.sh` 的显式名单加它 |
+| 全表 | 大批**迁移函数**同时红 | 夹具的迁移通道没接上:默认走**生产路**(真实 `_py_on`/`py_run`),`PY_HELPER_DIR` 指不到 `wchat_py` 就静默走降级;要测 bash 回退路才显式 `HW_PY=0` |
 | rulefail | `PASS/FAIL` | 出口话术不含关键词 ⇒ 你改了 msg 没改校验;或"判据出口行数"变红 ⇒ 你加了规则没同步期望数与覆盖清单 |
-| 压缩探针 | `RESULT total=29 pass=29 fail=0` | 接线锁红 ⇒ 有人删了调用点/把判据抄回调用点 |
+| 压缩探针 | `RESULT total=37 pass=37 fail=0` | 接线锁红 ⇒ 有人删了调用点/把判据抄回调用点 |
 | 审计探针 | `结论: 通过` | 缺 `root`/`pol` ⇒ 审计 JSON 字段被动过 |
 | 回放 | `无新增漂移` | 审计语料增长后要先复跑再 `GEN=1` 固化,**别直接固化** |
+| py 模块闸门 | `RESULT total=… pass=… fail=0` | 某模块刚"**收口**"(按铁律 3 删了 bash 回退)⇒ 全文 `grep` 源码的旧断言会**假红**,改成行为断言或指向 Python 侧;同轮 `tests/README.md` 基线也要同步 |
 
-## 当前基线(2026-09-24 实跑值,会变;以命令输出为准)
-全表 **562/562 fail=0**(且**换目录跑也必须一样绿** —— 表里若再出现依赖"$PWD 恰好是某个目录"的向量,
-换目录就会红,那是测试在骗人,不是环境问题)、rulefail **123/0**、压缩探针 **29/29**、形状探针 **20/0**、技能目录 **全部通过**、
-回放 **52 条一致**、主套件(unit+e2e)**全部通过** —— `bash tests/run_gates.sh --main` 的 `pass=9 fail=0`。
-这是这张表**第一次**全绿:此前长期挂着两条 T23"装载口"红,真因不是装载口没实现,而是主脚本
-第 44 行用了尚未定义的 `$API_KEY`(`set -u` 的夹具死在口之前)。别把这类红当环境噪音绕过去,
-它同时吃掉了形状探针那道。
+## 当前基线(2026-10-14 实跑值,会变;以命令输出为准)
+全表 **569/569 fail=0**(且**换目录跑也必须一样绿** —— 表里若再出现依赖"$PWD 恰好是某个目录"的向量,
+换目录就会红,那是测试在骗人,不是环境问题;全表**默认走生产路**,`HW_PY=0` 才是回退桩)、
+rulefail **123/0**、压缩探针 **37/37**、形状探针 **20/0**、技能目录 **全部通过**、MCP 通道 **130/130**、
+回放 **89 条一致**、主套件(unit+e2e)**全部通过** —— `bash tests/run_gates.sh --main` 的 `pass=26 fail=0 skip=0`。
+红条**别当环境噪音绕过去**:历史上 T23 那批假红的真因是 `set -u` 夹具撞未定义变量,不是判据坏。
 `src=` 是 `wchat.sh` 的 sha256 前 12 位:**两次运行结论不同,先看这个数**——它变小说明源码变了,与判据无关。
 
 ## 加断言后必须做的三件事(少一件就会"全绿但没测到")
@@ -71,3 +75,4 @@ MUT_SUITE=tests/compaction_pin_probe.sh /opt/homebrew/bin/bash tests/mutate_call
 
 ## 提交前的自我检查
 提交信息里写的每个数字,必须是**这一轮实跑**的;没跑的写"未验";改了注释导致 sha 变了要重跑一次再取 sha。这条不是格式洁癖——本项目出过一次"把没跑的闸门写成跑过"的现场。
+

@@ -37,6 +37,57 @@ stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
     [[ "$_v" =~ ^[0-9]+$ ]] || _v=0
     printf '%s' "$_v"
 }
+
+# ---------- Python 迁移通道(方案与台账见 docs/migration-to-python.md) ----------
+# 铁律(该文档「一」):**同一功能同一时刻只有一条"活的"实现**。默认 WCHAT_PY=1
+# 走 Python 活实现;WCHAT_PY=0(或分模块 WCHAT_PY_<MODULE>=0)退回 bash 旧实现 ——
+# 那是应急降级路径,不是并行实现。python3 或迁移包缺失时自动退回,保证
+# "python 环境不齐不会把功能打死"(与既有 input_helper/render_helper 的兜底同取向)。
+# ⚠ 位置必须在**任何迁移函数的首次调用之前**:inject_skills 在脚本源化时(顶层)
+#   就会经 scan_skills 调到 clip_line_width,定义晚于该调用点就是 command not found。
+PY_HELPER_DIR="${WCHAT_PY_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+WCHAT_PY="${WCHAT_PY:-1}"
+if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$PY_HELPER_DIR/wchat_py/_run.py" ]]; then
+    WCHAT_PY=0
+fi
+# 走不走 Python 活实现的**唯一判据**。任何迁移函数只调它,不得自己再判一遍
+# (那正是本仓库反复出事的"同一条规矩抄三遍")。
+_py_on() {
+    [[ "$WCHAT_PY" == "1" ]] || return 1
+    [[ -n "${PY_HELPER_DIR:-}" ]] || return 1
+    local _flag="WCHAT_PY_${1^^}"
+    [[ "${!_flag:-1}" == "1" ]] || return 1
+    return 0
+}
+# 统一调用口:按**绝对路径**跑启动器 _run.py,不经 `python3 -m`。
+# `-m` 会把 cwd 放进 sys.path[0],用户项目里的同名 wchat_py/ 会遮蔽本包(生产隐患)
+# 且让负对照失效(实测)。启动器把包父目录插到 sys.path 最前,与 cwd 无关。
+py_run() {
+    local _m="$1"; shift
+    python3 "$PY_HELPER_DIR/wchat_py/_run.py" "$_m" "$@"
+}
+
+# ---------- W12-1:启动期配置导出(见 docs/migration-to-python.md §八) ----------
+# "读全局的大块"(hard_deny_path 等)将来只吃这一份配置即可变纯判定。**单一出处仍是
+# 下面的顶层赋值**;这里只是把它导出成 JSON 供 Python 侧读取(键清单由 config.py 定义)。
+# 数组走一小段 jq 编码;标量用 eval 做安全间接展开(键在 lib-only 装载时可能还没赋值)。
+_cfg_arr_json() {   # <数组变量名> -> JSON 数组(空数组给 [])
+    local _n="$1" _c=0
+    eval '_c=${#'"$_n"'[@]}' 2>/dev/null || _c=0
+    if (( _c == 0 )); then printf '[]'; return 0; fi
+    eval 'printf "%s\n" "${'"$_n"'[@]}"' | jq -R . | jq -s -c .
+}
+py_cfg_dump() {
+    local -a _a=() _k
+    for _k in $(py_run config keys scalar 2>/dev/null); do
+        _a+=(--arg "$_k" "$(eval 'printf "%s" "${'"$_k"'-}"')")
+    done
+    for _k in $(py_run config keys array 2>/dev/null); do
+        _a+=(--argjson "$_k" "$(_cfg_arr_json "$_k")")
+    done
+    jq -nc "${_a[@]}" '$ARGS.named'
+}
+
 # ---------- 本地配置文件 ~/.ct/config ----------
 # 只在这里放"不该进 git 的东西"(密钥),其余配置仍走环境变量覆盖。
 # 加载前校验权限:被同机其他用户可读写时拒绝加载(否则等于把 key 交给别人)。
@@ -522,23 +573,11 @@ done
 # awk 逐字节匹配正则(否则 [\200-\377] 这类字节类在 UTF-8 locale 下不成立)。
 # 用法:printf '%s\n' "$text" | clip_line_width <最大字节数> <截断标记>
 clip_line_width() {
-    LC_ALL=C awk -v max="${1:-200}" -v mark="${2-…}" '
-    function clip(s,   n, i, need, c) {
-        n = length(s); i = 1
-        while (i <= n) {
-            c = substr(s, i, 1)
-            if      (c !~ /^[\200-\377]$/) need = 1   # ASCII
-            else if (c ~ /^[\200-\277]$/)  need = 1   # 游离续字节,跳过不卡死
-            else if (c ~ /^[\300-\337]$/)  need = 2
-            else if (c ~ /^[\340-\357]$/)  need = 3
-            else                            need = 4   # [\360-\377] emoji
-            if (i + need - 1 > n) need = 1             # 序列被截尾,别越界
-            if (i + need - 1 > max) break              # 放不下 → 在字符边界停刀
-            i += need
-        }
-        return substr(s, 1, i - 1)
-    }
-    { if (max > 0 && length($0) > max) print clip($0) mark; else print }'
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 awk 回退**已删除**。
+    # 直接写 stdout(不走 $(...)):命令替换会吃掉结尾换行,与旧函数的字节输出不等价。
+    # 组件不可用(WCHAT_PY=0 / 包缺失)→ **原样透传**(降级为不截断、不丢字节),不跑旧代码。
+    _py_on textutil || { cat; return 0; }
+    py_run textutil clip_line_width "${1:-200}" "${2-…}"
 }
 
 # 同族坑的第二半:BSD awk 的 length() 也是**字节**数,拿它当"字符预算"时,中文按
@@ -575,43 +614,11 @@ _JQ_HAS_IMAGE='[.. | objects | select(.type == "image_url")] | length > 0'
 # 扫描技能目录,解析每个 SKILL.md 的 frontmatter(name/description),
 # 输出"技能名: 描述"列表供注入。按 mtime 排序,只取前 SKILL_MAX_INJECT 个。
 scan_skills() {
-    local f name desc line in_front in_desc skills_text=""
-    while IFS= read -r f; do
-        [[ -f "$f" ]] || continue
-        # 外置技能目录里的符号链条目一律跳过:SKILLS_DIR 指到工作目录内之后,AI(或任何能
-        # 写该目录的东西)可以 `ln -s /elsewhere .skills/x`,借 read_skill 的 name 白名单
-        # 把目录外的 SKILL.md 读进上下文,并把它的 description 注进 system prompt。name 里
-        # 的 / 与 .. 早就堵住了,链接是这条路剩下的唯一出口 —— 注入侧(这里)与读全文侧
-        # (tool_read_skill)要一起堵,只堵一侧等于"列表里没有但模型凭记忆还能读"。
-        (( SKILLS_DIR_EXTERNAL )) && [[ -L "$f" || -L "${f%/SKILL.md}" ]] && continue
-        name=""; desc=""; in_front=0; in_desc=0
-        while IFS= read -r line; do
-            if (( in_front == 0 )); then
-                [[ "$line" == "---" ]] && in_front=1
-                continue
-            fi
-            [[ "$line" == "---" ]] && break
-            if [[ "$line" == name:* ]]; then
-                name="${line#name:}"
-                in_desc=0
-            elif [[ "$line" == description:* ]]; then
-                desc="${line#description:}"
-                in_desc=1
-            elif (( in_desc )) && [[ "$line" == [[:space:]]* ]]; then
-                desc="$desc $line"
-            else
-                in_desc=0
-            fi
-        done < "$f"
-        name=$(printf '%s' "$name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-        desc=$(printf '%s' "$desc" | tr -s '[:space:]' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
-        # name 缺失用目录名兜底;description 缺失(没有检索价值)跳过注入
-        [[ -z "$name" ]] && name=$(basename "$(dirname "$f")")
-        [[ -z "$desc" ]] && continue
-        desc=$(printf '%s' "$desc" | clip_line_width "$SKILL_DESC_MAX" '…')
-        skills_text+="- ${name}: ${desc}"$'\n'
-    done < <(ls -t "$SKILLS_DIR"/*/SKILL.md 2>/dev/null | head -n "$SKILL_MAX_INJECT")
-    printf '%s' "$skills_text"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 入参把 SKILLS_DIR/上限/外置标志显式传入(不在 python 侧另抄一份配置)。
+    # 组件不可用 → 输出空(不注入技能列表,降级但不崩),不跑旧代码。
+    _py_on skill || return 0
+    py_run skill scan "$SKILLS_DIR" "$SKILL_MAX_INJECT" "$SKILL_DESC_MAX" "$SKILLS_DIR_EXTERNAL"
 }
 
 # 把技能列表注入 messages 第 0 条(system)。先剥离旧的注入段再追加,保证
@@ -1192,15 +1199,15 @@ save_history() {
     # 存盘前剥离 skill 注入段:技能列表不随历史存档,加载时重新注入最新列表
     # auto 注入段同理必须剥离:否则下次普通模式加载这份历史,system 里还写着
     # "当前处于 auto 模式",模型会按 auto 的规矩行事(reason 必填、以为不会被拒)
-    history=$(echo "$messages" | jq --arg mark "$SKILLS_MARK" --arg mark2 "$AUTO_MARK" --arg mark3 "$MCP_MARK" --arg model "$model" --arg thinking "$thinking" \
-    '.[0].content = (.[0].content | split($mark)[0] | split($mark2)[0] | split($mark3)[0]) |
-    {
-        model: $model,
-        messages: .,
-        thinking: {type: $thinking},
-        reasoning_effort: "high",
-        stream: true
-    }' 2>&1)
+    local _hrc=1
+    if _py_on history; then
+        history=$(printf '%s' "$messages" | py_run history pack "$model" "$thinking" "$SKILLS_MARK" "$AUTO_MARK" "$MCP_MARK") && _hrc=0
+    fi
+    if (( _hrc != 0 )); then
+        # 【已收口】旧 bash jq 回退**已删除**;组件不可用 → 明示且**不落盘**(绝不写半截/空文件)
+        printf '\033[31m[save_history] 组件不可用,本次未保存\033[0m\n' >&2
+        return 0
+    fi
 
     inp_msg "保存记录 ${HISTORY_DIR}/${name}.json"
 
@@ -1233,16 +1240,12 @@ get_history() {
     # 且无任何输出。加载时自动剔除,保证历史文件永远可继续对话。
     # 注意:reduce 本身产出数组,外面不能再包一层 []。
     local orphan
-    orphan=$(echo "$messages" | jq '
-        reduce .[] as $m ([];
-            if $m.role == "tool" then
-                if (.[-1].role == "assistant" and (.[-1].tool_calls // [] | any(.id == $m.tool_call_id)))
-                then . + [$m]
-                else .
-                end
-            else . + [$m]
-            end)')
-    messages=$orphan
+    if _py_on history && orphan=$(printf '%s' "$messages" | py_run history drop_orphan_tools); then
+        messages=$orphan
+    else
+        # 【已收口】旧 bash jq 回退**已删除**;组件不可用 → 消息**原样保留**(不静默丢),并明示
+        printf '\033[31m[get_history] 组件不可用,跳过孤儿 tool 清理(消息原样保留)\033[0m\n' >&2
+    fi
     # thinking 模式下,DeepSeek 要求回传上一轮 assistant 的 reasoning_content。
     # 旧历史(无 reasoning_content 字段)直接续聊会 400,加载时自动降级为不思考
     if [[ "$(jq -r '.thinking.type // empty' <<< "$(<"$1")")" == "enabled" ]]; then
@@ -2396,14 +2399,17 @@ mcp_cli() {   # $1=墙钟秒 $2..=argv;成功时 MCP_OUT=stdout 内容、MCP_ERR
 # 做法是确定性地逐行往后试起点,第一个能整体 jq 解析的后缀就是 JSON 主体;
 # 上限 25 行,防止在一个巨大的非 JSON 输出上跑成一屏 subprocess。
 mcp_extract_json() {
-    local all="$1" i n txt
-    n=$(printf '%s\n' "$all" | wc -l | tr -d ' ')
-    (( n > 25 )) && n=25
-    for ((i = 1; i <= n; i++)); do
-        txt=$(printf '%s\n' "$all" | tail -n +"$i")
-        [[ -n "$txt" ]] || continue
-        if jq -e . <<<"$txt" >/dev/null 2>&1; then printf '%s' "$txt"; return 0; fi
-    done
+    # Python 活实现(见 wchat_py/mcp_client.py)。契约:命中 rc=0 + JSON 主体在 stdout;
+    # 未命中 rc=1(业务结果,不回退)。
+    if _py_on mcp_client; then
+        local _o _rc=0
+        _o=$(printf '%s' "$1" | py_run mcp_client extract_json) || _rc=$?
+        if (( _rc == 0 )); then printf '%s' "$_o"; return 0; fi
+        if (( _rc == 1 )); then return 1; fi
+    fi
+    # 【已收口】旧 bash 逐行试起点回退**已删除**;组件不可用/异常 → 按"未命中"处理(rc=1),
+    # 并 stderr 明示。调用方据此把 MCP 关掉(**绝不伪造命中**),比"静默当成没抽到"更可追。
+    printf '\033[31m[mcp_extract_json] 组件不可用,按未命中处理(MCP 本次不启用)\033[0m\n' >&2
     return 1
 }
 
@@ -3314,19 +3320,12 @@ stream_box_close() {
 # 头部=摘要/表头,尾部=报错/最终结果,中间多为重复性日志,AI 不需要全文。
 # 两层限制:先截超长单行(minified 文件一行可达几十万字符),再按行数截头尾。
 truncate_output() {
-    local text="$1" lines cropped head_lines
-    lines=$(printf '%s' "$text" | wc -l | tr -d ' ')
-    cropped=$(printf '%s' "$text" | clip_line_width "$TOOL_OUTPUT_MAX_COL" '...(该行过长已截断)')
-    if (( lines > TOOL_OUTPUT_MAX_LINES )); then
-        head_lines=$((TOOL_OUTPUT_MAX_LINES / 2))
-        {
-            printf '%s' "$cropped" | head -n "$head_lines"
-            printf '\n... (中间 %d 行已省略) ...\n\n' "$((lines - TOOL_OUTPUT_MAX_LINES))"
-            printf '%s' "$cropped" | tail -n "$head_lines"
-        }
-    else
-        printf '%s' "$cropped"
-    fi
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 正文经 stdin 传给子进程(大字符串绝不走 argv)。
+    # 组件不可用 → **原样透传**(降级为不截断,不丢内容),不跑旧代码。
+    _py_on textutil || { printf '%s' "$1"; return 0; }
+    printf '%s' "$1" | py_run textutil truncate_output \
+        "$TOOL_OUTPUT_MAX_COL" "$TOOL_OUTPUT_MAX_LINES" '...(该行过长已截断)'
 }
 
 # 自动压缩(compaction):把超出保留范围的旧消息浓缩成一条摘要消息,
@@ -3351,13 +3350,12 @@ truncate_output() {
 # 阈值空/0 一律不压:半装载的夹具、被裁剪的配置段,都不该把每一轮变成一次压缩
 # (白烧一次摘要请求 + 每次多一层有损摘要)。
 compact_due() {
-    local t=${1:-0} g=${TOKEN_THRESHOLD:-0}
-    [[ "$t" =~ ^[0-9]+$ ]] || t=0
-    [[ "$g" =~ ^[0-9]+$ ]] || g=0
-    # g>0 必须显式判:光写 t>g 的话,阈值被裁空/置 0 时任何 t>0 都成立,半装载的
-    # 环境会把每一轮都变成一次压缩(白烧请求 + 每次多一层有损摘要)。这条注释与代码
-    # 曾各写各的,是探针的"阈值空/0 不压"两档把它逮出来的。
-    (( g > 0 && t > g ))
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 判据**已删除**。
+    # 契约:rc0=要压 / rc1=不压。组件不可用 → 判"不压"(保守:别在组件故障时每轮狂压)。
+    _py_on compaction || return 1
+    local _rc=0
+    py_run compaction due "${1:-0}" "${TOKEN_THRESHOLD:-0}" 2>/dev/null || _rc=$?
+    (( _rc == 0 ))
 }
 
 # system 之后**连续**的旧摘要条数。它们要被原样保留,不许再喂回压缩器:摘要被反复
@@ -3392,31 +3390,13 @@ summary_pin_count() {
 # tests/compaction_pin_probe.sh),而不是只能靠人在真会话里撞运气。
 # $1=pin(锁定的旧摘要条数) $2=摘要正文(空串 = 压缩失败,只做硬截断) $3=cut(切点索引)
 compact_apply() {
-    local pin="$1" summary="$2" cut="$3"
-    local msg_file sum_file pin_max
-    [[ "$pin" =~ ^[0-9]+$ ]] || pin=0
-    [[ "$cut" =~ ^[0-9]+$ ]] || cut=0
-    # 钳制:锁定块不许越过切点,否则 [system]+[pinned]+[tail] 会把同一条消息数两遍
-    pin_max=$((cut > 1 ? cut - 1 : 0))
-    (( pin > pin_max )) && pin=$pin_max
-    # 整份 messages 走临时文件:它必然超过单参数上限(ARG_MAX 防护见下方专节)
-    msg_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$messages" > "$msg_file"
-    if [[ -n "$summary" ]]; then
-        sum_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-        printf '%s' "$summary" > "$sum_file"
-        messages=$(jq -n --slurpfile m "$msg_file" --argjson pin "$pin" --argjson cut "$cut" \
-            --arg p "$SUMMARY_PREFIX" --rawfile s "$sum_file" \
-            '($m[0])[0:1] + ($m[0])[1:1+$pin] + [{role:"user", content: ($p + "\n" + ($s | rtrimstr("\n")))}] + ($m[0])[$cut:]')
-        rm -f "$sum_file"
-    else
-        # 压缩失败只能硬截断,但已锁定的旧摘要必须原样留下。旧实现是 `.[0:1] + .[$cut:]`,
-        # 连摘要一起丢 —— 网络抖一次就等于凭空删掉一层历史,比"少一次摘要"严重得多。
-        messages=$(jq -n --slurpfile m "$msg_file" --argjson pin "$pin" --argjson cut "$cut" \
-            '($m[0])[0:1] + ($m[0])[1:1+$pin] + ($m[0])[$cut:]')
-    fi
-    rm -f "$msg_file"
-    return 0
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # messages 经 stdin 传给子进程;新值由 python 输出。
+    # 组件不可用 → 原样不动 messages(宁可少压一次,不破坏历史),不跑旧代码。
+    _py_on compaction || return 1
+    local _out
+    _out=$(printf '%s' "$messages" | py_run compaction apply "$1" "$2" "$3" "$SUMMARY_PREFIX") && { messages="$_out"; return 0; }
+    return 1
 }
 
 compact_messages() {
@@ -3762,67 +3742,33 @@ print_usage() {
 # 追加一条 user 消息到 messages 列表（必须在父 shell 调用，不能放 $() 里）
 # 第 6 个参数 reasoning:thinking 模式下 assistant 消息必须回传 reasoning_content
 add_message() {
-    # ⚠ 六个参数一律用 ${n:-} 取:生产没开 set -u(少传参数只是取空),但**所有测试夹具
-    #   都开 set -uo pipefail** —— 无条件引用 $4/$5/$6 会在夹具里当场 unbound 而死,
-    #   现象是"夹具跑起来没输出/闸门中途不出结论行",极难归因到被调函数。
-    #   本轮就被绊过两次(一次探针静默无输出、一次闸门崩)。同类既有 bug 见 bugList #43。
-    local addctx="${1:-}"
-    local role="${2:-}"
-    local tool_call_id="${3:-}"
-    local tool_call_name="${4:-}"
-    local tool_call_args="${5:-}"
-    local reasoning="${6:-}"
-    # content(工具输出可达几十 KB 甚至更大)与 reasoning(思考全文)经 --arg
-    # 传参都属单个参数:Linux 单参数上限 128KB,超限即
-    # "Argument list too long"。一律写临时文件后用 --rawfile 读入
-    # (需 jq 1.6+,脚本图片功能已要求该版本)。
-    local ctx_file rsn_file
-    ctx_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$addctx" > "$ctx_file"
-    rsn_file=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$reasoning" > "$rsn_file"
-    if [[ -z "$role" ]]; then
-        # 默认 user 消息
-        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" '. + [{role: "user", content: $content}]')
-    elif [[ "$role" == "assistant" && -n "$tool_call_name" ]]; then
-        # assistant 发起工具调用：必须记录 tool_calls。若本轮已有正文输出，
-        # 也要把正文写入 content，否则工具调用前的正文会丢失，messages 不完整。
-        # thinking 模式下必须回传 reasoning_content(API 硬性要求),哪怕本轮
-        # 模型没有输出思考(flash 模型 -t 下偶发只返回工具调用)也要带空串
-        # 字段:省略字段会让下一轮请求 400(真实 API 实测复现)。
-        if [[ -z "$addctx" ]]; then
-            messages=$(echo "$messages" | jq --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" \
-                '. + [{role: "assistant", content: null, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
-        else
-            messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg id "$tool_call_id" --arg name "$tool_call_name" --arg args "$tool_call_args" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" \
-                '. + [{role: "assistant", content: $content, tool_calls: [{id: $id, type: "function", function: {name: $name, arguments: $args}}]} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
-        fi
-    elif [[ -n "$tool_call_id" ]]; then
-        # tool 角色：工具执行结果，带 tool_call_id
-        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg role "$role" --arg tool_call_id "$tool_call_id" '. + [{role: $role, content: $content, tool_call_id: $tool_call_id}]')
-    else
-        # 普通角色（assistant 文本回复等）;thinking 模式下回传 reasoning_content,
-        # 无思考时同样带空串字段(原因同上:省略字段会让下一轮请求 400)
-        messages=$(echo "$messages" | jq --rawfile content "$ctx_file" --arg role "$role" --rawfile reasoning "$rsn_file" --arg thinking "$thinking" '. + [{role: $role, content: $content} + (if $reasoning != "" or $thinking == "enabled" then {reasoning_content: $reasoning} else {} end)]')
-    fi
-    rm -f "$ctx_file" "$rsn_file"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # messages 经 stdin、正文与思考全文经临时文件(ARG_MAX 防护)。
+    # 组件不可用 → 不追加(本条消息未入上下文),并往 stderr **明示**;不跑旧代码。
+    _py_on msg || { printf '\033[31m[add_message] 组件不可用,本条消息未入上下文\033[0m\n' >&2; return 1; }
+    local _mf _cf _rf _out _rc
+    _mf=$(mktemp "${TMPDIR:-/tmp}/ct_msg_XXXXXX"); _cf=$(mktemp "${TMPDIR:-/tmp}/ct_msg_XXXXXX"); _rf=$(mktemp "${TMPDIR:-/tmp}/ct_msg_XXXXXX")
+    printf '%s' "$messages" > "$_mf"
+    printf '%s' "${1:-}" > "$_cf"
+    printf '%s' "${6:-}" > "$_rf"
+    _out=$(py_run msg add "$_cf" "${2:-}" "${3:-}" "${4:-}" "${5:-}" "$_rf" "$thinking" < "$_mf"); _rc=$?
+    rm -f "$_mf" "$_cf" "$_rf"
+    (( _rc == 0 )) || return 1
+    messages="$_out"
+    return 0
 }
 auth_add_message() {
-    local addctx="$1"
-    local role="${2:-user}"
-    local tmpf
-    # 基于 auth_message 自身拼接（原实现误用了 $messages，会丢掉对话历史）;
-    # 命令文本理论上也可能超限,与主链路一样走临时文件(ARG_MAX 防护)
-    tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$addctx" > "$tmpf"
-    auth_message=$(echo "$auth_message" | jq --rawfile content "$tmpf" --arg role "$role" --argjson keep "$AUTH_CTX_KEEP" \
-        '. + [{role: $role, content: $content}]
-         # 裁剪:保留 system(.[0]) + 最近 keep 组问答(每组 user+assistant 两条)。
-         # 不裁剪会让审批链无上限增长——越判越慢越贵,更危险的是历史裁定会
-         # 锚化后续判断(前面一串 Y 之后,相似命令容易跟着 Y)。
-         | (if length > (1 + 2 * $keep) then (.[0:1] + .[(-2 * $keep):]) else . end)
-        ')
-    rm -f "$tmpf"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # auth_message 经 stdin、命令正文经临时文件;组件不可用 → 不追加,并往 stderr 明示。
+    _py_on msg || { printf '\033[31m[auth_add_message] 组件不可用,审批链未追加\033[0m\n' >&2; return 1; }
+    local _tf _out _rc
+    _tf=$(mktemp "${TMPDIR:-/tmp}/ct_msg_XXXXXX")
+    printf '%s' "${1:-}" > "$_tf"
+    _out=$(printf '%s' "$auth_message" | py_run msg auth_add "$_tf" "${2:-user}" "$AUTH_CTX_KEEP"); _rc=$?
+    rm -f "$_tf"
+    (( _rc == 0 )) || return 1
+    auth_message="$_out"
+    return 0
 }
 
 # 工具调用处理器已删除:并行调用按 index 解析已内联进 ask_ai 的流式循环,
@@ -3847,22 +3793,18 @@ auth_add_message() {
 # (它是提示词里 N 列表的序号,人靠它知道撞了哪一条);③模型违规没写 N 前缀时,
 # 整行当理由留下 —— 丢掉一段看不懂的文本,也比编一句确定的假理由好。
 auth_parse_verdict() {
-    local line code rest
-    av_verdict=""; av_code=""; av_reason=""
-    line=$(printf '%s' "${1-}" | head -n 1 | tr -d '\r')
-    case "$line" in
-        [Yy]*) av_verdict="Y"; return 0 ;;
-    esac
-    av_verdict="N"
-    if [[ "$line" =~ ^[Nn][[:space:]]*([0-9]+)[[:space:]]*[:：-]?(.*)$ ]]; then
-        av_code="${BASH_REMATCH[1]}"; rest="${BASH_REMATCH[2]}"
-    elif [[ "$line" =~ ^[Nn][[:space:]]*[:：-]?(.*)$ ]]; then
-        rest="${BASH_REMATCH[1]}"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 结果经单行 JSON 回传(契约 §3.3),由 jq 拆回三个全局 av_*(与旧实现同一契约)。
+    # WCHAT_PY=0 / 分模块 WCHAT_PY_AUTHPARSE=0 / 组件不可用 → **fail-closed**(判 N、无理由),
+    # 绝不静默放行、也绝不跑旧代码。
+    local _avj
+    if _py_on authparse && _avj=$(py_run authparse verdict "${1-}" 2>/dev/null); then
+        av_verdict=$(printf '%s' "$_avj" | jq -r '.verdict // ""')
+        av_code=$(printf '%s' "$_avj" | jq -r '.code // ""')
+        av_reason=$(printf '%s' "$_avj" | jq -r '.reason // ""')
     else
-        rest="$line"
+        av_verdict="N"; av_code=""; av_reason=""
     fi
-    rest="${rest#"${rest%%[![:space:]]*}"}"
-    av_reason="${rest:0:80}"
     return 0
 }
 
@@ -3951,13 +3893,14 @@ auth_think() {
 # 用于越界访问放行时,将原始路径中的 ~ 展开为实际的家目录路径
 expand_tilde() {
     local p="$1"
-    if [[ "$p" == '~' ]]; then
-        printf '%s' "$HOME"
-    elif [[ "$p" == '~/'* ]]; then
-        printf '%s/%s' "$HOME" "${p#'~/'}"
-    else
-        printf '%s' "$p"
+    # Python 活实现(见 wchat_py/pathutil.py);组件不可用 → 原样透传。
+    if _py_on pathutil; then
+        local _o _rc=0
+        _o=$(py_run pathutil expand_tilde "$p" "${HOME:-}" "${WORK_ROOT:-}") || _rc=$?
+        if (( _rc == 0 )); then printf '%s' "$_o"; return 0; fi
     fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → **原样透传**(至少不丢路径)。
+    printf '%s' "$p"
 }
 # 路径沙箱:解析工具传入的路径为物理绝对路径,并强制落在 WORK_ROOT 内。
 # 相对路径基于工作目录;.. 逃逸、绝对路径指向外部、symlink 指向外部都会被拒绝。
@@ -3965,47 +3908,16 @@ expand_tilde() {
 # 缺失的段原样拼回(必须都是新目录名,任何一段为 .. 直接拒绝)。
 # 成功输出解析后的绝对路径,失败返回非零。
 resolve_path() {
-    local p="$1" dir base canon missing seg
-    [[ -z "$p" ]] && return 1
-    # ~ 展开:模型常传 ~/xxx 路径,bash 变量/命令替换里的 ~ 不会自动展开,
-    # 原样会拼成工作根目录下字面量 ~ 目录,导致"文件不存在"(历史 bug #15)
-    if [[ "$p" == '~' ]]; then
-        p="$HOME"
-    elif [[ "$p" == '~/'* ]]; then
-        # 注意:${p#~/} 的 word 会先做波浪号展开(~/ → $HOME/),必须给
-        # 模式加引号阻止展开,否则剥离永远不命中
-        p="$HOME/${p#'~/'}"
+    # Python 活实现(见 wchat_py/pathutil.py);组件不可用 → 返回 1(调用方保守处理)。
+    if _py_on pathutil; then
+        local _o _rc=0
+        _o=$(py_run pathutil resolve_path "$1" "${HOME:-}" "${WORK_ROOT:-}") || _rc=$?
+        if (( _rc == 0 )); then printf '%s' "$_o"; return 0; fi
+        if (( _rc == 1 )); then return 1; fi
     fi
-    [[ "$p" != /* ]] && p="$WORK_ROOT/$p"
-    # 尾斜杠会让 basename 把最后一段吃掉(/a/b/ → dirname=/a/b, basename=b →
-    # 拼出 /a/b/b,一个不存在的路径,表现为"目录明明在却报找不到")
-    [[ "$p" != "/" && "${p%/}" != "$p" ]] && p="${p%/}"
-    dir=$(dirname "$p")
-    base=$(basename "$p")
-
-    missing=""
-    while [[ ! -d "$dir" ]]; do
-        [[ "$dir" == "/" ]] && return 1
-        missing="${dir##*/}/$missing"
-        dir=$(dirname "$dir")
-    done
-    # 缺失段必须逐个是普通目录名,含 .. 的拒绝(此时无法安全规范化)
-    for seg in ${missing//\// }; do
-        [[ "$seg" == ".." ]] && return 1
-    done
-
-    canon=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
-    # canon 为 "/" 时不能再补一个斜杠(否则返回 "//sub/x",与 norm_path 及授权
-    # 名单的字符串前缀比对不一致)
-    local tgt="${canon%/}/$missing$base"
-    # 包含判定必须落在**目标自身的物理路径**上。旧版判的是 canon(=目标的父目录),
-    # 于是"目标恰好等于 WORK_ROOT"这一条被判到工作目录外而误拒:父目录是
-    # WORK_ROOT 的上一级,两条模式都不匹配。表现是 list_dir 传绝对路径的 cwd 报
-    # "路径无法安全归一"(path_access 按 "$WORK_ROOT" 精确匹配判出 outside=0,落到
-    # 那条兜底拒绝里)。read_file 传 WORK_ROOT 下的文件不受影响 —— 它的父目录正好
-    # 等于 WORK_ROOT,所以这个洞藏了很久。
-    [[ "$tgt" == "$WORK_ROOT" || "$tgt" == "$WORK_ROOT"/* ]] || return 1
-    printf '%s' "$tgt"
+    # 【已收口】旧 bash 归一+边界回退**已删除**;组件不可用 → 返回 1(调用方 `|| resolved=""`
+    # 等,保守处理;复刻"函数缺席"行为)。
+    return 1
 }
 
 # 会话级授权名单(不持久化,重启/换会话失效):三类来源——
@@ -4032,24 +3944,17 @@ grant_file() {
 # 目录授权含其子树(用户放行 ~/.config 就是放行整棵 ~/.config,不再逐文件追问)。
 is_granted() {
     local p="$1" mode="${2:-r}" canon g gmode gpath
-    # 空名单 = 什么都没授权:下面的 for 零次循环、末尾 return 1,语义已自洽。
-    # (这里原先有一条 [[ ${#granted_files[@]} -eq 0 ]] && return 1 的提前返回,
-    #  是当年为 macOS 自带 bash 3.2 下 set -u 展开空数组会 unbound 而加的绕行;
-    #  本脚本统一跑 bash 5+,该雷不存在,已按"不留多版本兼容"的口径删除。)
-    if [[ -d "$(dirname "$p")" ]]; then
-        canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || canon=""
-    else
-        canon=""
+    # Python 活实现(W12-3,见 wchat_py/authz.py);组件不可用 → 返回 1(未授权)。
+    # 会话态名单经 argv 传入(单一出处仍是 bash)。
+    if _py_on authz; then
+        local _rc=0
+        printf '%s' "$p" | py_run authz is_granted "$mode" "${HOME:-}" "${WORK_ROOT:-}" \
+            "$(printf '%s\n' ${granted_files[@]+"${granted_files[@]}"})" >/dev/null 2>&1 || _rc=$?
+        if (( _rc == 0 )); then return 0; fi
+        if (( _rc == 1 )); then return 1; fi
     fi
-    for g in "${granted_files[@]}"; do
-        gmode="${g%%|*}"; gpath="${g#*|}"
-        [[ "$gmode" == "$mode" || "$gmode" == "rw" ]] || continue
-        [[ "$gpath" == "$p" ]] && return 0
-        [[ -n "$canon" && "$gpath" == "$canon/$(basename "$p")" ]] && return 0
-        # 子树命中:名单里是某个已存在目录,请求路径在它下面
-        [[ -d "$gpath" && "$p" == "$gpath"/* ]] && return 0
-        [[ -n "$canon" && -d "$gpath" && "$canon" == "$gpath"/* ]] && return 0
-    done
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(未授权,保守:继续走
+    # 硬墙/人工确认,绝不放行)。
     return 1
 }
 
@@ -4207,39 +4112,17 @@ auto_audit() {
 # (写入时父目录常常还不存在)。与 resolve_path 的区别:resolve_path 强制落在
 # WORK_ROOT 内(它是文件工具的沙箱闸门),本函数只做归一化、不做裁决。
 norm_path() {
-    local p="$1" dir base canon missing seg
-    [[ -z "$p" ]] && return 1
-    [[ "$p" == '~' ]] && p="$HOME"
-    [[ "$p" == '~/'* ]] && p="$HOME/${p#'~/'}"
-    [[ "$p" != /* ]] && p="$WORK_ROOT/$p"
-    # 只做"去掉字符串层面的 /." ,然后交给物理归一:
-    #   存在的目录 → cd + pwd -P 一次性消解 .. 与符号链接(与 resolve_path 同源)
-    #   不存在的父目录(写入时常见)→ 向上找最近的已存在祖先做物理归一,
-    #     缺失段原样拼回;缺失段里出现 .. 直接失败(此时无法安全归一)
-    # 旧实现在这里用 ${p%/../}* 手工消解 ..,把一个字面量 * 拼进了路径
-    # (模式写错),归一结果全错且不报错 —— 字符串层面的 .. 消解本来就不该自己做。
-    # 目录形态直接交给 cd + pwd -P 物理归一:这样 .. 与符号链接都由内核正确
-    # 消解。不要自己写字符串消解 ..(旧实现把模式写错,一个字面量 * 被拼进了
-    # 结果路径,归一化全错且静默)。
-    if [[ -d "$p" ]]; then
-        (cd "$p" 2>/dev/null && pwd -P) && return 0
+    # Python 活实现(见 wchat_py/pathutil.py)。
+    # 契约:成功 stdout=归一结果;rc=1 业务失败(调用方**不回退**);rc≥2 环境异常才回退。
+    if _py_on pathutil; then
+        local _o _rc=0
+        _o=$(py_run pathutil norm_path "$1" "${HOME:-}" "${WORK_ROOT:-}") || _rc=$?
+        if (( _rc == 0 )); then printf '%s' "$_o"; return 0; fi
+        if (( _rc == 1 )); then return 1; fi
     fi
-    p="${p//\/.\//\/}"; p="${p%/.}"
-    dir=$(dirname "$p"); base=$(basename "$p"); missing=""
-    while [[ ! -d "$dir" ]]; do
-        [[ "$dir" == "/" ]] && break
-        missing="${dir##*/}/$missing"; dir=$(dirname "$dir")
-    done
-    for seg in ${missing//\// }; do
-        [[ "$seg" == ".." ]] && return 1
-    done
-    canon=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
-    # 尾段是 . / .. 时(路径不存在但父级存在的情况不会出现,这里兜手滑拼写)
-    [[ "$base" == "." || "$base" == ".." ]] && { printf '%s' "$canon"; return 0; }
-    # canon 可能是 "/"(顶层不存在的绝对路径,如 /wchat-fx/a.txt:祖先取到根)。
-    # 直接拼 '%s/%s%s' 会得到 "//wchat-fx/a.txt",前缀比对全部失效(越界写名单
-    # 看起来配了却永远命中不了)。统一压成单个 "/" 分隔。
-    printf '%s/%s%s' "${canon%/}" "$missing" "$base"
+    # 【已收口】旧 bash 归一回退**已删除**;组件不可用 → 返回 1(调用方按"归一不了"
+    # 保守处理:用原始路径 / 跳过记账 / 判为不可豁免 —— 复刻"函数缺席"行为)。
+    return 1
 }
 
 # ---------- 私有临时目录:TMPDIR 缺失或指向 1777 公共目录时接管 ----------
@@ -4312,16 +4195,17 @@ unset _atp _atpc _dup _seen
 # 命中"用户启动时显式给的越界白名单"。mode: r(只读)/ rw(可写)
 auto_allow_hit() {
     local p="$1" mode="$2" e ep
-    ep=$(norm_path "$p") || ep="$p"
-    if [[ "$mode" == "rw" ]]; then
-        for e in "${auto_allow_rw[@]}"; do
-            [[ "$ep" == "$e" || "$ep" == "$e"/* ]] && return 0
-        done
-        return 1
+    # Python 活实现(W12-3,见 wchat_py/authz.py);组件不可用 → 返回 1(不在名单)。
+    if _py_on authz; then
+        local _rc=0
+        printf '%s' "$p" | py_run authz auto_allow_hit "$mode" "${HOME:-}" "${WORK_ROOT:-}" \
+            "$(printf '%s\n' ${auto_allow_ro[@]+"${auto_allow_ro[@]}"})" \
+            "$(printf '%s\n' ${auto_allow_rw[@]+"${auto_allow_rw[@]}"})" >/dev/null 2>&1 || _rc=$?
+        if (( _rc == 0 )); then return 0; fi
+        if (( _rc == 1 )); then return 1; fi
     fi
-    for e in "${auto_allow_ro[@]}" "${auto_allow_rw[@]}"; do
-        [[ "$ep" == "$e" || "$ep" == "$e"/* ]] && return 0
-    done
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(不在名单,保守:越界写
+    # 判成 P3,绝不放行)。
     return 1
 }
 
@@ -4757,226 +4641,46 @@ hd_words=()
 #  位置错位这条理由独立成立。见第十节:值得连带回归后再评估要不要改回收空元素。)
 hd_empty_token=0
 hd_split_words() {
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # 结果:词表经 jq 逐行搬回全局数组 hd_words(调用方保证 segment 内无换行,故行式
+    #   传输无损);空引号标志走 hd_empty_token。
+    if _py_on hd; then
+        local _j
+        _j=$(printf '%s' "$1" | py_run hd split_words) && {
+            mapfile -t hd_words < <(printf '%s' "$_j" | jq -r '.words[]')
+            hd_empty_token=$(printf '%s' "$_j" | jq -r '.empty_token // 0')
+            return 0
+        }
+    fi
+    # 【已收口】旧 bash 分词回退**已删除**;组件不可用 → 清空词表并返回 1,由调用方的
+    # 缺席守卫按更保守方向处理(hd_write_targets 退空白切分;shell_note_grants 不记账;
+    # hd_creds_all_exempt 不豁免)。
     hd_words=()
     hd_empty_token=0
-    # 注意:必须分两条 local。写成 `local s="$1" n=${#s}` 时 bash 会先把同行所有
-    # 名字建成未赋值的局部变量再依次赋值,${#s} 于是踩在 unset 上 —— set -u 环境
-    # 直接报 `s: unbound variable`(测试里表现为 hd_write_targets 恒返回空,
-    # 正表整片"漏放"假报,极易误判成规则被改坏)。
-    local s="$1"
-    local i=0 n=${#s} ch cur="" q="" nxt
-    local close delim dep j c2 q2
-    while (( i < n )); do
-        ch="${s:i:1}"
-        nxt="${s:i+1:1}"
-        if [[ -n "$q" ]]; then
-            if [[ "$ch" == "$q" ]]; then q=""; else cur+="$ch"; fi
-        elif [[ "$ch" == '\' ]]; then
-            if (( i + 1 < n )); then cur+="${s:i+1:1}"; i=$((i + 1)); fi
-        elif [[ "$ch" == '"' || "$ch" == "'" ]]; then
-            if [[ "$nxt" == "$ch" ]]; then
-                hd_empty_token=1          # 空引号对 = 一个空参数,标记后跳过两字符
-                i=$((i + 1))
-            else
-                q="$ch"
-            fi
-        elif [[ ( "$ch" == '$' && ( "$nxt" == '(' || "$nxt" == '{' ) ) || "$ch" == '`' ]]; then
-            # 命令替换 $(…) / 反引号 / 参数展开 ${…}:内部允许空格、重定向、引号,
-            # 必须整块并进当前 token。按空格切会造出 `$(date` 和 `%F)` 这类碎 token,
-            # ")" 之后的路径就可能顶到"命令名"的位置,整段写目标判定随之错位。
-            if [[ "$ch" == '`' ]]; then
-                close='`'; delim=""
-            elif [[ "$nxt" == '(' ]]; then
-                close=')'; delim='('
-            else
-                close='}'; delim='{'
-            fi
-            cur+="$ch"
-            if [[ -n "$delim" ]]; then cur+="$delim"; i=$((i + 1)); fi
-            dep=1; j=$((i + 1)); q2=""
-            while (( j < n && dep > 0 )); do
-                c2="${s:j:1}"
-                if [[ -n "$q2" ]]; then
-                    if [[ "$c2" == "$q2" ]]; then q2=""; fi
-                elif [[ "$c2" == '"' || "$c2" == "'" ]]; then
-                    q2="$c2"
-                elif [[ -n "$delim" ]]; then
-                    if [[ "$c2" == "$delim" ]]; then dep=$((dep + 1))
-                    elif [[ "$c2" == "$close" ]]; then dep=$((dep - 1)); fi
-                elif [[ "$c2" == '`' ]]; then
-                    dep=$((dep - 1))      # 反引号成对即闭合;嵌套反引号属病态写法不追
-                fi
-                cur+="$c2"
-                j=$((j + 1))
-            done
-            i=$((j - 1))                  # 主循环结尾还会 +1
-        elif [[ "$ch" == ' ' || "$ch" == $'\t' ]]; then
-            if [[ -n "$cur" ]]; then hd_words+=("$cur"); cur=""; fi
-        else
-            cur+="$ch"
-        fi
-        i=$((i + 1))
-    done
-    if [[ -n "$cur" ]]; then hd_words+=("$cur"); fi
-    return 0
+    return 1
 }
 
 # 提取「有写语义的目标」,不是最终裁决:/dev/null 这类特征设备由 H12 白名单过滤,
 # 越界与否在 H12 循环里判(把白名单复制进来会让两处口径漂移)。
 hd_write_targets() {
     local c="$1"
-    local t="$c"
-    # 规则 1:抹掉 fd 复制。循环替换直到不再有匹配(BASH_REMATCH[0] 恒非空,
-    # 每轮字符串变短,不会死循环)。
-    while [[ "$t" =~ [0-9]+\>\&[0-9-] || "$t" =~ \>\&[0-9-] ]]; do
-        t="${t/"${BASH_REMATCH[0]}"/}"
-    done
-    t="${t//|&/ }"
-    # (原此处有一行 flat="${flat//$'\n'/$'\n'}",把换行换成换行的空操作,意图是折叠续行
-    #  却写成了自替换。折叠已由 hd_fold_lines 在判定入口统一做掉,此处不再需要。)
-    # 命令边界:&& || | ; 换行。旧版只切 | 与 ;,&& 不切段,导致整条链的操作数
-    # 混在同一段里判定(一段里有 cp 就把另一段的无关 token 也当写目标)。
-    local flat="${t//&&/$'\n'}"
-    flat="${flat//||/$'\n'}"
-    flat="${flat//\|/$'\n'}"
-    flat="${flat//;/$'\n'}"
-
-    local seg w rhs out="" prog mode i n
-    local -a reds=() ops=() topts=()
-    while IFS= read -r seg; do
-        [[ -z "${seg// /}" ]] && continue
-        # 守卫:hd_split_words 不可用时(函数被裁剪、被单独 eval 进夹具、旧 checkpoint
-        # 被恢复)必须退回按空白切分,绝不能让整条判据链静默返回空 —— 那等于把所有
-        # 越界写放行(fail-open)。宁可不判,也不能不判成"无目标"。
-        if declare -f hd_split_words >/dev/null 2>&1; then
-            hd_split_words "$seg"
-        else
-            hd_words=()
-            for w in $seg; do hd_words+=("$w"); done
-            # 空白切分识别不了引号,段内有引号就按"位置不可靠"处理(保守多判)
-            case "$seg" in *'"'* | *"'"*) hd_empty_token=1 ;; *) hd_empty_token=0 ;; esac
+    # Python 活实现(见 wchat_py/hd.py write_targets);组件不可用 → 明示 + rc=1。
+    if _py_on hd; then
+        local _o _rc=0
+        _o=$(printf '%s' "$c" | py_run hd write_targets "$hd_re_write_verb") || _rc=$?
+        # ⚠ 不能用裸 $(...)：命令替换会吃掉结尾换行,而调用方是 `< <(hd_write_targets …)`
+        #   喂 `while read` —— 末行无换行时 read 返回非 0,**最后一个写目标会被丢掉**
+        #   (全表实测 8 条红正是这个形状)。非空时补回**一个**换行,与 bash 旧实现逐字节一致;
+        #   空输出照旧不打印(bash 旧实现也有 `[[ -n "$out" ]]` 守卫)。
+        if (( _rc == 0 )); then
+            [[ -n "$_o" ]] && printf '%s\n' "$_o"
+            return 0
         fi
-        n=${#hd_words[@]}
-        (( n > 0 )) || continue
-        prog=""
-        reds=(); ops=(); topts=()
-        for (( i = 0; i < n; i++ )); do
-            w="${hd_words[i]}"
-            # 规则 2a:重定向目标 —— 只取 > 之后那一段(同 token 或下一个 token)
-            if [[ "$w" == *'>'* ]]; then
-                rhs="${w##*>}"
-                if [[ -z "$rhs" ]]; then
-                    if (( i + 1 < n )); then rhs="${hd_words[i + 1]}"; i=$((i + 1)); fi
-                fi
-                rhs="${rhs//\"/}"; rhs="${rhs//\'/}"
-                # 必须去首尾空白:嵌在程序文本里的重定向(bash -c "echo x > /path/y")
-                # > 后面总带一个空格,不去掉就匹配不到 $HOME/ 等前缀判据,真越界写会漏放
-                rhs="${rhs#"${rhs%%[![:space:]]*}"}"
-                rhs="${rhs%"${rhs##*[![:space:]]}"}"
-                [[ -n "$rhs" ]] && reds+=("$rhs")
-                continue
-            fi
-            # 规则 2b:输入重定向是读方向,< 与它的操作数一起跳过(<<< 已被替换掉)
-            if [[ "$w" == *'<'* ]]; then
-                if [[ -z "${w##*<}" ]] && (( i + 1 < n )); then i=$((i + 1)); fi
-                continue
-            fi
-            # 规则 2c:选项。只有"值本身就是写目标"的选项才吃下一个 token
-            if [[ "$w" == -* || "$w" == *=* ]]; then
-                case "$w" in
-                    -C|-O|-o|--directory|--outdir|--output|--target|--file)
-                        (( i + 1 < n )) && { topts+=("${hd_words[i + 1]}"); i=$((i + 1)); } ;;
-                    --*=*)
-                        rhs="${w#*=}"
-                        [[ -n "$rhs" ]] && topts+=("$rhs") ;;
-                    -[a-zA-Z]*f)
-                        # 归档类合并短选项:tar -czf a.tgz / -xjf b.tar.xz,归档名藏在
-                        # 末尾 f 之后。必须按模式字母区分方向:c/r/u/a 是建档(写归档),
-                        # x/t 是解包/列出(归档只是读,写的是 -C 目标目录)——旧实现一律
-                        # 当写目标,tar -xf /外部/a.tgz -C ./out 就会被误判成往外写。
-                        # 非归档命令的 -rf/-af 一类不算目标值(旧版在这里把 rm -rf 的下
-                        # 一个参数提前收进 topts,与 all 模式重复提出同一目标)。
-                        case "$prog" in
-                            tar|gtar|bsdtar)
-                                case "$w" in
-                                    *x*|*t*) (( i + 1 < n )) && i=$((i + 1)) ;;
-                                    *) (( i + 1 < n )) && { topts+=("${hd_words[i + 1]}"); i=$((i + 1)); } ;;
-                                esac ;;
-                        esac ;;
-                    *) : ;;
-                esac
-                continue
-            fi
-            case "$w" in
-                for|in|do|done|while|until|if|then|else|elif|fi|case|esac|select|time|!|sudo|env|export)
-                    continue ;;
-            esac
-            # 段内第一个实义 token 是命令名,它自己永远不是写目标(旧版把 cp/tar
-            # 这类命令名也当成目标回传,审批卡上会出现「命中目标: cp」这种乱码)
-            if [[ -z "$prog" ]]; then prog="${w##*/}"; continue; fi
-            ops+=("$w")
-        done
-        [[ -n "$prog" ]] || continue
-        # 规则 3:按动词分类操作数是否算写目标。旧版一律算,于是 cp 的源文件、
-        # sed -n 的只读入参、bash x.sh 的外部入参全被当成"要往外写"。
-        mode="flagonly"
-        case "$prog" in
-            rm|rmdir|unlink|shred|tee|truncate|touch|mkdir|dd|ln) mode="all" ;;
-            cp|mv|rsync|scp|install)                              mode="last" ;;
-            sed|awk|gawk|perl)                                    mode="inplace" ;;
-        esac
-        # sed/awk 不带 -i 时操作数全是读。旧版用 `*-i*` 子串匹配,于是
-        #   sed 's/a/-i/' /etc/hosts        (替换文本里恰好含 -i)
-        # 被当成"要往外写",操作数全被计入写目标(误拦方向,本轮实测发现)。
-        # 收紧成"必须是独立选项簇":行首或空白后的 -字母簇里含 i,或 --in-place 长选项。
-        # 保住 macOS 的真实形态 `sed -i '' ...`(单独一簇)与 GNU 的 `sed -i.bak`、`-ni`。
-        if [[ "$mode" == "inplace" ]]; then
-            if [[ "$seg" =~ (^|[[:space:]])-[A-Za-z]*i[A-Za-z]*([[:space:]]|$) ]] ||
-               [[ "$seg" =~ (^|[[:space:]])--in-place ]]; then
-                :
-            else
-                mode="flagonly"
-            fi
-        fi
-        # 段内出现过空参数(""/'')时,切词位置不可靠(空元素进不了数组,后面的 token
-        # 会顶位)。这时若该段确实含写动词,操作数一律算目标 —— 宁可多判也不放过;
-        # 不含写动词的段不升级,否则 grep "" /etc/passwd 这种纯读命令会白白撞墙。
-        if (( hd_empty_token )) && [[ "$mode" == "flagonly" ]] && [[ "$seg" =~ $hd_re_write_verb ]]; then
-            mode="all"
-        fi
-        if (( ${#reds[@]} )); then
-            for w in "${reds[@]}"; do out+="$w"$'\n'; done
-        fi
-        if (( ${#topts[@]} )); then
-            for w in "${topts[@]}"; do out+="$w"$'\n'; done
-        fi
-        case "$mode" in
-            all)
-                if (( ${#ops[@]} )); then
-                    for w in "${ops[@]}"; do out+="$w"$'\n'; done
-                fi ;;
-            last)
-                if (( ${#ops[@]} )); then out+="${ops[${#ops[@]} - 1]}"$'\n'; fi ;;
-            inplace)
-                if (( ${#ops[@]} )); then
-                    for w in "${ops[@]}"; do
-                        # 跳过程序文本(正则/替换式/awk 动作):真文件名要么是裸名,
-                        # 要么以 . / ~ $ 开头,绝不会带这些元字符
-                        if [[ "$w" == *','* || "$w" == *'('* || "$w" == *')'* || "$w" == *'{'* \
-                           || "$w" == *'}'* || "$w" == *'\'* || "$w" == *'`'* || "$w" == *'^'* ]]; then
-                            continue
-                        fi
-                        if [[ "$w" == */* ]]; then
-                            [[ "$w" == ./* || "$w" == /* || "$w" == '~'* || "$w" == '$'* ]] || continue
-                        fi
-                        out+="$w"$'\n'
-                    done
-                fi ;;
-        esac
-    done <<< "$flat"
-    # 同一目标可能被两条规则各提出一次(-C 的值恰好又是末位操作数等)。去重后再交给
-    # H12:重复不改变判定,但会让审批卡上「命中目标」重复刷屏,干扰人和模型定位。
-    if [[ -n "$out" ]]; then printf '%s' "$out" | awk 'NF && !seen[$0]++'; fi
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → stderr 明示 + rc=1(调用点按 rc 判
+    # "提取器不可用" → 含重定向的命令一律交人工确认,fail-closed)。
+    printf '\033[31m[hd_write_targets] 组件不可用(H12 写目标提取停摆)\033[0m\n' >&2
+    return 1
 }
 
 
@@ -5002,64 +4706,14 @@ hd_is_readonly_verb() {
 }
 
 hd_mask_readonly() {
-    local s="$1" out="" cmd="" ch q="" qm=0 sp=1 keep=0 i n nxt
-    n=${#s}
-    for ((i = 0; i < n; i++)); do
-        ch=${s:i:1}
-        nxt=""
-        (( i + 1 < n )) && nxt=${s:i+1:1}
-        if [[ -n "$q" ]]; then
-            # ---- 引号内 ----
-            if [[ "$ch" == "$q" ]]; then
-                if (( qm )); then out+=")"; else out+="$ch"; fi
-                q=""; qm=0
-                continue
-            fi
-            if (( qm )); then
-                if [[ "$ch" == '`' ]] || { [[ "$ch" == '$' ]] && [[ "$nxt" == '(' ]]; }; then
-                    qm=0; out+="$ch"; continue
-                fi
-                case "$ch" in
-                    ";"|"|"|"&"|$'\n'|"<"|">"|"$"|'`') out+="$ch" ;;
-                    *) out+=x ;;
-                esac
-            else
-                out+="$ch"
-            fi
-            continue
-        fi
-        # ---- 引号外 ----
-        case "$ch" in
-            "'"|'"')
-                q="$ch"
-                if (( keep == 1 )) && (( sp == 0 )); then
-                    qm=1; out+="("
-                else
-                    qm=0; out+="$ch"
-                fi
-                ;;
-            " "|$'\t')
-                if (( sp )) && [[ -n "$cmd" ]]; then
-                    if hd_is_readonly_verb "$cmd"; then keep=1; else keep=0; fi
-                    cmd=""; sp=0
-                fi
-                out+="$ch"
-                ;;
-            ";"|"|"|"&"|$'\n'|"("|")"|"<"|">"|'`')
-                if (( sp )) && [[ -n "$cmd" ]]; then
-                    if hd_is_readonly_verb "$cmd"; then keep=1; else keep=0; fi
-                    cmd=""
-                fi
-                keep=0; sp=1
-                out+="$ch"
-                ;;
-            *)
-                (( sp )) && cmd+="$ch"
-                out+="$ch"
-                ;;
-        esac
-    done
-    printf '%s' "$out"
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # 经 stdin 传命令串(大字符串不进 argv);成功时 stdout 即脱敏结果。
+    if _py_on hd; then
+        printf '%s' "$1" | py_run hd mask_readonly && return 0
+    fi
+    # 【已收口】旧 bash 脱敏回退**已删除**;组件不可用 → **原样透传**(等同不脱敏)。
+    # 不是放水:调用方的二次确认会拿原串再匹一次,仍命中 → 照拒(fail-closed)。
+    printf '%s' "${1-}"
 }
 # 只脱「消息类动词」的带引号参数。为什么 H6 不能复用 hd_is_readonly_verb：
 # 那份白名单里有 cat/head/tail/less/strings/base64/grep/sed/awk —— 它们的带引号
@@ -5081,62 +4735,13 @@ hd_is_msg_verb() {
 # 与 hd_mask_readonly 同构：等长替换(不改变字符串形状,拼不出新的命中)、分界符原样
 # 保留、引号内遇到 `$(` 或反引号立刻停止脱敏(命令替换里的凭据路径必须照拦)。
 hd_mask_msg() {
-    local s="$1" out="" cmd="" ch q="" qm=0 sp=1 keep=0 i n nxt
-    n=${#s}
-    for ((i = 0; i < n; i++)); do
-        ch=${s:i:1}
-        nxt=""
-        (( i + 1 < n )) && nxt=${s:i+1:1}
-        if [[ -n "$q" ]]; then
-            if [[ "$ch" == "$q" ]]; then
-                if (( qm )); then out+=")"; else out+="$ch"; fi
-                q=""; qm=0
-                continue
-            fi
-            if (( qm )); then
-                if [[ "$ch" == '`' ]] || { [[ "$ch" == '$' ]] && [[ "$nxt" == '(' ]]; }; then
-                    qm=0; out+="$ch"; continue
-                fi
-                case "$ch" in
-                    ";"|"|"|"&"|$'\n'|"<"|">"|"$"|'`') out+="$ch" ;;
-                    *) out+=x ;;
-                esac
-            else
-                out+="$ch"
-            fi
-            continue
-        fi
-        case "$ch" in
-            "'"|'"')
-                q="$ch"
-                if (( keep == 1 )) && (( sp == 0 )); then
-                    qm=1; out+="("
-                else
-                    qm=0; out+="$ch"
-                fi
-                ;;
-            " "|$'\t')
-                if (( sp )) && [[ -n "$cmd" ]]; then
-                    if hd_is_msg_verb "$cmd"; then keep=1; else keep=0; fi
-                    cmd=""; sp=0
-                fi
-                out+="$ch"
-                ;;
-            ";"|"|"|"&"|$'\n'|"("|")"|"<"|">"|'`')
-                if (( sp )) && [[ -n "$cmd" ]]; then
-                    if hd_is_msg_verb "$cmd"; then keep=1; else keep=0; fi
-                    cmd=""
-                fi
-                keep=0; sp=1
-                out+="$ch"
-                ;;
-            *)
-                (( sp )) && cmd+="$ch"
-                out+="$ch"
-                ;;
-        esac
-    done
-    printf '%s' "$out"
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    if _py_on hd; then
+        printf '%s' "$1" | py_run hd mask_msg && return 0
+    fi
+    # 【已收口】旧 bash 脱敏回退**已删除**;组件不可用 → **原样透传**(等同不脱敏)。
+    # 不是放水:调用方的二次确认会拿原串再匹一次,仍命中 → 照拒(fail-closed)。
+    printf '%s' "${1-}"
 }
 
 # 检索类动词「模式位」脱敏(hd_mask_msg 的补充,只服务 H6/H3/H4 的二次确认口径)。
@@ -5162,88 +4767,12 @@ hd_is_search_verb() {
     return 1
 }
 hd_mask_search_pat() {
-    local s="${1-}" out="" w="" ch q="" qm=0 sp=1 i n nxt vs=0 patused=0 dd=0 pending="" msk
-    [[ -n "$s" ]] || { printf '%s' "$s"; return 0; }
-    n=${#s}
-    for ((i = 0; i < n; i++)); do
-        ch=${s:i:1}
-        nxt=""
-        (( i + 1 < n )) && nxt=${s:i+1:1}
-        if [[ -n "$q" ]]; then
-            if [[ "$ch" == "$q" ]]; then q=""; qm=0; out+="$ch"; continue; fi
-            if (( qm )); then
-                if [[ "$ch" == '`' ]] || { [[ "$ch" == '$' ]] && [[ "$nxt" == '(' ]]; }; then
-                    qm=0; out+="$ch"; continue
-                fi
-                case "$ch" in
-                    ";"|"|"|"&"|$'\n'|"<"|">"|'$'|'`') out+="$ch" ;;
-                    *) out+=x ;;
-                esac
-            else
-                out+="$ch"
-            fi
-            continue
-        fi
-        case "$ch" in
-            "'"|'"')
-                # 进引号这一刻定脱不脱:段内检索动词 + 未过 -- + (模式位可脱)
-                q="$ch"; qm=0; msk=0
-                if (( vs == 1 )) && (( dd == 0 )); then
-                    if [[ -n "$w" ]]; then
-                        # 选项自带取值(--include='*'、-e'pat'):只认这几个取文本值的
-                        case "$w" in
-                            -e|-g|--include=*|--exclude=*|--exclude-dir=*|--glob=*|--regexp=*) msk=1 ;;
-                        esac
-                    elif [[ "$pending" == "pat" ]]; then
-                        msk=1; pending=""
-                    elif (( patused == 0 )); then
-                        msk=1
-                    fi
-                    if (( msk == 1 )); then
-                        patused=1; qm=1; out+="("
-                        continue
-                    fi
-                fi
-                out+="$ch"
-                sp=0
-                ;;
-            " "|$'\t')
-                if [[ -n "$w" ]]; then
-                    if (( vs == 0 )); then
-                        hd_is_search_verb "$w" && vs=1
-                    elif [[ "$w" == "--" || "$w" == "-f" || "$w" == "--file" ]]; then
-                        # `--` 之后全是操作数;grep/rg 一旦带 -f/--file,模式来自文件,
-                        # 余下非选项参数**全部是文件操作数**(不会再有模式位),所以同一处理。
-                        dd=1
-                    elif [[ "${w:0:1}" == "-" ]]; then
-                        case "$w" in
-                            -e|-g|--include|--exclude|--exclude-dir|--glob|--regexp) pending="pat" ;;
-                            *) pending="" ;;
-                        esac
-                    else
-                        patused=1; pending=""
-                    fi
-                    w=""
-                fi
-                sp=1
-                out+="$ch"
-                ;;
-            ";"|"|"|"&"|$'\n'|"("|")"|"<"|">"|'`')
-                if [[ -n "$w" ]]; then
-                    if (( vs == 0 )); then hd_is_search_verb "$w" && vs=1; fi
-                    w=""
-                fi
-                # 分隔符 = 下一段重新开始;脱敏状态全部复位
-                vs=0; patused=0; dd=0; pending=""; sp=1
-                out+="$ch"
-                ;;
-            *)
-                (( sp == 1 )) && { w="$ch"; sp=0; } || { [[ -n "$w" ]] && w+="$ch"; }
-                out+="$ch"
-                ;;
-        esac
-    done
-    printf '%s' "$out"
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    if _py_on hd; then
+        printf '%s' "$1" | py_run hd mask_search_pat && return 0
+    fi
+    # 【已收口】旧 bash 脱敏回退**已删除**;组件不可用 → **原样透传**(少脱一格=更严)。
+    printf '%s' "${1-}"
 }
 
 # 命令边界归一:判定串里的换行有两种语义 —— `\` + 换行是同一条命令的续行,裸换行是
@@ -5257,24 +4786,21 @@ hd_mask_search_pat() {
 # 必须接在 hd_noncode_payload 之后:heredoc 定界靠换行,先折就解析不出来了。
 HD_FOLDED=""
 hd_fold_lines() {
-    local _s="$1" _line _out=""
-    HD_FOLDED="$_s"
-    [[ "$_s" == *$'\n'* ]] || return 0
-    # 含 heredoc 的一律不折:正文里的换行是数据不是命令边界,折成 `;` 会把数据行
-    # 并进命令行(实测把 `解释器 heredoc 被误剥` 等 4 条既有锁打成新误拦)。
-    # 代价很明白:带 heredoc 的多行命令仍可能跨行桥接(旧行为),不因此放水。
-    if [[ "$_s" == *'<<'* ]]; then return 0; fi
-    while IFS= read -r _line || [[ -n "$_line" ]]; do
-        if [[ "$_line" == *\\ ]]; then
-            _out+="${_line%\\} "
-        else
-            _out+="$_line"$'\n'
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # ⚠ **不能**用 $(...) 取结果:折叠结果允许以换行结尾,命令替换会把它吃掉,与旧实现
+    #   不等价。走临时文件 + `read -d ''`,各字节原样搬进全局 HD_FOLDED。
+    if _py_on hd; then
+        local _tf; _tf=$(mktemp "${TMPDIR:-/tmp}/ct_fold_XXXXXX" 2>/dev/null)
+        if [[ -n "$_tf" ]] && printf '%s' "$1" | py_run hd fold_lines > "$_tf"; then
+            IFS= read -r -d '' HD_FOLDED < "$_tf" || true
+            rm -f "$_tf"
+            return 0
         fi
-    done <<<"$_s"
-    # 不删换行,只在每个换行**前**补一个 `;`:边界符让正则的中间段停下来,而行结构
-    # 保持原样 —— H11 的「第 N 行」坐标要对着原文数(实测删换行会把坐标全说成第1行)。
-    _out="${_out%$'\n'}"
-    HD_FOLDED="${_out//$'\n'/$';\n'}"
+        [[ -n "$_tf" ]] && rm -f "$_tf"
+    fi
+    # 【已收口】旧 bash 折叠回退**已删除**;组件不可用 → **原样透传**到 HD_FOLDED
+    # (不折叠,行边界保留 → 至多退回跨换行桥接的误拦,绝不静默合并出新的命中)。
+    HD_FOLDED="${1-}"
     return 0
 }
 
@@ -5609,22 +5135,23 @@ hard_deny_cmd() {
     # AUTO_SHELL_PATHS=0 是总闸:关掉等于 shell 侧越界写完全不拦(文件工具侧仍
     # 拦),只用于排查误杀,不要长期置 0。
     if [[ -n "$auto_mode" && "${AUTO_SHELL_PATHS:-1}" == "1" ]]; then
-        # 兜底:提取器缺失(函数被裁剪、或像 auto_test.sh 那样按名单只抽了
-        # hard_deny_cmd)时,`< <(hd_write_targets …)` 会零输出 —— 那不是"没有写目标",
-        # 而是"看不见写目标"。静默走到下面 return 1 = 把所有越界写放行(fail-open),
-        # 与文档第 160 行"漏了的后果不是失败而是全绿"是同一类事故。宁可退回粗口径。
-        if ! declare -f hd_write_targets >/dev/null 2>&1; then
-            if [[ "$c" == *'>'* ]]; then
-                # 编号沿用 P3(越界写):提取器在场时这条命令正是由 hard_deny_path 落成
-                # P3,审计里不该因为装载残缺出现第二套编号。
-                hd_rule="P3"
-                hd_msg="写目标提取器 hd_write_targets 不可用,含重定向的命令一律交人工确认(宁可多问,绝不静默放行)。替代:把 hd_write_targets/hd_split_words 一并装载"
-                return 0
-            fi
-        fi
-        # HD_CODE_OK 由上面的 H11 扫描置位(H11 在 H12 之前,一定已扫过);
-        # 万一将来有人调整顺序,这里自己补扫一次,绝不因"没扫过"退回原文。
+        # 兜底:提取器**缺失或降级**都必须 fail-closed —— `hd_write_targets` 零输出,
+        # 那不是"没有写目标",而是"看不见写目标";静默放行 = 把所有越界写漏过去。
+        # 收口后函数恒在,不能再靠 `declare -f` 判缺席,故**按 rc** 判(收口降级返回 1)。
         [[ "$HD_CODE_OK" == "1" ]] || hd_h11_scan "$c"
+        local _wt _wtrc=0
+        if ! declare -f hd_write_targets >/dev/null 2>&1; then
+            _wtrc=127
+        else
+            _wt=$(hd_write_targets "$HD_CODE") || _wtrc=$?
+        fi
+        if (( _wtrc != 0 )) && [[ "$c" == *'>'* ]]; then
+            # 编号沿用 P3(越界写):提取器在场时这条命令正是由 hard_deny_path 落成
+            # P3,审计里不该因为装载残缺出现第二套编号。
+            hd_rule="P3"
+            hd_msg="写目标提取器 hd_write_targets 不可用,含重定向的命令一律交人工确认(宁可多问,绝不静默放行)。替代:把 hd_write_targets/hd_split_words 一并装载"
+            return 0
+        fi
         while IFS= read -r word; do
             [[ -z "$word" ]] && continue
             word="${word%[;,)]}"                                 # 去尾部标点
@@ -5645,7 +5172,7 @@ hard_deny_cmd() {
                 hd_msg="${hd_msg}(命中目标: ${word})"
                 return 0
             fi
-        done < <(hd_write_targets "$HD_CODE")
+        done <<< "$_wt"
     fi
     return 1
 }
@@ -5671,35 +5198,16 @@ hd_cred_subdirs=('.ssh' '.aws' '.gnupg' '.azure' '.docker' '.kube' '.subversion'
 #      宁可一致地窄,也不要一侧宽一侧窄。
 #   3) 名单里的 `.azure` 比命令侧多一项(路径侧更严,单向可接受,见 T15 守卫)。
 hd_foreign_cred_path() {
-    local p="$1" s pre rest name me
-    # HOME 未设时(极端环境/子 shell)保守返回 1:不因此加严,免得把自己的一切当他人。
-    [[ -n "${HOME:-}" ]] || return 1
-    # 自己家目录下的路径交给上面那份精确名单 —— 只判"别人的家"。这里必须用
-    # **basename 比对**而不是 `"$p" == "$HOME"/*`:p 是归一后的路径,macOS 上
-    # `/home` 是 firmlink(归一成 /System/Volumes/Data/home),拿 $HOME 前缀比会失配。
-    me="${HOME##*/}"
-    local _found=0
-    for pre in '/Users/' '/home/'; do
-        [[ "$_found" == 1 ]] && break
-        case "$p" in
-            *"$pre"*)
-                rest="${p#*"$pre"}"          # 最短匹配:取第一个 pre 之后的内容
-                name="${rest%%/*}"
-                [[ -n "$name" && "$name" != "$rest" ]] || return 1   # 没有"用户名/…"这一层
-                [[ "$name" != "$me" ]] || return 1                   # 是自己 → 不加严
-                rest="${rest#*/}"            # 剥掉用户名,只留家目录**直属**层级往后
-                _found=1
-                ;;
-        esac
-    done
-    [[ "$_found" == 1 ]] || return 1
-    # 名单匹配限定在"家目录直属的下一段":proj/.ssh 这种别人项目里的同名目录
-    # 两侧都不拦(命令级锚点同样是家目录名后紧跟 .ssh),宁可一致地窄。
-    for s in ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"}; do
-        case "$rest" in
-            "$s"|"$s"/*) return 0 ;;
-        esac
-    done
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # 入参:路径 + HOME + 凭据子目录名(单一出处 hd_cred_subdirs,随调用传,python 侧不另抄)。
+    if _py_on hd; then
+        local _r
+        _r=$(py_run hd foreign_cred_path "$1" "${HOME:-}" ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"}) && {
+            [[ "$_r" == "0" ]] && return 0 || return 1
+        }
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(不判为"他人家目录")。
+    # 与"函数整体缺席"时的行为一致(调用点无守卫、rc≠0 即不命中),不新增放行面。
     return 1
 }
 # ==================== 信任边界的唯一权威定义 ====================
@@ -5718,12 +5226,12 @@ hd_foreign_cred_path() {
 # 与 package.json 同类)。同一目录里的 postinstall/CI 脚本本来就能做同样的事,单独拦
 # 它只换来假安全感;真正需要人盯的是"落点在边界外"和"边界被整台机器顶掉"这两件事。
 in_root_exempt() {
-    local np="$1"
-    [[ -n "$np" ]] || return 1                                  # 空路径不豁免(fail-closed)
-    [[ "$WORK_ROOT" != "$HOME" && "$WORK_ROOT" != "/" ]] || return 1
-    case "$np" in
-        "$WORK_ROOT"|"$WORK_ROOT"/*) return 0 ;;
-    esac
+    # Python 活实现(见 wchat_py/pathutil.py;无 IO 的纯前缀判定)。
+    if _py_on pathutil; then
+        py_run pathutil in_root_exempt "${1:-}" "${WORK_ROOT:-}" "${HOME:-}" && return 0
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(不豁免;复刻"函数缺席",
+    # 保守方向:宁可多走名单/判据,也不静默放开边界)。
     return 1
 }
 # 0 = 末段是已存在的符号链接,且逐跳解析后的真身落在工作根外(含解析不出来 —— 不知道
@@ -5866,37 +5374,21 @@ hd_creds_all_exempt() {
 # 调用约定:返回非 0 = "没脱敏成",调用方必须按原样送去判定。
 HD_STRIP=""
 hd_strip_noncode() {
-    # _n 必须单独一条 local:${#_s} 和 _s= 写在同一条 local 里时,**所有**参数先整体
-    # 展开再赋值,那会儿 _s 还是外层的(未设)→ _n=0 → 循环一次不跑 → 返回空串。
-    # 现象是"整行被吞掉、H11 全线不触发",而函数看起来完全正确 —— 只能靠 declare -f
-    # 加手工调用才查得出来。这条规律对 Bash 3.2/4.x/5.x 一致,不是 macOS 特有。
-    local _s="$1" _out="" _prev="" _ch _i=0 _inq=""
-    local _n=${#_s}
-    while (( _i < _n )); do
-        _ch="${_s:_i:1}"
-        if [[ -n "$_inq" ]]; then
-            # 字符串内部原样保留:awk '{print > "/etc/passwd"}' 的写就在引号里,
-            # 那是 awk 自己的重定向、真会落盘,剥掉它等于给硬墙开后门。
-            _out+="$_ch"
-            [[ "$_ch" == "$_inq" ]] && _inq=""
-        elif [[ "$_ch" == '"' || "$_ch" == "'" ]]; then
-            _inq="$_ch"; _out+="$_ch"
-        elif [[ "$_ch" == '\' ]]; then
-            _out+="$_ch"; _i=$((_i + 1))
-            if (( _i < _n )); then _out+="${_s:_i:1}"; _prev="${_s:_i:1}"; fi
-        elif [[ "$_ch" == '#' ]]; then
-            # 只有 # 前是行首或空白才算注释起点,否则 a#b、URL 片段被吃掉一半。
-            if [[ -z "$_prev" || "$_prev" == " " || "$_prev" == $'\t' ]]; then
-                HD_STRIP="$_out"; return 0
-            fi
-            _out+="$_ch"
-        else
-            _out+="$_ch"
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # ⚠ 结果落全局 HD_STRIP、函数恒返回 0。用临时文件 + read -d '' 原样搬字节。
+    if _py_on hd; then
+        local _tf; _tf=$(mktemp "${TMPDIR:-/tmp}/ct_sn_XXXXXX" 2>/dev/null)
+        if [[ -n "$_tf" ]] && printf '%s' "$1" | py_run hd strip_noncode > "$_tf"; then
+            IFS= read -r -d '' HD_STRIP < "$_tf" || true
+            rm -f "$_tf"
+            return 0
         fi
-        _prev="$_ch"; _i=$((_i + 1))
-    done
-    HD_STRIP="$_out"
-    return 0
+        [[ -n "$_tf" ]] && rm -f "$_tf"
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → HD_STRIP 置空并返回 1,调用方
+    # 退回"用原始行"(不剥注释) → 更可能命中 → fail-closed。
+    HD_STRIP=""
+    return 1
 }
 
 # 逐行扫。命中返回 0,给出 HD_H11_NUM(第几行)/ HD_H11_LINE(脱敏后的行)/
@@ -5965,112 +5457,43 @@ hd_h11_prot() {
 # 在按空格分词的层面无法区分,收进来是用高频误拦换低频漏拦,不划算;原位改系统文件这条
 # 仍由重定向版正则与 H3 族兜着(实测:被拒的是重定向版正则的功劳,别把它当覆盖)。
 hd_h11_dest_hit() {
-    local _flat="$1" _seg _w _verb _i _n _p _redir
-    _flat="${_flat//[$;|&()]/$'\n'}"
-    while IFS= read -r _seg; do
-        [[ "$_seg" == */*/* ]] || continue
-        local -a _W=()
-        read -ra _W <<< "$_seg"
-        _verb=""; _redir=0; _n=${#_W[@]}
-        for ((_i = 0; _i < _n; _i++)); do
-            _w="${_W[_i]}"
-            _w="${_w%\"}"; _w="${_w#\"}"; _w="${_w%\'}"; _w="${_w#\'}"
-            [[ -n "$_w" ]] || continue
-            # 重定向符后面那一个操作数**无条件**按写入目标算,与动词无关、不看位置:
-            # 这一支是 `echo x > /tmp/../etc/passwd` 唯一的出路 —— 重定向版正则要求紧跟
-            # `>` 的字面路径以受保护前缀开头,带 .. 的写法它看不见;而 echo/printf 这类
-            # 动词又不在搬运动词表里。旧版把 of= 放在 "-*" 分支里也是同类错位:dd 的
-            # 操作数是 KEY=VALUE,根本不带横杠,那条分支永远走不到(写向量时才暴露)。
-            if [[ "$_w" == ">" || "$_w" == ">>" || "$_w" == ">&" || "$_w" == ">|" ]]; then
-                _redir=1
-                continue
-            fi
-            if (( _redir )); then
-                _redir=0
-                _p="$(hd_h11_norm "$_w")"
-                hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; }
-                continue
-            fi
-            if [[ "$_w" == of=* ]]; then
-                _p="$(hd_h11_norm "${_w#of=}")"
-                hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; }
-            fi
-            if [[ "$_w" == -* ]]; then
-                continue
-            fi
-            if [[ -z "$_verb" ]]; then
-                case "${_w##*/}" in
-                    cp|mv|install|rsync|ln|truncate|dd) _verb="${_w##*/}" ;;
-                    # 包装动词不结束段查找:sudo/env/time 只是转手,真正的搬运动词在它后面。
-                    # 不认识的一律当"这段不是搬运动词",绝不当成目标 —— 反着写就会把
-                    # `./scripts/mv_log.sh /var/log/x` 的相对参数判成写入。
-                    sudo|doas|command|env|time|nohup|exec|nice|ionice|timeout|xargs) continue ;;
-                    *) _verb="NO" ;;
-                esac
-                continue
-            fi
-            [[ "$_verb" != NO ]] || continue
-            [[ "$_w" == /* ]] || continue
-            _p="$(hd_h11_norm "$_w")"
-            case "$_verb" in
-                mv|truncate)
-                    hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; } ;;
-                *)
-                    [[ $_i -eq $((_n - 1)) ]] && hd_h11_prot "$_p" && { printf '%s' "$_p"; return 0; } ;;
-            esac
-        done
-    done <<< "$_flat"
+    # Python 活实现(见 wchat_py/hd.py);失败落到下面 bash 旧实现。
+    # 契约:命中 → stdout=路径 且 rc=0;未命中 → rc=1(业务性结果,不回退);
+    #       rc≥2(环境异常)→ 才落回 bash。
+    if _py_on hd; then
+        local _o _rc=0
+        _o=$(py_run hd h11_dest_hit "$1" "$hd_h11_sys_prefixes") || _rc=$?
+        if (( _rc == 0 )); then printf '%s' "$_o"; return 0; fi
+        if (( _rc == 1 )); then return 1; fi
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(不命中)。与"函数缺席"时
+    # 调用点的 `|| _frag=""` 行为一致(它只是重定向判据之外的第二探测器)。
     return 1
 }
 
 hd_h11_scan() {
     HD_H11_NUM=0; HD_H11_HIT=""; HD_H11_LINE=""; HD_H11_EXEMPT=""; HD_CODE=""; HD_CODE_OK=0
-    local _raw="$1" _line="" _num=0 _heredoc=0 _tag="" _stripped="" _frag=""
-    while IFS= read -r _line || [[ -n "$_line" ]]; do
-        _num=$((_num + 1))
-        # 攒代码文本:只有含 # 的行才付逐字符剥注释的代价,其余原样收下
-        if [[ "$_line" == *'#'* ]]; then
-            if hd_strip_noncode "$_line"; then HD_CODE+="$HD_STRIP"$'\n'; else HD_CODE+="$_line"$'\n'; fi
-        else
-            HD_CODE+="$_line"$'\n'
+    # Python 活实现(见 wchat_py/hd.py h11_scan);组件不可用 → 退回粗判据(见下)。
+    if _py_on hd; then
+        local _j _rc=0
+        _j=$(printf '%s' "$1" | py_run hd h11_scan "$hd_re_sys_redirect" "$hd_h11_sys_prefixes") || _rc=$?
+        if (( _rc == 0 || _rc == 1 )) && [[ -n "$_j" ]]; then
+            HD_H11_NUM=$(printf '%s' "$_j" | jq -r '.num')
+            HD_H11_HIT=$(printf '%s' "$_j" | jq -r '.hit')
+            HD_H11_LINE=$(printf '%s' "$_j" | jq -r '.line')
+            HD_H11_EXEMPT=$(printf '%s' "$_j" | jq -r '.exempt')
+            HD_CODE=$(printf '%s' "$_j" | jq -r '.code')
+            HD_CODE_OK=$(printf '%s' "$_j" | jq -r '.code_ok')
+            (( _rc == 0 )) && return 0 || return 1
         fi
-        if (( _heredoc )); then
-            # <<- 的结束符可以带缩进,比较前剥掉行首空白
-            if [[ "${_line#"${_line%%[![:space:]]*}"}" == "$_tag" ]]; then _heredoc=0; fi
-            continue
-        fi
-        # 先用主判据筛一遍:绝大多数命令行不含重定向,只有"像写系统路径"的行才付
-        # 得起逐字符剥注释的代价 —— 这段每个工具调用都要跑,慢不得。
-        _frag=""
-        if [[ "$_line" =~ $hd_re_sys_redirect ]]; then
-            _frag="${BASH_REMATCH}"
-        elif [[ "$_line" == */*/* ]]; then
-            # 没有重定向符号不等于没有写入目标:mv/install/truncate/dd 的落点在操作数里。
-            # 前置的 */*/* 是廉价预筛(这段每个工具调用都要跑,不能对每行都分词)。
-            _frag="$(hd_h11_dest_hit "$_line")" || _frag=""
-        fi
-        if [[ -n "$_frag" ]]; then
-            if hd_strip_noncode "$_line"; then _stripped="$HD_STRIP"; else _stripped="$_line"; fi
-            if [[ "$_stripped" =~ $hd_re_sys_redirect ]]; then
-                HD_H11_NUM=$_num; HD_H11_HIT="${BASH_REMATCH}"; HD_H11_LINE="$_stripped"
-                return 0
-            fi
-            # 目标版命中必须在**剥完注释**的那份文本里还在:否则 `mv a /usr/bin/b # 只是注释`
-            # 之外还有 `cp x y # 顺手 mv 到 /etc 下` 这种纯叙述会被当成写系统路径。
-            if [[ -n "$_frag" && "$_stripped" == *"$_frag"* ]]; then
-                HD_H11_NUM=$_num; HD_H11_HIT="$_frag"; HD_H11_LINE="$_stripped"
-                return 0
-            fi
-            HD_H11_EXEMPT="第${_num}行的 ${_frag} 剥掉注释后不再命中(写在 # 之后,不会执行)"
-        fi
-        # here-string <<< 不是 heredoc,别把它之后的行整段跳掉
-        if [[ "$_line" == *'<<'* && "$_line" != *'<<<'* ]]; then
-            if [[ "$_line" =~ \<\<-?[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*) ]]; then
-                _tag="${BASH_REMATCH[1]}"; _heredoc=1
-            fi
-        fi
-    done <<< "$_raw"
-    HD_CODE_OK=1
+    fi
+    # 【已收口】旧 bash 扫描回退**已删除**;组件不可用 → **退回粗判据**(整串一次正则,
+    # 不剥注释/heredoc → 宁多拦不漏判),并把 HD_CODE 置为原文让 H12 照常提目标。
+    # 与调用点原来的"函数缺席"兜底同源(fail-closed)。
+    HD_H11_NUM=0; HD_H11_LINE="$1"; HD_H11_EXEMPT=""
+    HD_CODE="$1"; HD_CODE_OK=1
+    if [[ "$1" =~ $hd_re_sys_redirect ]]; then HD_H11_HIT="${BASH_REMATCH}"; return 0; fi
+    HD_H11_HIT=""
     return 1
 }
 
@@ -6090,33 +5513,24 @@ hd_h11_scan() {
 # 未覆盖(下一轮):`git commit -m "rm -rf /"` 这类**行内引号参数**里的叙述文本 ——
 # 它和 `bash -c '…'` 的载荷在形状上无法区分,后者是真执行,所以本轮不碰。
 hd_noncode_payload() {
-    local _raw="$1" _line _tag="" _data=0 _found=0 _out="" _drop=0
-    while IFS= read -r _line || [[ -n "$_line" ]]; do
-        if (( _drop )); then
-            # <<- 的结束符可以带缩进:比较前剥掉行首空白
-            if [[ "${_line#"${_line%%[![:space:]]*}"}" == "$_tag" ]]; then
-                _drop=0; _out+="$_line"$'\n'
+    local _raw="$1"
+    # Python 活实现(见 wchat_py/hd.py noncode_payload);组件不可用 → 返回 1(等同"无正文")。
+    if _py_on hd; then
+        local _tf; _tf=$(mktemp "${TMPDIR:-/tmp}/ct_ncp_XXXXXX" 2>/dev/null)
+        if [[ -n "$_tf" ]]; then
+            printf '%s' "$_raw" | py_run hd noncode_payload > "$_tf"; local _rc=$?
+            if (( _rc == 0 )); then
+                IFS= read -r -d '' HD_PAYLOAD < "$_tf" || true
+                rm -f "$_tf"
+                return 0
             fi
-            continue
+            rm -f "$_tf"
+            if (( _rc == 1 )); then return 1; fi
         fi
-        _out+="$_line"$'\n'
-        # here-string <<< 不是 heredoc,别把它之后的行整段跳掉
-        if [[ "$_line" == *'<<'* && "$_line" != *'<<<'* ]] \
-           && [[ "$_line" =~ \<\<-?[[:space:]]*[\'\"]?([A-Za-z_][A-Za-z0-9_]*) ]]; then
-            _tag="${BASH_REMATCH[1]}"; _data=0
-            case " $_line " in
-                *' git commit '*|*' git tag '*|*' tee '*|*' cat '*|*' echo '*|*' printf '*|*' cp '*|*' mv '*|*' touch '*)
-                    _data=1 ;;
-            esac
-            # 同一行里既有数据动词又有解释器/执行类动词 → 按解释器算(保守)
-            [[ "$_line" =~ (^|[[:space:]])(sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|php|awk|sed|eval|expect|ssh|su|sudo|crontab|at|batch|xargs|env|systemd-run)[[:space:]] ]] && _data=0
-            if (( _data )); then _drop=1; _found=1; fi
-        fi
-    done <<< "$_raw"
-    # 没找到可剥的数据型 heredoc → 返回 1,调用方保留原文(绝不用空串替换判据文本)
-    (( _found )) || return 1
-    HD_PAYLOAD="$_out"
-    return 0
+    fi
+    # 【已收口】旧 bash 回退**已删除**;组件不可用 → 返回 1(等同"无正文" → 调用方
+    # 保留原文照判,fail-closed)。
+    return 1
 }
 
 
@@ -6188,141 +5602,45 @@ hd_note_hit() {
 hard_deny_path() {
     local p="$1" mode="${2:-r}" np
     hd_rule=""; hd_msg=""
-    np=$(norm_path "$p") || np="$p"
-
-    # LINK 目录内特权的第一条例外:末段是链接、真身在边界外。必须排在**所有**豁免与
-    # 名单之前 —— 否则 `write_file $WORK_ROOT/.ssh` 会先被"目录内"放行,写盘却跟随
-    # 链接落到 ~/.ssh/...,等于用一条链接穿过整份名单(临时目录那条 TMP 红线同形)。
-    if in_root_exempt "$np" && link_escapes_root "$np"; then
-        hd_rule="LINK"; hd_msg="这个路径是符号链接,真实落点在工作目录外:路径判定看链接名、读写跟随链接真身,目录内豁免对它不成立(否则一条链接就能穿过整份凭据/dotfile 名单)。auto 档直接拒,非 auto 档须用户本人逐字输入 yes。替代:让用户把真实文件放进工作目录,或直接给出边界外的真实路径(那条会按它自己的规则重新判定)。换链接、换路径写法都不改变判定"
-        hd_note_hit "$np"
-        return 0
+    # Python 活实现(W12-2,见 wchat_py/pathrule.py);组件不可用 → 退回粗判据(见下)。
+    # 配置+会话态经 argv 传入(都短);path 走 stdin。
+    if _py_on pathrule; then
+        local _j _rc=0
+        _j=$(printf '%s' "$p" | py_run pathrule hard_deny_path "$mode" "${auto_mode:-}" \
+              "${HOME:-}" "${WORK_ROOT:-}" \
+              "$(printf '%s\n' ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"})" \
+              "$(printf '%s\n' ${auto_tmp_prefixes[@]+"${auto_tmp_prefixes[@]}"})" \
+              "$(printf '%s\n' ${auto_allow_rw[@]+"${auto_allow_rw[@]}"})") || _rc=$?
+        if (( _rc == 0 || _rc == 1 )) && [[ -n "$_j" ]]; then
+            hd_rule=$(printf '%s' "$_j" | jq -r '.rule')
+            hd_msg=$(printf '%s' "$_j" | jq -r '.msg')
+            (( _rc == 0 )) && return 0 || return 1
+        fi
     fi
-
-    # P1 凭据类路径:读写都判硬墙,但放行出口只有"用户本人手输 yes"一条
-    # (auto 档不提问直接拒;非 auto 档在调用点升级为严格人工确认)。列目录也算读。
-    # 与命令级 H6 同口径(改一侧必须同步另一侧,否则"shell 拦死、文件工具放行"就等于
-    # 没有保护 —— 这正是本条存在的全部意义)。
-    case "$np" in
-        "$HOME/.ssh"*|"$HOME/.aws"*|"$HOME/.gnupg"*|"$HOME/.config/gh"*|\
-        "$HOME/.config/gcloud"*|"$HOME/.config/azure"*|"$HOME/.azure"*|\
-        "$HOME/.docker"*|"$HOME/.kube"*|"$HOME/.subversion"*|"$HOME/.ct/history"*|"$HOME/.ct/config"*|\
-        "$HOME/.mcporter"|"$HOME/.mcporter/"*|\
-        "$HOME/.local/share/mcporter"|"$HOME/.local/share/mcporter/"*)
-            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(~/.ct/history 存对话正文、~/.ct/config 含接口凭据、~/.mcporter 是 MCP 的 vault 与 daemon 密钥):它会被读进上下文并随请求发给服务端。判定与档位无关,但出口有两条:auto 档直接拒(不提问),非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定。换写法、换路径表达或重试都不改变判定,也不要替用户作答;与 shell 的 H6 同判。替代:请用户自己贴出所需的值"
-            hd_note_hit "$np"
-            return 0 ;;
+    # 【已收口】旧 bash 全量回退**已删除**;组件不可用 → **粗判据**:只认最关键的
+    # 凭据/系统路径**字面量前缀**(不做归一 → 宁多拦不漏判),其余交调用方确认流程。
+    # 数字沿用 P1/P2;文案是降级版(不追求与常态一致,但只要不是空串/占位)。
+    case "$p" in
+        "$HOME/.ssh"*|"$HOME/.aws"*|"$HOME/.gnupg"*|"$HOME/.config/gh"*|"$HOME/.config/gcloud"*|\
+        "$HOME/.config/azure"*|"$HOME/.azure"*|"$HOME/.docker"*|"$HOME/.kube"*|\
+        "$HOME/.subversion"*|"$HOME/.ct/history"*|"$HOME/.ct/config"*|"$HOME/.mcporter"*|\
+        "$HOME/.local/share/mcporter"*)
+            hd_rule="P1"; hd_msg="凭据/会话数据路径不可访问(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
     esac
-    # 他人家目录下的凭据目录(与上面那份 $HOME 名单同源,见 hd_foreign_cred_path)。
-    # 只读也判、与档位无关,和 P1 其余分支同出口;刻意排在"凭据文件名"判定之前:
-    # 规则号都是 P1,但拒绝文案要说清是"别人的家目录"——写成"~/.xxx 被禁止"会让
-    # 用户以为是自己被误伤,转而去加 --allow-write(而 P1 根本放不开),白费一轮。
-    if hd_foreign_cred_path "$np"; then
-        hd_rule="P1"; hd_msg="另一个用户家目录下的凭据/会话目录(如 /home/<user>/.ssh、/Users/<user>/.aws)不可访问:不是本会话的工作目录,也不是你本人的配置。内容会进上下文并随请求发给服务端。判定与档位无关:auto 档直接拒,非 auto 档须用户本人逐字输入 yes。--allow-write 与换路径表达都放不开这条(P1 在任何名单判定之前),与 shell 的 H6 同判。替代:请用户自己贴出所需的值,或由用户在自己的终端里操作"
-        hd_note_hit "$np"
-        return 0
-    fi
-    # 凭据**文件名**判定:只对**边界外**的路径生效(见上面 in_root_exempt 的权威定义)。
-    # 口径变更说明:此前这条写的是"不限位置、含仓库里的项目级 .npmrc",而工具链从未
-    # 执行过它(resolve_path 判在目录内就直接放行,根本不调本函数)—— 于是要么维持
-    # "判据说拒、链路放行"的分裂,要么把口径统一到链路上。现在统一到边界:.npmrc 在
-    # 项目里是包管理器的配置文件,与 package.json/lockfile 同类,拦它不减少实际风险
-    # (同目录的 postinstall 能做同样的事),只逼人绕道或手敲。用户级 ~/.npmrc 仍在
-    # 名单内(它必然在边界外,除非工作根==家目录 —— 那时边界本身失效,见上面第 1 条)。
-    # 旧写法把 id_rsa 拿整串比(`[[ "$np" == id_rsa ]]`)是条死分支 —— 绝对路径永不相等,
-    # 嵌在 .ssh 之外的私钥全靠这一条才兜得住,这条保留原样。
-    # 刻意不列 `.env`:工作目录内的 .env 属开发常规(H6 注释同口径),由外发规则 H10 兜。
-    # `.pub` 不在名单里:公钥不是机密,拦它只会逼模型去绕。
-    if ! in_root_exempt "$np"; then
-        case "${np##*/}" in
-            .npmrc|.netrc|_netrc|.pypirc|.git-credentials|.htpasswd|.pgpass|spnego-machine|\
-            id_rsa|id_dsa|id_ecdsa|id_ed25519)
-                hd_rule="P1"; hd_msg="工作目录外的凭据文件不可访问(按文件名判定:.npmrc/.netrc/.pypirc/.pgpass/.git-credentials/私钥等):内容会进上下文并随请求发给服务端。auto 档直接拒,非 auto 档会向用户弹严格确认(必须逐字输入 yes),放不放行由用户决定;换位置、换写法都不改变判定,与 shell 的 H6 同判。替代:请用户自己贴出所需的值;要查 registry 用 npm config get registry"
-                hd_note_hit "$np"
-                return 0 ;;
-        esac
-        if [[ "$np" == *.pem || "$np" == *.key || "$np" == *.p12 || "$np" == *.pfx || "$np" == id_rsa || "$np" == id_ed25519 || "$np" == id_ecdsa ]]; then
-            hd_rule="P1"; hd_msg="工作目录外的私钥/证书文件(.pem/.key/.p12/.pfx/id_rsa 等)不可访问,内容与凭据文件同判:auto 档直接拒,非 auto 档须用户本人逐字输入 yes 才放行。替代:请用户自己提供所需的值"
-            hd_note_hit "$np"
-            return 0
-        fi
-    fi
-
-    # P2/P3 写侧裁决。坑:比较模式必须**不加引号**才会按 glob 匹配
-    # (写成 "$np" != "/tmp/*" 是拿字面量星号比字符串,永远不等)。
-    # case 顺序即优先级:先放行例外(特征设备、临时目录),再拒系统/家目录配置,
-    # 最后才判"越界写"(只有 auto 下才算硬墙,非 auto 交给人工确认)。
-    # /tmp 与 $TMPDIR 放行:编译器/构建工具大量写临时目录,拦下来只会把任务卡死。
     if [[ "$mode" == "rw" ]]; then
-        # 工作目录内的写优先放行 —— 必须排在系统路径判据**之前**:测试与开发时
-        # WORK_ROOT 本身就可能落在 /private/var/... 或 /Users/Shared 下,先判系统
-        # 路径会把"在自己项目里写文件"误拒(P2 命中 /private/*)。
-        # 边界与它的两条例外(工作根==$HOME 或 /、末段链接落到边界外)统一由
-        # in_root_exempt / hard_deny_path 顶部的 LINK 定义,这里不再抄一遍条件:
-        # 同一条规矩散在三处各写各的,正是上一轮"判据说拒、链路放行"能存活那么久的原因。
-        in_root_exempt "$np" && return 1
-        # 临时目录先放行:编译器/构建工具/heredoc 大量写 $TMPDIR,拦下来只会把
-        # 任务卡死。比对用物理前缀(见 auto_tmp_prefixes 注释);字面量 /tmp 系列
-        # 一并列出兜底 —— 数组因故未初始化时,不能退化成"临时目录也拒",那样
-        # 本程序自己的 mktemp 链路都会连带炸掉。
-        local _tmp_hit=0 _tp
-        for _tp in /tmp /private/tmp /var/tmp ${auto_tmp_prefixes[@]+"${auto_tmp_prefixes[@]}"}; do
-            [[ "$np" == "$_tp" || "$np" == "$_tp"/* ]] && { _tmp_hit=1; break; }
-        done
-        if (( _tmp_hit )); then return 1; fi
-        case "$np" in
-            /dev/null|/dev/stdin|/dev/stdout|/dev/stderr|/dev/zero) return 1 ;;
+        case "$p" in
+            "$WORK_ROOT"|"$WORK_ROOT"/*) return 1 ;;    # 根内写放行(与常态一致)
         esac
-        # 系统路径名单必须**两平台并集**。原清单只有 macOS 形状(/System /Library
-        # /private /Applications /Volumes /var/root),Linux 该有的 /proc /sys /run
-        # /boot /lib /lib64 /srv /media /mnt /var /root 一个没列 —— 后果不是"漏放",而是
-        # 这些写入掉到下面的 P3:P3 在 full 档 + --allow-write 命中时**可放开**,P2
-        # 永不放开。等于同一类"改内核参数/覆盖系统库"的动作,在 Linux 上比 macOS
-        # 低一档红线等级,且拒绝文案把人误导去加 --allow-write。
-        # `/root` 与 macOS 侧已有的 `/var/root` 成对:两者都是 root 的家目录,
-        # 漏掉它就意味着 `echo k > /root/.ssh/authorized_keys` 这类最典型的提权写法
-        # 在 Linux 上只是一条可放开的 P3。它以 **root** 身份跑时 HOME=/root,而 HOME
-        # 检查在本 case 之前,不会自伤。
-        # 刻意**不列 /home**:它在 Linux 上的角色就是 macOS 的 /Users(用户目录,
-        # 工作目录常常就在其下),而 /Users 本来就不在这份名单里 —— 越界写由 P3 管,
-        # 家目录里的隐藏配置由下面那条 $HOME/.xxx 管。两边必须同构,别单侧加严。
-        case "$np" in
-            /|/etc|/etc/*|/usr|/usr/*|/bin|/bin/*|/sbin|/sbin/*|/System|/System/*|\
-            /Library|/Library/*|/private|/private/*|/Applications|/Applications/*|\
-            /Volumes|/Volumes/*|/opt|/opt/*|/var/root|/var/root/*|/dev|/dev/*|\
-            /proc|/proc/*|/sys|/sys/*|/run|/run/*|/boot|/boot/*|\
-            /lib|/lib/*|/lib64|/lib64/*|/srv|/srv/*|/media|/media/*|/mnt|/mnt/*|\
-            /var|/var/*|\
-            /root|/root/*)
-                hd_rule="P2"; hd_msg="写入系统路径被禁止(持久改变环境,且不在 checkpoint 覆盖范围)。替代:写到工作目录内或 /tmp。注意 --allow-write 放不开这条(P2 在越界名单判定之前就已拒绝,名单只对'工作目录外的普通路径'生效且仅 full 档),确需改系统文件请用户自己执行"
-                hd_note_hit "$np"
-                return 0 ;;
+        case "$p" in
+            /tmp/*|/private/tmp/*|/var/tmp/*|/dev/null|/dev/stdin|/dev/stdout|/dev/stderr|/dev/zero)
+                return 1 ;;
+            /|/etc/*|/usr/*|/bin/*|/sbin/*|/System/*|/Library/*|/private/*|/Applications/*|\
+            /Volumes/*|/opt/*|/var/*|/root/*|/proc/*|/sys/*|/run/*|/boot/*|/lib/*|/lib64/*|\
+            /srv/*|/media/*|/mnt/*)
+                hd_rule="P2"; hd_msg="写入系统路径被禁止(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
+            "$HOME"|"$HOME"/.*)
+                hd_rule="P2"; hd_msg="写入主目录顶层或隐藏配置目录(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
         esac
-        case "$np" in
-            "$HOME"|"$HOME"/.[a-zA-Z]*|"$HOME"/.[a-zA-Z]*/*)
-                hd_rule="P2"; hd_msg="写入主目录顶层或隐藏配置目录(~/.xxx)被禁止。替代:写到工作目录内或 /tmp,把要落的内容打印出来交给用户自行放置"
-                hd_note_hit "$np"
-                return 0 ;;
-        esac
-        if [[ -n "$auto_mode" ]]; then
-            case "$np" in
-                "$WORK_ROOT"|"$WORK_ROOT"/*) ;;
-                *)
-                    # 档位门槛必须与文件工具侧(path_access 的 "4)" 分支)一致:
-                    # --allow-write 名单只在 full 档生效。以前这里不看档位,等于
-                    # shell 侧比文件工具侧松一档,而拒绝文案又让用户去升 full,
-                    # 两处口径漂移。
-                    if [[ "$auto_mode" != "full" ]] || ! auto_allow_hit "$np" rw; then
-                        hd_rule="P3"
-                        if [[ "$auto_mode" == "full" ]]; then
-                            hd_msg="越界写入被拒绝:该路径不在用户的 --allow-write 名单里。替代:写到工作目录内或 /tmp,或把内容打印出来交给用户放置${p:+;确需写它请用户重启时加 --allow-write '$p'}"
-                        else
-                            hd_msg="越界写入被拒绝:auto=${auto_mode} 档不放开工作目录外的写(--allow-write 只在 -auto=full 生效)。替代:写到工作目录内或 /tmp,或把内容打印出来交给用户自行放置"
-                        fi
-                        return 0
-                    fi ;;
-            esac
-        fi
     fi
     return 1
 }
@@ -6825,7 +6143,7 @@ auto_report_exit() {
 # 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
 
 tool_read_file() {
-    local path offset limit resolved out total_lines total_chars
+    local path offset limit resolved
     path=$(jq -r '.path // empty' <<< "$fn_args")
     offset=$(jq -r '.offset // empty' <<< "$fn_args")
     limit=$(jq -r '.limit // empty' <<< "$fn_args")
@@ -6841,23 +6159,23 @@ tool_read_file() {
     # 真实原因往往是相对路径落到了另一个工作根下(本轮实例:根=$HOME,报的是 wchat.sh 不存在)。
     [[ -f "$resolved" ]] || { content="错误:文件不存在: $path(解析为 $resolved;工作根 $WORK_ROOT)"; printf ' ⛔ 文件不存在:%s\n' "$resolved"; return 0; }
 
-    total_lines=$(wc -l < "$resolved" | tr -d ' ')
-    total_chars=$(wc -m < "$resolved" | tr -d ' ')
-
-    # 带行号输出:行号供 edit_file 的 old_string 定位和后续沟通引用
-    if (( limit > 0 )); then
-        out=$(sed -n "${offset},$((offset + limit - 1))p" "$resolved" | \
-            awk -v s="$offset" '{printf "%6d│ %s\n", s + NR - 1, $0}')
-        content="📄 $path · 第 ${offset}-$((offset + limit - 1)) 行(共 ${total_lines} 行):\n\n$out"
-    elif (( total_chars > READ_MAX_CHARS )); then
-        # 按行粒度截断:awk 逐行累计字符数,超阈值即停,不会切断多字节字符
-        out=$(LC_ALL=C awk -v max="$READ_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; printf "%6d│ %s\n", NR, $0}' "$resolved")
-        content="📄 $path · 共 ${total_lines} 行 / ${total_chars} 字符,文件过大仅返回前半部分。请用 offset/limit 参数继续分段读取:\n\n$out"
-    else
-        out=$(awk '{printf "%6d│ %s\n", NR, $0}' "$resolved")
-        content="📄 $path · 共 ${total_lines} 行:\n\n$out"
+    # 纯格式化半交给 Python(见 wchat_py/filefmt.py);安全裁决(resolve_path/path_access)已在上面。
+    if _py_on filefmt; then
+        local _j _rc=0 _ln
+        _j=$(py_run filefmt read "$resolved" "$path" "$offset" "$limit" "$READ_MAX_CHARS") || _rc=$?
+        if (( _rc == 0 )); then
+            content=$(printf '%s' "$_j" | jq -r '.content')
+            _ln=$(printf '%s' "$_j" | jq -r '.lines')
+            printf ' 已读取 %s(%s 行)\n' "$path" "$_ln"
+            return 0
+        fi
     fi
-    printf ' 已读取 %s(%s 行)\n' "$path" "$total_lines"
+
+    # 【已收口】旧 bash 格式化回退**已删除**;组件不可用 → **明示失败**,绝不返回半截/错行号内容
+    # (行号是 edit_file 定位与沟通引用的依据,错一行比不返回更坏)。
+    content="错误:读取组件不可用(filefmt),本次未返回内容"
+    printf ' ⛔ 读取组件不可用,未返回内容\n' >&2
+    return 0
 }
 
 tool_write_file() {
@@ -6991,14 +6309,14 @@ tool_web_fetch() {
     html="${resp%$'\n'*}"
 
     if [[ -z "$html" ]]; then
-        # 按状态码细分失败原因,让模型正确归因:这是网络/站点问题,
-        # 换用 shell 命令(w3m/curl)不会得到不同结果,应换站点或告知用户
-        case "$http_code" in
-            000) content="错误:无法连接 $url(HTTP 000:网络不可达或超时。换用 shell 命令不会改善,请更换站点或搜索引擎,或向用户说明网络限制)" ;;
-            403|429) content="错误:$url 返回 HTTP ${http_code}(被站点拒绝/限流,可能是反爬。换用 shell 命令不会改善,请更换站点)" ;;
-            4*|5*) content="错误:$url 返回 HTTP ${http_code}(站点拒绝或服务器错误,请更换站点)" ;;
-            *) content="错误:无法获取 $url(HTTP ${http_code},空响应)" ;;
-        esac
+        # 【已收口】状态码→原因映射的 Python 是唯一活实现(旧 bash case 已删除)。
+        # 按状态码细分原因让模型正确归因:这是网络/站点问题,换 shell 命令不会改善。
+        if _py_on webs && content=$(py_run webs fetch_error "$http_code" "$url" 2>/dev/null); then
+            :
+        else
+            # 组件不可用:给一条通用归因(明示、不静默、不跑旧代码)
+            content="错误:无法获取 $url(HTTP ${http_code},空响应)"
+        fi
         printf ' ⛔ 抓取失败:%s(HTTP %s)\n' "$url" "$http_code"
         return 0
     fi
@@ -7047,45 +6365,12 @@ tool_web_fetch() {
 # 按接口构造联网请求体,输出到 stdout。$1=搜索词 $2=模型名
 # 未知 provider 返回 1(正常流程下工具不会注册,这里兜住模型的幻觉调用)
 web_search_build_body() {
-    local query="$1" mdl="$2"
-    case "$WEB_SEARCH_PROVIDER" in
-        mimo)
-            # mimo 私有:tools 数组声明 web_search 工具类型。force_search 强制必搜
-            # (否则模型可能凭记忆作答),limit 控制回传结果条数(实测字段均被接受)
-            jq -n --arg q "$query" --arg model "$mdl" '{
-                model: $model,
-                messages: [{role: "user", content: $q}],
-                tools: [{
-                    type: "web_search",
-                    search_result: true,
-                    keyword: true,
-                    max_keyword: 5,
-                    force_search: true,
-                    limit: 10
-                }],
-                thinking: {type: "disabled"},
-                reasoning_effort: "high",
-                stream: false
-            }'
-            ;;
-        qwen)
-            # dashscope/qwen:顶层 enable_search 开启联网,forced_search 强制必搜。
-            # enable_thinking:false 关掉思考链——实测同一查询开着思考要白烧 1429 个
-            # reasoning token(搜索由接口完成,思考对结果无增益)。
-            # 该接口把来源并入正文(形如 [1][2] 角标),不回传 URL,解析端已适配
-            jq -n --arg q "$query" --arg model "$mdl" '{
-                model: $model,
-                messages: [{role: "user", content: $q}],
-                enable_search: true,
-                enable_thinking: false,
-                search_options: {forced_search: true, enable_source: false},
-                stream: false
-            }'
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash `case` 回退**已删除**。
+    # WCHAT_PY=0 / 分模块 WCHAT_PY_WEBS=0 / 组件不可用 → 返回 1(该功能不可用,明示),
+    # 调用方据此回退通用 web_fetch。绝不静默、也绝不跑旧代码。
+    # 契约:rc0=成功(体在 stdout)/ rc1=provider 不支持或组件不可用。
+    _py_on webs || return 1
+    py_run webs build_body "$WEB_SEARCH_PROVIDER" "$1" "$2" 2>/dev/null
 }
 
 tool_web_search() {
@@ -7486,19 +6771,10 @@ prepare_inline() {
 # 不许拿"再试一档"去掩盖(重试不可解决的问题 = 白烧一次压缩 + 一句误导性话术)。
 # 关掉整条阶梯:IMG_INLINE_SHRINK=0 → 只走首档,与加这个功能之前逐字节等价。
 img_inline_sides() {
-    # ⚠ 必须**分开写**再组数组:`local first=… out=("$first")` 里 $first 取到的是空 ——
-    #   local 会先把整串词展开完再逐个赋值,所以同一行引用自己刚设的变量必空。
-    #   现象不是报错而是"首档凭空消失"(默认那张全分辨率图从来没被试过),写出来给后来人。
-    local first s
-    first="${IMG_INLINE_MAX_SIDE:-2048}"
-    local out=("$first")
-    (( ${IMG_INLINE_SHRINK:-1} == 1 )) || { printf '%s' "$first"; return 0; }
-    for s in ${IMG_INLINE_SHRINK_LADDER:-1536 1024 768}; do
-        [[ "$s" =~ ^[0-9]+$ ]] || continue
-        (( s > 0 && s < first )) || continue
-        out+=("$s"); first="$s"          # 只准递减:名单写乱了也不会挂出比上一档更大的
-    done
-    printf '%s' "${out[*]}"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 组件不可用 → 输出首档(IMG_INLINE_MAX_SIDE),保证调用方拿到一个可用档位(降级不崩)。
+    _py_on img || { printf '%s' "${IMG_INLINE_MAX_SIDE:-2048}"; return 0; }
+    py_run img inline_sides "${IMG_INLINE_MAX_SIDE:-2048}" "${IMG_INLINE_SHRINK:-1}" "${IMG_INLINE_SHRINK_LADDER:-1536 1024 768}"
 }
 
 # ---------- "这次报错算不算模型不收图"的唯一判据 ----------
@@ -7517,32 +6793,10 @@ img_inline_sides() {
 # "item type + content" 双词同时命中来认,不单独匹配 "invalid"(那会命中我们自己的
 # 参数 bug,把锅甩给模型能力)。宁可漏判(继续试、多付一次失败)也不错判(永久关通道)。
 img_reject_wording() {  # $1=错误文本 → 0=算"不收图" 1=不算
-    local t="${1:-}" lc="${1,,}"
-    [[ -n "$t" ]] || return 1
-    # 一组:图片或视觉能力被明确说"不支持/不接受"
-    # ⚠ 先排掉"格式 / 解码器 / 文件类型"这一类:**文件问题是文件问题,不是端点不收图** ——
-    #   判成不收图会把整个会话的内联能力永久关掉(这条错判比漏判贵得多:漏判只多付一次失败)。
-    #   实测踩过:旧 describe_images 那份 case 表里本来有这层排除,收成统一判据时丢了,
-    #   于是 'This image format is not supported by the decoder' 会被判成"端点不吃图"
-    #   —— 反向锁在 inline 闸门第 12 组与 vision_layer 探针第 6 节,别再丢。
-    if [[ ( "$lc" == *image* || "$lc" == *vision* || "$lc" == *multimodal* || "$t" == *图片* || "$t" == *多模态* ) \
-       && ( "$lc" == *"not support"* || "$lc" == *"not"*"support"* || "$lc" == *unsupport* \
-         || "$lc" == *"do not accept"* || "$lc" == *"does not accept"* || "$lc" == *unsupported* \
-         || "$t" == *不支持* || "$t" == *不接受* ) \
-       && "$lc" != *format* && "$lc" != *decoder* && "$lc" != *"file type"* && "$t" != *格式* ]]; then
-        return 0
-    fi
-    # 二组:数组 content 被拒(纯文字档的典型回法),必须两个词同时在场
-    if [[ "$lc" == *"unexpected item type"* && "$lc" == *content* ]]; then return 0; fi
-    if [[ "$lc" == *"item must be dict"* || "$lc" == *"key[type]"* ]]; then return 0; fi
-    # 三组:直接否认视觉能力的说法(不带 support/accept 字样)。
-    # 这几条是从旧 describe_images 那份字面表**平移**过来的 —— 统一判据时不能顺手丢掉
-    # 别人踩出来的措辞,否则"合成一处"就变成"覆盖面缩小"(实测差点丢:not a vision model
-    # / no vision capability 在前两组里都接不住)。
-    if [[ "$lc" == *"not a vision model"* || "$lc" == *"no vision capability"* \
-       || "$lc" == *"no vision model"* || "$lc" == *"lacks vision"* \
-       || "$lc" == *"not support visual"* ]]; then return 0; fi
-    return 1
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 组件不可用 → 返回 1(不判"不收图" = 不关内联通道;保守方向:宁可继续试)。
+    _py_on img || return 1
+    [[ "$(printf '%s' "${1:-}" | py_run img reject_wording)" == "0" ]]
 }
 
 # ---------- 主模型收不收图:切档时探一次 ----------
@@ -8167,20 +7421,26 @@ vision_extra_fields() {
 # $4=system 提示(可空)。转述是独立请求:不注册 tools、不参与主对话形状,
 # 只吃几张图 + 一句话;$2 走文件是为了避开 ARG_MAX(图片 base64 可达数十 MB)
 vision_build_body() {
-    local extra sysfrag=""
-    extra=$(vision_extra_fields)
-    [[ -n "${4:-}" ]] && sysfrag="{role: \"system\", content: \$sys}, "
-    jq -nc --rawfile parts "$2" --arg model "$1" --arg prompt "$3" --arg sys "${4:-}" \
-        "{ model: \$model, messages: [ ${sysfrag}{role: \"user\", content: ((\$parts | fromjson) + [{type: \"text\", text: \$prompt}])} ] $extra, stream: false }"
+    # Python 活实现(见 wchat_py/vision.py)。契约:成功 → stdout=请求体 JSON。
+    if _py_on vision; then
+        py_run vision build_body "$1" "$2" "$3" "${4:-}" && return 0
+    fi
+    # 【已收口】旧 bash jq 回退**已删除**;组件不可用 → 返回 1(不产出请求体),
+    # 调用方据此报"转述请求体构建失败"并中止转述(绝不发一个半截 body)。
+    return 1
 }
 
 # 响应取文归一:多数网关返回字符串 content;部分网关(Anthropic 风格)把回复
 # 拆成 parts 数组,不归一会把对象字面量当转述文本喂给模型
 vision_parse_resp() {
-    jq -r '.choices[0].message.content
-        | if type == "array"
-          then [.[] | if type == "object" then (.text // "") else tostring end] | join("")
-          else . end // ""' <<<"$1" 2>/dev/null
+    # Python 活实现(见 wchat_py/vision.py)。契约:成功 → stdout=转述文本。
+    if _py_on vision; then
+        printf '%s' "$1" | py_run vision parse_resp && return 0
+    fi
+    # 【已收口】旧 bash jq 回退**已删除**;组件不可用 → 输出空串(调用方用 `-z` 判为
+    # "无转述文本" → describe_failed=1 并报错),不返回任何可能被当转述正文的东西。
+    printf ''
+    return 0
 }
 
 # 转述通道的两条回传(**顶层声明**,理由同 img_inline_reject):调用方与夹具里的桩都会先读它们,
@@ -8489,28 +7749,20 @@ tool_read_image() {
 # 之所以能绕开路径墙:这条白名单不拼用户可控的路径分量,穿越只可能在 name 里,而 name
 # 已被上面两条判死;换 SKILLS_DIR 指向不改变这个性质(校验在启动段做,见「Skill 自我进化」节)。
 tool_read_skill() {
-    local name path total_chars out
-    name=$(jq -r '.name // empty' <<< "$fn_args")
-    [[ -z "$name" ]] && { content="错误:技能名(name)不能为空"; return 0; }
-    [[ "$name" == *"/"* || "$name" == *".."* ]] && { content="错误:非法技能名: $name"; printf ' ⛔ 非法技能名:%s\n' "$name"; return 0; }
-    path="$SKILLS_DIR/$name/SKILL.md"
-    # 与 scan_skills 同一侧的守卫(理由见那里的注释):列表里被跳过的条目,读全文也读不到;
-    # 只堵一侧会留下"模型凭上一轮记忆里的技能名还能穿出去"的缺口。
-    if (( SKILLS_DIR_EXTERNAL )) && { [[ -L "$path" ]] || [[ -L "$SKILLS_DIR/$name" ]]; }; then
-        content="错误:技能 $name 的目录或 SKILL.md 是符号链接,已拒绝读取(外置技能目录里的链接可指向工作目录之外)"
-        printf ' ⛔ 技能为符号链接,已拒绝:%s\n' "$name"
-        return 0
-    fi
-    [[ -f "$path" ]] || { content="错误:技能不存在: ${name}。可用技能见系统消息中的可用技能列表,名称以列表中短横线后的名字为准。"; printf ' ⛔ 技能不存在:%s\n' "$name"; return 0; }
-    total_chars=$(wc -m < "$path" | tr -d ' ')
-    if (( total_chars > READ_MAX_CHARS )); then
-        out=$(LC_ALL=C awk -v max="$READ_MAX_CHARS" "$_AWK_U8LEN"'{acc += u8len($0) + 1; if (acc > max) exit; print}' "$path")
-        content="📖 技能 $name(SKILL.md,共 ${total_chars} 字符,过长已截断):\n\n$out"
+    # 【已收口】Python 是唯一活实现(方案铁律 3):旧 bash 回退**已删除**。
+    # 结果经单行 JSON 回传:content 落全局 content,status 逐字打印。
+    # 组件不可用 → 明确的错误 content(明示,不静默、不跑旧代码)。
+    local _n _j
+    _n=$(jq -r '.name // empty' <<< "$fn_args")
+    if _py_on skill && _j=$(py_run skill read "$_n" "$SKILLS_DIR" "$READ_MAX_CHARS" "$SKILLS_DIR_EXTERNAL"); then
+        content=$(printf '%s' "$_j" | jq -r '.content')
+        local _st; _st=$(printf '%s' "$_j" | jq -r '.status // ""')
+        [[ -n "$_st" ]] && printf '%s\n' "$_st"
     else
-        out=$(cat "$path")
-        content="📖 技能 $name(SKILL.md)全文:\n\n$out"
+        content="错误:技能读取组件不可用(需要 python3 + wchat_py;--skill 依赖它)"
+        printf ' ⛔ 技能读取组件不可用\n'
     fi
-    printf ' 已读取技能 %s\n' "$name"
+    return 0
 }
 
 # Skill 沉淀:把当前对话提炼为一个可复用技能(Agent Skills 格式)。

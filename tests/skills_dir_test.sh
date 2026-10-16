@@ -127,34 +127,17 @@ ck "生效值仍是该目录" "${r%%|*}" "$DEF"
 ck "但不打外置标记(默认目录归人管,不该被链接守卫改判)" "${r##*|}" "0"
 
 echo "=== 6. 链接守卫必须三侧配对(只堵一侧=列表里没有但凭记忆还能读/写穿) ==="
-ck "scan_skills 有链接守卫" "$(awk '/^scan_skills\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -c 'SKILLS_DIR_EXTERNAL')" "1"
-ck "tool_read_skill 有链接守卫" "$(awk '/^tool_read_skill\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -c 'SKILLS_DIR_EXTERNAL')" "1"
-ck "skill_save 写侧有链接守卫" "$(grep -c '的目录或 SKILL.md 是符号链接' "$REAL")" "2"
+# scan_skills / tool_read_skill 已**收口**(守卫移入 wchat_py/skill.py);skill_save 仍并存(守卫在 bash 侧)。
+PYSC="$(dirname "$REAL")/wchat_py/skill.py"
+ck "scan_skills 已收口(不再内联守卫)" "$(awk '/^scan_skills\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -c 'f%/SKILL.md')" "0"
+ck "scan_skills 外置标志仍传给 Python" "$(awk '/^scan_skills\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -c 'SKILLS_DIR_EXTERNAL')" "1"
+ck "tool_read_skill 外置标志仍传给 Python" "$(awk '/^tool_read_skill\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -c 'SKILLS_DIR_EXTERNAL')" "1"
+ck "链接守卫在 Python 侧(scan+read 共 ≥4 处)" "$([[ "$(grep -o 'islink' "$PYSC" | wc -l | tr -d ' ')" -ge 4 ]] && echo ge4 || echo lt4)" "ge4"
+ck "skill_save 写侧守卫仍在(该模块未收口)" "$(grep -c '的目录或 SKILL.md 是符号链接' "$REAL")" "1"
 
-# 行为断言(不满足于"代码里有这行"):同一份技能目录,外置前后 scan_skills 的产出必须不同。
-# 只 grep 会有一类假绿 —— 守卫写成了无条件生效,老配置(dotfiles 把技能 symlink 进
-# ~/.ct/skills)会静默丢技能,而 grep 看起来一样漂亮。
-awk '/^scan_skills\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" > "$W/scan_fn.sh"
-[[ -s "$W/scan_fn.sh" ]] || { echo "❌ scan_skills 抽取失败(假绿风险)"; exit 1; }
-cat > "$W/scan_run.sh" <<'EOS'
-# clip_line_width 是**桩**:scan_skills 只在截 description 时用它,与本闸门判据无关。
-# 真函数依赖另一段实现,抽过来会让这份测试跟着绘制层一起漂。
-clip_line_width() { printf '%s' "$2"; }
-W="$1"; source "$W/scan_fn.sh"
-SKILL_DESC_MAX=200; SKILL_MAX_INJECT=30
-SKILLS_DIR="$2"; SKILLS_DIR_EXTERNAL="$3"
-scan_skills
-EOS
-SD="$W/scan"; mkdir -p "$SD/good" "$W/outside"
-printf -- '---\nname: good\ndescription: 真目录里的技能\n---\n\n正文\n' > "$SD/good/SKILL.md"
-# 链接目标放在技能目录**之外**:否则 glob 会同时数到它,两条断言一起失真
-printf -- '---\nname: linked\ndescription: 被 symlink 进来的技能\n---\n\n正文\n' > "$W/outside/SKILL.md"
-ln -s "$W/outside" "$SD/linked"
-n_def=$("$RB" "$W/scan_run.sh" "$W" "$SD" 0 | grep -c '^- ')
-n_ext=$("$RB" "$W/scan_run.sh" "$W" "$SD" 1 | grep -c '^- ')
-ck "默认目录(EXTERNAL=0):链接条目照旧加载 —— 老配置不静默丢技能" "$n_def" "2"
-ck "外置目录(EXTERNAL=1):链接条目被跳过,只剩真目录" "$n_ext" "1"
-has "被跳过的正是那个链接条目" "$("$RB" "$W/scan_run.sh" "$W" "$SD" 1)" "good"
+# 行为断言已**移到 tests/py_skill_test.sh**:那里按 ext=0/1 跑**真 scan_skills**(经 Python),
+# 看链接条目是否被跳过(抽函数体跑的老办法已不可用 —— scan_skills 收口后函数体只剩一行 py_run,
+# 抽出来跑会因缺 _py_on 而空转)。
 
 echo "=== 7. -skill 的 name 清洗:写侧此前缺 read_skill 那条「拒 ..」判据 ==="
 clean_line=$(grep -E "^ +name=\\$\\(printf '%s' \"\\\$name\" \\| tr '\\[:upper:\\]' '\\[:lower:\\]'" "$REAL")
@@ -177,8 +160,9 @@ ck "输入[.] 同样收敛(不再指向技能目录自身)" "$(clean_run '.')" "
 ck "正常名字不被误伤" "$(clean_run 'cad-dfam-check')" "cad-dfam-check"
 
 echo "=== 8. read_skill 的 name 白名单不许被削弱 ==="
-ck "仍拒斜杠" "$(awk '/^tool_read_skill\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -cF '"$name" == *"/"*')" "1"
-ck "仍拒 .." "$(awk '/^tool_read_skill\(\) \{/{p=1} p{print} p && /^}$/{exit}' "$REAL" | grep -cF '"$name" == *".."*')" "1"
+# tool_read_skill 已收口 → name 白名单在 wchat_py/skill.py(仍是"拒 / 与 ..")
+ck "python 侧仍拒斜杠" "$(grep -c '"/" in name' "$PYSC")" "1"
+ck "python 侧仍拒 .." "$(grep -c '"\.\." in name' "$PYSC")" "1"
 
 echo "=== 9. 文档口径与实现一致(注释说不能覆盖、代码却能覆盖,是下一轮误判的源头) ==="
 has "① 类(env 可覆盖)登记了 SKILLS_DIR" "$(awk '/^# ① 可用/{p=1} /^# ② /{p=0} p' "$REAL")" "SKILLS_DIR"

@@ -27,6 +27,10 @@ for _f in compact_due summary_pin_count compact_apply; do
 done
 [[ -n "${SUMMARY_PREFIX:-}" ]] || { echo "SUMMARY_PREFIX 没抽到,后面的断言都是假绿"; exit 1; }
 [[ -n "${_JQ_CONTENT_TEXT:-}" ]] || { echo "_JQ_CONTENT_TEXT 没抽到,summary_pin_count 的断言全是假绿"; exit 1; }
+# 迁移通道:compact_due/compact_apply **已收口**(Python 唯一活实现)→ 让 `_py_on` 恒真、
+# `py_run` 直连启动器,抽出来的函数体照常走 Python(summary_pin_count 未收口,不碰 _py_on)。
+_py_on() { return 0; }
+py_run() { local _m="$1"; shift; python3 "$(dirname "$SRC")/wchat_py/_run.py" "$_m" "$@"; }
 
 pass=0 fail=0
 ck() {  # $1=说明 $2=实得 $3=期望

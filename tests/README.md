@@ -36,8 +36,27 @@
 > 现已全部改按 `$SRC_ABS`。负对照实测:从副本里删掉装载口 → T23 两条 + T25 一条立刻红。
 > 那次全表跑不出 RESULT 的根因不是判据坏了,是 harness 变量抽取 `grep -vF '$('` 把 `$((…))` 算术派生
 > 一起排除在外,夹具里 TOKEN_THRESHOLD/CTX_OVERFLOW_GATE 根本不存在 —— 详见该文件第 74 行注释。
+> **W9(压缩/历史)收口轮**:`test_hardwall.sh` 的迁移通道开关由"默认回退桩"改为**默认生产路** ——
+> 收口把 bash 回退按铁律 3 删掉后,回退桩模式对已收口模块(A2 起:authparse…)必判红;`HW_PY=0`
+> 保留为调试口。同时 `mcp_channel_test.sh` 那条 `grep 'split($mark3)'`(grep 源码的旧断言,
+> 铁律 5)改为**行为断言**(python `history pack` 剥第 3 刀)+ **接线断言**(`save_history` 传 `$MCP_MARK`)。
+> 基线:全表 569/569、MCP 通道 130/130、`py_history` 27/27、`py_filefmt` 22/22、`py_mcp_client` 22/22、主套件全通过。
+> **W7(文件类工具)收口轮**:`filefmt.read` 收口 —— `tool_read_file` 里的 bash 格式化回退删除,
+> 组件不可用 → **明示"读取组件不可用"、不返回半截/错行号内容**;闸门改为语义 + 结构锁 + 工具口降级。
+> **W2b(硬墙谓词)收口轮**:8 个已路由的 `hd_*`(分词/脱敏/折叠/他人家凭据/剥注释/H11 落点)收口,
+> 旧 bash 回退删除;降级一律**复刻"函数整体缺席"时的既有行为、不新增放行面**;`hd_write_targets`
+> 的 split 守卫加 `&& hd_split_words "$seg"` 以在降级时退空白切分(否则空目标=fail-open)。
+> 基线:`py_hd` 53/53、全表 569/569。
+> **W6(视觉)收口轮**:`vision_build_body`/`vision_parse_resp` 收口 —— 旧 bash jq 回退删除;
+> 不可用 → build_body `rc=1`(调用方报"请求体构建失败")、parse_resp 空串(调用方判"无转述文本");
+> `vision_layer_test.sh`/`vision_e2e.sh` 沙箱接 `_py_on`/`py_run` 生产路。基线:`py_vision` 25/25。
+> **W12-2(`hard_deny_path`)收口轮**:`hard_deny_path` → `wchat_py/pathrule.py`(配置+会话态全经
+> argv 传入);旧 bash 全量回退删除,降级=fail-closed **粗判据**(凭据/系统路径字面量前缀 + 根内放行)。
+> ⚠ 两条**对 `wchat.sh` 源码的静态 grep 断言**(凭据文案出口说明、P2 名单含 `/root`)因判据迁 Python
+> 而假红 —— 已改成**行为断言**(调 `hard_deny_path` 看 `hd_rule`/`hd_msg`),这是铁律 5 的又一实例。
+> 基线:`py_pathrule` 25/25、全表 569/569。
 
-| 全表断言(即"517 那张表") | `bash tests/test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
+| 全表断言(即"517 那张表") | `bash tests/test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**默认走生产路**(真实 `_py_on`/`py_run`:已迁移/已收口的谓词走 Python 唯一活实现,未迁移的照旧 bash;`HW_PY=0` 才回退桩,仅供调试);**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
 | 判据规则失败核查 | `bash tests/rulefail_check.sh` | `PASS=111 FAIL=0` |
 | 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |
 | 真实流量回放对账 | `bash tests/traffic_replay.sh` | `一致 25 / 有损未参与 74 / 判定崩溃 0`;更新基线:`GEN=1 bash tests/traffic_replay.sh` |
@@ -52,6 +71,10 @@
 | MCP 通道闸门 | `bash tests/mcp_channel_test.sh` | `-mcp` 开关与暴露面(排除别家程序 import 进来的 server)、名字校验拒 `-y`/`../`、L0 幂等注入与超预算折叠、`mcp_call` 的成功/isError/CLI 失败/图片丢弃四分支、**会话级授权的四种形状**(默认只问 1 次 / `always` 问 3 次 / auto 不问 / 被拒不记账)、**次数刹车的默认形状**(默认不限、显式设上限才生效、"不限"绝不写成"上限 0 次"、标记不带 `/0` 分母)、**通用暴露面**(参数差异不改变暴露、实际命令行逐字摊出、缺 description 被点名、源码零第三方专名与 flag 字面量)、**启动失败的五种形状**(秒失败/慢失败/在线但空/上游缺席/名字不合法各自措辞,`durationMs` 与上游 `counts` 必须转述;点名打错不许静默;失败原因**只走 stderr**,有反向锁禁止它进 L0/`tools()`)、次数刹车、无人值守范围闸、`tools()` 关闭时逐字节不变。**全部打桩**:不依赖 npm/Chrome,可离线跑 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
 | 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 50 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本,第 7 节另管**输入语义**(回车=发送;行尾 `\`+回车=续行且反斜杠不许留在正文里;空缓冲区回车不发送不退出;行中反斜杠不触发续行)。负对照两条:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";整表对 HEAD 版 helper → 8 条红(含第 7 节全 4 条),再只去掉 `delete_before_cursor` 一行做变异 → 恰好红 1 条且正是"反斜杠被吃掉"(实得 `abc\\\ndef`)。变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |
+| Python 迁移通道(**已拆分·W0–W9**) | `bash tests/py_channel_test.sh`(通道机制 4) + `tests/py_<模块>_test.sh`(各模块 parity) | 原单体 221 条已**机械拆分**成"共享前奏 `tests/py_prelude.sh` + 每模块一个 gate",合计仍 221、逐文件全绿;`py_channel_test.sh` 缩为通道机制 4 条(开关/回退/哨兵)。各模块 gate:`py_textutil`(27)/`py_authparse`(22)/`py_hd`(98)/`py_skill`(14)/`py_mcp_client`(22)/`py_img`(24)/`py_compaction`(18)/`py_msg`(19)/`py_history`(27)/`py_filefmt`(22)/`py_pathutil`(49,W3)/`py_config`(16,W12-1)/`py_pathrule`(25,W12-2)/`py_authz`(20,W12-3·已收口)/`py_llm`(20,W12-4a)。**目的**:增删/收口模块只动各自小文件,不再反复改大文件(解**路径熔断**死结);收口样板见 `tests/webs_py_test.sh`。⚠ 各 gate 各 source 主脚本多次,`py_hd` 最慢(~3min),务必后台跑。坑:①`truncate_output` 读**全局** `TOOL_OUTPUT_MAX_*`;②**`python3 -m` 的 cwd 会遮蔽本包** → 用绝对路径启动器 `wchat_py/_run.py`;③BSD `tail` 不补末行换行;④重定向别把 `"$outf"` 写成 `'$outf'`;⑤`source`/抽函数式闸门须有 `_py_on` 回退桩;⑥谓词 `rc=1` 是业务结果、不回退;⑦`clip_bytes` 返回带尾换行的"流",`$(...)` 要自己剥;⑧parity 会把既有隐 bug 也钉住(`\n\n` 字面两字符);⑨`$'...'` 别套外层双引号;⑩大内容走临时文件/stdin;⑪`jq -r` 回读记得 `-j`。方案见 `docs/migration-to-python.md` |
+| 硬墙判据 Python 路径闸门(**新增·W2b**) | `bash tests/hardwall_py_test.sh` | 2 条,但每条是一次**整表**:A) `HW_PY=1`(真实 `_py_on`/`py_run`,`HW_PY_DIR` 可指包位置)跑 569 向量 → 期望 `569/569`(已迁谓词走 Python,未迁的照旧 bash);B) **负对照/接线证明** —— 把 `wchat_py/hd.py` 的 `mask_readonly` 改成原样返回再跑一遍,期望表**变红**(实测 `560/569`,T3 那 9 条红)。没有 B,A 可能只是"python 路径静默退回 bash"的假绿。⚠ 慢(跑两遍整表),用后台通道 |
+| 网络搜索 Python 路径闸门(**新增·W8·已收口**) | `bash tests/webs_py_test.sh` | 15 条:`web_search_build_body`(mimo/qwen/未知)+ `fetch_error`(000/403/429/4xx/5xx/其它)的**收口后形态** —— 语义锚点 + **函数体内结构锁**(旧 bash `case` 回退确已删、只剩一行 `py_run`)+ **不可用降级**(`WCHAT_PY_WEBS=0 → build_body rc=1`,不静默)。**单列成文件的原因**:主迁移闸门 `tests/py_channel_test.sh` 本会话改动过频,被**路径熔断(F1/F2)**拦写 —— 新模块一律开独立 parity 文件;收口其它模块前需先把主闸门改成数据驱动向量表 |
+| 视觉转述 Python 路径闸门(**W6·已收口**) | `bash tests/vision_py_test.sh` | **25 条**:`vision_build_body`(有/无 system、parts+text 拼接、model/thinking/stream)+ `vision_parse_resp`(字符串/数组/null/缺字段/非法 JSON/非 text 部件)的**收口后形态**——语义锚点 + **函数体内结构锁**(旧 jq 回退确已删)+ **不可用降级**(build_body rc=1 不产半截体、parse_resp 空串)。独立文件;`vision_layer_test.sh`/`vision_e2e.sh` 的沙箱已接 `_py_on`/`py_run` 生产路 |
 
 **本轮把仓库根的四张表搬进 `tests/`**:`test_hardwall.sh`、`test_history_render.sh`、`test_pty_pager.sh`、`tty_e2e_check.sh`(用 `git mv`,历史保留)。搬它们不是因为写错,是因为根目录只剩产品与这四张表,而四张表全都用 `cd "$(dirname "$0")"` + `$PWD/wchat.sh` 定位被测源—— 直接搬会变成"找不到被测源文件"(就是 `skills_dir_test.sh` 现在这副样子)。所以每张都改成 `cd "$(dirname "$0")/.."` 退回仓库根,并同步改了引用点:`run_gates.sh`、`mutate_call_site.sh`(MUT_SUITE 默认值)、`rulefail_check.sh`、`traffic_replay.sh`(它按 `^WORK_ROOT="$PWD"` 的行号从硬墙表里**抽装载片段**,路径不改就抽空)、`tests/README.md` 本身,以及 `wchat.sh` 注释里的 5 处指向。另修了 `test_hardwall.sh` 的 `HW_SELF`(`$PWD/$(basename $0)` 搬目录后会指到不存在的路径,而三条结构守卫靠它 grep 表自身)。验证方式:从 `/tmp` 调用这张表,照样全绿。
 

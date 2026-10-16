@@ -98,10 +98,25 @@ for _fn in hd_is_readonly_verb hd_mask_readonly hd_is_msg_verb hd_mask_msg hd_sp
            in_root_exempt link_escapes_root hd_creds_all_exempt \
     auto_write_fuse auto_install_allowed policy_self_check _policy_hash_of _policy_stat \
            tty_strip_init tty_strip_responses tty_hold_tick tty_drain_responses \
-           hd_note_hit auth_parse_verdict auth_confirm_note; do
+           hd_note_hit auth_parse_verdict auth_confirm_note _py_on py_run; do
     eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC_ABS")" 2>/dev/null
 done
 unset _fn
+# ---- 迁移通道:默认跑**生产路** ----
+# 默认用**真实** _py_on/py_run:已迁移/已收口的谓词走 Python(迁移铁律 3 下那是唯一活实现),
+#   未迁移的没有 _py_on 分支,照旧 bash。可选 HW_PY_DIR 指定 wchat_py 包所在 —— 负对照
+#   用它塞一份被打坏的副本,验证"表确实在跑 Python"(否则 python 路径静默退回 bash,假绿)。
+# HW_PY=0 → 覆盖成回退桩,整表跑 bash 回退路径 —— **只对尚未收口的迁移模块有意义**;
+#   对已收口模块(其 bash 回退按铁律 3 已删),该模式下其判据会走 fail-closed 降级而变红,
+#   属预期,所以它是个调试口,不作为闸门默认。
+# 不装 _py_on 的话,下面 command_not_found_handle 会把每条迁移函数判红(而它只是走了回退)。
+if [[ "${HW_PY:-1}" == 0 ]]; then
+    _py_on() { return 1; }
+else
+    WCHAT_PY=1
+    PY_HELPER_DIR="${HW_PY_DIR:-$PWD}"
+    command -v python3 >/dev/null 2>&1 || { echo "全表默认走 Python 生产路,需要 python3(或设 HW_PY=0 走回退桩)"; exit 3; }
+fi
 echo "harness: 已装载 $(declare -F | wc -l | tr -d ' ') 个函数(为 0 说明抽取全失败,下面的红都是假象)"
 # 对齐产品顶层(1382 行)的 tty_* 状态初始化:过滤器读的是全局态,harness 只抽大写常量
 # (TTY_HOLD_MAX / TTY_RE_CSI_PI),小写状态变量不抽 —— 少了这一行,set -u 下
@@ -853,14 +868,22 @@ if [[ "${_abs:-0}" == "0" ]]; then
 else
     bad "hd_msg 内残留绝对化措辞 ${_abs} 条" "声称恒拒但实现允许用户 yes 放行 → 假话"
 fi
-# ② 凭据类四条文案必须两条出口都在(auto 直接拒 / 非 auto 须用户手输 yes)
-_n_p1=$(grep -c 'hd_rule="P1"\|hd_rule="H6"' "$SRC_ABS")
-_ok_p1=$(grep 'hd_rule="P1"\|hd_rule="H6"' "$SRC_ABS" | grep -c 'auto.*yes')
-if (( _n_p1 > 0 )) && [[ "$_n_p1" == "$_ok_p1" ]]; then
-    ok "凭据类 ${_n_p1} 条文案同时写明 auto 直拒 / 非 auto 须手输 yes"
+# ② 凭据类"文案必须写明两条出口":**行为断言**(判据已迁 Python,静态 grep 会假红)。
+#    逐个走 P1 的四条分支,断言 hd_msg 同时提到 auto 与 yes。
+_t11_paths=( "$HOME/.ssh/id_rsa" "/home/wchat-t11/.aws/credentials" "/wchat-t11/.npmrc" "/wchat-t11/key.pem" )
+_t11_ok=0; _t11_n=0
+for _p in "${_t11_paths[@]}"; do
+    hd_rule=""; hd_msg=""
+    if hard_deny_path "$_p" r >/dev/null 2>&1; then :; fi
+    _t11_n=$((_t11_n + 1))
+    [[ "$hd_rule" == "P1" && "$hd_msg" == *auto* && "$hd_msg" == *yes* ]] && _t11_ok=$((_t11_ok + 1))
+done
+if (( _t11_n > 0 )) && (( _t11_ok == _t11_n )); then
+    ok "凭据类 P1 文案同时写明 auto 直拒 / 非 auto 须手输 yes(行为断言 ${_t11_ok}/${_t11_n})"
 else
-    bad "凭据类文案缺出口说明" "共 ${_n_p1} 条、仅 ${_ok_p1} 条提到 auto+yes"
+    bad "凭据类文案缺出口说明" "仅 ${_t11_ok}/${_t11_n} 条同时提到 auto+yes"
 fi
+unset _p _t11_paths _t11_ok _t11_n
 # ③ 硬墙那条 confirm_cmd 必须带 strict=1(文案承诺"逐字 yes"的前提)
 if grep -q 'confirm_cmd .*"\$hd_msg" 1; then' "$SRC_ABS"; then
     ok "硬墙确认调用点传 strict=1"
@@ -998,10 +1021,13 @@ if grep -qE '^hd_[a-z_0-9]+\+=' "$SRC_ABS"; then
 else
     ok "静态 顶层 hd_* 赋值无 += 追加(harness 抽取安全)"
 fi
-if grep -qE '^[[:space:]]+/root\|/root/\*\)' "$SRC_ABS"; then
-    ok "静态 P2 系统路径名单含 /root"
+# /root 在 P2 名单里(Linux 的 root 家目录):**行为断言**(判据已迁 Python)。
+hd_rule=""; hd_msg=""
+if hard_deny_path "/root/.ssh/authorized_keys" rw >/dev/null 2>&1; then :; fi
+if [[ "$hd_rule" == "P2" ]]; then
+    ok "P2 系统路径名单含 /root(行为断言)"
 else
-    bad "静态 P2 名单缺 /root" "Linux 上写 /root/.ssh 会掉到可放开的 P3"
+    bad "静态 P2 名单缺 /root" "Linux 上写 /root/.ssh 会掉到可放开的 P3(实际 rule=${hd_rule:-空})"
 fi
 _ln_pt=$(grep -n '^auto_private_tmpdir$' "$SRC_ABS" | head -1 | cut -d: -f1)
 _ln_tp=$(grep -n '^auto_tmp_prefixes=()' "$SRC_ABS" | head -1 | cut -d: -f1)

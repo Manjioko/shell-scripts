@@ -40,7 +40,7 @@ W=$(mktemp -d)
         || awk '/^IMG_DESC_PROMPT="/{p=1} p{print} p && /^"""$/{exit}' "$REAL"
 } > "$W/sandbox.sh"
 for fn in img_mime is_image img_dims prepare_image prepare_delivery img_reject_wording \
-    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images; do
+    vision_extra_fields vision_build_body vision_parse_resp vision_disable describe_images _py_on py_run; do
     awk -v name="$fn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
 done
 # describe_images 现在共用 prepare_delivery(而它要用 img_dims)。漏抽的后果不是报错,是
@@ -50,6 +50,8 @@ for fn in img_dims prepare_delivery img_reject_wording; do
 done
 # shellcheck disable=SC1090
 source "$W/sandbox.sh"
+# 迁移通道:vision_build_body/parse_resp 已收口(旧 bash jq 回退已删)→ 必须走 Python 生产路。
+PY_HELPER_DIR="$(dirname "$REAL")"; WCHAT_PY=1
 for v in BASE_URL flash_model vision_model IMG_PROVIDER IMG_DESC_PROMPT; do
     [[ -n "${!v}" ]] || { echo "❌ 沙箱抽取不完整:$v 为空 —— wchat.sh 排版漂了,先修抽取"; exit 1; }
 done

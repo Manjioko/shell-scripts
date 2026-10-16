@@ -697,7 +697,14 @@ ck "分发白名单点名三条通道" "$(grep -c 'mcp_tools|mcp_schema|mcp_call
 ck "分发处仍有 MCP_ENABLE 执行期闸门(注册与执行两道关)" \
    "$(awk '/mcp_tools\|mcp_schema\|mcp_call\)/,/fi ;;/' "$REAL" | grep -c 'MCP_ENABLE == 1')" "1"
 ck "tools() 里走条件追加(不另起注册机制)" "$(grep -c -- '--argjson m "$MCP_TOOLS_JSON"' "$REAL")" "1"
-ck "存盘剥离链含 MCP 标记(与 SKILLS/AUTO 同一条)" "$(grep -c 'split($mark3)\[0\]' "$REAL")" "1"
+# 收口形态(W9):存盘剥离链已移入 Python(`history pack` 的 mark/mark2/mark3 三刀),
+# 不再 grep 已删的 bash `split($mark3)`。改两条:①行为——pack 确实剥掉第 3 刀(MCP 槽);
+# ②接线——save_history 把 $MCP_MARK 当第 3 个标记传进 pack(单一出处仍在 bash)。
+_mcp_strip=$(printf '%s' '[{"role":"system","content":"head M3 tail"}]' \
+    | python3 "$(dirname "$REAL")/wchat_py/_run.py" history pack m disabled M1 M2 M3 \
+    | jq -r '.messages[0].content')
+ck "存盘剥离链含 MCP 标记(与 SKILLS/AUTO 同一条):pack 剥第 3 刀" "$_mcp_strip" "head "
+ck "save_history 把 MCP 标记传进 pack" "$(grep -c 'history pack .*"\$MCP_MARK"' "$REAL")" "1"
 ck "auto 签字面板会打印 MCP 面" "$(grep -c 'MCP:      已启用' "$REAL")" "1"
 ck "mcp_* 没把 content 声明成 local(靠全局回传)" \
    "$(awk '/^tool_mcp_call\(\)/,/^}/' "$REAL" | grep -c 'local content')" "0"
