@@ -244,6 +244,22 @@ def cmd_stream(argv) -> int:
     except Exception as e:
         _emit({"t": "error", "v": "读取 messages_file 失败: %s" % e})
         return _contract.EXIT_FAIL
+    # W12-4b-2:图片引用展开 + 图片部件计数(替代 bash 侧"jq 数请求体里的 image_url")。
+    # bash 不传 ref_map_file 时这两步都不做 ⇒ 现有调用方行为字节不变。
+    if req.get("ref_map_file"):
+        try:
+            with open(req["ref_map_file"], encoding="utf-8") as f:
+                _ref_map = json.load(f)
+        except Exception as e:
+            _emit({"t": "error", "v": "读取 ref_map_file 失败: %s" % e})
+            return _contract.EXIT_FAIL
+        from wchat_py.request import expand_refs
+        msgs = expand_refs(msgs, _ref_map,
+                           req.get("gone_pre", ""), req.get("gone_hint", ""))
+    from wchat_py.request import image_parts
+    # `start` 事件:告诉 bash 侧"这次请求里有多少个图片部件"。img_token_sample 靠它标定单价,
+    # 不能再靠解析请求体文本(切换后请求体里只剩 [[IMGREF:id]] 标记,数出来是 0)。
+    _emit({"t": "start", "v": {"image_parts": image_parts(msgs)}})
     kwargs = build_kwargs(req.get("model", ""), msgs, tools,
                           req.get("thinking", "disabled"))
     to = _build_timeout(req)

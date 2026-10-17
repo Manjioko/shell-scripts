@@ -88,7 +88,7 @@ PY
     # 凭据缺失/URL 非法:必须在 python 侧转成 {"t":"error"} 事件,而不是把 Traceback 糊到屏幕
     # (用户实跑见过 "⚠️ API 请求失败: Traceback ..." 一长串)。构造客户端阶段就抛、不联网,故可离线测。
     _cerr="$(printf '{}' | PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" llm stream 2>&1)"
-    ck "缺凭据时给出 error 事件" "$(printf '%s' "$_cerr" | head -1 | jq -r '.t')" "error"
+    ck "缺凭据时给出 error 事件" "$(printf '%s' "$_cerr" | grep -o '"t": "error"' | head -1)" '"t": "error"'
     ck "缺凭据时不糊 Traceback"  "$(printf '%s' "$_cerr" | grep -c Traceback)" "0"
     # 停滞兜底锁:必须是 httpx 的 **read** timeout(无字节进展即判死),**不是总超时** ——
     # 总超时会把健康的长流一起砍掉。curl 时代的 --speed-time/--speed-limit 等价物就是它
