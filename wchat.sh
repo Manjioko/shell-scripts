@@ -7053,7 +7053,7 @@ img_token_lookup() {
 #   · 活引用不止一个 → 真实值是谁的?不知道 → 放弃
 #   · 请求里图片部件不是 1 个 → 同上,放弃
 #   · 这张已经标过 → 不再遍历 MB 级请求体(顺序:先做便宜的引用数,再做贵的 jq)
-img_token_sample() { # $1=请求体 JSON
+img_token_sample() { # $1=图片部件个数(来自 {"t":"start","v":{"image_parts":N}})
     local model_now="${model:-}" e rid n=0 last="" side parts
     (( ${IMG_TOKENS_AUTOCAL:-1} == 1 )) || return 0
     [[ -n "$model_now" && -n "${IMG_REF_DIR:-}" ]] || return 0
@@ -7067,7 +7067,10 @@ img_token_sample() { # $1=请求体 JSON
     grep -q "^$model_now|$last|" "$(img_tok_table_file)" 2>/dev/null && return 0
     side=$(awk 'NR==1{print ($4 > $5 ? $4 : $5)}' "${IMG_REF_DIR}/${last}.fp" 2>/dev/null)
     [[ "$side" =~ ^[0-9]+$ ]] || return 0
-    parts=$(printf '%s' "$1" | jq -r '[..|objects|select(has("image_url"))]|length' 2>/dev/null)
+    # 部件个数由 **stream 的 start 事件**给出(python 从展开后的 messages 里数)。
+    # 旧实现是 `jq '[..|objects|select(has("image_url"))]|length'` 解析请求体文本 ——
+    # 建体方切到 Python 后请求体里只剩 [[IMGREF:id]] 标记,那句 jq 会数出 0 并**静默跳过**标定。
+    parts="${1:-0}"
     [[ "$parts" == "1" ]] || return 0
     img_token_calibrate "$model_now" "$last" "$side" "$last_image_tokens"
 }
@@ -8381,7 +8384,7 @@ ask_ai() {
                     [[ "$last_cached_tokens" =~ ^[0-9]+$ ]] || last_cached_tokens=0
                     [[ "$last_image_tokens" =~ ^[0-9]+$ ]] || last_image_tokens=0
                     (( last_image_tokens > 0 )) && [[ -s "${req_file:-}" ]] \
-                        && img_token_sample "$(cat "$req_file" 2>/dev/null)" || true
+                        && img_token_sample "${last_image_parts:-0}" || true
                 fi ;;
             reasoning)
                 thinking_chunk=$(printf '%s' "$line" | jq -j '.v // empty' 2>/dev/null; echo x)
@@ -8405,6 +8408,11 @@ ask_ai() {
                 done < <(printf '%s' "$line" | jq -c '.v[]?' 2>/dev/null) ;;
             error)
                 api_error+="$(printf '%s' "$line" | jq -r '.v // empty' 2>/dev/null)"$'\n' ;;
+            start)
+                # 请求开始:{"t":"start","v":{"image_parts":N}}。N 由 python 从**它实际要发的
+                # messages** 里数(展开后),img_token_sample 靠它标定单价 —— 不再解析请求体文本。
+                _ip=$(printf '%s' "$line" | jq -r '.v.image_parts // empty' 2>/dev/null)
+                [[ "$_ip" =~ ^[0-9]+$ ]] && last_image_parts="$_ip" ;;
             done)
                 # 流结束标记(encode_chunk 在 finish_reason 处发 {"t":"done","v":...}),
                 # **不是错误**。曾因缺这个分支掉进下面的 *),把 {"t":"done",...} 当 API

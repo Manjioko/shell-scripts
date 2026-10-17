@@ -510,6 +510,27 @@ IMG_TOKENS_AUTOCAL=0
 ck "AUTOCAL=0 完全退回刀3 常数" "$(img_est_from_side 512)" "262"
 ck "AUTOCAL=0 时连标定都不记" "$(img_token_calibrate "probe-m" p4 512 194; img_token_calib_count)" "1"
 IMG_TOKENS_AUTOCAL=1
+# --- 15.1b img_token_sample:图片部件计数 → 触发标定(**此前无任何测试覆盖**) ---
+# 失败形态是**静默的**:`parts` 不等于 1 就 `return 0`,标定表不再增长,不报错、不告警。
+# 所以每条断言都必须"看表/看查表结果",不能看"有没有报错"。
+# 负对照:旧实现是拿**请求体 JSON** 去 jq 数 image_url;一旦计数来源变了(或传错),
+# 它数出非数字 → 不标定 —— 这条负对照钉的正是那种"看起来对、其实哑火"的形状。
+_old_rd="${IMG_REF_DIR:-}"; _old_refs=("${IMG_REFS[@]:-}")
+_tbl="$(img_tok_table_file)"; rm -f "$_tbl"
+rm -rf "$W/refs"; mkdir -p "$W/refs"
+printf 'u' > "$W/refs/r1.url"; printf '0 0 512 512\n' > "$W/refs/r1.fp"
+IMG_REF_DIR="$W/refs"; model="probe-m"; last_image_tokens=194; IMG_TOKENS_AUTOCAL=1
+IMG_REFS=("a1 r1")
+img_token_sample 1
+ck "parts=1 触发标定(表内 1 条)" "$(img_token_calib_count)" "1"
+ck "parts=1 标定值可查(512→194)" "$(img_est_from_side 512)" "194"
+img_token_sample 2
+ck "parts=2 不标定(多图不猜单价)" "$(img_token_calib_count)" "1"
+img_token_sample 0
+ck "parts=0 不标定" "$(img_token_calib_count)" "1"
+img_token_sample '{"messages":[{"content":[{"type":"image_url"}]}]}'
+ck "负对照:非数字计数不标定" "$(img_token_calib_count)" "1"
+IMG_REF_DIR="$_old_rd"; IMG_REFS=("${_old_refs[@]:-}"); rm -rf "$W/refs"
 rm -f "$_tbl"
 # 负对照:同一查表逻辑去掉 BEGIN{best=1e18} 就永远 miss —— 那正是上一轮"标定写了、
 # 查不到"的 bug 本体,证明"查表命中"这条断言不是恒真
