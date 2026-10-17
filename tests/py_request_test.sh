@@ -107,8 +107,11 @@ exp_case "非字符串content" '[{"role":"user","content":[{"type":"text","text"
 # 这两个数就是"切换发生了没有"的判据:切换后应为 0 和 1(甚至把 0 那条删掉)。
 # 注意:**不能**用 `grep -c 'request_body=$(make_request_body)'` 数——注释里有 3 处同款文本,
 # 会数出 5 来(本轮实测踩过)。必须锚定"行首 + 真实调用形态"。
-ck "生产仍走 jq 建体(切换前锚点)" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_body\)' "$SRC")" "3"
-ck "Python 建体尚无调用方(切换前锚点)" "$(grep -Fc 'py_run request body' "$SRC")" "0"
+# ── 切换判据（W12-4b-1 已切换：jq 建体不再被调用，信封接管） ──────────────────────
+# 注意:**不能**用 `grep -c 'request_body=$(make_request_body)'` 数——注释里有 3 处同款文本,
+# 会数出 5 来(本轮实测踩过)。必须锚定"行首 + 真实调用形态"。
+ck "jq 建体已无调用方" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_body\)' "$SRC")" "0"
+ck "信封构建接管(3 个调用点)" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_inputs\)' "$SRC")" "3"
 
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]

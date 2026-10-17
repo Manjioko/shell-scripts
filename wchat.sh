@@ -3650,6 +3650,31 @@ make_request_body() {
     printf '%s' "$out"
 }
 
+# W12-4b-1:只交**输入**给 Python 建体(取代 make_request_body 的 jq 建体)。
+# ⚠ 临时文件(几 MB,含 base64)必须放在**自己建的目录**里,目录路径随信封返回,由 ask_ai
+#   在既有清理点统一 rm -rf。**不能由调用点创建**——那样没人负责删,每轮泄漏一个 MB 级文件,
+#   跑一天塞满 /tmp,而且不报任何错。
+make_request_inputs() {
+    local _d msgs_f mapf tools_json out
+    _d=$(mktemp -d "${TMPDIR:-/tmp}/ct_in_XXXXXX") || return 1
+    msgs_f="$_d/messages.json"
+    printf '%s' "$messages" > "$msgs_f"
+    if (( ${no_tools:-0} )); then tools_json='[]'; else tools_json=$(tools); fi
+    mapf="$_d/refmap.json"
+    # 没有引用时给空 map,Python 侧据此不做展开(与"无引用时逐字节相同"一致)。
+    if [[ "$messages" == *'[[IMGREF:'* ]]; then
+        img_build_map "$mapf" || printf '{}' > "$mapf"
+    else
+        printf '{}' > "$mapf"
+    fi
+    out=$(jq -n --arg model "$model" --arg thinking "$thinking" \
+        --argjson tools "$tools_json" --arg mf "$msgs_f" --arg rmf "$mapf" --arg d "$_d" \
+        --arg gp "${IMG_INLINE_GONE_MARK:-}" --arg gh "${IMG_INLINE_GONE_HINT:-}" \
+        '{model:$model, thinking:$thinking, tools:$tools, messages_file:$mf,
+          ref_map_file:$rmf, tmpdir:$d, gone_pre:$gp, gone_hint:$gh}')
+    printf '%s' "$out"
+}
+
 # 失败自愈:请求失败(无响应/传输层断连/上下文越界)时,若本地字节粗算已超阈值,
 # 说明是上下文越界而非纯网络抖动——主动压缩历史后重发一次,打破
 # "越界→请求失败→拿不到 usage→last_prompt_tokens 不更新→压缩永不触发"的死循环。
@@ -3689,7 +3714,7 @@ retry_after_compact() {
         printf '⚠️ 自动压缩未减少消息量,请手动 -c 压缩或重开对话\n'
         return 1
     fi
-    request_body=$(make_request_body)
+    request_body=$(make_request_inputs)
     # 透传 ask_ai 的返回码:130(Ctrl+C 打断)需要继续向上传播
     ask_ai "$request_body" "$is_lock" "$is_record"
     return $?
@@ -8244,7 +8269,7 @@ tool_run_and_parse() {
     # 而 compact_messages 的 cut 会前移直到 tail 首条不是 tool(见其工具链对齐注释)。
     compact_due "$last_prompt_tokens" && compact_messages
 
-    request_body=$(make_request_body)
+    request_body=$(make_request_inputs)
     ask_ai "$request_body" 1
 }
 # 核心函数：向模型发起请求，流式接收输出，处理工具调用
@@ -8276,10 +8301,13 @@ ask_ai() {
     local t_idx="" t_name="" t_args="" t_id="" tpiece=""
     local api_error="" err_msg="" chunk_err=""
     local request_body=$1
+    # 信封里的临时目录(见 make_request_inputs;含 messages/refmap,可能几 MB):
+    # 这里取一次,函数末尾的既有清理点统一 rm -rf。
+    req_tmpdir=$(printf '%s' "$request_body" | jq -r '.tmpdir // empty' 2>/dev/null)
     local is_lock_screen=$2
     local is_record_usage=${3:-1}
     # 重试:零产出与可重试错误(传输层/5xx/429)最多 max_attempts 次,递增退避
-    local attempt max_attempts=3 think_save_len rc req_file retry_reason=""
+    local attempt max_attempts=3 think_save_len rc req_file retry_reason="" req_tmpdir=""
 
     full_response=""
     # thinking_response 故意不在这里重置:工具链每一轮 ask_ai 的思考都要累积,
@@ -8459,6 +8487,9 @@ ask_ai() {
     [[ "$is_lock_screen" == 1 ]] && stream_box_close
     ai_active=0
     rm -f "$req_file"
+    # 信封带来的临时目录(messages/refmap,可能几 MB/张图):跟着 req_file 一起删,
+    # 不新增清理路径 —— 重试/中断/异常退出都走这里。
+    [[ -n "${req_tmpdir:-}" ]] && rm -rf "$req_tmpdir"
     # 统一清理 SSE FIFO(所有退出路径都在此之后,含 Ctrl+C 打断的 return 130)
     # (2>/dev/null 陷阱同上,禁止加在带 exec 的 eval 上)
     [[ -n "${req_fd:-}" ]] && eval "exec $req_fd<&-"
@@ -8711,7 +8742,7 @@ printContent() {
 
     # 构建请求体:大体积 messages 经临时文件传入,防止 jq --argjson 撞
     # ARG_MAX(详见 make_request_body 注释);-tr/-to 模式不发送工具
-    request_body=$(make_request_body)
+    request_body=$(make_request_inputs)
 
     ask_ai "$request_body" 1
     
