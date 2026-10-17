@@ -85,6 +85,21 @@ PY
     ck "e2e done 事件"    "$(ev done)"       "stop"
     ck "e2e usage 事件"   "$(grep '"t": "usage"' "$W/events.jsonl" | jq -r '.v.total')" "7"
     ck "e2e 无 error 事件" "$(grep -c '"t": "error"' "$W/events.jsonl")" "0"
+    # 凭据缺失/URL 非法:必须在 python 侧转成 {"t":"error"} 事件,而不是把 Traceback 糊到屏幕
+    # (用户实跑见过 "⚠️ API 请求失败: Traceback ..." 一长串)。构造客户端阶段就抛、不联网,故可离线测。
+    _cerr="$(printf '{}' | PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" llm stream 2>&1)"
+    ck "缺凭据时给出 error 事件" "$(printf '%s' "$_cerr" | head -1 | jq -r '.t')" "error"
+    ck "缺凭据时不糊 Traceback"  "$(printf '%s' "$_cerr" | grep -c Traceback)" "0"
+    # 停滞兜底锁:必须是 httpx 的 **read** timeout(无字节进展即判死),**不是总超时** ——
+    # 总超时会把健康的长流一起砍掉。curl 时代的 --speed-time/--speed-limit 等价物就是它
+    # (bash 侧由 SSE_STALL_TIMEOUT 派生 export WCHAT_LLM_STALL)。
+    _TT='import os;from wchat_py.llm import _build_timeout as b;t=b({});print(type(t).__name__,None if t is None else t.read)'
+    ck "停滞兜底用 read timeout"     "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" WCHAT_LLM_STALL=7 python3 -c "$_TT")" "Timeout 7.0"
+    ck "未设停滞变量则不传 timeout"  "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c "$_TT")" "NoneType None"
+    # TODO(W12-4b-1):`messages_file`/`no_tools` 的锁**待补** —— 我写了一版用 `$W` 落临时文件的三条,
+    # 实测让本闸门**挂住不出结论行**(没定位到原因就回退了;先怀疑 `$W` 在该作用域未定义 + set -u)。
+    # 这两个能力已实现(_resolve_inputs,人工验过三种形态),但**没有闸门覆盖**——下次补锁时注意:
+    # 写完必须看到 RESULT 行,没结论行=失败(不敢报绿)。
 else
     echo "  NOTE ⚠ 跳过(未装 openai)"
 fi
@@ -94,5 +109,28 @@ ck "llm.py 存在"               "$([[ -f "$RLDIR/wchat_py/llm.py" ]] && echo y)
 ck "llm.py 不 shell-out"       "$(grep -cE 'subprocess|os\.system|Popen|check_output|check_call' "$RLDIR/wchat_py/llm.py")" "0"
 ck "llm.py 用官方 SDK"         "$(grep -c 'from openai import OpenAI' "$RLDIR/wchat_py/llm.py")" "1"
 ck "requirements 登记 openai"  "$(grep -c '^openai' "$RLDIR/requirements.txt")" "1"
+# W12-4c 收口锁:ask_ai 的流式请求必须走 Python(唯一活实现),旧 curl 主请求块必须已删。
+# 只钉"调用点存在/旧路径不存在"这类结构事实;行为由 auto_test.sh 的 E5/E6(续发不被吞)覆盖。
+ck "ask_ai 主请求走 py_run llm stream" "$(grep -c 'py_run llm stream' "$RLDIR/wchat.sh")" "1"
+ck "ask_ai 旧 SSE curl 已删"           "$(grep -c -- '-sSN --connect-timeout' "$RLDIR/wchat.sh")" "0"
+# 凭据接线锁:bash 侧 API_KEY 是普通 shell 变量(从不 export),子进程继承不到 ⇒
+# 启动行必须**显式**注入。删掉这行会立刻在生产路报 SDK "Missing credentials"。
+ck "ask_ai 显式注入凭据"               "$(grep -c 'WCHAT_API_KEY=\"\$API_KEY\"' "$RLDIR/wchat.sh")" "1"
+# URL 形状锁:本项目 BASE_URL 是**完整端点**(脚本注释里列的三家地址),curl 直接 POST 它;
+# 而 SDK 的 base_url 是**根**、会再拼 /chat/completions ⇒ 透传必得 404(用户实跑复现)。
+_NB='from wchat_py.llm import _normalize_base_url as n; import sys; print(n(sys.argv[1]))'
+ck "base_url 折掉完整端点后缀" "$(PYTHONPATH="$RLDIR" python3 -c "$_NB" 'https://api.deepseek.com/chat/completions')" "https://api.deepseek.com"
+ck "base_url 兼容带前缀的端点" "$(PYTHONPATH="$RLDIR" python3 -c "$_NB" 'https://x.aliyuncs.com/compatible-mode/v1/chat/completions')" "https://x.aliyuncs.com/compatible-mode/v1"
+ck "base_url 根形状原样保留"   "$(PYTHONPATH="$RLDIR" python3 -c "$_NB" 'http://127.0.0.1:9/v1')" "http://127.0.0.1:9/v1"
+unset _NB
+# thinking 形状锁:bash 请求体里是**对象** {"type": ...},python 侧必须先归一成字符串再包一层。
+# 少了归一化就会双包 → 服务端 422 `unknown variant 'type'`(用户实跑复现),且
+# "带图 + 关思考 ⇒ effort=none" 那条规则会因"对象 != 字符串"恒为假、从未生效。
+_TK='import os,json;from wchat_py.llm import build_kwargs as b;v=json.loads(os.environ["TH"]);k=b("m",[],None,v);print(k["extra_body"]["thinking"]["type"],k["reasoning_effort"])'
+ck "thinking 对象形状归一为字符串" "$(PYTHONPATH="$RLDIR" TH='{"type":"disabled"}' python3 -c "$_TK")" "disabled high"
+ck "thinking 字符串形状原样保留"   "$(PYTHONPATH="$RLDIR" TH='"enabled"' python3 -c "$_TK")" "enabled high"
+_TK2='import os,json;from wchat_py.llm import build_kwargs as b;m=[{"role":"user","content":[{"type":"image_url","image_url":{"url":"x"}}]}];print(b("m",m,None,json.loads(os.environ["TH"]))["reasoning_effort"])'
+ck "带图+关思考 ⇒ effort=none"     "$(PYTHONPATH="$RLDIR" TH='{"type":"disabled"}' python3 -c "$_TK2")" "none"
+unset _TK _TK2
 
 finish

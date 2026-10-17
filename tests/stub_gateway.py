@@ -57,7 +57,11 @@ class H(BaseHTTPRequestHandler):
             kind = "final"
         with _lock:
             with open(LOG, "a") as f:
+                _tk = body.get("thinking")
                 f.write(json.dumps({"kind": kind, "model": body.get("model"),
+                                    "path": self.path,
+                                    "thinking_type": (_tk.get("type")
+                                                      if isinstance(_tk, dict) else _tk),
                                     "stream": body.get("stream"),
                                     "has_tools": "tools" in body}, ensure_ascii=False) + "\n")
 

@@ -383,9 +383,23 @@ e2e() (
 BASE=$(cd "$(mktemp -d)" && pwd -P)
 export HOME="$BASE/home"; mkdir -p "$HOME" "$BASE/proj"; export TMPDIR="$BASE/tmp"; mkdir -p "$TMPDIR"
 AUTO_LOG="$HOME/.ct/auto/audit.log"       # 由脚本自身 CT_HOME=$HOME/.ct 推导,测试不改写
+# 凭据走**生产路**:写进 ~/.ct/config(0600),由 wchat 读成普通 shell 变量。
+# 关键:这里**不 export WCHAT_API_KEY** —— 那正是 2026-xx 假绿的根源:夹具直接给子进程
+# 塞了导出变量,把"bash 侧 API_KEY 从未 export、Python 子进程拿不到"这条接线缺口整个盖住
+# (用户实跑 `wchat -dp` 报 SDK "Missing credentials" 才暴露)。密钥只经 config 进 bash,
+# 再靠 ask_ai 启动行显式注入子进程 —— 夹具必须保留这段"不 export"的形状,否则又是假绿。
+mkdir -p "$HOME/.ct"
+( umask 077; printf 'API_KEY=sk-stub\n' > "$HOME/.ct/config" )
+chmod 600 "$HOME/.ct/config"
 
 # auto_enable 要求真 tty(签字/人工确认都要读),所以整条链路在 pty 里跑。
 # 输出静默 2.5s 视为"在等输入"→ 按 E2E_FEED 顺序喂(签字 AUTO、人工确认 n)。
+# 注意与"总时限"的分工:静默阈值量的是**假用户的耐心**(2.5s 不变,保住对急躁用户的仿真);
+# 总时限(TIME_LIMIT,见 run_case)量的是**场景跑完需要多少墙钟**,随被测实现变慢而放宽。
+# 2026-xx 实测:ask_ai 由 curl(首字节 ~10ms)换官方 SDK(独立 python 进程冷启动
+# 首字节 0.64s,见 .scratch/measure_firstbyte.py)后,每请求 +0.64s;多请求场景
+# 跨过旧 30s → 应用被 SIGTERM、场景截断(表现为"请求数=0/某步没发生")。
+# 单变量验证:只放总时限、阈值仍 2.5s → e2e 由 6~20 红转 0 红。故放宽的是时限,不是阈值。
 cat > "$BASE/pty_drive.py" <<'PYEOF'
 import os, pty, select, sys, time, signal
 log_path, limit = sys.argv[1], float(sys.argv[2])
@@ -430,9 +444,13 @@ run_case() {
         sleep 0.15; (( i++ ))
     done
     # WORK_ROOT 由 wchat 按 pwd -P 锁定,所以要 cd 进 $BASE/proj 再跑
-    ( cd "$BASE/proj" && WCHAT_API_KEY=sk-stub BASE_URL="http://127.0.0.1:$port/v1" \
+    # BASE_URL 用**生产形状**(完整端点,含 /chat/completions),不是根 —— 这是本项目
+    # 的历史约定(见 wchat.sh「切换模型需要改这里」列的三家地址)。夹具若图省事传根,
+    # 就会掩盖"SDK 的 base_url 是根、会再拼一层"这整类接线错(2026-xx 已因此连挂两次:
+    # 凭据没继承、URL 拼双 404)。curl 调用与 SDK 调用都必须落在同一路径上。
+    ( cd "$BASE/proj" && BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \
       E2E_FEED="$feed" MAX_TOOL_ROUNDS="$mtr" CMD_TIMEOUT="${CMD_TIMEOUT:-20}" \
-      python3 "$BASE/pty_drive.py" "$BASE/out-$name.log" 30 -- \
+      python3 "$BASE/pty_drive.py" "$BASE/out-$name.log" 60 -- \
       "$BASH5" "$REAL" -f ${tier:+-auto=$tier} -st "按脚本依次调用工具,不要多问" ) \
       > "$BASE/drive-$name.out" 2>&1
     kill $spid 2>/dev/null; wait $spid 2>/dev/null
@@ -462,6 +480,22 @@ ck "审计记终审拒绝"     "$(grep -c '"rule":"final","verdict":"auto_deny"'
 ck "审计记签字"         "$(grep -c '"verdict":"started"' "$AUTO_LOG")" 1
 ck "审计记退出小结"     "$(grep -c '"verdict":"finished"' "$AUTO_LOG")" 1
 ck "审计不记命令输出"   "$(grep -c 'No such file\|Permission denied' "$AUTO_LOG")" 0
+# URL 形状锁(承重):BASE_URL 是完整端点,SDK 的 base_url 是根 —— 透传会拼成
+# `.../chat/completions/chat/completions` 而服务端回 404。桩**按 body 分类、不看路径**,
+# 所以拼双了它照样回 200:必须直接断言它收到的 path。反锁用"路径拼接次数=0",
+# 正锁用"端点路径条数 == 桩收到的请求条数"(期望值由日志自己数出来,不写死数字)。
+ck "桩收到的路径未被拼双" "$(grep -c 'chat/completions/chat/completions' "$BASE/req-s1.jsonl")" 0
+ck "桩收到的都是预期端点路径" "$(grep -c '"path": "/v1/chat/completions"' "$BASE/req-s1.jsonl")" \
+                            "$(grep -c '"kind"' "$BASE/req-s1.jsonl")"
+# thinking 形状锁(承重):bash 请求体里是 {"type": ...} 对象,python 侧若再包一层,发出去就是
+# {"type": {"type": ...}} —— 服务端 serde 把内层 map 的键名当枚举变体找,报 422
+# "unknown variant 'type'"(用户实跑复现)。桩按内容分类、不校验字段形状,所以必须自己断言:
+# 桩收到的 thinking.type 是**标量**;是对象({ 开头)就说明被双包了。
+ck "桩收到的 thinking.type 未被双包" "$(grep -c '"thinking_type": {' "$BASE/req-s1.jsonl")" 0
+# 事件兜底锁:流结束标记 {"t":"done",...} 曾经掉进"非事件行"兜底,被当成 API 错误**显示给用户**
+# (屏幕出现 `⚠️ API 请求失败: {"t":"done"...}`)。任何"形状像事件但我们不认识"的 JSON 都必须
+# 被忽略,只有**不像事件**的行(缺依赖/Traceback)才允许进 api_error。
+ck "屏幕无'API 请求失败'"           "$(grep -c 'API 请求失败' "$BASE/out-s1.log")" 0
 
 echo "=== E2 read 档:shell 的 N 仍归人(人答 n 就不执行) ==="
 run_case s2 "$J

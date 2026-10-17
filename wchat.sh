@@ -116,7 +116,12 @@ BASE_URL="${BASE_URL:-}"
 # auto 模式下模型有无次数的 cat wchat.sh + curl 机会,"脚本里没有 key"是唯一
 # 能让"读脚本+外发"这条链路失效的做法。旧 key 已进 git 历史与 ~/.ct/history,
 # 建议到服务商后台轮换(轮换后只改 ~/.ct/config 即可)。
-API_KEY="${WCHAT_API_KEY:-}"
+API_KEY="${WCHAT_API_KEY:-${API_KEY:-}}"
+# ⚠ 上面这行**必须**用 ${API_KEY:-} 兜底:第 94–110 行刚把 ~/.ct/config 里的
+# `API_KEY=...` source 进来,写成 `API_KEY="${WCHAT_API_KEY:-}"` 会在 WCHAT_API_KEY
+# 未设时**当场清空**它 —— 脚本自带的提示"1) 写入配置文件(推荐)"于是永远不可用
+# (2026-xx 用 `bash -x` 实测:_cfg_perm=600 → API_KEY=sk-... → API_KEY= 三行连在一起)。
+# 语义不变:环境变量 WCHAT_API_KEY 优先,否则用配置文件里的值。
 # ---------- 鉴权头(勿删) ----------
 # 本脚本每一处请求都固定带两个头:标准的 `Authorization: Bearer $API_KEY`,外加一个
 # `-H "api-key: $API_KEY"`。后者**不是冗余**:它是小米 MiMo LLM(api.xiaomimimo.com)
@@ -993,6 +998,10 @@ INT_FORCE_TIMEOUT=2000000   # 2 秒(微秒)
 # 正常流式输出 token 连续,不会误伤;与 run_with_window 的 job control
 # 恢复(见该函数 set -m 注释)构成双保险。
 SSE_STALL_TIMEOUT=120      # 2 分钟
+# 派生给 Python 侧:单一出处仍是上面这个变量,Python 侧用它构造 httpx 的 **read**
+# timeout(无字节进展即判死)——**不是总超时**。详见 wchat_py/llm.py `_build_timeout`
+# 与 docs §8.5「停滞兜底」。不设这个变量,SDK 路径就没有停滞兜底。
+export WCHAT_LLM_STALL="${WCHAT_LLM_STALL:-$SSE_STALL_TIMEOUT}"
 
 # 会话内命令的唯一清单是下面 PTK_COMMANDS。**命令判定的唯一执行点**是
 # handle_cmd_line(精确匹配 + "未知命令"兜底);PTK_COMMANDS 现在只作为调用契约
@@ -8291,6 +8300,13 @@ ask_ai() {
     # 请求体为空 = 上游 jq 构建失败(如上下文过大撞 ARG_MAX):立即给出
     # 可见反馈并返回,不发空请求(空请求体只会得到无意义的 API 报错)
     if [[ -z "$request_body" ]]; then
+        # 先分辨"被打断"与"真的建体失败":Ctrl+C 会打断 `$(make_request_body)` 的子 shell,
+        # 拿回来的是空串。直接报"上下文过大"会把用户指到完全错误的方向(实测:按 Ctrl+C 后
+        # 屏幕出现"⚠️ 请求体构建失败(上下文过大…)",真因只是中止)。
+        if (( ${ai_abort:-0} )); then
+            full_response="⚠️ 已中止(本轮请求未发出)。"
+            return 1
+        fi
         full_response="⚠️ 请求体构建失败(上下文过大,超出系统命令行参数上限)。请 -c 压缩历史或 -n 重开对话。"
         return 1
     fi
@@ -8327,119 +8343,79 @@ ask_ai() {
             sleep "$attempt"
         fi
 
-        # 启动本次尝试的 curl:显式后台任务 + 记录 PID(而非进程替换),让
-        # handle_ctrl_c 能直接 TERM 它(见其注释)。--connect-timeout 连接阶段
-        # 超时;--retry 连接失败自动重试 2 次,--retry-max-time 限制重试总窗口:
-        # 连接拒绝等快速失败(毫秒级)可正常重试,而流式停滞中止要等满
-        # SSE_STALL_TIMEOUT,远超窗口,不再被 --retry 放大成多轮停滞(历史实测
-        # 3 次重试把 5s 停滞拖成 36s);-sS 静默进度条但保留错误输出(传输层
-        # 断连时报 "curl: (52)..." 等,由上方 else 分支记录进 api_error,否则
-        # 错误被吞、误报成"无响应");--speed-time/--speed-limit 流式停滞兜底
-        # ——连接建立后若平均速率低于 1 字节/秒持续 SSE_STALL_TIMEOUT 秒,curl
-        # 自行断开报 "curl: (28)"(进入 api_error,可见报错),防止无人干预时
-        # 服务端静默挂死、read 无限 pending。
-        # 鉴权双头:本条 curl 里的 api-key 头是小米 MiMo LLM 需要的兼容头,勿删(见脚本头部「鉴权头」说明)
-        curl -sSN --connect-timeout 15 --retry 2 --retry-connrefused --retry-max-time 15 \
-            --speed-time "$SSE_STALL_TIMEOUT" --speed-limit 1 \
-            "$BASE_URL" \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $API_KEY" \
-            -H "api-key: $API_KEY" \
-            --data-binary @"$req_file" \
-            > "$req_fifo_dir/fifo" 2>&1 &
+        # 启动本次尝试的流式请求:走 Python(官方 SDK,见 docs §8.5)。
+        # 仍用显式后台任务 + 记录 PID(而非进程替换),让 handle_ctrl_c 能直接
+        # TERM 它(见其注释)。
+        # ⚠ 停滞兜底尚未等价:curl 时代的 --speed-time/--speed-limit(平均速率
+        # <1B/s 持续 SSE_STALL_TIMEOUT 秒即断开并报 "curl: (28)")在 SDK 侧
+        # 需由 httpx 的 **read timeout** 承担(不是总超时:总超时会把健康的
+        # 长流也砍掉)。目前**未接上**,停滞时不会在 SSE_STALL_TIMEOUT 内报错。
+        # 补上之前不要删这条注释(见 docs §8.5「已知缺口」)。
+        # 本次尝试的请求走 **Python(官方 SDK)**,不再用 curl(见 docs §8.5)。
+        # ⚠ 凭据必须**显式**注入:API_KEY/BASE_URL 在 wchat.sh 里是普通 shell
+        # 变量(第 113/119 行),**从未 export**,子进程继承不到;只靠环境会让
+        # SDK 报 "Missing credentials"(实测)。这也是 e2e 旧夹具假绿的根源——
+        # 它直接 export WCHAT_API_KEY,把这条接线整个盖住了。
+        WCHAT_API_KEY="$API_KEY" BASE_URL="$BASE_URL" \
+            py_run llm stream < "$req_file" > "$req_fifo_dir/fifo" 2>&1 &
         curl_pid=$!
-        # 竞态兜底:curl 启动与 $! 捕获之间的瞬间 Ctrl+C 可能已置 ai_abort,
-        # 而 trap 里 curl_pid 仍是空/旧值,这里补一刀(重复 TERM 无害)
+        # 竞态兜底:启动与 $! 捕获之间的瞬间 Ctrl+C 可能已置 ai_abort
         (( ai_abort )) && kill -TERM "$curl_pid" 2>/dev/null
-        # 每个尝试独立重开 FIFO 读端:上一次尝试结束时 fd 已读到 EOF,
-        # 复用同一 fd 会立即返回 EOF,导致假"空响应"误重试。
-        # 必须在 while 之前完成:done 的重定向在循环开始时求值,若把 exec
-        # 放进循环体,req_fd 求值时还是空、循环直接报 Bad file descriptor
-        # (历史 bug,此顺序不可颠倒)
+        # 每个尝试独立重开 FIFO 读端(见下方原注释:复用旧 fd 会立即 EOF)
         exec {req_fd}<"$req_fifo_dir/fifo"
         # read 只对"以换行结尾的完整行"返回 0。DeepSeek 的整段 JSON 错误响应
         # (400 等)末尾没有换行符:若只写 while read,EOF 残段让 read 返回非零,
         # 循环体一次都不执行,api_error 永远为空,400 被误报成"无响应"
         # (历史 bug,真实 API 实测复现)。|| [[ -n "$line" ]] 让残段也进循环体。
         while IFS= read -r line || [[ -n "$line" ]]; do
-        # Ctrl+C 打断:立即退出读循环(handle_ctrl_c 已 TERM 掉 curl → EOF;
-        # 此检查兜底 read 被中断后仍带着残留行进入循环体的情况)
+        # Ctrl+C 打断:立即退出读循环
         (( ai_abort )) && break
-        if [[ "$line" =~ ^data:\  ]]; then
-            json="${line#data: }"
-            [[ "$json" == "[DONE]" ]] && break
-
-            # SSE 内嵌错误:部分错误(如 thinking 模式限制/限流)不是整段 JSON,
-            # 而是包在 data: chunk 里。必须在此检查,否则表现为"空流/无响应"。
-            chunk_err=$(printf '%s' "$json" | jq -r '.error.message // .error // empty' 2>/dev/null)
-            [[ -n "$chunk_err" ]] && api_error="$chunk_err"            # stream_options.include_usage:流式最后一个 chunk 的 choices 为空、
-            # 只带 usage。prompt_tokens = 本次请求发送的全量 messages 的 token 数,
-            # 即"当前上下文大小"的精确值,直接覆盖旧值,无需累计
-            if (( is_record_usage )); then
-                usage_pt=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens // empty' 2>/dev/null)
-                [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
-                # 刀1 观测:缓存命中与图片计费。两个字段都可能在某些端点缺失,
-                # 缺失一律记 0 而**不要沿用上一轮的值**(沿用会把"这次没命中"
-                # 说成"上次命中了",正是这类计数器最容易自欺的地方)。
-                last_cached_tokens=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens_details.cached_tokens // 0' 2>/dev/null)
-                last_image_tokens=$(printf '%s' "$json" | jq -r '.usage.prompt_tokens_details.image_tokens // 0' 2>/dev/null)
-                [[ "$last_cached_tokens" =~ ^[0-9]+$ ]] || last_cached_tokens=0
-                [[ "$last_image_tokens" =~ ^[0-9]+$ ]] || last_image_tokens=0
-                # 刀4:用网关回传的真实计费值标定单价估算器。
-                # 本函数是**唯一**"已知发了图、又已知真实 token"的地方,所以只能在这里采。
-                # 请求体直接读 $req_file(ask_ai 已把它落盘):MB 级 JSON 不进命令行参数(ARG_MAX)。
-                (( last_image_tokens > 0 )) && [[ -s "${req_file:-}" ]] \
-                    && img_token_sample "$(cat "$req_file" 2>/dev/null)" || true
-            fi
-
-            # 思考部分的输出也要显示出来:流箱内随流显示原文(无横幅装饰,
-            # 流箱样式保持不变);thinking_response 只累积思考原文——不再
-            # 夹带"思考开始/结束"横幅(横幅既影响主屏观感,也会随
-            # reasoning_content 回传进 API 上下文)
-            thinking_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; echo x)"
-            thinking_chunk="${thinking_chunk%x}"
-            [[ -n "$thinking_chunk" ]] && (( is_lock_screen )) && stream_box_append "$thinking_chunk"
-            [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; }
-
-
-            # jq -j 不自动加末尾换行 + echo x 技巧保留内容中的 \n（$() 会截掉末尾换行符）
-            chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; echo x)"
-            chunk="${chunk%x}"
-
-            if [[ -n "$chunk" ]]; then
-                (( is_lock_screen )) && stream_box_append "$chunk"
-            fi
-            [[ -n "$chunk" ]] && full_response+="$chunk"
-
-            
-            tool_chunk="$(printf '%s' "$json" | jq -j '.choices[0].delta.tool_calls // empty')"
-            if [[ -n "$tool_chunk" ]]; then
-                # 并行调用:一次响应可含多个 tool_calls(index 区分)。每个调用
-                # 的 name/id 只在其首片出现,arguments 分片按 index 各自累加。
-                # 绝不能把不同 index 的参数拼在一起(历史 bug:参数粘合后
-                # jq 解析出 null,shell 工具执行 eval "null" 报 command not found)。
+        _et=$(printf '%s' "$line" | jq -r '.t // empty' 2>/dev/null)
+        case "$_et" in
+            usage)
+                if (( is_record_usage )); then
+                    usage_pt=$(printf '%s' "$line" | jq -r '.v.prompt // empty' 2>/dev/null)
+                    [[ -n "$usage_pt" ]] && last_prompt_tokens=$usage_pt
+                    last_cached_tokens=$(printf '%s' "$line" | jq -r '.v.cached // 0' 2>/dev/null)
+                    last_image_tokens=$(printf '%s' "$line" | jq -r '.v.image // 0' 2>/dev/null)
+                    [[ "$last_cached_tokens" =~ ^[0-9]+$ ]] || last_cached_tokens=0
+                    [[ "$last_image_tokens" =~ ^[0-9]+$ ]] || last_image_tokens=0
+                    (( last_image_tokens > 0 )) && [[ -s "${req_file:-}" ]] \
+                        && img_token_sample "$(cat "$req_file" 2>/dev/null)" || true
+                fi ;;
+            reasoning)
+                thinking_chunk=$(printf '%s' "$line" | jq -j '.v // empty' 2>/dev/null; echo x)
+                thinking_chunk="${thinking_chunk%x}"
+                [[ -n "$thinking_chunk" ]] && (( is_lock_screen )) && stream_box_append "$thinking_chunk"
+                [[ -n "$thinking_chunk" ]] && { thinking_response+="$thinking_chunk"; raw_reasoning+="$thinking_chunk"; } ;;
+            text)
+                chunk=$(printf '%s' "$line" | jq -j '.v // empty' 2>/dev/null; echo x)
+                chunk="${chunk%x}"
+                [[ -n "$chunk" ]] && (( is_lock_screen )) && stream_box_append "$chunk"
+                [[ -n "$chunk" ]] && full_response+="$chunk" ;;
+            tool_calls)
                 while IFS= read -r tpiece; do
                     t_idx=$(printf '%s' "$tpiece" | jq -r '.index // 0' 2>/dev/null)
-                    t_name=$(printf '%s' "$tpiece" | jq -r '.function.name // empty' 2>/dev/null)
-                    t_args=$(printf '%s' "$tpiece" | jq -r '.function.arguments // empty' 2>/dev/null)
+                    t_name=$(printf '%s' "$tpiece" | jq -r '.name // empty' 2>/dev/null)
+                    t_args=$(printf '%s' "$tpiece" | jq -r '.arguments // empty' 2>/dev/null)
                     t_id=$(printf '%s' "$tpiece" | jq -r '.id // empty' 2>/dev/null)
                     [[ -n "$t_name" ]] && tool_names[$t_idx]="$t_name"
                     [[ -n "$t_args" ]] && tool_args[$t_idx]+="$t_args"
                     [[ -n "$t_id" ]] && tool_ids[$t_idx]="$t_id"
-                done < <(printf '%s' "$tool_chunk" | jq -c '.[]' 2>/dev/null)
-            fi
-
-            # chunk_end="$(printf '%s' "$json" | jq -j '.choices[0].finish_reason // empty')"
-            # [[ "$chunk_end" == "tool_calls" ]] && tool_handler 0
-        else
-            # 非 SSE 行两类:1. API 报错(如 400 结构非法)时 curl 输出整段 JSON;
-            # 2. curl 传输层错误(如 "curl: (52) Empty reply from server"、
-            #    连接被断/超时)。都记录进 api_error,循环结束后显示,
-            # 避免"发消息毫无输出"的静默失败。
-            if [[ "$line" == \{* || "$line" == \[* || "$line" == curl:* ]]; then
-                api_error+="$line"$'\n'
-            fi
-        fi
+                done < <(printf '%s' "$line" | jq -c '.v[]?' 2>/dev/null) ;;
+            error)
+                api_error+="$(printf '%s' "$line" | jq -r '.v // empty' 2>/dev/null)"$'\n' ;;
+            done)
+                # 流结束标记(encode_chunk 在 finish_reason 处发 {"t":"done","v":...}),
+                # **不是错误**。曾因缺这个分支掉进下面的 *),把 {"t":"done",...} 当 API
+                # 报错显示给用户(实测踩过:屏幕出现 `⚠️ API 请求失败: {"t": "done", ...}`)。
+                : ;;
+            *)
+                # 只把**不像事件的行**(python 侧 stderr:缺依赖/Traceback 等)记进 api_error。
+                # 形状像事件但我们不认识的,一律**忽略**——再漏一个事件类型时,宁可它静默消失
+                # 在调试里被发现,也不要把它当 API 错误糊到用户屏幕上(上面那条就是这么来的)。
+                if [[ -n "$line" && "$line" != "{"* ]]; then api_error+="$line"$'\n'; fi ;;
+        esac
         done <&"$req_fd"
         # 本尝试结束:立即清 curl_pid(缩小 trap 误杀窗口)并关闭读端
         curl_pid=""

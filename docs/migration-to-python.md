@@ -287,7 +287,7 @@ some_fn() {
 | W9 | 压缩 / 历史 | 🟡 进行中 | **已收口**：`compact_due` + `compact_apply`（→ `wchat_py/compaction.py`；不可用→不压 / 不动 messages）、`add_message`/`auth_add_message`（→ `wchat_py/msg.py`；不可用→不追加 + stderr 明示）、`history pack`/`drop_orphan_tools`（→ `wchat_py/history.py`；调用方 `save_history` 不可用→**不落盘** + stderr、`get_history` 不可用→**消息原样保留** + stderr）。**留 bash**：`summary_pin_count`、`compact_messages`、`save_history`/`get_history` 的非纯部分、`ensure_chat_title`。闸门 `py_compaction`(22)/`py_msg`(19)/`py_history`(27) 均已改收口形态；`compaction_pin_probe.sh` 迁移桩已路由 Python |
 | W10 | 交互/确认 UI | ⬜ 未开始 | — |
 | W11 | 权限 auto 装配 | ⬜ 未开始 | — |
-| W12 | 核心循环（主结构） | 🟡 进行中 | **前置拆解见 §八**：全局态分「启动期配置」（`hd_re_*`/名单/`AUTO_*`/根路径 → 打包 JSON 传入）与「会话态」（`granted_files`/`auto_*`/熔断 → 随状态机迁）。**W12-1 已完成**：`wchat_py/config.py`（schema + `keys`/`validate`/`get`）+ `wchat.sh` 侧 `py_cfg_dump`/`_cfg_arr_json`（bash 仍是单一出处，导出 JSON 供 Python 读）；闸门 `tests/py_config_test.sh`（**16/16**：合法/校验/键集合一致/值透传/空数组/负例/schema 与脚本一致）。**待做**：W12-2 `hard_deny_path` 纯判定化（141 行、无 IO，迁 `pathrule.py`）→ W12-3 会话态过渡 → W12-4 主循环。`path_access`（138 行编排：审计/弹确认/备份/熔断）留壳随 W12-3 迁。**W12-2 已完成**：`hard_deny_path` → `wchat_py/pathrule.py`（配置 + 会话态 `auto_mode`/`auto_allow_rw` 全经 argv 传入；`link_escapes_root` 一并 Python 化）；旧 bash 全量回退**已删**，降级=**fail-closed 粗判据**（只认凭据/系统路径字面量前缀 + 根内放行，不做归一）；闸门 `tests/py_pathrule_test.sh`（**25/25**：语义锚点 + 结构锁 + 降级），parity 期已由 15 向量 + 全表 569 验证。**W12-3 进行中**：`is_granted`/`auto_allow_hit` → `wchat_py/authz.py`（会话态 `granted_files`/`auto_allow_ro`/`auto_allow_rw` **全经 argv 传入**，单一出处仍在 bash；`pathrule` 的 P3 白名单判定改为复用 `authz.auto_allow_hit`，消灭第三份抄写）；parity 装置 `tests/py_authz_test.sh`（**19/19**：13 向量 py-vs-bash + 语义锚点 + 接线锁），全表 569/569。**已收口**：旧 bash 回退已删（降级 fail-closed：`is_granted` 返回 1=未授权、`auto_allow_hit` 返回 1=不在名单）；闸门改为收口形态 **20/20**。**W12-4a 已完成**：`wchat_py/llm.py`（官方 OpenAI SDK 适配 + seam JSON-lines 编码 + 依赖探测，**无 curl 回退**，缺失依赖即报错）+ `requirements.txt`（`openai>=1.0`）；闸门 `tests/py_llm_test.sh`（**19/19**；`openai` 未装时**明示跳过** SDK 流式实测，不假绿）。**待做**：W12-4b/c（请求 kwargs 化 / `ask_ai` SSE 读循环，桩网关 e2e）。 | |
+| W12 | 核心循环（主结构） | 🟡 进行中 | **前置拆解见 §八**：全局态分「启动期配置」（`hd_re_*`/名单/`AUTO_*`/根路径 → 打包 JSON 传入）与「会话态」（`granted_files`/`auto_*`/熔断 → 随状态机迁）。**W12-1 已完成**：`wchat_py/config.py`（schema + `keys`/`validate`/`get`）+ `wchat.sh` 侧 `py_cfg_dump`/`_cfg_arr_json`（bash 仍是单一出处，导出 JSON 供 Python 读）；闸门 `tests/py_config_test.sh`（**16/16**：合法/校验/键集合一致/值透传/空数组/负例/schema 与脚本一致）。**待做**：W12-2 `hard_deny_path` 纯判定化（141 行、无 IO，迁 `pathrule.py`）→ W12-3 会话态过渡 → W12-4 主循环。`path_access`（138 行编排：审计/弹确认/备份/熔断）留壳随 W12-3 迁。**W12-2 已完成**：`hard_deny_path` → `wchat_py/pathrule.py`（配置 + 会话态 `auto_mode`/`auto_allow_rw` 全经 argv 传入；`link_escapes_root` 一并 Python 化）；旧 bash 全量回退**已删**，降级=**fail-closed 粗判据**（只认凭据/系统路径字面量前缀 + 根内放行，不做归一）；闸门 `tests/py_pathrule_test.sh`（**25/25**：语义锚点 + 结构锁 + 降级），parity 期已由 15 向量 + 全表 569 验证。**W12-3 进行中**：`is_granted`/`auto_allow_hit` → `wchat_py/authz.py`（会话态 `granted_files`/`auto_allow_ro`/`auto_allow_rw` **全经 argv 传入**，单一出处仍在 bash；`pathrule` 的 P3 白名单判定改为复用 `authz.auto_allow_hit`，消灭第三份抄写）；parity 装置 `tests/py_authz_test.sh`（**19/19**：13 向量 py-vs-bash + 语义锚点 + 接线锁），全表 569/569。**已收口**：旧 bash 回退已删（降级 fail-closed：`is_granted` 返回 1=未授权、`auto_allow_hit` 返回 1=不在名单）；闸门改为收口形态 **20/20**。**W12-4a 已完成**：`wchat_py/llm.py`（官方 OpenAI SDK 适配 + seam JSON-lines 编码 + 依赖探测，**无 curl 回退**，缺失依赖即报错）+ `requirements.txt`（`openai>=1.0`）；闸门 `tests/py_llm_test.sh`（**19/19**；`openai` 未装时**明示跳过** SDK 流式实测，不假绿）。**W12-4b 待做**（`make_request_body` kwargs 化）；**W12-4c 已完成并收口**：`ask_ai` 的 SSE 读循环改为 `py_run llm stream` + JSON-lines 事件（`text`/`reasoning`/`tool_calls`/`usage`/`error`），**curl 旧路径已删、无回退**（HTTP/SSE 例外）；收口锁 2 条（`py_run llm stream` 存在 / 旧 `-sSN --connect-timeout` 为 0），闸门 `py_llm` **20/20 → 33/33**；代价 = 每请求 +0.64s 冷启动（实测），e2e 夹具 pty **总时限 30s→60s**（静默阈值 2.5s 不动）。**已知缺口（下一步就补）**：curl 的**停滞兜底**（`--speed-time`/`--speed-limit`）在 SDK 路径上没有等价物，`SSE_STALL_TIMEOUT` 已成死变量、`WCHAT_LLM_TIMEOUT` 从未被 export —— 服务端挂死时不再 120s 报错。详见 §8.5。 | |
 
 ---
 
@@ -366,7 +366,80 @@ some_fn() {
 **步骤**：
 1. **W12-4a 依赖与适配层**：`wchat_py/llm.py`（`OpenAI` 客户端封装 + `stream=True`）；启动时 `import openai` 探测；文档登记依赖。
 2. **W12-4b `make_request_body` → Python**：纯 JSON；parity 对照 jq 输出**逐字节**。
-3. **W12-4c `ask_ai` SSE 读循环 → Python（SDK 流）**：bash 保留 curl 回退；闸门走**桩网关 e2e**（现有 `auto_test` 桩 + pty）。
+3. **W12-4c `ask_ai` SSE 读循环 → Python（SDK 流）**：**已完成并按 HTTP/SSE 例外收口——不留 curl 回退**。
+   `ask_ai` 每轮尝试改为 `py_run llm stream < "$req_file" > "$req_file_dir/fifo" 2>&1 &`（仍用 FIFO +
+   显式后台 PID + `handle_ctrl_c` 的 TERM 逻辑，逐尝试重开 FIFO 读端以避开"复用 fd 立即 EOF"的老坑）；
+   读循环由"解析 `data:` SSE 行"改为"解析 JSON-lines 事件"（`text`/`reasoning`/`tool_calls`/`usage`/`error`，
+   `usage` 带 `cached`/`image`），渲染/重试/中断/收尾逻辑原样保留。`llm.py` 侧：`cmd_stream` 支持从环境取
+   `BASE_URL`/`WCHAT_API_KEY` 与 `timeout`，`_emit` 逐事件 `flush`（否则 FIFO 会整段缓冲，前端表现为"卡死"）。
+   收口锁：`tests/py_llm_test.sh` 结构锁两条（`py_run llm stream` 存在=1、旧 `-sSN --connect-timeout` 主请求块=0），
+   闸门由 20/20 → **22/22**。
+
+   ⚠ **代价（实测，勿当噪音绕过）**：curl 首字节 ~10ms，改用独立 python 进程后**每请求 +0.64s 冷启动**
+   （量测 `.scratch/measure_firstbyte.py`，3 次稳定 0.642~0.650s）。这笔钱买的是官方 SDK 与可维护性，接受。
+   但它击穿了测试夹具里一个**与实现无关的时间预算**：`tests/auto_test.sh` 的 pty 驱动器原以 30s 墙钟跑完每个场景
+   （curl 时代够用），多请求场景现在跨过 30s → 应用被 SIGTERM、场景截断，表现为"请求数=0 / 某步没发生"（**flaky**：同一份代码两次跑出 6 红与 20 红）。
+   单变量判别后确认：**静默阈值（2.5s = 假用户耐心）不动**，只把总时限 30s → 60s，e2e 即由 6~20 红转 0 红；
+   断言一行未改。理由与实测值已写进 `tests/auto_test.sh` 该处注释。
+
+   🔴→✅ **停滞兜底缺口（本轮已补）**：`SSE_STALL_TIMEOUT` 重新变成活变量——bash 侧派生
+   `export WCHAT_LLM_STALL`（单一出处仍是它），`llm.py` 新增 `_build_timeout()` 用它构造
+   **`httpx.Timeout(connect=15, read=N)`**（read timeout＝"无字节进展即判死"；**刻意不用总超时**，
+   总超时会把健康长流一起砍掉）。闸门 `py_llm` 两条锁：`停滞兜底用 read timeout`、`未设则不传 timeout`。
+   ⚠ 覆盖强度如实说明：这两条锁在**单元层**钉住语义（`Timeout.read == N`），**没有**跑"桩挂住不吐字节"
+   的真实停滞 e2e；要补真实停滞用例，得给桩加一个 stall 模式，留作后续。原始分析留档如下。
+
+   🔴 **原始分析（当时的缺口）**：curl 那条命令所带的**流式停滞兜底**
+   （`--speed-time "$SSE_STALL_TIMEOUT" --speed-limit 1`：连接建立后平均速率 <1B/s 持续 120s 即自行断开、
+   报 `curl: (28)` 进 `api_error`，防止无人值守时服务端静默挂死、读循环无限 pending）**在 SDK 路径上没有等价物**。
+   证据：`$SSE_STALL_TIMEOUT` 全脚本零引用（只剩第 995 行的定义与注释），`WCHAT_LLM_TIMEOUT` 从未被 `wchat.sh`
+   export（`llm.py:159` 读它但永远读不到）⇒ `cmd_stream` 不传 `timeout`，走 SDK 默认（约 600s 总超时）。
+   注意**不能用总超时顶替**：`--speed-time/--speed-limit` 是"**无进展**即判死"，普通 `timeout` 会把健康的
+   长流一并砍掉。正确等价物是 httpx 的 **read timeout**（`httpx.Timeout(connect=15, read=SSE_STALL_TIMEOUT)`）。
+   补法（单一出处不变）：`wchat.sh` 由 `SSE_STALL_TIMEOUT` 派生并 export `WCHAT_LLM_STALL` → `llm.py` 用它构造
+   `httpx.Timeout` 的 `read`；随后把只当注释用、已无引用的 `SSE_STALL_TIMEOUT` 收敛到这一处；
+   再补一条**行为断言**（桩网关挂住不吐字节 → 必须在超时窗口内报错退出，而不是无限 pending），
+   并按 §八 的收口清单同步闸门/README。
+
+   🟠 **形状契约(本轮教训——同一个坑连踩四次)**：W12-4c 上线后用户实跑连抛四个错，根因**全在
+   "bash 侧 jq 造的请求体 ↔ Python SDK 的 kwargs" 这条缝上**：两边对"形状"的隐含假设不一致。
+   1. **凭据在哪**：`API_KEY`/`BASE_URL` 是普通 shell 变量、**从不 export**，子进程拿不到 ⇒ SDK
+      `Missing credentials`。修：启动行显式 `WCHAT_API_KEY="$API_KEY" BASE_URL="$BASE_URL"`。
+      （顺带修掉一个既有 bug：`API_KEY="${WCHAT_API_KEY:-}"` 无条件赋值，把第 94–110 行刚从
+      `~/.ct/config` 读进来的 key **清空** —— 脚本自带提示"1) 写入配置文件(推荐)"那条路一直是坏的。）
+   2. **URL 是根还是端点**：本项目 `BASE_URL` 是**完整端点**（带 `/chat/completions`），而 SDK 的
+      `base_url` 是**根**、会再拼一层 ⇒ `.../chat/completions/chat/completions` ⇒ 404。
+      修：`_normalize_base_url()` 剥掉已知端点后缀，根形状原样保留。
+   3. **字段是对象还是标量**：请求体里 `thinking` 已是 `{"type": ...}`，python 侧又包一层 ⇒ 服务端
+      serde 把内层 map 的键名当枚举变体 ⇒ 422 `unknown variant 'type'`。修：`_thinking_type()` 归一；
+      **顺带修好一条从未生效的规则**——`thinking == "disabled"` 拿对象比字符串恒为假，于是
+      "带图 + 关思考 ⇒ `reasoning_effort=none`"从未生效（注释里写着"实测 qwen 会 400"）。
+   **为什么四道闸门全没拦住**：夹具的输入形状与生产**不同**——它 export 了密钥、传的是根 URL、
+   桩只按 body 内容分类而**不校验字段形状**。于是"看不见的绿灯"连骗四关。
+   已改：夹具改走生产形状（密钥只经 `~/.ct/config`、`BASE_URL` 用完整端点），桩日志增记
+   `path`/`thinking_type`，并补**承重锁**（URL 正/反锁、`thinking.type` 未被双包）。闸门 `py_llm`
+   20/20 → **33/33**。
+   **结论**：这类问题的系统性解药恰好是 **W12-4b 的逐字节 parity**（把"形状契约"变成可执行的东西，
+   而不是靠人记），故把 4b 提到停滞兜底之前先做。
+
+   🟢 **W12-4b-1 交接（截至本轮：尺子已造好，尚未切）**
+   - `wchat_py/request.py`：`build_body()` + `py_run request body`（stdin 收
+     `{"model","messages","thinking","tools"}`，stdout 出请求体）。**与 jq 版逐字节等价**。
+   - `tests/py_request_test.sh`（闸门 `请求建体`，**22/22**，已登记进 `run_gates`，闸门 31→32）：
+     4 组语料（纯文本/带图 × thinking enabled/disabled）× 逐字节 `cmp` + 键顺序 + `thinking.type` 标量
+     + `reasoning_effort` + Python 侧无终端转义。
+   - **两个"并存锚点"（切换时要把期望反过来）**：`生产仍走 jq 建体` = **3**、`Python 建体尚无调用方` = 0。
+   - ⚠ **jq 的调用点是 3 个，不是 2 个**：`wchat.sh:3692 / 8244 / 8706`（代码注释里写的"3617/8262 两处"
+     已漂且漏了第三处）。**只切 ask_ai(8244) 会漏掉两条**——收口必须三个都过一遍。
+   - ⚠ **别用 `grep -c 'request_body=$(make_request_body)'` 数调用点**：注释里有同款文本，会数出 5。
+     要用 `grep -Ec '^[[:space:]]*request_body=$\{?\(?make_request_body'` 这类锚定行首的写法。
+   - **切换的设计约束（不可退让）**：建体与发送必须**同一次 python 调用**（`cmd_stream` 内部建体），
+     否则每请求多一次 0.64s 冷启动，e2e 墙钟会再爆（见上面"代价"一节）。
+     落法：`llm stream` 增支持 `messages_file`（大 messages 走文件，保 ARG_MAX）与 `no_tools`，
+     ask_ai 不再调 `make_request_body`，直接把 `model/thinking/no_tools/messages_file` 交给它。
+   - **收口顺序建议**：先切 8244（热路径）→ e2e 验 → 再切 3692/8706（非热路径）→ 最后删 jq 的
+     `make_request_body` 与三个**已死字段**（`reasoning_effort`/`stream`/`stream_options`），
+     闸门转收口形态（`make_request_body() {` 计数=0 + 锚点期望反过来），跑全量对账取新 sha。
 4. **W12-4d `messages` 数据模型**：先"单一出处 + 读写接口"，再逐步替换 bash 侧的直接读写。
 
 **闸门策略**：桩网关 e2e（不联网）+ 新 parity；`openai` 包缺失时，gate 走**回退路径**或**跳过 SDK 专测**并明示（不假绿）。
