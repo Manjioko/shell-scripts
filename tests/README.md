@@ -127,7 +127,7 @@
 > 存在=1、旧 curl 主请求块=0）；全表仍 **569/569 fail=0**（py 模块 gate 的 `ck` 不计入全表总数，无需动
 > `EXPECT_TOTAL`）；主套件断言 **+4**（e2e 新增：URL 正/反锁各 1、`thinking.type` 未被双包 1、
 > `屏幕无'API 请求失败'` 1 —— 最后这条钉的是"`{"t":"done",...}` 掉进非事件兜底被当 API 错误显示"）。
-> **新增闸门 `py_request`（请求建体 parity）20/20，闸门总数 31 → 32**；全量对账
+> **新增闸门 `py_request`（请求建体 parity）29/29，闸门总数 31 → 32**；全量对账
 > `run=32 pass=32 fail=0`，`sha=d7a24fa81b35`。
 > **四条"形状契约"教训**（凭据不 export / URL 是完整端点 / `thinking` 对象 vs 标量 / 夹具必须用生产形状）
 > 见 `docs/migration-to-python.md` §8.5 —— 它们全是"夹具形状与生产不同"造出来的假绿。

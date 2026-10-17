@@ -68,6 +68,40 @@ check "纯文本/enabled"  "m1" "enabled"  "$TXT" "high"
 check "带图/disabled"   "m1" "disabled" "$IMG" "none"
 check "带图/enabled"    "m1" "enabled"  "$IMG" "high"
 
+# ── 图片引用展开 parity（六族）：python 的 expand_refs 对照 jq 的 $_JQ_EXPAND_REFS ──
+# 参考片段从 wchat.sh 里取（lib-only 装载后打印变量）。注意两点坑：
+#   1) 必须用**脚本文件**跑 bash5（守卫按 $0 判"调用方是不是脚本文件"）；
+#   2) 取回的片段尾部会带**终端转义**（退出时恢复光标/自动换行），不剥掉 jq 会报
+#      INVALID_CHARACTER —— 这个坑本轮已踩三次，凡"用 $( ) 从 wchat.sh 取文本"都要剥。
+cat > "$W/frag.sh" <<'REF'
+_WCHAT_LIB_ONLY=1 API_KEY=sk-stub
+. "$1" < /dev/null > /dev/null
+printf '%s' "$_JQ_EXPAND_REFS"
+REF
+FRAG="$("$B5" "$W/frag.sh" "$SRC" 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')"
+ck "取到展开片段" "$([[ -n "$FRAG" ]] && echo y)" "y"
+
+exp_case() {  # <名字> <messages-json> <refmap-json>
+    local name="$1" msgs="$2" map="$3"
+    printf '%s' "$map" > "$W/map.json"; printf '%s' "$msgs" > "$W/m.json"
+    jq -c --rawfile map "$W/map.json" --arg gone_pre '<<G>>' --arg gone_hint '<<H>>' \
+        '($map|fromjson) as $map | '"$FRAG" < "$W/m.json" > "$W/e.jq" 2>"$W/e.err"
+    "$PY" -c 'import json,sys
+sys.path.insert(0,sys.argv[1])
+from wchat_py.request import expand_refs as f
+print(json.dumps(f(json.load(open(sys.argv[2])),json.load(open(sys.argv[3])),"<<G>>","<<H>>"),
+                 ensure_ascii=False,separators=(",",":")))' \
+        "$RLDIR" "$W/m.json" "$W/map.json" > "$W/e.py" 2>"$W/e.pyerr"
+    ck "展开 parity/$name" "$(perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' "$W/e.py")" "$(cat "$W/e.jq")"
+}
+
+exp_case "单图"         '[{"role":"user","content":"看图 [[IMGREF:a1]] 谢谢"}]' '{"a1":{"url":"data:1"}}'
+exp_case "一条消息多图" '[{"role":"user","content":"两张 [[IMGREF:a1]] 和 [[IMGREF:a2]]"}]' '{"a1":{"url":"data:1"},"a2":{"url":"data:2"}}'
+exp_case "已回收gone"   '[{"role":"user","content":"旧 [[IMGREF:g1]] 尾巴"}]'   '{"g1":{}}'
+exp_case "混合活+回收"  '[{"role":"user","content":"活 [[IMGREF:a1]] 死 [[IMGREF:g1]]"}]' '{"a1":{"url":"data:1"},"g1":{}}'
+exp_case "无引用"       '[{"role":"user","content":"纯文字"}]'                  '{"a1":{"url":"data:1"}}'
+exp_case "非字符串content" '[{"role":"user","content":[{"type":"text","text":"x"}]}]' '{"a1":{"url":"data:1"}}'
+
 # ── 两实现并存的**临时锚点**（收口那一步要把这两条的期望反过来，见注释） ──────────
 # 现在:生产仍由 jq 建体,Python 建体虽与它逐字节等价但**尚无调用方**。
 # 这两个数就是"切换发生了没有"的判据:切换后应为 0 和 1(甚至把 0 那条删掉)。
