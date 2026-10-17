@@ -77,9 +77,9 @@ ck "没有裸判据残留(这条判据不许再被抄回调用点)" "$_raw" "0"
 _tp=$(grep -nF 'compact_due "$last_prompt_tokens" && compact_messages' "$SRC" | cut -d: -f1 | tr '\n' ' ')
 _bad=0
 for _l in $_tp; do
-    awk -v s="$_l" 'NR>s && NR<=s+6 && /make_request_body/ {f=1} END{exit f?0:1}' "$SRC" || _bad=$((_bad + 1))
+    awk -v s="$_l" 'NR>s && NR<=s+6 && /make_request_(body|inputs)/ {f=1} END{exit f?0:1}' "$SRC" || _bad=$((_bad + 1))
 done
-ck "每个触发点都在 make_request_body 之前 6 行内" "$_bad" "0"
+ck "每个触发点都在建体(make_request_inputs)之前 6 行内" "$_bad" "0"
 
 echo "summary_pin_count:只数 system 之后**连续**的旧摘要"
 ck "连续 2 条被数出"                "$(summary_pin_count "$m")" "2"
