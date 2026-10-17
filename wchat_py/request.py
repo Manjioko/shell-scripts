@@ -138,8 +138,32 @@ def image_parts(messages) -> int:
     return n
 
 
+def resolve_inputs(req):
+    """请求输入 → (messages, tools)。**唯一出处**（`llm.cmd_stream` 与 `request.cmd_body` 共用）。
+
+    - `messages_file`：大 messages 走**文件**（ARG_MAX 防护），与 `messages` 互斥，文件优先；
+    - `no_tools`：置真时 tools 强制 `[]`；
+    - `ref_map_file`：存在则把 `[[IMGREF:id]]` 展开成 image_url 部件（见 `expand_refs`）。
+    注意：展开只在**这里**做一次 —— 遍历顺序决定了 `reasoning_effort` 的判据能看到
+    image_url 部件（"先展开再判"是历史 bug 的修法，不能反过来）。
+    """
+    msgs = req.get("messages", [])
+    if req.get("messages_file"):
+        with open(req["messages_file"], encoding="utf-8") as f:
+            msgs = json.load(f)
+    tools = req.get("tools", [])
+    if req.get("no_tools"):
+        tools = []
+    if req.get("ref_map_file"):
+        with open(req["ref_map_file"], encoding="utf-8") as f:
+            ref_map = json.load(f)
+        msgs = expand_refs(msgs, ref_map, req.get("gone_pre", ""), req.get("gone_hint", ""))
+    return msgs, tools
+
+
 def cmd_body(argv) -> int:
-    """stdin 收 `{"model","messages","thinking","tools"}`，stdout 出请求体 JSON。
+    """stdin 收 `{"model","messages"|"messages_file","thinking","tools","ref_map_file",...}`
+    → stdout 出请求体 JSON。
 
     与 jq 版一样：**stdout 只出正文**（调用方是 `$( )`），任何诊断走 stderr。
     """
@@ -148,8 +172,13 @@ def cmd_body(argv) -> int:
     except Exception as e:
         sys.stderr.write("request: 输入 JSON 解析失败: %s\n" % e)
         return 2
-    body = build_body(req.get("model", ""), req.get("messages", []),
-                      req.get("thinking", "disabled"), req.get("tools", []))
+    try:
+        msgs, tools = resolve_inputs(req)
+    except Exception as e:
+        sys.stderr.write("request: 读取输入失败: %s\n" % e)
+        return 2
+    body = build_body(req.get("model", ""), msgs,
+                      req.get("thinking", "disabled"), tools)
     sys.stdout.write(json.dumps(body, ensure_ascii=False, indent=2))
     return 0
 

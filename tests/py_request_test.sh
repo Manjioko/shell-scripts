@@ -102,6 +102,17 @@ exp_case "混合活+回收"  '[{"role":"user","content":"活 [[IMGREF:a1]] 死 [
 exp_case "无引用"       '[{"role":"user","content":"纯文字"}]'                  '{"a1":{"url":"data:1"}}'
 exp_case "非字符串content" '[{"role":"user","content":[{"type":"text","text":"x"}]}]' '{"a1":{"url":"data:1"}}'
 
+# cmd_body 走**文件形态**的输入(messages_file + ref_map_file):切换后 bash 交的就是这个形状。
+# 钉住两点:① 展开确实发生(1 张图 → image_url+text 两个部件);② **展开先于 effort 判据**
+# (带图 + 关思考必须得 none —— 反过来先算 effort 就会拿到 high,qwen 会 400)。
+_mf="$W/cm.json"; _rf="$W/cr.json"
+printf '%s' '[{"role":"user","content":"看图 [[IMGREF:a1]]"}]' > "$_mf"
+printf '%s' '{"a1":{"url":"data:1"}}' > "$_rf"
+_pb=$(printf '{"model":"m","thinking":"disabled","messages_file":"%s","ref_map_file":"%s","gone_pre":"G","gone_hint":"H"}' "$_mf" "$_rf" \
+      | "$PY" "$RLDIR/wchat_py/_run.py" request body 2>/dev/null)
+ck "cmd_body 展开文件输入" "$(printf '%s' "$_pb" | jq -c '[.messages[0].content[].type]')" '["image_url","text"]'
+ck "cmd_body 展开先于 effort 判据" "$(printf '%s' "$_pb" | jq -r '.reasoning_effort')" "none"
+
 # ── 两实现并存的**临时锚点**（收口那一步要把这两条的期望反过来，见注释） ──────────
 # 现在:生产仍由 jq 建体,Python 建体虽与它逐字节等价但**尚无调用方**。
 # 这两个数就是"切换发生了没有"的判据:切换后应为 0 和 1(甚至把 0 那条删掉)。
