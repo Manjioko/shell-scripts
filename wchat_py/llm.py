@@ -197,25 +197,6 @@ def _build_timeout(req):
     return None
 
 
-def _resolve_inputs(req):
-    """把"请求输入"解析成 (messages, tools)。
-
-    - `messages_file`：大 messages 走**文件**（ARG_MAX 防护），与 `messages` 互斥，文件优先；
-    - `no_tools`：置真时 tools 强制 `[]`（与 jq 版 `no_tools ? "[]" : $(tools)` 同义）。
-
-    这是 W12-4b-1 切换的前置：bash 侧只要交"输入"（model/thinking/no_tools/messages_file），
-    不必再造整份请求体 —— 建体归 Python 一处，形状契约就只有一份。
-    """
-    msgs = req.get("messages", [])
-    if req.get("messages_file"):
-        with open(req["messages_file"], encoding="utf-8") as f:
-            msgs = json.load(f)
-    tools = req.get("tools", [])
-    if req.get("no_tools"):
-        tools = []
-    return msgs, tools
-
-
 def cmd_stream(argv) -> int:
     try:
         req = json.loads(_contract.read_stdin_text())
@@ -240,23 +221,11 @@ def cmd_stream(argv) -> int:
         _emit({"t": "error", "v": "客户端初始化失败(检查 API_KEY/BASE_URL): %s" % e})
         return _contract.EXIT_FAIL
     try:
-        msgs, tools = _resolve_inputs(req)
+        from wchat_py.request import resolve_inputs, image_parts
+        msgs, tools = resolve_inputs(req)      # 文件输入/展开的唯一出处(见 request.resolve_inputs)
     except Exception as e:
-        _emit({"t": "error", "v": "读取 messages_file 失败: %s" % e})
+        _emit({"t": "error", "v": "读取输入失败: %s" % e})
         return _contract.EXIT_FAIL
-    # W12-4b-2:图片引用展开 + 图片部件计数(替代 bash 侧"jq 数请求体里的 image_url")。
-    # bash 不传 ref_map_file 时这两步都不做 ⇒ 现有调用方行为字节不变。
-    if req.get("ref_map_file"):
-        try:
-            with open(req["ref_map_file"], encoding="utf-8") as f:
-                _ref_map = json.load(f)
-        except Exception as e:
-            _emit({"t": "error", "v": "读取 ref_map_file 失败: %s" % e})
-            return _contract.EXIT_FAIL
-        from wchat_py.request import expand_refs
-        msgs = expand_refs(msgs, _ref_map,
-                           req.get("gone_pre", ""), req.get("gone_hint", ""))
-    from wchat_py.request import image_parts
     # `start` 事件:告诉 bash 侧"这次请求里有多少个图片部件"。img_token_sample 靠它标定单价,
     # 不能再靠解析请求体文本(切换后请求体里只剩 [[IMGREF:id]] 标记,数出来是 0)。
     _emit({"t": "start", "v": {"image_parts": image_parts(msgs)}})
