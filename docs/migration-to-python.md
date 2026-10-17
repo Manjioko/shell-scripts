@@ -440,6 +440,20 @@ some_fn() {
    - **收口顺序建议**：先切 8244（热路径）→ e2e 验 → 再切 3692/8706（非热路径）→ 最后删 jq 的
      `make_request_body` 与三个**已死字段**（`reasoning_effort`/`stream`/`stream_options`），
      闸门转收口形态（`make_request_body() {` 计数=0 + 锚点期望反过来），跑全量对账取新 sha。
+
+   🔴 **顺序修正（实测后改）**：**4b-2 必须先于 4b-1 的切换**。三条证据：
+   1. `ask_ai` 的 `$1` 是**建好的请求体**（`local request_body=$1`），三个调用点
+      （`3692/8244/8706`）都是 `request_body=$(make_request_body)` + `ask_ai "$request_body" ...`
+      —— 切换是**入参契约变更**，不是局部替换。
+   2. `img_token_sample` 对 body 的唯一依赖是
+      `jq '[..|objects|select(has("image_url"))]|length' == 1`（只标定"恰好一张图"）。
+      切换后 `messages_file` 里是 `[[IMGREF:id]]` **标记**、`image_url` 个数为 0 ⇒ 该函数
+      在那一行**静默 return**，图片计费标定从此不再发生（不报错、不告警）。
+   3. 因此正解是：**图片展开搬进 Python**（4b-2），由 Python 在展开后的 messages 上数
+      `image_parts`，经事件（如 `{"t":"start","v":{"image_parts":N}}`）回传给 bash；
+      `img_token_sample` 改成吃这个数字，彻底不再依赖请求体文本。
+   **新顺序**：4b-2（展开 + image_parts 事件 + `img_token_sample` 改造，单独提交并跑全量）
+   → 4b-1 切换（信封 + 三个调用点 + e2e）→ 删 jq/死字段/翻锚点 → 全量取 sha。
 4. **W12-4d `messages` 数据模型**：先"单一出处 + 读写接口"，再逐步替换 bash 侧的直接读写。
 
 **闸门策略**：桩网关 e2e（不联网）+ 新 parity；`openai` 包缺失时，gate 走**回退路径**或**跳过 SDK 专测**并明示（不假绿）。
