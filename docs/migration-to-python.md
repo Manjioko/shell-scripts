@@ -454,6 +454,24 @@ some_fn() {
       `img_token_sample` 改成吃这个数字，彻底不再依赖请求体文本。
    **新顺序**：4b-2（展开 + image_parts 事件 + `img_token_sample` 改造，单独提交并跑全量）
    → 4b-1 切换（信封 + 三个调用点 + e2e）→ 删 jq/死字段/翻锚点 → 全量取 sha。
+
+   ⚠ **上面这条"4b-2 先行"的说法在实现层面站不住（本轮勘误）**：图片展开目前发生在
+   **bash 的 `make_request_body`**（`img_build_map` + `$_JQ_EXPAND_REFS`）。只要 bash 还在展开，
+   Python 就永远看不到 `[[IMGREF:id]]` 标记 —— `expand_refs()` 与 `image_parts()` 会**永远空转**。
+   也就是说 **4b-2 的 bash 侧 = 4b-1 的切换**，二者是同一个动作，不能拆成两轮：
+   - Python 侧可以先行（已完成：`expand_refs`/`image_parts` + `ref_map_file` + `start` 事件，
+     六族 parity 已进闸门、`py_llm` 33/33）；
+   - **bash 侧必须与切换同一次落地**，且 `img_token_sample` 必须在**同一个提交**里改吃
+     `start.image_parts` —— 否则一旦 bash 停止展开、而采样还去 `jq` 请求体数 `image_url`，
+     得到的是 0，`img_token_sample` 会在 `[[ "$parts" == "1" ]]` 处**静默 return**，
+     标定表从此不再增长（不报错、不告警）。
+   **落地清单（一次提交，四个点）**：
+   ① `make_request_body` 的信封带上 `ref_map_file` / `gone_pre` / `gone_hint`（`img_build_map`
+      仍留在 bash，它产出的是**文件**，不是请求体）；
+   ② 三个调用点（`3692/8244/8706`）不再调 `make_request_body` 的展开分支；
+   ③ `ask_ai` 读循环加 `start` 分支存 `last_image_parts`；
+   ④ `img_token_sample` 改吃 `last_image_parts`（删那句 `jq '[..|has("image_url")]|length'`）。
+   验收：`inline_image_test.sh` + `e2e` + **标定表真新增一行**（不能拿"没报错"当通过）+ 全量对账。
 4. **W12-4d `messages` 数据模型**：先"单一出处 + 读写接口"，再逐步替换 bash 侧的直接读写。
 
 **闸门策略**：桩网关 e2e（不联网）+ 新 parity；`openai` 包缺失时，gate 走**回退路径**或**跳过 SDK 专测**并明示（不假绿）。
