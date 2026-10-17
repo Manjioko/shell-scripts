@@ -455,6 +455,29 @@ some_fn() {
    **新顺序**：4b-2（展开 + image_parts 事件 + `img_token_sample` 改造，单独提交并跑全量）
    → 4b-1 切换（信封 + 三个调用点 + e2e）→ 删 jq/死字段/翻锚点 → 全量取 sha。
 
+   🟡 **当前进度（截至 commit `ac2b9df`，可直接从这里接手）**
+   已完成并各自验证：
+   - `request.resolve_inputs()`：`messages_file`/`no_tools`/`ref_map_file`(展开) 的**唯一出处**，
+     `llm.cmd_stream` 与 `request.cmd_body` 共用（`llm.py` 里那份重复实现已删）。
+   - `make_request_inputs()`（bash）：只交输入 + `tmpdir`（临时文件由 ask_ai 在既有清理点
+     `rm -f "$req_file"` 之后统一 `rm -rf`，**不能由调用点建** —— 否则每轮泄漏 MB 级文件）。
+   - `img_token_sample` 改吃 `start.image_parts`（bash 侧不再解析请求体文本）。
+   - 闸门：`请求建体` 31/31（六族展开 parity + 文件形态输入）、`py_llm` 33/33、
+     `inline_image` 298/298、`e2e` 0 失败。
+   **未完成（必须一次做完再提交）**：
+   ① `wchat.sh:8438` 仍是内联的 `ask_ai "$(make_request_body)"` —— 第**四**个调用点，形状与
+      另外三处（`request_body=$(…)`）不同，按单一形状 grep 会漏（已实测漏过一次）。
+   ② `inline_image_test` 第 7 节 6 条断言把 **jq 建体当被测物**：其中"与 `git show HEAD:wchat.sh`
+      逐字节相同"**必须换掉**（提交删除后 HEAD 里没有该函数 → 永远 red；职责已由六族 parity 承担），
+      其余 5 条改成断言 Python 建体输出，并**重定 298 基线**。
+      反例已实测：先删函数后跑，`inline_image` 从 298 掉到 291 —— **尺子依赖被测物**。
+   ③ 删 `make_request_body` 本体 + 三个死字段（`reasoning_effort`/`stream`/`stream_options`），
+      闸门加结构锁 `make_request_body() {` 计数 = 0。
+   ④ 全量对账取新 sha + 台账。
+   ⚠ 顺序固定：②→③（反了必红）；③做完才算满足铁律 1（现在 `8438` 一条活路径仍在用 jq）。
+   ⚠ 不能顺手删 `img_build_map` / `_JQ_EXPAND_REFS`：展开虽归 Python，但"从磁盘收集图片引用"
+     仍在 bash，`make_request_inputs` 用它产 `refmap.json`。删错 = 静默丢图。
+
    ⚠ **上面这条"4b-2 先行"的说法在实现层面站不住（本轮勘误）**：图片展开目前发生在
    **bash 的 `make_request_body`**（`img_build_map` + `$_JQ_EXPAND_REFS`）。只要 bash 还在展开，
    Python 就永远看不到 `[[IMGREF:id]]` 标记 —— `expand_refs()` 与 `image_parts()` 会**永远空转**。
