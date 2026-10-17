@@ -3546,109 +3546,6 @@ _img_prefix_fp() {
          | tostring)]' 2>/dev/null | cksum | awk '{print $1}'
 }
 
-make_request_body() {
-    local tools_json tmpfile out
-    if (( no_tools )); then
-        tools_json="[]"
-    else
-        tools_json=$(tools)
-    fi
-    # ---------- inline 引用展开(只在这里做)----------
-    # messages 里只存 [[IMGREF:id]] 一行短标记,base64 留在磁盘(理由与三组实测代价见
-    # 配置节 IMG_INLINE_*)。这里在发请求前把标记换成真正的 image_url 部件。
-    # ⚠ **没有引用时一次 jq 都不多跑**:msgs 直接沿用 $messages,请求体与改动前逐字节相同
-    #   (刀1 立的那条回归基线靠这个"先判再展开"的顺序保住,不是靠展开逻辑碰巧无害)。
-    # 展开必须在算 reasoning_effort 之前完成:那条判据看的是"有没有 image_url 部件",
-    # 只存标记的 messages 里根本没有部件 → 不展开就会漏判,带图的续发照样 400。
-    local msgs="$messages" newmsgs=""
-    if [[ "$msgs" == *'[[IMGREF:'* ]]; then
-        mapf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-        img_build_map "$mapf"
-        # --rawfile 而非 --argjson:map 文件是几 MB 的 base64,走参数列表必撞 ARG_MAX。
-        # ($map|fromjson) as $map 只是把"文件原文"就地转成对象,不动 $_JQ_EXPAND_REFS。
-        newmsgs=$(printf '%s' "$msgs" | jq -c \
-            --rawfile map "$mapf" \
-            --arg gone_pre "$IMG_INLINE_GONE_MARK" \
-            --arg gone_hint "$IMG_INLINE_GONE_HINT" \
-            '($map|fromjson) as $map | '"$_JQ_EXPAND_REFS" 2>/dev/null)
-        # 展开失败(jq 报错/输出空)宁可发"带标记的原样文本",也不许发坏 JSON:
-        # 后果是模型看到 [[IMGREF:xxx]] 这行字而没看到图(怪,可解释),
-        # 而不是请求体半截被截、或历史被 jq 的半途输出改坏。
-        [[ -n "$newmsgs" ]] && msgs="$newmsgs"
-        rm -f "$mapf"
-    fi
-    # ---------- 刀1:历史前缀指纹比对(只出声,不拦截) ----------
-    # 为什么值得为此多跑两次 jq:前缀被悄悄改写意味着"那之后的 token 全部从打折变全价",
-    # 而这件事在屏幕上完全不可见【实测:同一形状两次给出 1203 与 0 两种损失】。
-    # ⚠ 状态一律落在**文件**里,不放 bash 变量:本函数的调用点是
-    #   `request_body=$(make_request_body)`(见 3617 / 8262 两处)—— 那是子 shell,
-    #   写在变量里的计数会被整份丢弃,表现为"探针全绿而产品从不报警"。
-    #   同一个道理本文件早就用过了:base64 落盘、熔断按 CRC 记账,都是这个原因。
-    # 只在**本会话挂过图**时才跑:纯文字会话一次 jq 都不多付,
-    # 刀1 立的那条"无引用时请求体逐字节相同"基线不能被这个观测块弄破。
-    if [[ -n "${IMG_REF_DIR:-}" && "${IMG_OBSERVE_PREFIX:-1}" == "1" && "${msgs:0:1}" == "[" ]]; then
-        local _n _prev_line _prev_n _prev_ph _prev_seen _ph _brk _brktok
-        _n=$(printf '%s' "$msgs" | jq 'length' 2>/dev/null || echo "")
-        [[ "$_n" =~ ^[0-9]+$ ]] || _n=""
-        if [[ -n "$_n" ]]; then
-            _prev_line=$(cat "$(_img_obs_file)" 2>/dev/null || echo "")
-            read -r _prev_n _prev_ph _prev_seen _brk _brktok _prev_dir <<<"$_prev_line"
-            _brk=${_brk:-0}; _brktok=${_brktok:-0}; _prev_seen=${_prev_seen:-0}
-            # 换了引用目录 = 换了一个观察窗口(会话重载 / 全新进程 / 多格实验)。
-            # 这时上一发的指纹属于**另一段历史**,拿来比会误报 —— 直接放弃这一发的比对。
-            # 这条不是想象:phase5 四格共用一个进程时,第二格开局就响了一次。
-            if [[ -n "$_prev_dir" && "$_prev_dir" != "${IMG_REF_DIR:-}" ]]; then
-                _prev_n=""; _prev_ph=""
-            fi
-            if [[ "$_prev_n" =~ ^[0-9]+$ ]] && (( _n >= _prev_n )) && [[ -n "$_prev_ph" ]]; then
-                _ph=$(_img_prefix_fp "$msgs" "$_prev_n")
-                if [[ -n "$_ph" && "$_ph" != "$_prev_ph" && "$IMG_PRUNE_EVENTS" == "$_prev_seen" ]]; then
-                    # 指纹变了,而这期间一次合法回收/压缩都没发生 → 有代码在动旧消息
-                    _brk=$((_brk + 1))
-                    if (( last_prompt_tokens > last_cached_tokens )); then
-                        _brktok=$(( _brktok + last_prompt_tokens - last_cached_tokens ))
-                    fi
-                    printf '⚠️ 历史前缀被改写(上一发 %s 条消息的指纹对不上,约 %s token 从打折变全价);期间无回收/压缩事件 → 请查哪里的展开形态动了旧消息\n' \
-                        "$_prev_n" "$(( last_prompt_tokens > last_cached_tokens ? last_prompt_tokens - last_cached_tokens : 0 ))" >&2
-                fi
-            fi
-            printf '%s %s %s %s %s %s' "$_n" "$(_img_prefix_fp "$msgs" "$_n")" \
-                "$IMG_PRUNE_EVENTS" "$_brk" "$_brktok" "${IMG_REF_DIR:-}" > "$(_img_obs_file)" 2>/dev/null
-        fi
-    fi
-    tmpfile=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")
-    printf '%s' "$msgs" > "$tmpfile"
-    out=$(jq -n \
-        --arg model "$model" \
-        --arg thinking "$thinking" \
-        --argjson tool "$tools_json" \
-        --slurpfile msgs "$tmpfile" \
-        '{
-        model: $model,
-        messages: $msgs[0],
-        thinking: {type: $thinking},
-        # 带图时撤掉 high:实测(2026-09-30,同一张 120px PNG)qwen 网关
-        #   纯文本 + thinking:disabled + reasoning_effort:high → 200
-        #   **带图   + thinking:disabled + reasoning_effort:high → 400**
-        #     "'"'"'reasoning_effort'"'"' must be '"'"'none'"'"' when '"'"'enable_thinking'"'"' is false"
-        #   带图   + disabled + reasoning_effort:none → 200 / 带图 + enabled + high → 200
-        # 这是 bugList #35 那个坑换了个位置:当初只在转述子请求上踩,图片一进 messages
-        # 就打在**主请求**上,而默认档 thinking 就是 disabled(wchat.sh:541) → 表现为
-        # "带图的工具链第 2 轮续发必挂"。mimo 网关三档实测对 high+disabled+图 都收,
-        # 但两家行为不一致,所以只能条件化,不能统一收敛成一种形状。
-        # 只在"带图且关思考"时取值变化;不带图时输出与改动前**逐字节相同**(回归基线靠这条)。
-        reasoning_effort: (if ($thinking == "disabled" and ($msgs[0] | '"$_JQ_HAS_IMAGE"')) then "none" else "high" end),
-        stream: true,
-        tools: $tool,
-        stream_options: {include_usage: true}
-        # 注意:这里绝不出现联网参数(enable_search / tools:[{type:web_search}])。
-        # 联网一律由 web_search 工具另发一次子请求完成(见文件顶部
-        # WEB_SEARCH_PROVIDER 与该工具的 build_body)——主请求每轮都带联网参数
-        # 等于每轮都付搜索费、还拖慢首字;各家参数还互不兼容,发错会静默失效或 400
-    }')
-    rm -f "$tmpfile"
-    printf '%s' "$out"
-}
 
 # W12-4b-1:只交**输入**给 Python 建体(取代 make_request_body 的 jq 建体)。
 # ⚠ 临时文件(几 MB,含 base64)必须放在**自己建的目录**里,目录路径随信封返回,由 ask_ai
@@ -8538,7 +8435,7 @@ ask_ai() {
             IMG_INLINE=0
             printf '\033[33m⚠️ 接口拒收图片,已摘掉原图并按文字重发;本会话后续 read_image 走转述。报错:%s\033[0m\n' \
                 "${err_msg:0:160}" >&2
-            ask_ai "$(make_request_body)" "$is_lock_screen" "$is_record_usage"
+            ask_ai "$(make_request_inputs)" "$is_lock_screen" "$is_record_usage"
             rc=$?
             (( rc == 0 || rc == 130 )) && return "$rc"
             # 重发仍失败:回到原兜底(把错误写进 full_response 让人和模型都看得见)

@@ -44,15 +44,10 @@ check() {  # <名字> <model> <thinking> <messages-json> <期望 effort>
     printf '{"model":%s,"thinking":%s,"messages":%s,"tools":[]}' \
         "$(jq -c -n --arg m "$mdl" '$m')" "$(jq -c -n --arg t "$th" '$t')" "$msgs" \
         | "$PY" "$RLDIR/wchat_py/_run.py" request body > "$W/py.out" 2>"$W/py.err"
-    perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' "$W/py.out"   > "$W/py.s"
-    perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' "$W/bash.out" > "$W/bash.s"
-    if cmp -s "$W/py.s" "$W/bash.s"; then
-        pass=$((pass+1)); printf '  ok   %s: 与 jq 逐字节相同\n' "$name"
-    else
-        fail=$((fail+1)); printf '  FAIL %s: 与 jq 逐字节相同(cmp 有差异)\n' "$name"
-        diff "$W/py.s" "$W/bash.s" | head -8 | sed 's/^/       /'
-        head -2 "$W/ref.err" | sed 's/^/       ref-err: /'
-    fi
+    # ⚠ parity 窗口已关闭(W12-4b 收口:jq 版 make_request_body 已删)。原"与 jq 建体逐字节相同"
+    # 的断言**不能留** —— 它的参考实现就是被删掉的东西,留下只会变成"比空串"的假绿/假红。
+    # 现在断言的是**契约**(键顺序 / thinking 标量 / reasoning_effort / 无终端转义 / 展开 parity
+    # 仍在下方用 jq 片段对照),而不是"与某一版实现相同"。
     ck "$name: Python 侧无终端转义" "$(grep -c "$(printf '\033')" "$W/py.out")" "0"
     ck "$name: 键顺序" "$(jq -r 'keys_unsorted|join(",")' "$W/py.out" 2>/dev/null)" \
                       "model,messages,thinking,reasoning_effort,stream,tools,stream_options"
@@ -122,7 +117,15 @@ ck "cmd_body 展开先于 effort 判据" "$(printf '%s' "$_pb" | jq -r '.reasoni
 # 注意:**不能**用 `grep -c 'request_body=$(make_request_body)'` 数——注释里有 3 处同款文本,
 # 会数出 5 来(本轮实测踩过)。必须锚定"行首 + 真实调用形态"。
 ck "jq 建体已无调用方" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_body\)' "$SRC")" "0"
-ck "信封构建接管(3 个调用点)" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_inputs\)' "$SRC")" "3"
+ck "信封构建接管(3 个 request_body= 调用点)" "$(grep -Ec '^[[:space:]]*request_body=\$\(make_request_inputs\)' "$SRC")" "3"
+# 收口锁(第③步):
+# - jq 版函数本体已删;
+# - 调用点有**两种形状**:`request_body=$(…)` 与内联 `ask_ai "$(…)"` —— 只按前一种数会漏
+#   (实测漏过,导致"jq 已无调用方"的错误结论);
+# - img_build_map 必须留着:展开归 Python 了,但"从磁盘收集图片引用"仍在 bash,用它产 refmap.json。
+ck "jq make_request_body 函数已删" "$(grep -c '^make_request_body() {' "$SRC")" "0"
+ck "内联调用形状也已切换" "$(grep -Ec '^[[:space:]]*ask_ai "\$\(make_request_inputs\)"' "$SRC")" "1"
+ck "img_build_map 仍在(产 refmap)" "$(grep -c '^img_build_map() {' "$SRC")" "1"
 
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]

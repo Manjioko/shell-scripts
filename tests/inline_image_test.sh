@@ -35,7 +35,7 @@ ck() { if [[ "$2" == "$3" ]]; then pass=$((pass+1)); printf '  ok   %s\n' "$1"
 # 装载走脚本自带的 _WCHAT_LIB_ONLY 口。**不要**改成按行 grep 抽函数:
 # _JQ_* 片段与 IMG_DESC_PROMPT 都是单行约定,但历史上多行引号串曾把抽取器整段吞掉。
 _WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" source "$SRC" < /dev/null >/dev/null 2>&1
-for f in img_dims prepare_inline img_inline_attach img_build_map img_refs_prune make_request_body tool_read_image; do
+for f in img_dims prepare_inline img_inline_attach img_build_map img_refs_prune make_request_inputs tool_read_image; do
     ck "函数已装载 $f" "$(declare -F "$f" >/dev/null && echo yes || echo no)" "yes"
 done
 # 探针自己的前提:全局没定义时 `${#IMG_REFS[@]}` 在 set -u 下会当场死,
@@ -140,28 +140,30 @@ echo "=== 7. 请求体契约(独立子 shell,不与上面的状态共享) ==="
 #   恢复光标/终端。在子 shell 里 source 它 = 把这条 trap 也装上,子 shell 退出时才输出,
 #   于是"外层重定向/命令替换"会把这串转义收进请求体尾巴 → jq -e 判非法(而 jq -r 单键
 #   取值却照样成功,现象是"一半断言红一半绿",极难归因)。放内层就与请求体无关了。
-run_body() {  # $1=装载源 $2=messages 文件 $3=额外 bash 语句(可空;set -u 下必须给默认值)
-    local extra="${3:-}"
+run_body() {  # $1=装载源(保留签名) $2=messages 文件 $3=额外 bash 语句(可空;set -u 下必须给默认值)
+    local extra="${3:-}" prd
+    prd="$(cd "$(dirname "$1")" && pwd)"
+    # W12-4b 切换后:请求体由 **Python** 建。bash 只交"输入信封"(make_request_inputs),
+    # 里面带 messages_file / ref_map_file(由 img_build_map 产出)/ tmpdir。
     _WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" /opt/homebrew/bin/bash -c "
         source '$1' </dev/null >/dev/null 2>&1
         messages=\$(cat '$2')
         no_tools=1
         $extra
-        make_request_body > '$W/body.out'
+        make_request_inputs > '$W/env.json'
     " < /dev/null >/dev/null 2>&1
-    cat "$W/body.out"
+    python3 "$prd/wchat_py/_run.py" request body < "$W/env.json"
+    # 信封自带的临时目录(messages/refmap)**:测试自己建的就得自己删**
+    local td; td=$(jq -r '.tmpdir // empty' "$W/env.json" 2>/dev/null)
+    [[ -n "$td" ]] && rm -rf "$td"
 }
 printf '%s' '[{"role":"system","content":"s"},{"role":"user","content":"hi"}]' > "$W/noimg.json"
 new=$(run_body "$SRC" "$W/noimg.json")
 ck "无引用时请求体是合法 JSON" "$(jq -e . <<<"$new" >/dev/null 2>&1 && echo yes)" "yes"
 ck "无图 reasoning_effort=high" "$(jq -r .reasoning_effort <<<"$new" 2>/dev/null)" "high"
-# 与"不含 inline 的那一版"逐字节比:HEAD 还没有 inline,正好当基线
-git show HEAD:wchat.sh > "$W/head.sh" 2>/dev/null
-if [[ -s "$W/head.sh" ]]; then
-    old=$(run_body "$W/head.sh" "$W/noimg.json")
-    ck "无引用时与 HEAD 逐字节相同(新特性不许动旧路径)" \
-       "$([[ "$new" == "$old" ]] && echo same || echo diff)" "same"
-fi
+# (原"与 git HEAD 的 jq 建体逐字节相同"断言已删:它把**上一版实现**当基线,收口提交后
+#  HEAD 里没有 make_request_body → 永远 red。该职责由 py_request 闸门的**六族 parity**
+#  (python 建体 vs jq 建体,落盘 cmp)承担,那才是对"契约"的断言而非对"某个版本"的断言。)
 # 只存标记(尚未展开)时也必须判出 none —— 钉住"先展开再算 reasoning_effort"的顺序
 printf '%s' "[{\"role\":\"tool\",\"tool_call_id\":\"c\",\"content\":\"read_image: x\n[[IMGREF:$idB]]\"}]" > "$W/marked.json"
 mk=$(run_body "$SRC" "$W/marked.json" "IMG_REF_DIR='$IMG_REF_DIR'")
