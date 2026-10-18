@@ -559,6 +559,22 @@ some_fn() {
      都过 `msg_save`，才算真正"单一出处"。
    - **第三批**：删掉其余直接读写、加结构锁（`grep -c '\$messages' ` 收敛目标），跑全量取新 sha。
 
+   🟠 **4d 第二批的真实落点（实测后修正）**
+   - **store 路径可推导**：`save_history()`(1190) 里文件名来自 `chat_title`（加载时是
+     `basename "$1"`，新会话由 `overview` 生成），即 `$CT_HOME/history/<sanitized title>.json`。
+     所以"轮内回写"没有路径障碍。
+   - **但绝不能"再加一个写入方"**：`save_history()` **本来就在写这个文件**（对象形状：
+     messages + thinking + model + title）。若 `msgstore.save` 也写同一文件 → **两个写者写同一文件**，
+     谁后写谁赢，`messages` 与 `thinking` 可能来自不同时刻 → 正是最难查的那类"状态半新半旧"。
+     ⇒ 第二批的正确做法是**替换**：让 `save_history()` 内部改调 `msgstore`，
+     而不是在 append 点另外落盘。
+   - **接口需要扩展**：现在的 `msgstore.save(path, messages)` 只替换 `.messages` 并保留已有兄弟字段
+     （对"已有文件"正确）。但**新文件没有兄弟字段**，`thinking`/`model`/`title` 会缺失
+     ⇒ 需要 `save_doc(path, doc)`（整份对象写）或给 `save` 加 `siblings=` 参数。
+     这一条**必须先补 + 补断言**，否则第一批接线会让"新会话存盘后丢 thinking"。
+   - 顺序：① 扩 `msgstore` 接口 + 断言（新文件带兄弟字段）→ ② `save_history` 改调它
+     → ③ 再谈 append 点是否也走 store。
+
    🟣 **W11 会话态形状（本轮实测 13 个变量，A 阶段只搬"持久"那一类）**
    实测位置：`wchat.sh` 711–777、934、4021、4121。
    - **持久（跨调用要活，4d 第二/三批的搬移对象）**
