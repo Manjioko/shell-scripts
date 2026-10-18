@@ -112,9 +112,50 @@ def cmd_auth_add(argv) -> int:
     return _contract.EXIT_OK
 
 
+def inject(messages, mark: str, text: str):
+    """往 **system(content)里**注入一段带标记的清单，幂等。
+
+    等价于现有 jq（skills/MCP/auto 三处共用同一形状）：
+      `.[0].content = ((.[0].content | split($mark)[0]) + "\\n\\n" + $mark + "\\n" + $list)`
+    `split($mark)[0]` 取的是"第一个标记之前的部分"，所以重复调用不会叠加（先剥旧段再贴新段）。
+    """
+    out = list(messages)
+    if not out:
+        return out
+    m0 = dict(out[0])
+    cur = m0.get("content")
+    if not isinstance(cur, str):
+        cur = "" if cur is None else str(cur)
+    m0["content"] = cur.split(mark)[0] + "\n\n" + mark + "\n" + text
+    out[0] = m0
+    return out
+
+
+def init(system_text: str = "You are a helpful assistant."):
+    """新会话的初始 messages（等价 `jq -n '[{role:"system",content:"..."}]'`）。"""
+    return [{"role": "system", "content": system_text}]
+
+
+def cmd_inject(argv) -> int:
+    mark = argv[0] if len(argv) > 0 else ""
+    list_file = argv[1] if len(argv) > 1 else ""
+    msgs = json.loads(_contract.read_stdin_text())
+    _contract.write_text(json.dumps(inject(msgs, mark, _read_text(list_file)),
+                                   ensure_ascii=False, indent=2) + "\n")
+    return _contract.EXIT_OK
+
+
+def cmd_init(argv) -> int:
+    text = argv[0] if argv and argv[0] else "You are a helpful assistant."
+    _contract.write_text(json.dumps(init(text), ensure_ascii=False, indent=2) + "\n")
+    return _contract.EXIT_OK
+
+
 _COMMANDS = {
     "add": cmd_add,
     "auth_add": cmd_auth_add,
+    "inject": cmd_inject,
+    "init": cmd_init,
 }
 
 
