@@ -368,7 +368,11 @@ for pat in 'MAX_TOOL_ROUNDS:-25' 'timeout_hit=1' 'confirm_cmd' 'auto_final_judge
            'tool_round=0' 'auto_enable' 'auto_report_exit' 'grant_file "$path" "r"' 'AUTH_MODEL' \
            '"reason"' '"purpose"' 'CMD_TIMEOUT' 'auto_estop=1' 'hd_approved' 'content=""' \
            'WCHAT_AUTO_ASSUME_YES' 'kill -TERM -- "-$win_pgid"'; do
-    grep -qF "$pat" "$REAL" && echo "  ✓ 存在 $pat" || { echo "  ✗ 缺失 $pat"; fail=$((fail+1)); }
+    # 同时查源码与工具规格文件:W12-5 把工具 schema 迁到 tools_spec.json 后,
+    # '"reason"'/'"purpose"' 这类**schema 片段**不在 wchat.sh 里了 —— 但它们仍必须"存在",
+    # 所以查两处而不是删断言(删了就没人守'工具必须声明 reason/purpose'了)。
+    { grep -qF "$pat" "$REAL" || grep -qF "$pat" "$(dirname "$REAL")/wchat_py/tools_spec.json" 2>/dev/null; } \
+        && echo "  ✓ 存在 $pat" || { echo "  ✗ 缺失 $pat"; fail=$((fail+1)); }
 done
 ck "文件工具不再各自弹确认" "$(grep -c 'ask_path_grant "\$path"' "$REAL")" 0
 ck "轮次上限不再是注释"     "$(grep -c '^# MAX_TOOL_ROUNDS=10' "$REAL")" 0
