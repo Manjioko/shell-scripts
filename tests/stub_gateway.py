@@ -58,10 +58,31 @@ class H(BaseHTTPRequestHandler):
         with _lock:
             with open(LOG, "a") as f:
                 _tk = body.get("thinking")
+                _msgs = body.get("messages") or []
+
+                def _orphans(ms):
+                    # 孤儿 tool 消息:tool_call_id 没有被**前面任何 assistant 的 tool_calls** 声明过。
+                    # 这种消息会让真实服务端 400,且屏幕上没有任何提示 —— 它是"回滚没做干净"的指纹
+                    # (失败/被拒的工具调用残留在上下文里)。W12-4d 改状态所有权前先把它钉成 0。
+                    declared, n = set(), 0
+                    for m in ms:
+                        if not isinstance(m, dict):
+                            continue
+                        if m.get("role") == "assistant":
+                            for tc in (m.get("tool_calls") or []):
+                                if isinstance(tc, dict):
+                                    declared.add(tc.get("id") or "")
+                        elif m.get("role") == "tool":
+                            if (m.get("tool_call_id") or "") not in declared:
+                                n += 1
+                    return n
+
                 f.write(json.dumps({"kind": kind, "model": body.get("model"),
                                     "path": self.path,
                                     "thinking_type": (_tk.get("type")
                                                       if isinstance(_tk, dict) else _tk),
+                                    "n_messages": len(_msgs),
+                                    "orphan_tools": _orphans(_msgs),
                                     "stream": body.get("stream"),
                                     "has_tools": "tools" in body}, ensure_ascii=False) + "\n")
 

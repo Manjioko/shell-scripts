@@ -496,6 +496,11 @@ ck "桩收到的 thinking.type 未被双包" "$(grep -c '"thinking_type": {' "$B
 # (屏幕出现 `⚠️ API 请求失败: {"t":"done"...}`)。任何"形状像事件但我们不认识"的 JSON 都必须
 # 被忽略,只有**不像事件**的行(缺依赖/Traceback)才允许进 api_error。
 ck "屏幕无'API 请求失败'"           "$(grep -c 'API 请求失败' "$BASE/out-s1.log")" 0
+# 回滚安全带:工具被硬墙拒绝后,messages 必须回到干净状态 —— 不残留未完成的 tool 消息。
+# 孤儿 tool 消息(tool_call_id 没被前面的 assistant 声明过)会让真实服务端 400 且屏幕无提示,
+# 是"回滚没做干净"的指纹。这条对"整份复制"和"快照 id"两种实现都成立,能陪所有权迁移一起用。
+ck "无孤儿 tool 消息(回滚干净)" "$(grep -c '"orphan_tools": 0' "$BASE/req-s1.jsonl")" \
+                               "$(grep -c '"kind"' "$BASE/req-s1.jsonl")"
 
 echo "=== E2 read 档:shell 的 N 仍归人(人答 n 就不执行) ==="
 run_case s2 "$J
