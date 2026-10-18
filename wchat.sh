@@ -2824,11 +2824,14 @@ mcp_catalog_text() {
 
 inject_mcp() {
     (( MCP_ENABLE == 1 )) || return 0
-    local list
+    local list _lf
     list=$(mcp_catalog_text)
     [[ -z "$list" ]] && return 0
-    messages=$(printf '%s' "$messages" | jq --arg mark "$MCP_MARK" --arg body "$list" \
-        '.[0].content = ((.[0].content | split($mark)[0]) + "\n\n" + $mark + "\n" + $body)')
+    # W12-4d:注入归 Python(msg inject,幂等);清单走文件(ARG_MAX)。
+    _lf=$(mktemp "${TMPDIR:-/tmp}/ct_inj_XXXXXX")
+    printf '%s' "$list" > "$_lf"
+    messages=$(printf '%s' "$messages" | py_run msg inject "$MCP_MARK" "$_lf")
+    rm -f "$_lf"
 }
 
 # 技能清单与 MCP 清单的**生命周期完全相同**(常驻 messages[0]、存盘要剥离、加载要重注入),
@@ -5887,15 +5890,18 @@ path_access() {
 AUTO_MARK="## auto 模式(权限全自动)生效中"
 inject_auto() {
     [[ -n "$auto_mode" ]] || return 0
-    local text
+    local text _lf
     text=$'当前处于 auto 模式(档位: '"$auto_mode"$')。规则:\n'
     text+=$'1. 敏感权限不再由用户逐次确认,由审批器与终审器裁决。run_shell_command 的 reason 字段是终审器唯一的材料,每次调用都必须填清楚"为什么必须执行它";不填或含糊的越界/破坏性命令会被直接拒绝。\n'
     text+=$'2. 被标为「硬墙」的拒绝是代码级红线(提权、系统路径、凭据、越界写、强推/改写已发布历史、下载即执行、批量杀进程),换一种写法也还是会被拒,不要重试同一条命令。正确做法:换方案,或把命令原样告知用户请他手动执行。\n'
     text+=$'3. 工作目录外的写入一律不允许。需要外部内容时交给用户,或请他在启动时加 --allow/--allow-write。读取工作目录外的文件是允许的(只读)。\n'
     text+=$'4. 你在用户的真实工作目录里干活,覆盖前会自动落备份(~/.ct/auto/backup),但备份不是让你大胆的理由:删除与批量改写请先用只读命令确认清单。\n'
     text+=$'5. 所有自动放行都会记入 ~/.ct/auto/audit.log,用户随时回看。'
-    messages=$(echo "$messages" | jq --arg mark "$AUTO_MARK" --arg list "$text" \
-        '.[0].content = ((.[0].content | split($mark)[0]) + "\n\n" + $mark + "\n" + $list)')
+    # W12-4d:注入归 Python(msg inject);清单走文件(ARG_MAX)。
+    _lf=$(mktemp "${TMPDIR:-/tmp}/ct_inj_XXXXXX")
+    printf '%s' "$text" > "$_lf"
+    messages=$(printf '%s' "$messages" | py_run msg inject "$AUTO_MARK" "$_lf")
+    rm -f "$_lf"
 }
 
 # ---------- 回滚点 ----------
