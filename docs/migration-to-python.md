@@ -478,6 +478,22 @@ some_fn() {
    ⚠ 不能顺手删 `img_build_map` / `_JQ_EXPAND_REFS`：展开虽归 Python，但"从磁盘收集图片引用"
      仍在 bash，`make_request_inputs` 用它产 `refmap.json`。删错 = 静默丢图。
 
+   🔵 **W12-4d 侦察结论（`messages` 数据模型，下一步）**
+   - 规模：`messages` 是 bash 全局 JSON 字符串，**11 处直接赋值**、2 个主入口
+     （`add_message` 3675 / `compact_messages` 3411）、全文 115 处引用。
+   - 赋值点按性质分四类，**迁移顺序应按这个来**（风险从低到高）：
+     ① 初始化/重载：641、8950（新会话）、1241（从历史文件读）、1253（孤儿修复）
+     ② 注入标记：636（skills）、2830（MCP）、5897（auto 能力清单）——都是"往 system 里塞一段"
+     ③ 追加：`add_message` 3688
+     ④ **回滚**：7943/8032/8050/8146（`messages=$msgs_before_call`，失败时回滚到调用前）—— 最危险，
+        它们依赖"整份快照可复制"，换成文件存储后语义会变（要改成显式事务/快照）
+   - **铁律（这一步的关键）**：过渡期 `messages` 只能有**一个所有者**。要么 bash 持有、传给人 Python
+     （现状，即"信封"），要么**文件持有、bash 只拿路径**。绝不允许"bash 变量 + 磁盘文件两份"并存 ——
+     那必然分叉，症状是我们这轮已经见过的那类：前缀被改写（token 从打折变全价）、图丢了却没人报错。
+   - 建议落地：`wchat_py/messages.py`（纯函数：append / trim / compact / 修 tool 配对）+ **文件-backed store**；
+     先迁①③（纯追加，可逐字节对照），再迁②（注入），最后 ④ 回滚（改成显式快照 id）。
+     每步都要 `新增/消失的红条` 可判读，并保持 `全表 569` 与 `堆压缩 37` 不变。
+
    ⚠ **上面这条"4b-2 先行"的说法在实现层面站不住（本轮勘误）**：图片展开目前发生在
    **bash 的 `make_request_body`**（`img_build_map` + `$_JQ_EXPAND_REFS`）。只要 bash 还在展开，
    Python 就永远看不到 `[[IMGREF:id]]` 标记 —— `expand_refs()` 与 `image_parts()` 会**永远空转**。
