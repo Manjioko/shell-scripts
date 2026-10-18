@@ -3581,6 +3581,19 @@ make_request_inputs() {
 # "越界→请求失败→拿不到 usage→last_prompt_tokens 不更新→压缩永不触发"的死循环。
 # 参数:$1 是否锁屏  $2 是否记录 usage(原样透传给重发的 ask_ai)。
 # 返回 0 = 已压缩并重发(调用方应直接 return);返回 1 = 未处理(交给原兜底逻辑)。
+# 越界判据(抽成函数以便断言):**"真越界被判成网络抖动"的唯一防线**。
+# $1=api_error 文本  $2=本地估算 tokens  $3=越界判据 → 打印 sig | est | none
+# 为什么要抽出来:原先是内联在 retry_after_compact 里的正则 + 粗算,没有任何断言;
+# 一旦有人(包括我)把它改去 Python 或改正则,越界不再触发压缩只会一直重试,**无报错**。
+HD_OVF_SIG='(context (length|window|tokens)|maximum context|too many tokens|token (limit|count).{0,20}(exceed|large)|prompt is too long|input.{0,10}token.{0,20}exceed|reduce your (prompt|input)|上下文(长度|窗口|过(长|大))|超出.{0,8}(长度|窗口|上限)|长度超限)'
+ctx_overflow_kind() {
+    local e_lc
+    e_lc=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]' || true)
+    if [[ -n "$e_lc" && "$e_lc" =~ $HD_OVF_SIG ]]; then printf 'sig'; return 0; fi
+    if (( ${2:-0} > ${3:-0} )); then printf 'est'; return 0; fi
+    printf 'none'
+}
+
 retry_after_compact() {
     local is_lock=$1 is_record=$2
     local est_bytes est_tokens before_count after_count request_body
@@ -3595,18 +3608,14 @@ retry_after_compact() {
     # 就必然把判据一起抬到 75%(粗算漏的那部分还没算进来)→ 真越界被判成网络抖动反复重试。
     # 拆成 CTX_OVERFLOW_GATE 之后,抬 TOKEN_THRESHOLD 不再削弱这条自愈。
     # api_error 是 ask_ai 里的局部变量,靠 bash 的动态作用域在这里读到 —— 改名要同步。
-    local hd_ovf_sig api_error_lc
-    hd_ovf_sig='(context (length|window|tokens)|maximum context|too many tokens|token (limit|count).{0,20}(exceed|large)|prompt is too long|input.{0,10}token.{0,20}exceed|reduce your (prompt|input)|上下文(长度|窗口|过(长|大))|超出.{0,8}(长度|窗口|上限)|长度超限)'
-    api_error_lc=$(printf '%s' "${api_error-}" | tr '[:upper:]' '[:lower:]' || true)
-    if [[ -n "$api_error_lc" && "$api_error_lc" =~ $hd_ovf_sig ]]; then
-        printf '⚠️ 请求失败且接口报上下文越界,自动压缩历史后重发…(%s)\n' "${api_error:0:120}"
-    else
-        est_bytes=$(printf '%s' "$messages" | wc -c | tr -d ' ')
-        est_tokens=$((est_bytes * 2 / 5))
-        # 粗算没越过越界判据 → 判成纯网络抖动,交给原重试/兜底逻辑
-        (( est_tokens <= CTX_OVERFLOW_GATE )) && return 1
-        printf '⚠️ 请求失败且本地估算 %s tokens 已越过越界判据 %s,自动压缩历史后重发…\n' "$est_tokens" "$CTX_OVERFLOW_GATE"
-    fi
+    est_bytes=$(printf '%s' "$messages" | wc -c | tr -d ' ')
+    est_tokens=$((est_bytes * 2 / 5))
+    case "$(ctx_overflow_kind "${api_error-}" "$est_tokens" "$CTX_OVERFLOW_GATE")" in
+      sig) printf '⚠️ 请求失败且接口报上下文越界,自动压缩历史后重发…(%s)\n' "${api_error:0:120}" ;;
+      est) printf '⚠️ 请求失败且本地估算 %s tokens 已越过越界判据 %s,自动压缩历史后重发…\n' "$est_tokens" "$CTX_OVERFLOW_GATE" ;;
+      # 粗算没越过越界判据 → 判成纯网络抖动,交给原重试/兜底逻辑
+      *)   return 1 ;;
+    esac
     before_count=$(echo "$messages" | jq 'length')
     compact_messages
     after_count=$(echo "$messages" | jq 'length')

@@ -171,6 +171,24 @@ ck "默认锁定上限是正整数(0 表示关闭锁定,不该是默认)" \
 
 # 两条汇总:人看的中文行 + 机器可读的无色彩固定字段行(与全表同惯例,变异装置按
 # ^  FAIL 取差异、按 RESULT 取结论,少一条就是它读不到东西而误判"变异未被杀")
+# ── 越界判据的特征样本(ctx_overflow_kind)───────────────────────────────────────
+# 这条判据是"真越界被判成网络抖动、只一直重试"的唯一防线,原先内联无断言。
+# 样本覆盖:各家越界原文 / 大小写折叠 / 中文两种 / 网络抖动 / 粗算三分支 / sig 优先。
+_os="$(mktemp -d)"
+cat > "$_os/k.sh" <<'REF'
+_WCHAT_LIB_ONLY=1 API_KEY=sk-stub
+. "$1" < /dev/null > /dev/null
+k() { ctx_overflow_kind "$1" "${2:-0}" "${3:-0}"; }
+printf '%s|%s|%s|%s|%s|%s|%s|%s' \
+  "$(k 'This model maximum context length is 8192 tokens')" \
+  "$(k 'TOO MANY TOKENS')" "$(k '上下文长度超出上限')" "$(k '输入长度超限')" \
+  "$(k 'Connection reset by peer' 0 100)" "$(k '' 200 100)" "$(k '' 50 100)" \
+  "$(k 'prompt is too long' 0 0)"
+REF
+_ovf=$(/opt/homebrew/bin/bash "$_os/k.sh" "$SRC" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+ck "越界判据特征样本(英/大写/中文/抖动/粗算/sig优先)" "$_ovf" "sig|sig|sig|sig|none|est|none|sig"
+rm -rf "$_os"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 printf '结果:PASS=%d FAIL=%d\n' "$pass" "$fail"
 [[ $fail -eq 0 ]] || exit 1

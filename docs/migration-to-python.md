@@ -575,6 +575,23 @@ some_fn() {
    - 顺序：① 扩 `msgstore` 接口 + 断言（新文件带兄弟字段）→ ② `save_history` 改调它
      → ③ 再谈 append 点是否也走 store。
 
+   🔴 **`retry_after_compact` 的迁移边界（读代码后定）**
+   它是**编排**：读 `api_error`（bash 动态作用域）→ 判"是否越界" → `compact_messages`
+   → 用 `make_request_inputs` 重建请求 → 递归重发。整块迁 = 迁核心循环，不在小步之列。
+   **其中只有一处是可独立迁的纯逻辑**：越界判据
+   ```bash
+   hd_ovf_sig='(context (length|window|tokens)|maximum context|too many tokens|…|长度超限)'
+   api_error_lc=$(printf '%s' "${api_error-}" | tr '[:upper:]' '[:lower:]')
+   # 命中 → 判越界;否则 est_tokens=bytes*2/5,与 CTX_OVERFLOW_GATE 比较兜底
+   ```
+   ⚠ **这段正则不能盲迁**：注释里写明它防的是"真越界被判成网络抖动反复重试"，而
+   `bytes*2/5` 的粗算**两个方向都会错**（对代码/英文偏高；又漏算 tools schema 与技能清单
+   那几万 token）。一旦 ERE→Python re 的转写有细微差异（`{0,20}`、`|` 优先级、大小写折叠），
+   症状是**某些越界不再触发压缩、只是一直重试**——没有报错。
+   ⇒ **先把它变成可判读的东西再迁**：给它一组特征样本（各家越界原文 + 网络抖动原文 +
+   大小写变体 + 中文变体），断言"该判越界的判越界、不该判的不判"；有了这组样本，
+   正则才能安全换实现。**没有样本前，正则留在 bash。**
+
    🟣 **W11 会话态形状（本轮实测 13 个变量，A 阶段只搬"持久"那一类）**
    实测位置：`wchat.sh` 711–777、934、4021、4121。
    - **持久（跨调用要活，4d 第二/三批的搬移对象）**
