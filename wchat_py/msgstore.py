@@ -17,6 +17,7 @@
    （半截文件会让下次启动读不出历史 —— 而那正是本项目最贵的一类故障）。
 """
 import json
+import sys
 import os
 import tempfile
 
@@ -85,3 +86,50 @@ def restore(messages, n: int):
     if not isinstance(n, int) or n < 0 or n > len(messages):
         return messages
     return messages[:n]
+
+
+# ── CLI 入口（bash 侧接线用：`py_run msgstore load <path>` / `save <path>`）──────────
+# 约定与其它 seam 一致：**stdout 只出正文**，诊断走 stderr。
+def _read_stdin_text():
+    return sys.stdin.read()
+
+
+def cmd_load(argv) -> int:
+    path = argv[0] if argv else ""
+    try:
+        msgs = load(path)
+    except Exception as e:
+        sys.stderr.write("msgstore: 读取失败(%s): %s\n" % (path, e))
+        return 2
+    sys.stdout.write(json.dumps(msgs, ensure_ascii=False))
+    return 0
+
+
+def cmd_save(argv) -> int:
+    path = argv[0] if argv else ""
+    try:
+        msgs = json.loads(_read_stdin_text() or "[]")
+    except Exception as e:
+        sys.stderr.write("msgstore: stdin 不是合法 JSON: %s\n" % e)
+        return 2
+    try:
+        save(path, msgs)
+    except Exception as e:
+        sys.stderr.write("msgstore: 写入失败(%s): %s\n" % (path, e))
+        return 2
+    return 0
+
+
+_COMMANDS = {"load": cmd_load, "save": cmd_save}
+
+
+def main(argv) -> int:
+    if not argv or argv[0] not in _COMMANDS:
+        sys.stderr.write("msgstore: 未知子命令 %r(可用: %s)\n"
+                         % (argv[0] if argv else "", ", ".join(sorted(_COMMANDS))))
+        return 2
+    return _COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
