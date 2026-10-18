@@ -144,6 +144,8 @@
 > `inline_image` 第 7 节改为断言 Python 建体、删掉"与 HEAD 逐字节"（职责由契约断言承担）；
 > `请求建体` parity 窗口关闭后转**契约断言**（键顺序/thinking 标量/effort/无转义/展开 parity）+ 收口锁。
 > 基线：`请求建体` **30/30**、`inline_image` **297/297**、`压缩布局` 37/37、全量 **run=32 pass=32 fail=0**，
-> `sha=38c3f5c8fa3d`。
+> `sha=a9abdfd0ee0c`(W12-4d 注入与 -n 切换后重取)。
 > ⚠ 收口连带损伤一处（全量对账才照出来）：`压缩布局` 的接线锁钉的是"压缩后立刻重建请求体"的调用点，
 > 函数改名后失效（37→36）——**单跑各道全绿、整体跑才红**，这就是全量的价值。
+
+> **W12-4d 阶段基线**: `inject_mcp`/`inject_auto`/`-n` 初始化切到 Python(`inject_skills` 与 641 顶层按"装载胶水"保留 bash,依据 `mcp_channel_test.sh:711` 既有锁);`消息构造` **22/22**(+3:inject 幂等/init 形状);新增**回滚安全带**(桩记 `orphan_tools`,e2e 断言拒绝后无孤儿 tool 消息,对"整份复制"与"快照 id"两种实现都成立);全量 **run=32 pass=32 fail=0**,`sha=a9abdfd0ee0c`。
