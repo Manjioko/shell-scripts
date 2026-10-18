@@ -582,6 +582,21 @@ some_fn() {
    重编码成对象会牵动 `authz`/`pathrule`（两个已收口模块），风险远大于收益。
    **搬移顺序**：先 `granted`+`allow_*`（纯数据，`py_authz`/`py_pathrule` 已用 argv 传），
    再 `counters`（只是加减），最后 `checkpoint`（依赖 git/rsync 命令，属胶水，可能留 bash）。
+
+   ✅ **W11 定案（实测后，A 阶段意义上的收尾）**
+   - **已搬 Python**：`granted_files`→`granted_list`（4 处）、`auto_allow_ro/rw`→字符串（16 处，
+     含显示计数 7 处走纯 bash 的 `list_count`/`list_join`）。形状不变（换行分隔 `mode|path`），
+     **`authz`/`pathrule` 接口零改动** —— 已收口模块不动，是这一步的安全底线。
+   - **定案留 bash：`counters`**（`auto_installs`/`auto_approvals`/`auto_deny_streak`/
+     `auto_backup_count`）。理由：**算术语义 + 热路径**。它们只是 `=$((x+1))`，只被 bash 侧的
+     显示/审计读，没有任何 Python 模块需要；`auto_backup_count` 更是每次文件备份都 +1
+     （`cp -p` 的下一行）。搬进 Python = 每次备份起一个进程换一行加法，**收益为零、成本是一次冷启动**。
+   - **定案留 bash：`checkpoint`**（`auto_ck_kind/head/note/dirty`）—— 依赖 git/rsync **命令**，
+     属命令胶水，不是数据。
+   - **瞬时态**（`auto_judge`/`auto_judge_reason`/`auto_estop`/`auto_tmp_prefixes`）随状态机一起搬，
+     不在 A 阶段这一轮。
+   判据（与 `inject_skills`、`jq '.messages'` 同一条）：**迁移的目的是消掉"同一业务的两份实现"，
+   不是消灭所有 bash**。凡是"一次加减 / 一次字段读取 / 装载期执行 / 调用外部命令"，留在 bash 更对。
    `inject_mcp`(2825) 与 `inject_auto`(5888) 都在**运行时**被调（`system_inject_all` 1372 / 1374、
    `inject_auto` 6051），没有这个障碍，可以照原计划先切这两处。
      先迁①③（纯追加，可逐字节对照），再迁②（注入），最后 ④ 回滚（改成显式快照 id）。
