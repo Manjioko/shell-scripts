@@ -119,5 +119,38 @@ print("%d,%s,%s,%s" % (len(d["messages"]), d["thinking"]["type"], d["model"], d[
 PY2
 )" "2,enabled,m1,t"
 
+# CLI 入口(bash 接线就走它)。⚠ 上一版把"建文件→save→jq"拆成三条 shell 命令,结果
+# 断言红而手工对 —— 教训:**这类有先后状态的检查要在一个 python 进程里跑完**,别让 shell 的
+# 求值顺序/变量作用域插进来。下面每条都是自包含的。
+ck "CLI load 只出 messages" "$(py <<'PY2' 2>&1 | tail -1
+import json,os,subprocess,sys,tempfile
+R=sys.argv[1]; p=os.path.join(tempfile.mkdtemp(),"h.json")
+open(p,"w").write('{"messages":[{"a":1}],"thinking":{"type":"x"}}')
+r=subprocess.run([sys.executable,os.path.join(R,"wchat_py","_run.py"),"msgstore","load",p],
+                 capture_output=True,text=True)
+print(len(json.loads(r.stdout)) if r.stdout else "empty")
+PY2
+)" "1"
+
+ck "CLI save 保留兄弟字段" "$(py <<'PY2' 2>&1 | tail -1
+import json,os,subprocess,sys,tempfile
+R=sys.argv[1]; p=os.path.join(tempfile.mkdtemp(),"h.json")
+open(p,"w").write('{"messages":[{"a":1}],"thinking":{"type":"x"},"title":"T"}')
+subprocess.run([sys.executable,os.path.join(R,"wchat_py","_run.py"),"msgstore","save",p],
+               input='[{"b":1},{"c":2}]', text=True, check=True)
+d=json.load(open(p))
+print("%d,%s,%s" % (len(d["messages"]), d["thinking"]["type"], d["title"]))
+PY2
+)" "2,x,T"
+
+ck "CLI 坏 stdin → rc=2" "$(py <<'PY2' 2>&1 | tail -1
+import os,subprocess,sys,tempfile
+R=sys.argv[1]; p=os.path.join(tempfile.mkdtemp(),"h.json")
+r=subprocess.run([sys.executable,os.path.join(R,"wchat_py","_run.py"),"msgstore","save",p],
+                 input="not-json", text=True, capture_output=True)
+print(r.returncode)
+PY2
+)" "2"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]
