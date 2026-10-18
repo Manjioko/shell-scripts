@@ -696,7 +696,11 @@ ck "分发白名单点名三条通道" "$(grep -c 'mcp_tools|mcp_schema|mcp_call
 # 或不守注册表的网关都能把它发回来)。上一版冒烟就是靠这条才发现漏了。
 ck "分发处仍有 MCP_ENABLE 执行期闸门(注册与执行两道关)" \
    "$(awk '/mcp_tools\|mcp_schema\|mcp_call\)/,/fi ;;/' "$REAL" | grep -c 'MCP_ENABLE == 1')" "1"
-ck "tools() 里走条件追加(不另起注册机制)" "$(grep -c -- '--argjson m "$MCP_TOOLS_JSON"' "$REAL")" "1"
+# W12-5:注册表归 Python。条件追加不再是 tools() 里的 jq,而是 build() 里一处独立变换;
+# 仍钉"只有一处、没另起注册机制"——bash 已无该 jq,Python 仅一处。
+ck "tools 的条件追加只在 Python 一处(不另起注册机制)" \
+   "$(grep -c 'tools + list(mcp_tools)' "$(dirname "$REAL")/wchat_py/tools.py")" "1"
+ck "bash 侧已无 MCP 追加 jq(已收口)" "$(grep -c -- '--argjson m "$MCP_TOOLS_JSON"' "$REAL")" "0"
 # 收口形态(W9):存盘剥离链已移入 Python(`history pack` 的 mark/mark2/mark3 三刀),
 # 不再 grep 已删的 bash `split($mark3)`。改两条:①行为——pack 确实剥掉第 3 刀(MCP 槽);
 # ②接线——save_history 把 $MCP_MARK 当第 3 个标记传进 pack(单一出处仍在 bash)。
