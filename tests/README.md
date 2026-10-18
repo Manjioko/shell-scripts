@@ -165,3 +165,7 @@
 > **W12-4d 转写迁移基线**: `to_compact`/`to_summarize` → `py_run msg render_summary`(共用一份口径,
 > 与 jq 逐字节对照通过);`压缩布局` 37→**38/38**(接线锁改为 bash≥2 + Python 2 调用点);
 > 全量 **run=34 pass=34 fail=0**,`sha=bf59e461dea5`。
+
+> **W12-4 收口判定**: 越界判据抽函数 + 8 样本(压缩布局 38→39);`messages` 操作层全 Python;
+> `tool_round` 与 `retry_after_compact` 编排按判据留 bash/B 阶段。全量 **run=34 pass=34 fail=0**,
+> `sha=63db3fc4cdab`。
