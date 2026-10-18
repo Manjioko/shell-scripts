@@ -156,3 +156,8 @@
 > **W12-4d 第一批基线**: 历史载入点改走 `py_run msgstore load`(store=历史文件本身,保留兄弟字段);
 > `py_history` 27/27、`消息存储` 13/13、全量 **run=33 pass=33 fail=0**,`sha=ae5f0b8fed9d`。
 > 计划洞已补:W10(判定流程属 A/渲染留 B)、W11(会话态形状,须先于 4d 第二三批)。
+
+> **W11 会话态搬移基线**: `granted_files`→`granted_list`(4 处)、`auto_allow_ro/rw`→字符串(16 处,含
+> 显示计数 7 处走纯 bash 的 `list_count`/`list_join`);`权限状态` 10→**14/14**;闸门数 **34**;
+> 全量 **run=34 pass=34 fail=0**,`sha=57e16388df7c`。
+> 形状不变(换行分隔 `mode|path`),`py_authz`/`py_pathrule` 接口零改动。
