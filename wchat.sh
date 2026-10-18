@@ -8953,7 +8953,7 @@ handle_cmd_line() {
         return 0
     fi
     if [[ "$line" == "-n" ]]; then
-        messages=$(jq -n '[{role: "system", content: "You are a helpful assistant."}]')
+        messages=$(py_run msg init)
         system_inject_all
         inject_auto
         chat_title=""
