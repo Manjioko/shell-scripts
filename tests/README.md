@@ -149,3 +149,6 @@
 > 函数改名后失效（37→36）——**单跑各道全绿、整体跑才红**，这就是全量的价值。
 
 > **W12-4d 阶段基线**: `inject_mcp`/`inject_auto`/`-n` 初始化切到 Python(`inject_skills` 与 641 顶层按"装载胶水"保留 bash,依据 `mcp_channel_test.sh:711` 既有锁);`消息构造` **22/22**(+3:inject 幂等/init 形状);新增**回滚安全带**(桩记 `orphan_tools`,e2e 断言拒绝后无孤儿 tool 消息,对"整份复制"与"快照 id"两种实现都成立);全量 **run=32 pass=32 fail=0**,`sha=a9abdfd0ee0c`。
+
+> **W12-4d 存储层基线**: 新增闸门 `消息存储`(`py_msgstore_test.sh` **7/7**),闸门数 **32 → 33**;
+> 全量 **run=33 pass=33 fail=0**,`sha=a9abdfd0ee0c`(`msgstore` 未接线,`wchat.sh` 未动)。
