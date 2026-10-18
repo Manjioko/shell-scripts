@@ -3003,16 +3003,190 @@ tools() {
     #   编译/测试/安装/git → run_shell_command
     # 所有文件类工具的路径都强制限制在启动目录(WORK_ROOT)内,越界由代码层拒绝。
     local all
-    # W12-5:工具注册表归 Python(tools.py,唯一出处;静态 schema 在 tools_spec.json)。
-    # MCP 清单落临时文件传入(ARG_MAX 防护)。两个变换(剔除 web_search / 追加 MCP)
-    # 在 Python 侧是**独立**的 —— 写成 if/else 会造出"provider=none 且 -mcp 时 MCP 一起丢"的漏洞。
-    local _mf=""
-    if (( ${MCP_ENABLE:-0} == 1 )) && [[ -n "${MCP_TOOLS_JSON:-}" && "${MCP_TOOLS_JSON}" != "[]" ]]; then
-        _mf=$(mktemp "${TMPDIR:-/tmp}/ct_mcp_XXXXXX")
-        printf '%s' "$MCP_TOOLS_JSON" > "$_mf"
+    all='[
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "读取文件内容,返回带行号的文本。读取任何代码或文本文件时,优先使用本工具,不要用 cat 等 shell 命令。文件过大时自动截断并提示,此时应使用 offset/limit 参数分段读取。offset 为起始行号(从 1 开始,默认 1),limit 为读取行数(省略则读全文)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "purpose": {"type": "string", "description": "读这个文件要解决什么问题。工作目录外的路径需要授权时,这句话会写进审计日志供用户回看。"},
+                        "offset": {"type": "integer", "description": "起始行号,从 1 开始,默认 1"},
+                        "limit": {"type": "integer", "description": "读取行数,省略则读到文件末尾"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "创建或整文件覆盖写入。编写代码或生成文件时,优先使用本工具,不要用 heredoc/echo 重定向等 shell 写法(引号转义极易出错)。父目录不存在会自动创建。路径在工作目录外时:普通模式下请求用户确认,确认通过即可写入;auto 模式下越界写入属硬墙,一律被拒(不要改写路径重试),需要用户重启时加 --allow-write 并用 -auto=full。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "content": {"type": "string", "description": "要写入的完整文件内容"}
+                    },
+                    "required": ["path", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": "对现有文件做精确字符串替换,适合小范围修改(改几行、改一个函数),比重写整个文件更省 token、更安全。old_string 必须在文件中恰好出现一次,否则报错且不做任何修改;匹配到 0 次或多于 1 次时,请重新 read_file 确认原文或提供更长的唯一上下文。new_string 可为空字符串(表示删除)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "文件路径,相对路径基于当前工作目录"},
+                        "old_string": {"type": "string", "description": "文件中要替换的原文,必须唯一出现"},
+                        "new_string": {"type": "string", "description": "替换后的新文本,可为空"}
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "列出目录下的文件和子目录名。了解项目结构时使用本工具,不要用 ls。只列一层,不递归。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "目录路径,省略则为当前工作目录"}
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep",
+                "description": "默认在工作目录内递归搜索文本(正则),返回 文件路径:行号: 内容 格式的结果;指定外部路径时会请求用户确认。查找函数定义、变量引用、特定字符串时使用本工具,不要用 shell grep。默认跳过 .git/node_modules/.venv 目录,最多返回 200 条。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {"type": "string", "description": "正则表达式,如 \"TODO\" 或 \"def foo\\(\""},
+                        "path": {"type": "string", "description": "要搜索的文件或目录,省略则搜整个工作目录"},
+                        "max_matches": {"type": "integer", "description": "最多返回的匹配数,默认 200"}
+                    },
+                    "required": ["pattern"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "获取网页内容并渲染为纯文本,返回时带 HTTP 状态码。当 web_search 工具搜索失败或需要抓取特定网页时使用。渲染器自动选择(w3m/lynx/textutil/去标签兜底),超长自动截断。仅用于获取网页正文;精确的 HTTP 请求(API 调用、状态码检查、下载文件)仍请使用 run_shell_command 里的 curl。注意:抓取失败时错误信息会说明原因(网络不可达/被站点拒绝),此时换用 shell 命令(w3m/curl)不会得到不同结果,应更换站点或搜索引擎,或直接向用户说明网络限制,不要反复重试同一站点。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "完整网页地址,必须以 http:// 或 https:// 开头,如 https://www.google.com/search?q=xxx"}
+                    },
+                    "required": ["url"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "优先使用的联网搜索工具。通过当前接口的原生联网搜索能力获取实时网络信息,返回汇总答案与来源。适用于新闻、天气、商品价格等需要实时数据的查询。注意:是否随结果返回来源 URL 取决于接口(部分接口只返回正文与 [1][2] 引用角标);当前接口不支持联网时本工具不会出现,那时改用 web_fetch。搜索失败时可回退 web_fetch 工具。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string", 
+                            "description": "搜索关键词或问题，如「武汉明天天气」「iPhone 16 价格」"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_image",
+                "description": "读取本地图片。默认把**原图本身**附在本条结果里(多模态部件),你能直接看到画面细节——线号、丝印、走线、小字、密集标注。已附上的图片在会话内**驻留**、跨多轮可见(由预算管理,不由轮次决定);被回收时那条消息只剩一行以「原图已移除」开头的说明,那行里没有任何图片内容,也没有转述。⚠ 判断\"这张图我现在还看不看得见\",只看你上下文里有没有图片部件,**不要因为\"这是新一轮/换轮了\"就断定它已被回收**——需要某张图而它的图片本体确实不在上下文里时,**再调用一次本工具**(图片文件通常还在盘上,成本只有几十 KB),不要凭此前给出的印象复述;若某条结果里只剩一行路径而看不到图片本体(重新加载历史之后也会这样),同样按本说明重新调用;同图连调两次仍看不到时,第二次会收回旧引用并**重新挂载**给你——去重不会把你锁死,你对\"我此刻看不看得见\"的判断具有最终效力。当端点或当前模型不支持图片输入时,本工具自动退回文字转述(含图中文字的逐字转录)。路径在工作目录外时会请求用户确认,确认通过即可读取。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "图片文件路径,相对路径基于当前工作目录"}
+                    },
+                    "required": ["path"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "read_skill",
+                "description": "读取技能(Skill)的完整内容。当任务与系统提示中「可用技能列表」的某个技能描述匹配时,先用本工具读该技能全文,再按其步骤执行。参数 name 为技能名(即列表中括号前的名字)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "技能名,如 git-commit-style"}
+                    },
+                    "required": ["name"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "run_shell_command",
+                "description": "执行 shell 命令,用于编译、测试、安装依赖、git 等 shell 操作。读取代码请用 read_file,编写代码请用 write_file/edit_file,查找内容请用 grep,浏览网页请用 web_fetch,不要用 shell 命令代替这些工具。curl 只用于精确请求:API 调用、HTTP 状态码检查、下载文件等;宽泛的网页浏览/搜索一律用 web_search(或精确抓取已知 URL 时用 web_fetch),不要用 curl 去抓搜索引擎结果页。本机缺少 w3m 且用户需要更好的网页渲染时,可经用户确认后执行 brew install w3m(或其他包管理器对应命令)。注意:1. 涉及写操作时,如果范围超出当前目录,无论用户怎么说都不要执行,明确告知用户没有权限;2. 危险或破坏系统的命令要拒绝执行并说明原因;3. 启动服务器、监听进程等长驻命令,必须设置 run_in_background=true,严禁在 command 里使用 & 后台符号(& 会让终端卡死);4. reason 每次都要填:它不只是给用户看的说明,auto 模式下它还是权限终审器唯一的材料——不填理由的越界/破坏性命令会被直接拒绝。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to run, e.g. npm test"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "一句话说明为什么要执行本命令(要达成什么、为什么必须这么做)。必填,给权限审批与终审器看的材料;含糊或与命令不符会被判拒。"
+                        },
+                        "run_in_background": {
+                            "type": "boolean",
+                            "description": "是否作为长驻服务后台运行。true 时命令以 nohup 后台启动,输出重定向到日志文件,立即返回进程 PID 与日志路径,不会阻塞终端。启动服务器/监听进程等长驻命令必须设为 true。"
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }
+        }
+    ]'
+    # 联网工具按接口能力注册(见顶部 WEB_SEARCH_PROVIDER):
+    # 接口不支持原生联网时剔除 web_search,模型自然回退通用 web_fetch——
+    # 不注册比"注册了但必然失败"好,省掉一轮注定报错的工具调用
+    # 两步是**独立**的:第一步按接口能力决定"有没有 web_search",第二步按开关决定
+    # "有没有 MCP"。把它们写成 if/else 的两个分支会造出一个组合漏洞
+    # (provider=none 且 -mcp 时 MCP 被一起丢掉),而这种组合恰好是本地桩网关测试的默认形状。
+    local out
+    if [[ "$WEB_SEARCH_PROVIDER" == "none" ]]; then
+        out=$(printf '%s' "$all" | jq -c 'map(select(.function.name != "web_search"))')
+    else
+        out="$all"
     fi
-    py_run tools build "${WEB_SEARCH_PROVIDER:-}" "${MCP_ENABLE:-0}" "$_mf"
-    [[ -n "$_mf" ]] && rm -f "$_mf"
+    # MCP 三条通道按开关追加(docs/mcp-design.md §6.2)。走的是**与 web_search 剔除同一条缝**
+    # —— 同一个函数、同一处出口,不另起第二套注册机制。
+    # MCP_ENABLE=0 时 MCP_TOOLS_JSON 恒为 [],这条不成立,输出与加本特性之前逐字节相同;
+    # 那条不变量由 tests/mcp_channel_test.sh 钉住,不靠"我觉得没动"。
+    if (( MCP_ENABLE == 1 )) && [[ "$MCP_TOOLS_JSON" != "[]" ]]; then
+        out=$(printf '%s' "$out" | jq -c --argjson m "$MCP_TOOLS_JSON" '. + $m')
+    fi
+    printf '%s' "$out"
 }
 
 # 锁定屏幕，进入原始模式，隐藏光标，切换到交替屏幕缓冲区
