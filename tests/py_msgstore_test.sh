@@ -152,5 +152,24 @@ print(r.returncode)
 PY2
 )" "2"
 
+# 新文件必须能带上兄弟字段(否则"新会话存盘"会丢 thinking/model/title —— 无报错)。
+ck "新文件带兄弟字段" "$(py <<'PY2' 2>&1 | tail -1
+import os,sys,tempfile,json; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import save
+p=os.path.join(tempfile.mkdtemp(),"new.json")
+save(p,[{"role":"system","content":"s"}], {"thinking":{"type":"enabled"},"model":"m","title":"t"})
+d=json.load(open(p)); print("%d,%s,%s,%s" % (len(d["messages"]), d["thinking"]["type"], d["model"], d["title"]))
+PY2
+)" "1,enabled,m,t"
+ck "已有文件:siblings 覆盖同名键" "$(py <<'PY2' 2>&1 | tail -1
+import os,sys,tempfile,json; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import save
+p=os.path.join(tempfile.mkdtemp(),"h.json")
+open(p,"w").write('{"messages":[],"thinking":{"type":"disabled"},"title":"old"}')
+save(p,[{"a":1}], {"thinking":{"type":"enabled"}})
+d=json.load(open(p)); print("%d,%s,%s" % (len(d["messages"]), d["thinking"]["type"], d["title"]))
+PY2
+)" "1,enabled,old"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]

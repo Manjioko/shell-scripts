@@ -43,12 +43,14 @@ def load(path, init=None):
                      % type(data).__name__)
 
 
-def save(path, messages):
-    """原子写。**若目标文件是对象形状，则保留其兄弟字段**（read-modify-write）。
+def save(path, messages, siblings=None):
+    """原子写。**对象形状时保留兄弟字段**（read-modify-write）；`siblings` 显式给出时优先生效。
 
     为什么必须保留：历史文件里 `messages` 之外还有 `thinking` / `model` / `title`。
-    直接写数组会把它们抹掉 —— 表现是"续聊时思考模式突然变回默认""标题丢了"，
-    而且**没有任何报错**。
+    直接写数组会把它们抹掉 —— 表现是"续聊时思考模式突然变回默认""标题丢了"，**没有任何报错**。
+
+    `siblings` 是给**新文件**用的：新文件没有既有兄弟字段可保留，必须由调用方显式交
+    （`save_history` 就是这种情形）。already-exists 时 `siblings` 会覆盖同名键。
     """
     doc = messages
     try:
@@ -56,9 +58,13 @@ def save(path, messages):
             cur = json.load(f)
         if isinstance(cur, dict):
             cur["messages"] = messages
+            if siblings:
+                cur.update(siblings)
             doc = cur
     except (FileNotFoundError, ValueError):
-        pass
+        if siblings:
+            doc = {"messages": messages}
+            doc.update(siblings)
     d = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".msgs_", suffix=".tmp")
