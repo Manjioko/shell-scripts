@@ -624,6 +624,29 @@ some_fn() {
    **工具注册表 `tools()`(194)** 与确认流程 —— 这是一块 ~1000 行的整体。
    ⇒ 因此"一个函数一个函数搬"的说法对它们是**不成立**的；它们是 W12-5「核心循环」
    的范围，必须作为一个单元迁移与验证（e2e + 全量 + 569 断言同时看）。
+   🔴 **seam 划不出来的原因（读 tool_run_and_parse 中段后实测）**
+   那个 for 循环把 **"簿记" 与 "工具实现" 交织**在一起：
+   ```bash
+   for i in "${!ids_arr[@]}"; do
+     content=""                      # 全局清零(防上一条结果被当本次)
+     msgs_before_call=$messages      # 回滚快照
+     add_message … "assistant" …     # 只有第一条带 reasoning_content(否则死循环复读)
+     … dispatch by fn_name → 调 tool_* 函数(仍是 bash,各 100~200 行)
+     add_message … "tool" …          # 配对补齐
+   done
+   ```
+   ⇒ **无法"只迁循环"**：Python 循环无法回调 bash 工具函数（bash→Python 是单向调用）。
+   所以真正的迁移单元是 **核心循环 + 它调用的所有工具实现**，这是一块 1000+ 行。
+   **修订后的 W12-5 顺序（可执行）**：
+   1. **先逐个迁工具实现**（自包含、可单独验）：`tool_read_file`（其格式化半已在
+      `filefmt.py`）→ `tool_web_fetch`（`webs.py` 已有状态码映射）→ `tool_read_image`
+      → `grep/list_dir/write_file/edit_file` → `run_shell_command`(最后，最重)；
+   2. **工具都成 Python 后**，循环里只剩"簿记 + 调 Python"，此时迁 `tool_run_and_parse`
+      才是自洽的（一个 python 进程内 for 循环调 python 工具）；
+   3. 最后迁 `ask_ai` 的编排（渲染留 bash）。
+   ⚠ 每迁一个工具都要：`py_<模块>` 闸门 + e2e + 相关行为断言；`orphan_tools==0` 全程盯着。
+   每迁一个工具都要：
+   `py_<模块>` 闸门 + e2e + 相关行为断言；`orphan_tools==0` 全程盯着。
    **另一条量化修正**：bash 里**没有巨型提示词 heredoc**（实测仅 1 个 5 行的 MCPJSON；
    提示词是散落在各函数里的 `text+=$'…'` 与超长单行）。所以"外置提示词砍几千行"的
    假设不成立，不要据此排期。
