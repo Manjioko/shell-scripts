@@ -1224,7 +1224,9 @@ save_history() {
     inp_msg "保存记录 ${HISTORY_DIR}/${name}.json"
 
     # 只在真正写盘成功后回传路径(目录被删/磁盘满等重定向失败时不留假路径)
-    if echo "$history" > "${HISTORY_DIR}/${name}.json"; then
+    # W12-4d:原子写(临时文件+fsync+replace)。原来 `echo > file` 一半崩溃就留半截 JSON,
+    # 下次加载直接报"格式错误"—— 历史实际上丢了。这是最贵的一类故障。
+    if printf '%s' "$history" | py_run msgstore save_doc "${HISTORY_DIR}/${name}.json"; then
         last_saved_history="${HISTORY_DIR}/${name}.json"
     fi
 }

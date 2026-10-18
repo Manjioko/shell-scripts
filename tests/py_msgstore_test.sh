@@ -171,5 +171,17 @@ d=json.load(open(p)); print("%d,%s,%s" % (len(d["messages"]), d["thinking"]["typ
 PY2
 )" "1,enabled,old"
 
+# save_doc:整份对象原子写(save_history 用)。半截 JSON = 历史读不出,所以断"写坏不留残骸"。
+ck "save_doc 整份写 + 无残留" "$(py <<'PY2' 2>&1 | tail -1
+import os,sys,tempfile,json; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import save_doc
+d=tempfile.mkdtemp(); p=os.path.join(d,"h.json")
+save_doc(p, {"messages":[{"a":1}],"thinking":{"type":"x"},"model":"m","title":"t"})
+x=json.load(open(p))
+print("%d,%s,%s,%s,%s" % (len(x["messages"]), x["thinking"]["type"], x["model"], x["title"],
+                          [f for f in os.listdir(d) if f.startswith(".msgs_")]==[]))
+PY2
+)" "1,x,m,t,True"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]

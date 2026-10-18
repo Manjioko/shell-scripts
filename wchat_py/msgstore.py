@@ -43,6 +43,30 @@ def load(path, init=None):
                      % type(data).__name__)
 
 
+def save_doc(path, doc):
+    """整份文档的**原子写**（同目录临时文件 → fsync → `os.replace`）。
+
+    `save_history` 用它。为什么要原子：历史文件写到一半崩溃/磁盘满会留下**半截 JSON**，
+    下次加载直接报"格式错误"，历史实际上丢了 —— 这是本项目最贵的一类故障。
+    原来的 `echo "$history" > file` 就是非原子的。
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".msgs_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save(path, messages, siblings=None):
     """原子写。**对象形状时保留兄弟字段**（read-modify-write）；`siblings` 显式给出时优先生效。
 
@@ -65,21 +89,7 @@ def save(path, messages, siblings=None):
         if siblings:
             doc = {"messages": messages}
             doc.update(siblings)
-    d = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".msgs_", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(doc, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    save_doc(path, doc)
 
 
 def snapshot(messages) -> int:
@@ -126,7 +136,23 @@ def cmd_save(argv) -> int:
     return 0
 
 
-_COMMANDS = {"load": cmd_load, "save": cmd_save}
+def cmd_save_doc(argv) -> int:
+    """整份文档写盘(save_history 用):stdin = 对象 JSON。"""
+    path = argv[0] if argv else ""
+    try:
+        doc = json.loads(_read_stdin_text())
+    except Exception as e:
+        sys.stderr.write("msgstore: stdin 不是合法 JSON: %s\n" % e)
+        return 2
+    try:
+        save_doc(path, doc)
+    except Exception as e:
+        sys.stderr.write("msgstore: 写入失败(%s): %s\n" % (path, e))
+        return 2
+    return 0
+
+
+_COMMANDS = {"load": cmd_load, "save": cmd_save, "save_doc": cmd_save_doc}
 
 
 def main(argv) -> int:
