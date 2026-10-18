@@ -152,3 +152,7 @@
 
 > **W12-4d 存储层基线**: 新增闸门 `消息存储`(`py_msgstore_test.sh` **7/7**),闸门数 **32 → 33**;
 > 全量 **run=33 pass=33 fail=0**,`sha=a9abdfd0ee0c`(`msgstore` 未接线,`wchat.sh` 未动)。
+
+> **W12-4d 第一批基线**: 历史载入点改走 `py_run msgstore load`(store=历史文件本身,保留兄弟字段);
+> `py_history` 27/27、`消息存储` 13/13、全量 **run=33 pass=33 fail=0**,`sha=ae5f0b8fed9d`。
+> 计划洞已补:W10(判定流程属 A/渲染留 B)、W11(会话态形状,须先于 4d 第二三批)。
