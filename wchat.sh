@@ -723,8 +723,8 @@ marker_shown=0
 #   --allow <路径>        越界只读(任何档位,含非 auto)
 #   --allow-write <路径>  越界可写(仅 -auto=full)
 # 语义与 @ 选文件一致:目录授权含其子树;授权名单不持久化,重启即失效。
-auto_allow_ro=()
-auto_allow_rw=()
+auto_allow_ro=""
+auto_allow_rw=""
 
 # 单条 shell 命令墙钟超时(秒)。auto 下没有人按 Ctrl+C,交互命令/挂死命令
 # 会把整轮永久卡住(本机无 coreutils 的 timeout,用窗口轮询自己实现,
@@ -1615,10 +1615,10 @@ parse_options() {
                 local _np
                 _np=$(norm_path "$_p" 2>/dev/null) || _np="$(expand_tilde "$_p")"
                 if [[ "$_m" == "rw" ]]; then
-                    auto_allow_rw+=("$_np")
+                    auto_allow_rw=$(printf '%s' "$auto_allow_rw" | py_run state append rw "$_np" 2>/dev/null)
                     inp_msg "[auto] 越界可写白名单: ${_np}"
                 else
-                    auto_allow_ro+=("$_np")
+                    auto_allow_ro=$(printf '%s' "$auto_allow_ro" | py_run state append r  "$_np" 2>/dev/null)
                     inp_msg "[auto] 越界只读白名单: ${_np}"
                 fi
             fi
@@ -4145,8 +4145,8 @@ auto_allow_hit() {
     if _py_on authz; then
         local _rc=0
         printf '%s' "$p" | py_run authz auto_allow_hit "$mode" "${HOME:-}" "${WORK_ROOT:-}" \
-            "$(printf '%s\n' ${auto_allow_ro[@]+"${auto_allow_ro[@]}"})" \
-            "$(printf '%s\n' ${auto_allow_rw[@]+"${auto_allow_rw[@]}"})" >/dev/null 2>&1 || _rc=$?
+            "$auto_allow_ro" \
+            "$auto_allow_rw" >/dev/null 2>&1 || _rc=$?
         if (( _rc == 0 )); then return 0; fi
         if (( _rc == 1 )); then return 1; fi
     fi
@@ -5556,7 +5556,7 @@ hard_deny_path() {
               "${HOME:-}" "${WORK_ROOT:-}" \
               "$(printf '%s\n' ${hd_cred_subdirs[@]+"${hd_cred_subdirs[@]}"})" \
               "$(printf '%s\n' ${auto_tmp_prefixes[@]+"${auto_tmp_prefixes[@]}"})" \
-              "$(printf '%s\n' ${auto_allow_rw[@]+"${auto_allow_rw[@]}"})") || _rc=$?
+              "$auto_allow_rw") || _rc=$?
         if (( _rc == 0 || _rc == 1 )) && [[ -n "$_j" ]]; then
             hd_rule=$(printf '%s' "$_j" | jq -r '.rule')
             hd_msg=$(printf '%s' "$_j" | jq -r '.msg')
@@ -5997,7 +5997,7 @@ auto_enable() {
     case "$auto_mode" in
         read)    printf '  越界写:   硬墙拒绝\n  shell N: 仍逐条人工确认\n' ;;
         sandbox) printf '  越界写:   硬墙拒绝(--allow-write 不生效)\n  shell N:  由终审器带 reason 复审后自动决定\n' ;;
-        full)    printf '  越界写:   仅 %s 个 --allow-write 路径,且覆盖前备份\n  shell N:  由终审器带 reason 复审后自动决定\n' "${#auto_allow_rw[@]}" ;;
+        full)    printf '  越界写:   仅 %s 个 --allow-write 路径,且覆盖前备份\n  shell N:  由终审器带 reason 复审后自动决定\n' "$(list_count "$auto_allow_rw")" ;;
     esac
     printf '  硬墙(任何档位都不放行): H1 提权 H2 下载即执行 H3 家目录/系统删 H4 磁盘\n'
     printf '    H5 家目录配置 H6 凭据 H7 改写发布历史 H8 电源 H9 批量杀进程 H10 外发密钥 H11 系统路径\n'
@@ -6005,8 +6005,8 @@ auto_enable() {
     printf '    越界写(工作目录之外)按路径判据报 P1/P2/P3,与文件工具同一口径\n'
     printf '  刹车: 单轮工具≤%s 次 · 单命令≤%ss · 自动放行配额 %s 次 · 连续拒 %s 次降级人工\n' \
         "$MAX_TOOL_ROUNDS" "$CMD_TIMEOUT" "$AUTO_MAX_APPROVALS" "$AUTO_DENY_STREAK"
-    (( ${#auto_allow_ro[@]} )) && printf '  只读白名单: %s\n' "${auto_allow_ro[*]}"
-    (( ${#auto_allow_rw[@]} )) && printf '  可写白名单: %s\n' "${auto_allow_rw[*]}"
+    (( $(list_count "$auto_allow_ro") )) && printf '  只读白名单: %s\n' "$(list_join "$auto_allow_ro")"
+    (( $(list_count "$auto_allow_rw") )) && printf '  可写白名单: %s\n' "$(list_join "$auto_allow_rw")"
     # 安装面必须在签字前说出来:它是"写在工作根之外 + 跑第三方代码"的能力,签字的人
     # 有权知道这一条到底是关着、点名开着、还是全开。
     if (( AUTO_INSTALL_ALL )); then
@@ -6063,7 +6063,7 @@ auto_enable() {
         signed="env-assume"
     fi
     mkdir -p "$AUTO_DIR" 2>/dev/null
-    auto_audit enable "session" "$WORK_ROOT" "" started "tier=$auto_mode ck=$auto_ck_kind ro=${#auto_allow_ro[@]} rw=${#auto_allow_rw[@]} signed=$signed"
+    auto_audit enable "session" "$WORK_ROOT" "" started "tier=$auto_mode ck=$auto_ck_kind ro=$(list_count "$auto_allow_ro") rw=$(list_count "$auto_allow_rw") signed=$signed"
     printf '\033[1;31m  ⚡ auto 已开启\033[0m \033[2m审计: %s · 备份: %s · 急停: Ctrl+C 两次\033[0m\n\n' \
         "$AUTO_AUDIT_LOG" "$AUTO_BACKUP_DIR/$auto_session_id"
     inject_auto
@@ -9077,7 +9077,7 @@ handle_cmd_line() {
         if [[ -n "$auto_mode" ]]; then
             inp_msg "auto: ${auto_mode} 档 · 已自动放行 ${auto_approvals}/${AUTO_MAX_APPROVALS} 次 · 本轮工具 ${tool_round}/${MAX_TOOL_ROUNDS} 轮"
             inp_msg "  回滚点: ${auto_ck_note:-无} · 备份 ${auto_backup_count} 份 · 审计 ${AUTO_AUDIT_LOG}"
-            inp_msg "  越界名单: 只读 ${#auto_allow_ro[@]} 项 / 可写 ${#auto_allow_rw[@]} 项 · 输入 -noauto 关闭"
+            inp_msg "  越界名单: 只读 $(list_count "$auto_allow_ro") 项 / 可写 $(list_count "$auto_allow_rw") 项 · 输入 -noauto 关闭"
         else
             inp_msg "auto: 关闭(权限逐次人工确认)"
         fi
