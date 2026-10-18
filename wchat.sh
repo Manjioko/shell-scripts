@@ -1238,7 +1238,10 @@ get_history() {
     # 显示加载提示，避免用户以为卡住
     printf "\033[1;33m⏳ 正在加载历史记录...\033[0m"
     # 读取并解析 JSON，失败时清除提示并报错
-    messages=$(jq '.messages' <<< "$(<"$1")" 2>/dev/null)
+    # W12-4d 第一批:载入点走 store(单一出处 = 历史文件本身,见 docs §8.5)。
+    # 等价于原来的 `jq '.messages'`,但 store 同时兼容对象形状并**保留兄弟字段**的写入语义;
+    # 失败(文件损坏/非对象)时 stdout 为空、rc≠0 —— 与下面那段"格式错误"分支吻合。
+    messages=$(py_run msgstore load "$1")
     if [[ $? -ne 0 || -z "$messages" ]]; then
         printf "\r\033[K"
         printf "\033[1;31m❌ 历史文件格式错误或为空: $1\033[0m\n"
