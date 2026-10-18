@@ -8694,7 +8694,8 @@ printContent() {
 overview() {
     local msg request_body resp title tmpf
 
-    msg=$(echo "$messages" | jq '. + [{role: "user", content: "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]')
+    # W12-4d:消息追加归 Python(msg append_user),不再让 bash 拼 JSON。
+    msg=$(printf '%s' "$messages" | py_run msg append_user "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。")
 
     # msg 是整段对话历史,必须走临时文件(见 make_request_body 的 ARG_MAX 防护)
     tmpf=$(mktemp "${TMPDIR:-/tmp}/ct_jq_XXXXXX")

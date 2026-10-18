@@ -201,12 +201,29 @@ def cmd_render_summary(argv) -> int:
     return _contract.EXIT_OK
 
 
+def append_user(messages, content):
+    """追加一条 `{"role":"user","content":…}`。等价 jq `. + [{role:"user",content:$c}]`。
+
+    注意这里**只**追加一条纯文本消息，不走 `build()`（不加 reasoning_content、不动
+    tool 相关字段）—— 调用点是"让模型调 set_title 工具生成标题"，不需要那些。
+    """
+    return list(messages) + [{"role": "user", "content": content}]
+
+
+def cmd_append_user(argv) -> int:
+    content = argv[0] if argv else ""
+    msgs = json.loads(_contract.read_stdin_text())
+    _contract.write_text(json.dumps(append_user(msgs, content), ensure_ascii=False))
+    return _contract.EXIT_OK
+
+
 _COMMANDS = {
     "add": cmd_add,
     "auth_add": cmd_auth_add,
     "inject": cmd_inject,
     "init": cmd_init,
     "render_summary": cmd_render_summary,
+    "append_user": cmd_append_user,
 }
 
 

@@ -89,4 +89,9 @@ ck "init: 单条 system" \
    "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" msg init | jq -c .)" \
    '[{"role":"system","content":"You are a helpful assistant."}]'
 
+# append_user:标题请求靠它(原 jq `. + [{role:"user",content:$c}]`)。只追加纯文本消息,
+# 不走 build()(不加 reasoning_content/tool 字段)—— 调用点只是要模型调 set_title。
+ck "append_user 追加一条 user" "$(printf '%s' '[{"role":"system","content":"s"}]' | PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" msg append_user 'hello' | jq -c '[length, .[-1].role, .[-1].content]')" '[2,"user","hello"]'
+ck "append_user 不动原有消息" "$(printf '%s' '[{"role":"system","content":"s"}]' | PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" msg append_user 'x' | jq -r '.[0].content')" "s"
+
 finish
