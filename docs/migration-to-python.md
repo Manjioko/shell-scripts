@@ -558,6 +558,30 @@ some_fn() {
    - **第二批**：`add_message` / `inject_*` / 回滚四个点（轮内写入）——此批完成后，轮内所有写入
      都过 `msg_save`，才算真正"单一出处"。
    - **第三批**：删掉其余直接读写、加结构锁（`grep -c '\$messages' ` 收敛目标），跑全量取新 sha。
+
+   🟣 **W11 会话态形状（本轮实测 13 个变量，A 阶段只搬"持久"那一类）**
+   实测位置：`wchat.sh` 711–777、934、4021、4121。
+   - **持久（跨调用要活，4d 第二/三批的搬移对象）**
+     `auto_mode`(档位) / `auto_downgraded` / `auto_allow_ro[]` / `auto_allow_rw[]` /
+     `granted_files[]`（元素形状 `"mode|path"`，见 3873/3877）/ `auto_session_id` /
+     计数 `auto_installs` `auto_approvals` `auto_deny_streak` `auto_backup_count` /
+     回滚点 `auto_ck_kind|head|note|dirty`。
+   - **瞬时（单次调用内有效，随状态机一起搬，不在本轮）**
+     `auto_judge`/`auto_judge_reason`（本次判定结果）、`auto_estop`（窗口内急停）、
+     `auto_tmp_prefixes[]`（本次临时前缀）。
+   **形状约定**（供 Python 侧直接吃）：
+   ```json
+   {"mode":"sandbox|full|read|''", "downgraded":0,
+    "allow_ro":["/p1"], "allow_rw":["/p2"],
+    "granted":["sandbox|/p1"],        // 保留 "mode|path" 原形状,不重新编码
+    "session_id":"20261016-120000-1234",
+    "counters":{"installs":0,"approvals":0,"deny_streak":0,"backups":0},
+    "checkpoint":{"kind":"","head":"","note":"","dirty":0}}
+   ```
+   ⚠ **`granted` 保持 `"mode|path"` 字符串不动**：它已经被 3873/3877 的追加逻辑和路径判定读着，
+   重编码成对象会牵动 `authz`/`pathrule`（两个已收口模块），风险远大于收益。
+   **搬移顺序**：先 `granted`+`allow_*`（纯数据，`py_authz`/`py_pathrule` 已用 argv 传），
+   再 `counters`（只是加减），最后 `checkpoint`（依赖 git/rsync 命令，属胶水，可能留 bash）。
    `inject_mcp`(2825) 与 `inject_auto`(5888) 都在**运行时**被调（`system_inject_all` 1372 / 1374、
    `inject_auto` 6051），没有这个障碍，可以照原计划先切这两处。
      先迁①③（纯追加，可逐字节对照），再迁②（注入），最后 ④ 回滚（改成显式快照 id）。
