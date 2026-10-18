@@ -34,6 +34,26 @@ ck "含 | 的路径不截断"   "$(st 'print(parse("r|/a|b"))')" "[('r', '/a|b')
 ck "CLI append 读改写"  "$(printf 'r|/a' | python3 "$RLDIR/wchat_py/_run.py" state append rw /b | tr '\n' ',')" "r|/a,rw|/b"
 ck "CLI 非法 mode → rc=2" "$(printf '' | python3 "$RLDIR/wchat_py/_run.py" state append zz /x 2>/dev/null; echo $?)" "2"
 
+# ── bash 侧 helper:list_count / list_join ──────────────────────────────────────
+# 会话态从"bash 数组"换字符串后,显示与计数靠这两个。**用临时文件喂多行**:
+# 上轮用嵌套引号的单行命令测三条,失败后整轮白费 —— 测试命令也别依赖巧妙引号。
+# 参考侧走**脚本文件**跑 bash5(wchat.sh 的 bash5 兜底拒绝 `bash -c` 装载)。
+_dw="$(mktemp -d)"
+cat > "$_dw/lc.sh" <<'REF'
+_WCHAT_LIB_ONLY=1 API_KEY=sk-stub
+. "$1" < /dev/null > /dev/null
+case "$2" in
+  count) list_count "$(cat "$3")" ;;
+  join)  list_join  "$(cat "$3")" ;;
+esac
+REF
+: > "$_dw/empty"; printf 'a\nb\nc' > "$_dw/three"
+ck "list_count 空 → 0"      "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat.sh" count "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "0"
+ck "list_count 三条 → 3"    "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat.sh" count "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "3"
+ck "list_join 三条 → a, b, c" "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat.sh" join  "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "a, b, c"
+ck "list_join 空 → 空"      "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat.sh" join  "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" ""
+rm -rf "$_dw"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]
 
