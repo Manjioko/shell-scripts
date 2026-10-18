@@ -3871,6 +3871,12 @@ resolve_path() {
 # 写入(模型提示词里明明写着"该文件已获只读授权",代码却允许 write_file 覆盖它),
 # 而且一次越界读放行后同路径写也静默通过。存储格式 "<r|rw>|<路径>";rw ⊃ r。
 # 旧格式(无 "|" 前缀)按 rw 处理是危险的,所以一律按最小权限 r 处理。
+# 会话态从"bash 数组"换成"换行分隔字符串"后,原来靠 `${#a[@]}` / `${a[*]}` 的
+# **显示与计数**会坏(字符串没有 `#`/`[*]`)。这两个 helper 补位,且刻意用纯 bash ——
+# 显示路径不该为一个数字付 python 冷启动。
+list_count() { [[ -z "${1:-}" ]] && { printf '0'; return 0; }; printf '%s\n' "$1" | wc -l | tr -d ' '; }
+list_join()  { [[ -z "${1:-}" ]] && return 0; printf '%s' "$1" | tr '\n' ',' | sed 's/,/, /g; s/, $//'; }
+
 grant_file() {
     local p="$1" mode="${2:-r}" canon
     granted_list=$(printf '%s' "$granted_list" | py_run state append "$mode" "$p" 2>/dev/null)
