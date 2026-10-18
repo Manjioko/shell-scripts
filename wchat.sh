@@ -931,7 +931,10 @@ input=""
 input_images=()
 # 用户通过 @ 显式选择的文件路径(只读授权):AI 的 read_file/read_image 工具
 # 除 WORK_ROOT 沙箱外,还可读取这些用户亲手选中的文件。写入工具不受影响。
-granted_files=()
+# W11:权限会话态改由 Python 维护同一份"换行分隔的 mode|path"字符串(见 wchat_py/state.py)。
+# 形状与 py_run authz is_granted 的入参完全一致 —— 已收口模块不动是这一步的安全点。
+# 组件不可用时追加失败 ⇒ 名单不增长 ⇒ 继续走硬墙/人工确认(fail-closed)。
+granted_list=""
 # -tr/-to 模式标志:会话全程禁用工具(翻译/词源任务不需要工具,从 API 层面
 # 硬约束——不发送 tools 字段,模型物理上无法发起 tool_call)。
 no_tools=0
@@ -3870,11 +3873,11 @@ resolve_path() {
 # 旧格式(无 "|" 前缀)按 rw 处理是危险的,所以一律按最小权限 r 处理。
 grant_file() {
     local p="$1" mode="${2:-r}" canon
-    granted_files+=("$mode|$p")
+    granted_list=$(printf '%s' "$granted_list" | py_run state append "$mode" "$p" 2>/dev/null)
     # 同时存物理规范化形式,模型用别名/符号链接拼法也能命中
     if [[ -d "$(dirname "$p")" ]]; then
         canon=$(cd "$(dirname "$p")" 2>/dev/null && pwd -P) || return 0
-        granted_files+=("$mode|$canon/$(basename "$p")")
+        granted_list=$(printf '%s' "$granted_list" | py_run state append "$mode" "$canon/$(basename "$p")" 2>/dev/null)
     fi
 }
 # 命中判定:mode 传 r 表示"要读",rw 表示"要写";rw 授权同时满足读写。
@@ -3886,7 +3889,7 @@ is_granted() {
     if _py_on authz; then
         local _rc=0
         printf '%s' "$p" | py_run authz is_granted "$mode" "${HOME:-}" "${WORK_ROOT:-}" \
-            "$(printf '%s\n' ${granted_files[@]+"${granted_files[@]}"})" >/dev/null 2>&1 || _rc=$?
+            "$granted_list" >/dev/null 2>&1 || _rc=$?
         if (( _rc == 0 )); then return 0; fi
         if (( _rc == 1 )); then return 1; fi
     fi
