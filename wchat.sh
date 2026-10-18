@@ -3455,13 +3455,8 @@ compact_messages() {
     #   是数组,旧写法在这里 rc=5,而**报错前已产出的行会照常喂进摘要器** —— 表现为
     #   "压缩成功、摘要里后半段没了"的静默数据损失,比崩溃难发现。图片本体不进转写,
     #   但留一句"此处原有 N 张图"的计数,免得摘要把"看图"这件事整个抹掉。
-    to_compact=$(echo "$messages" | jq -r --argjson start "$start" --argjson cut "$cut" '
-        .[$start:$cut][] |
-        if .tool_calls != null then
-            "[assistant → 工具调用] " + (.tool_calls | tostring)
-        else
-            "[" + .role + "] " + '"$_JQ_CONTENT_TEXT"'
-        end')
+    # W12-4d:转写归 Python(msg render_summary),两处(压缩/提炼)共用同一口径。
+    to_compact=$(printf '%s' "$messages" | py_run msg render_summary "$start" "$cut")
 
     if compact_due "$last_prompt_tokens"; then
         inp_msg "📦 上下文 $last_prompt_tokens tokens 已超阈值 $TOKEN_THRESHOLD,正在自动压缩历史…"
@@ -7730,12 +7725,7 @@ skill_save() {
     # 对话转可读文本(与压缩同款格式),发给 flash 提炼。
     # 取 content 的口径与 compact_messages 必须一致(共用 $_JQ_CONTENT_TEXT):旧写法在这里
     # 同样 rc=5,后果是"技能草稿基于半截对话提炼"——提炼出来的技能会长期误导后续会话。
-    to_summarize=$(echo "$messages" | jq -r '.[1:][] |
-        if .tool_calls != null then
-            "[assistant → 工具调用] " + (.tool_calls | tostring)
-        else
-            "[" + .role + "] " + '"$_JQ_CONTENT_TEXT"'
-        end')
+    to_summarize=$(printf '%s' "$messages" | py_run msg render_summary 1 "")
     inp_msg '📦 正在从当前对话提炼技能…'
     # 用 function calling 拿结构化草稿:tool_calls 的 arguments 由 API 层保证
     # 是合法 JSON,比"提示词要求只输出 JSON"可靠得多(实测 flash 模型对

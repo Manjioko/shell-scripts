@@ -151,11 +151,62 @@ def cmd_init(argv) -> int:
     return _contract.EXIT_OK
 
 
+def _content_text(m):
+    """等价 jq 片段 `_JQ_CONTENT_TEXT`：数组内容拼 text 部件 + **图片只留计数**。
+
+    "图片本体不进文本转写，但留一句'此处原有 N 张图'"——否则摘要/提炼会把'用户看过图'
+    这件事整个抹掉。口径必须与 jq 侧逐字一致，否则同一段对话在压缩与提炼两条路上
+    会给出不同文本（历史上正是这种漂移导致摘要后半段丢失）。
+    """
+    c = m.get("content")
+    if isinstance(c, list):
+        txt = "\n".join((it.get("text") or "") for it in c
+                        if isinstance(it, dict) and it.get("type") == "text")
+        n = sum(1 for it in c if isinstance(it, dict) and it.get("type") == "image_url")
+        if n > 0:
+            txt += "\n(此处原有 %d 张原图,图片本体不进文本转写)" % n
+        return txt
+    return c if isinstance(c, str) else ("" if c is None else str(c))
+
+
+def render_for_summary(messages, start=1, cut=None):
+    """把 messages 转成"人读的对话文本"（压缩摘要 / 技能提炼**共用同一口径**）。
+
+    等价 jq：`.[$start:$cut][] | if .tool_calls != null then "[assistant → 工具调用] " +
+    (.tool_calls|tostring) else "[" + .role + "] " + <_JQ_CONTENT_TEXT> end`
+
+    两处调用原本各写一份（`[$start:$cut]` 与 `[1:]`），只是范围不同 —— 合并成一个函数，
+    避免"两份格式化逻辑漂移"（那种漂移曾导致摘要凭空少一段，且不报错）。
+    """
+    seg = messages[start:cut] if cut is not None else messages[start:]
+    lines = []
+    for m in seg:
+        if not isinstance(m, dict):
+            continue
+        tc = m.get("tool_calls")
+        if tc is not None:
+            lines.append("[assistant → 工具调用] "
+                         + json.dumps(tc, ensure_ascii=False, separators=(",", ":")))
+        else:
+            lines.append("[%s] %s" % (m.get("role"), _content_text(m)))
+    return "\n".join(lines)
+
+
+def cmd_render_summary(argv) -> int:
+    """stdin = messages JSON；argv[0]=start(默认1)、argv[1]=cut(空=到末尾)。"""
+    start = int(argv[0]) if len(argv) > 0 and argv[0] != "" else 1
+    cut = int(argv[1]) if len(argv) > 1 and argv[1] != "" else None
+    msgs = json.loads(_contract.read_stdin_text())
+    _contract.write_text(render_for_summary(msgs, start, cut) + "\n")
+    return _contract.EXIT_OK
+
+
 _COMMANDS = {
     "add": cmd_add,
     "auth_add": cmd_auth_add,
     "inject": cmd_inject,
     "init": cmd_init,
+    "render_summary": cmd_render_summary,
 }
 
 

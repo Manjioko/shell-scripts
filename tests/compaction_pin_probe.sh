@@ -133,7 +133,11 @@ ck "消息侧裸 content 惯用法只剩片段定义那 1 处" "$_naked" "1"
 # 反例:上一条光靠"把守卫都删了"也能变绿。所以同时钉"守卫确实在被用"——
 # 定义 1 处 + 消费点 4 处(summary_pin_count / compact_messages / skill_save / get_history)。
 _uses=$(sed -E 's/^[[:space:]]*#.*//' "$SRC" | grep -cF '$_JQ_CONTENT_TEXT')
-ck "归一口径至少有 4 个消费点在用(防'删断言消红')" "$([[ "$_uses" -ge 4 ]] && echo ge4 || echo "lt4:$_uses")" "ge4"
+# W12-4d:compact_messages / skill_save 两处转写已迁到 Python(msg render_summary),
+# 口径**换了地方但没丢** —— 所以 bash 侧 ≥2,另用一条钉住 Python 侧的 2 个调用点。
+# 两条合起来仍守住原意(防"删断言消红"):谁把 Python 那个函数删了,第二条立刻红。
+ck "归一口径仍有 ≥2 个 bash 消费点" "$([[ "$_uses" -ge 2 ]] && echo ge2 || echo "lt2:$_uses")" "ge2"
+ck "转写口径在 Python 侧仍有 2 个调用点" "$(grep -c 'py_run msg render_summary' "$SRC")" "2"
 ck "片段定义恰好 1 处(不许再出现第二份口径)" \
    "$(grep -c '^_JQ_CONTENT_TEXT=' "$SRC")" "1"
 
