@@ -490,7 +490,17 @@ some_fn() {
    - **铁律（这一步的关键）**：过渡期 `messages` 只能有**一个所有者**。要么 bash 持有、传给人 Python
      （现状，即"信封"），要么**文件持有、bash 只拿路径**。绝不允许"bash 变量 + 磁盘文件两份"并存 ——
      那必然分叉，症状是我们这轮已经见过的那类：前缀被改写（token 从打折变全价）、图丢了却没人报错。
-   - 建议落地：`wchat_py/messages.py`（纯函数：append / trim / compact / 修 tool 配对）+ **文件-backed store**；
+   - ⚠ **修正（核准代码后）**：`msg add` / `msg auth_add` / `compaction due` / `compaction apply`
+     **已经是 Python**（W9 迁入）。所以 4d 剩下的**不是"迁操作"，而是"迁状态所有权"** + 五个仍是
+     bash jq 的赋值点：
+     · 三个**注入点**（636 skills / 2830 MCP / 5897 auto 清单）——形状完全一致（"往 system 里塞一段
+       带标记的文本"），可合成一个 `msg inject <mark> <text>`，一处迁三个；
+     · 两条**初始化**（641 / 8950 的 `jq -n '[{role:"system",content:"You are a helpful assistant."}]'`）
+       → `msg init`；
+     · **载入/孤儿修复**（1241 `jq .messages` / 1253 `messages=$orphan`）；
+     · **四个回滚点**（7943/8032/8050/8146）→ 改成显式快照 id，语义要重新定。
+   - 建议落地：`wchat_py/msg.py` 增 `inject`/`init`/`load`（纯函数，逐字节对照现有 jq 输出）；
+     store 仍是 bash 全局字符串（现状），所有权切换单独一轮做，**不做"变量+文件"双份**。
      先迁①③（纯追加，可逐字节对照），再迁②（注入），最后 ④ 回滚（改成显式快照 id）。
      每步都要 `新增/消失的红条` 可判读，并保持 `全表 569` 与 `堆压缩 37` 不变。
 
