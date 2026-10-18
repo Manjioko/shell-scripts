@@ -22,25 +22,48 @@ import tempfile
 
 
 def load(path, init=None):
-    """读 messages。文件不存在 → 返回 `init`（默认 `[]`）；损坏 → **抛错**（不静默返回空）。"""
+    """读 messages。文件不存在 → 返回 `init`（默认 `[]`）；损坏 → **抛错**（不静默返回空）。
+
+    兼容两种形状（历史文件是**对象**，带 `thinking`/`model`/`title` 等兄弟字段；
+    早期的纯数组文件也要能读）：
+      · `[...]`            → 直接就是 messages
+      · `{"messages":[…]}` → 取 `.messages`
+    """
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         return list(init) if init is not None else []
-    if not isinstance(data, list):
-        raise ValueError("messages store 不是数组: %r" % type(data).__name__)
-    return data
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict) and isinstance(data.get("messages"), list):
+        return data["messages"]
+    raise ValueError("messages store 既不是数组、也不含 messages 数组: %r"
+                     % type(data).__name__)
 
 
 def save(path, messages):
-    """原子写。同目录临时文件 → fsync → `os.replace`。"""
+    """原子写。**若目标文件是对象形状，则保留其兄弟字段**（read-modify-write）。
+
+    为什么必须保留：历史文件里 `messages` 之外还有 `thinking` / `model` / `title`。
+    直接写数组会把它们抹掉 —— 表现是"续聊时思考模式突然变回默认""标题丢了"，
+    而且**没有任何报错**。
+    """
+    doc = messages
+    try:
+        with open(path, encoding="utf-8") as f:
+            cur = json.load(f)
+        if isinstance(cur, dict):
+            cur["messages"] = messages
+            doc = cur
+    except (FileNotFoundError, ValueError):
+        pass
     d = os.path.dirname(os.path.abspath(path)) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".msgs_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(messages, f, ensure_ascii=False)
+            json.dump(doc, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
@@ -62,4 +85,3 @@ def restore(messages, n: int):
     if not isinstance(n, int) or n < 0 or n > len(messages):
         return messages
     return messages[:n]
-

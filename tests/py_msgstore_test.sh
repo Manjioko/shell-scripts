@@ -82,6 +82,42 @@ print(len(load(p)))
 PY
 )" "1"
 
+# ── 接线前必须证明的两件事(否则一切换,旧历史全读不出) ────────────────────────
+# 1) 能读 bash/jq 现在写出的格式:jq 默认输出是 **2 空格缩进的多行 JSON**(不是紧凑格式)。
+ck "能读 jq 的缩进格式历史" "$(py <<'PY' 2>&1 | tail -1
+import os,sys,tempfile; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import load
+p=os.path.join(tempfile.mkdtemp(),"h.json")
+open(p,"w").write('{\n  "messages": [\n    {\n      "role": "system",\n      "content": "s"\n    }\n  ]\n}\n')
+print(len(load(p)))
+PY
+)" "1"
+
+# 2) 往返不改变内容(逐字节):store 写出去的,再读回来必须与内存里一致。
+#    注意比较的是 **JSON 语义等价 + 字节一致** —— 未来若有人给 save 加 indent/排序,
+#    历史文件的字节形态就变了(diff/备份/回放都会受影响),这条会红。
+ck "save→load 逐字节往返" "$(py <<'PY' 2>&1 | tail -1
+import os,sys,tempfile,json; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import load,save
+d=tempfile.mkdtemp(); p=os.path.join(d,"m.json")
+m=[{"role":"system","content":"中文 s"},{"role":"user","content":"hi"}]
+save(p,m); once=open(p,"rb").read(); save(p,load(p)); twice=open(p,"rb").read()
+print("same" if once==twice and json.loads(once)==m else "diff")
+PY
+)" "same"
+
+# 历史文件是**对象**形状(带 thinking/model/title 兄弟字段)。save 若直接写数组,
+# 这些字段会被静默抹掉 —— 表现是"续聊时思考模式变回默认/标题丢了",且没有任何报错。
+ck "save 保留对象里的兄弟字段" "$(py <<'PY2' 2>&1 | tail -1
+import os,sys,tempfile,json; sys.path.insert(0,sys.argv[1])
+from wchat_py.msgstore import load,save
+p=os.path.join(tempfile.mkdtemp(),"h.json")
+open(p,"w").write(json.dumps({"messages":[{"role":"system","content":"s"}],"thinking":{"type":"enabled"},"model":"m1","title":"t"}))
+save(p,[{"role":"system","content":"s"},{"role":"user","content":"hi"}])
+d=json.load(open(p))
+print("%d,%s,%s,%s" % (len(d["messages"]), d["thinking"]["type"], d["model"], d["title"]))
+PY2
+)" "2,enabled,m1,t"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]
-
