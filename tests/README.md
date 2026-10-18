@@ -161,3 +161,7 @@
 > 显示计数 7 处走纯 bash 的 `list_count`/`list_join`);`权限状态` 10→**14/14**;闸门数 **34**;
 > 全量 **run=34 pass=34 fail=0**,`sha=57e16388df7c`。
 > 形状不变(换行分隔 `mode|path`),`py_authz`/`py_pathrule` 接口零改动。
+
+> **W12-4d 转写迁移基线**: `to_compact`/`to_summarize` → `py_run msg render_summary`(共用一份口径,
+> 与 jq 逐字节对照通过);`压缩布局` 37→**38/38**(接线锁改为 bash≥2 + Python 2 调用点);
+> 全量 **run=34 pass=34 fail=0**,`sha=bf59e461dea5`。
