@@ -169,3 +169,9 @@
 > **W12-4 收口判定**: 越界判据抽函数 + 8 样本(压缩布局 38→39);`messages` 操作层全 Python;
 > `tool_round` 与 `retry_after_compact` 编排按判据留 bash/B 阶段。全量 **run=34 pass=34 fail=0**,
 > `sha=63db3fc4cdab`。
+
+> **W12-5 地基基线**: 工具注册表迁 Python(`wchat_py/tools.py` + `tools_spec.json`,原文字节保留);
+> `wchat.sh` **9365 → 9192(-173 行)**;新增闸门 `工具规格` 9/9(闸门 **35**);
+> 全量 **run=35 pass=35 fail=0**,`sha=74bf397d9b0b`。
+> 教训:搬 schema 前先把"grep 源码找 schema/文案"的断言改到规格文件,
+> 否则内联图片 3 条 + 主套件 2 条 + mcp 1 条会静默失效(本轮先栽过一次再修)。
