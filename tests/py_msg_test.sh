@@ -74,4 +74,19 @@ add_message hello
 " _ 2>&1 >/dev/null)
 ck "add_message off → stderr 有明示" "$([[ "$warn" == *"组件不可用"* ]] && echo yes || echo no)" "yes"
 
+# --- W12-4d: msg inject / init（纯函数，逐字节等价 jq）---
+# 先有锁再切调用点：bash 侧三处注入（skills/MCP/auto 清单）与两处初始化还没切，
+# 但那之前必须能判读这两个新函数——否则切完只有"没报错"可看。
+_lf="$W/inj_list.txt"; printf 'A\nB' > "$_lf"
+_mi() { printf '%s' "$1" | PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 "$RLDIR/wchat_py/_run.py" msg inject "$2" "$_lf"; }
+ck "inject: 标记+清单贴在 system 末尾" \
+   "$(_mi '[{"role":"system","content":"base"}]' '<<M>>' | jq -r '.[0].content')" \
+   "$(printf 'base\n\n<<M>>\nA\nB')"
+ck "inject 幂等(二次注入标记仍 1 个)" \
+   "$(_mi "$(_mi '[{"role":"system","content":"base"}]' '<<M>>')" '<<M>>' | grep -c '<<M>>')" "1"
+ck "init: 单条 system" \
+   "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 "$RLDIR/wchat_py/_run.py" msg init | jq -c .)" \
+   '[{"role":"system","content":"You are a helpful assistant."}]'
+
 finish
