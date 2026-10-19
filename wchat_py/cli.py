@@ -156,7 +156,49 @@ def cmd_parse(argv):
     return 0
 
 
+def run_single_turn(content, model=""):
+    """单轮：组消息 → 调 `llm stream` → 用 StreamBox 渲染 → 返回退出码。
+
+    复用现有 Python 件(msg/llm), 不重造; 事件流经同一条 JSON-lines seam(与 bash 一致)。
+    """
+    import json as _json
+    import subprocess
+    from wchat_py import msg as msgmod
+    from wchat_py.render import StreamBox
+
+    msgs = msgmod.append_user(msgmod.init(), content)
+    env_req = {"model": model or os.environ.get("FLASH_MODEL", ""),
+               "messages": msgs, "thinking": "disabled", "tools": []}
+    box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
+    text_all = []
+    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    p.stdin.write(_json.dumps(env_req, ensure_ascii=False))
+    p.stdin.close()
+    for line in p.stdout:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = _json.loads(line)
+        except Exception:
+            continue
+        t = ev.get("t")
+        if t == "text":
+            box.append(ev.get("v") or "")
+            sys.stdout.write(box.paint())
+            sys.stdout.flush()
+        elif t == "error":
+            sys.stderr.write("API 请求失败: %s\n" % ev.get("v"))
+    rc = p.wait()
+    return 0 if rc == 0 else 1
+
+
 def main(argv):
+    if argv and argv[0] == "run-st":
+        st = parse(argv[1:])
+        return run_single_turn(st["content"], st.get("model", ""))
     if argv and argv[0] == "parse":
         from wchat_py.shellio import assign
         return cmd_parse(argv[1:])
