@@ -1,0 +1,35 @@
+{
+ "name": "st_tool",
+ "argv": [
+  "-f",
+  "-st",
+  "list"
+ ],
+ "feed": [],
+ "limit": 30.0,
+ "env": {
+  "BASE_URL": "http://127.0.0.1:50077/v1/chat/completions",
+  "WCHAT_API_KEY": "sk-stub",
+  "HOME": "/var/folders/lc/xc4kw8h96h3g5drxy7pdwrmh0000gp/T/tmpk9yxtbb7/home",
+  "TMPDIR": "/var/folders/lc/xc4kw8h96h3g5drxy7pdwrmh0000gp/T/tmpk9yxtbb7/tmp",
+  "MAX_TOOL_ROUNDS": "25",
+  "CMD_TIMEOUT": "20",
+  "PYTHONPATH": "/Users/jwan/Library/Python/3.9/lib/python/site-packages"
+ },
+ "out_b64": "G1s/MjVsG1s/N2wbWz8yNWgbWz83aCAbWzM2beKPuhtbMG0gG1sxOzM2bWxpc3RfZGlyG1swbSAbWzJtwrcbWzBtIHsicGF0aCI6Ii4ifQ0KDQog5bey5YiX5Ye6IC4NCg0KG1s/MjVsG1s/N2wNCg0KDQoNCg0KDQoNCg0KDQoNChtbOUEbW3MbW3UbWzJLG1sybeKUghtbMG0gRE9ORRtbdRtbMksbWzFCG1t1G1s/MjVoG1s/N2hET05FICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgDQoNChtbPzI1aBtbPzdo",
+ "requests": [
+  {
+   "kind": "main",
+   "n_messages": 2,
+   "orphan_tools": 0
+  },
+  {
+   "kind": "main",
+   "n_messages": 4,
+   "orphan_tools": 0
+  }
+ ],
+ "sandbox": true,
+ "note": "工具链段。**录制确定(两次逐字节相同),但回放不一致** —— 差异在 TUI 的渲染时序(spinner/多行重绘/光标移动),不是业务内容。⇒ §3 第7条'逐字节复现屏幕输出'对带 TUI 重绘的段不成立,需要'归一化比对':剥 ANSI + 折叠 \\r/重复帧 + 只比业务文本序列(或锚点断言)。暂留在 _pending,待回放器加 --normalize 后转正。",
+ "reply": "[{\"type\":\"tool\",\"name\":\"list_dir\",\"args\":{\"path\":\".\"}},{\"type\":\"text\",\"text\":\"DONE\"}]"
+}
