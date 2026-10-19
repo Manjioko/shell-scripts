@@ -68,3 +68,23 @@ class StreamBox:
             out.append("\033[2K" + BAR + self.line)
         return "".join(out)
 
+
+
+def tool_banner(name, preview):
+    """等价 bash `tool_banner`：`printf ' \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n'`。"""
+    return " \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n" % (name, preview)
+
+
+def args_preview(args_json):
+    """等价 bash 的 `jq -c '.'` + null→(参数为空) + >160 字符截断加 `…`。"""
+    import json
+    try:
+        obj = json.loads(args_json) if args_json else None
+    except Exception:
+        obj = None
+    if obj is None:
+        return "(参数为空)"
+    s = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    if len(s) > 160:
+        s = s[:160] + "…"
+    return s

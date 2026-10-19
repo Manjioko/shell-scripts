@@ -263,7 +263,10 @@ def run_turn(content, model="", max_rounds=5):
                                                   "arguments": tc.get("arguments") or "{}"}}
                                     for i, tc in enumerate(tcs)]})
         # 每个调用都必须有配对的 tool 结果, 否则下一轮 400(孤儿 tool_calls)
+        from wchat_py.render import tool_banner, args_preview
         for tc in tcs:
+            sys.stdout.write(tool_banner(tc.get("name") or "", args_preview(tc.get("arguments") or "")))
+            sys.stdout.write("\n"); sys.stdout.flush()
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
