@@ -142,6 +142,31 @@ print('%s/%s|%s/%s|%s/%s' % (a['action'], a['content'], b['action'], b['content'
 [[ "$_py10" == "compact/|usage/|True/hi" ]] && p 10 "-c/-u 动作+break 语义" 0 "$_py10" \
                                             || p 10 "-c/-u 动作+break 语义" 1 "$_py10"
 
+# ── 11. 1c 跨实现比对：Python `run-st` vs bash `st_text` 基线（归一化后一致）──────
+# 这是"Python 能真的跑完一轮对话、且屏幕内容与 bash 等价"的**唯一证据**。
+# 复用 replay_check 的 normalize/_sandbox_env（桩+沙箱+掩码+取最后一帧+剥边框），
+# 不另写一份，避免口径漂移。
+_r11=$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$RLDIR" <<'PYX' 2>&1 | tail -1
+import base64, importlib.util, json, os, sys
+repo = sys.argv[1]
+spec = importlib.util.spec_from_file_location("rc", repo + "/tests/replay_check.py")
+rc = importlib.util.module_from_spec(spec); spec.loader.exec_module(rc)
+d = json.load(open(repo + "/tests/replay/st_text.json", encoding="utf-8"))
+env, stub = rc._sandbox_env(d)
+env["PYTHONPATH"] = repo + ":" + env.get("PYTHONPATH", "")
+try:
+    got = rc.run([sys.executable, "-m", "wchat_py.cli", "run-st", "hi"], [], 60, env)
+finally:
+    if stub:
+        stub.terminate()
+a = rc.normalize(base64.b64decode(d["out_b64"]))
+b = rc.normalize(got)
+print("same" if a == b else "diff(bash=%r py=%r)" % (a, b))
+PYX
+)
+[[ "$_r11" == same ]] && p 11 "Python run-st 与 bash 基线一致" 0 "$_r11" \
+                       || p 11 "Python run-st 与 bash 基线一致" 1 "$_r11"
+
 echo "----"
 printf 'B 验收:通过 %d / 共 %d（未通过 %d）\n' "$ok" "$((ok+bad))" "$bad"
 if [[ $bad -gt 0 ]]; then
