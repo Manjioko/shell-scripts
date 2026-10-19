@@ -22,5 +22,6 @@
  ],
  "sandbox": true,
  "reply": "[{\"type\":\"text\",\"text\":\"ZZTOP\"}]",
- "note": "业务段。回放时必须重建: ①起桩(STUB_REPLY=本文件 reply 字段) ②沙箱 HOME/TMPDIR+~/.ct/config(0600) ③BASE_URL 指向新端口 ④PYTHONPATH 指向真实 user-site(沙箱 HOME 会让 openai import 不到, 本项目已踩 5 次)。"
+ "note": "单轮纯文本。mode=norm: 正文由 stream_box_append 做**节流重绘**(STREAM_THROTTLE + EPOCHREALTIME), 重绘次数依赖墙钟 ⇒ 跨实现(bytes)不可靠; 归一化后比业务文本序列。⚠ 这条是 1c 之前发现的: 若用 bytes 判据, Python 版与 bash 的墙钟差异会造成大量假红。",
+ "mode": "norm"
 }
