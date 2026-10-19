@@ -30,6 +30,7 @@
   }
  ],
  "sandbox": true,
- "note": "工具链段。**录制确定(两次逐字节相同),但回放不一致** —— 差异在 TUI 的渲染时序(spinner/多行重绘/光标移动),不是业务内容。⇒ §3 第7条'逐字节复现屏幕输出'对带 TUI 重绘的段不成立,需要'归一化比对':剥 ANSI + 折叠 \\r/重复帧 + 只比业务文本序列(或锚点断言)。暂留在 _pending,待回放器加 --normalize 后转正。",
- "reply": "[{\"type\":\"tool\",\"name\":\"list_dir\",\"args\":{\"path\":\".\"}},{\"type\":\"text\",\"text\":\"DONE\"}]"
+ "reply": "[{\"type\":\"tool\",\"name\":\"list_dir\",\"args\":{\"path\":\".\"}},{\"type\":\"text\",\"text\":\"DONE\"}]",
+ "mode": "norm",
+ "note": "工具链段。mode=norm: TUI 有 spinner/重绘, 逐字节不可比; 归一化后比业务文本序列。"
 }

@@ -14,6 +14,7 @@ import base64
 import glob
 import json
 import os
+import re
 import pty
 import select
 import signal
@@ -117,6 +118,40 @@ def _sandbox_env(d):
     return env, stub
 
 
+
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][A-Za-z0-9]|\x1b[=>]")
+
+
+def normalize(b):
+    """把屏幕字节归一成**业务文本序列**，供带 TUI 重绘的段比对。
+
+    做什么：剥 ANSI 控制序列 → 按 \r 与 \n 切行 → 去空白 → 丢空行 → **折叠连续重复行**
+    （流式重绘会把同一行画很多次）。
+    不做什么：不排序、不去重（非连续重复保留）——顺序仍有意义。
+    """
+    t = ANSI.sub("", b.decode("utf-8", "replace"))
+    out = []
+    for seg in re.split(r"[\r\n]+", t):
+        seg = seg.strip()
+        if not seg:
+            continue
+        if out and out[-1] == seg:
+            continue
+        out.append(seg)
+    return out
+
+
+def compare(want, got, mode):
+    if mode == "norm":
+        nw, ng = normalize(want), normalize(got)
+        if nw == ng:
+            return None
+        i = next((k for k in range(min(len(nw), len(ng))) if nw[k] != ng[k]), None)
+        return ("norm", i, (nw[i] if i is not None else "<末尾>"), (ng[i] if i is not None else "<末尾>"))
+    if want == got:
+        return None
+    return ("bytes",) + (diff_at(want, got) or (None, b"", b""))
+
 def check_one(path, exe=None):
     d = json.load(open(path, encoding="utf-8"))
     argv = [exe or os.path.join(REPO, "wchat")] + d["argv"]
@@ -127,14 +162,16 @@ def check_one(path, exe=None):
     finally:
         if stub is not None:
             stub.terminate()
-    if got == want:
-        print("  ok   %-16s %d 字节一致" % (d["name"], len(got)))
+    mode = d.get("mode", "bytes")
+    r = compare(want, got, mode)
+    if r is None:
+        print("  ok   %-16s %d 字节一致(%s)" % (d["name"], len(got), mode))
         return True
-    dd = diff_at(want, got)
-    print("  FAIL %-16s 期望 %d 字节 / 实得 %d 字节" % (d["name"], len(want), len(got)))
-    if dd:
-        i, wa, ga = dd
-        print("       首个差异偏移 %d\n       基线: %r\n       实得: %r" % (i, wa, ga))
+    print("  FAIL %-16s 期望 %d 字节 / 实得 %d 字节(%s)" % (d["name"], len(want), len(got), mode))
+    if r[0] == "norm":
+        print("       首个不同的业务行 #%s\n       基线: %r\n       实得: %r" % (r[1], r[2], r[3]))
+    else:
+        print("       首个差异偏移 %s\n       基线: %r\n       实得: %r" % (r[1], r[2], r[3]))
     return False
 
 
