@@ -102,6 +102,8 @@ def parse(argv):
     这里用 shellio.assign 输出赋值语句，由 bash `eval` 回去 —— 与硬墙那条回传通道同一套。
     """
     content = ""
+    model = ""
+    thinking = "disabled"
     forget_history = 0
     quick_mode = 0
     seen_help = 0
@@ -117,13 +119,21 @@ def parse(argv):
             seen_help = 1
         elif a == "-f":
             forget_history = 1
+        elif a == "-t":
+            thinking = "enabled"
+        elif a == "-p":
+            model = os.environ.get("PRO_MODEL", "")
+        elif a == "-dp":
+            thinking = "enabled"
+            model = os.environ.get("PRO_MODEL", "")
         elif a == "-st" or a == "-to":
             quick_mode = 1
             forget_history = 1
         else:
             unknown.append(a)
         i += 1
-    return {"content": content, "forget_history": str(forget_history),
+    return {"content": content, "model": model, "thinking": thinking,
+            "forget_history": str(forget_history),
             "quick_mode": str(quick_mode), "seen_help": str(seen_help),
             "unknown": " ".join(unknown)}
 

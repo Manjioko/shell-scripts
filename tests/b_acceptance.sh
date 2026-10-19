@@ -113,18 +113,18 @@ cat > "$_po" <<'REF'
 _WCHAT_LIB_ONLY=1 API_KEY=sk-stub
 . "$1" < /dev/null > /dev/null
 shift
-content=""; quick_mode=0; forget_history=0
+content=""; quick_mode=0; forget_history=0; model=""; thinking=disabled; pro_model="${PRO_MODEL:-}"
 parse_options "$@"
-printf '%s|%s|%s' "$content" "$quick_mode" "$forget_history"
+printf '%s|%s|%s|%s|%s' "$content" "$quick_mode" "$forget_history" "$model" "$thinking"
 REF
 _bad=0; _n=0
-for v in "-f -st hello world" "-st" "abc"; do
+for v in "-f -st hello world" "-st" "abc" "-t" "-p" "-dp" "-f -dp 问题文本"; do
     _n=$((_n+1))
     b=$(/opt/homebrew/bin/bash "$_po" "$RLDIR/wchat.sh" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
-    content=""; quick_mode=0; forget_history=0
+    content=""; quick_mode=0; forget_history=0; model=""; thinking=disabled
     eval "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
-    [[ "$b" == "$content|$quick_mode|$forget_history" ]] || {
-        _bad=$((_bad+1)); echo "      差异 argv[$v]: bash=$b py=$content|$quick_mode|$forget_history"
+    [[ "$b" == "$content|$quick_mode|$forget_history|$model|$thinking" ]] || {
+        _bad=$((_bad+1)); echo "      差异 argv[$v]: bash=$b py=$content|$quick_mode|$forget_history|$model|$thinking"
     }
 done
 [[ "$_bad" == 0 ]] && p 9 "参数解析 parity($_n 组)" 0 "全部一致" \
