@@ -130,6 +130,12 @@ def normalize(b):
     不做什么：不排序、不去重（非连续重复保留）——顺序仍有意义。
     """
     t = ANSI.sub("", b.decode("utf-8", "replace"))
+    # 整窗重绘语义: `\033[u` 是"光标归位后重画整个窗口"的分界(被 ANSI 剥掉后表现为分段),
+    # 所以**只保留最后一帧** = 最终可见内容。不这样做, 部分行的多次重绘会直接拼接
+    # (bash 的部分行重绘不带 \r), 原始字节里出现 ZZTOPZZTOP 这种重复, 而真终端上是对的。
+    _raw = b.decode("utf-8", "replace")
+    if "\033[u" in _raw:
+        t = ANSI.sub("", _raw.rsplit("\033[u", 1)[1])
     # 掩掉易变量: auto_session_id(时间戳+PID)、临时路径、端口。
     # 不掩这些, auto 段天然不可重复(实测: 连录两次不一致)。
     t = re.sub(r"\d{8}-\d{6}-\d+", "<SID>", t)
