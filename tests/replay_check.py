@@ -162,6 +162,13 @@ def normalize(b):
         _skip_next_bar = (seg == "<CPR-WARN>")
         if seg == "<CPR-WARN>":
             continue
+        # 边框 `│ ` 是**装饰**(与 ANSI 同性质): 它只是"在容器内输出"的视觉标记,
+        # 不是业务内容。跨实现时 bash 的收尾帧由 prompt_toolkit 重绘、不带边框,
+        # 不归一掉就会永远差这一个前缀。⇒ 统一剥掉行首边框。
+        if seg.startswith("│ "):
+            seg = seg[2:]
+            if not seg:
+                continue
         if out and out[-1] == seg:
             continue
         out.append(seg)
