@@ -355,6 +355,25 @@ some_fn() {
 | 命令胶水 | `path_access` / `hard_deny_cmd` 编排 / `checkpoint` / `counters` | git、rsync、审计、一次加减 |
 | 数据 | `tools_spec.json`(已外置) / 提示词 / UI 文案 / 配置常量 | 不是逻辑 |
 
+🟢 **`hard_deny_cmd` 迁移可行性评估（本轮实测，结论：可行，装置改动很小）**
+- harness 机制（`tests/test_hardwall.sh` 85–108）：把源码里**按名字 eval 进测试 shell**
+  （一个自动循环 `^hd_[a-z_0-9]+\(\)` + 一个显式名单，`hard_deny_cmd` 在名单里），
+  然后 569 条断言**直接调用**这些 bash 函数。
+- ⇒ 迁 Python 后**不需要重写抽取模型**：只要在名单处把 `hard_deny_cmd` 换成
+  **一个 stub**（`hard_deny_cmd() { eval "$(py_run hd cmd "$@")"; }`），断言一行都不用改。
+  **我先前说"必须同轮改测试装置、是大工程"是错的**——装置侧改动只有这一处 stub。
+- 真正的难点是**结果回传**：`hard_deny_cmd` 通过 **bash 全局**通信
+  （`hd_rule` / `hd_msg` / `HD_SOFT` / `HD_PAYLOAD`）。子进程无法设 bash 全局，所以
+  Python 侧要把这些**编码成 shell 赋值语句**返回、由 stub `eval` 回去；`hd_msg` 是自由文本，
+  必须严格转义（用 `printf %q` 或 base64）。
+- 另一利好：它调用的 11 个 `hd_*` 谓词**都已路由到 Python**，所以 Python 版的
+  `hard_deny_cmd` 是**同进程直接调**那些纯函数，没有 IPC 开销。
+- **工作量估计**：221 行代码的直译 + 回传协议 + stub + 跑 569 条。**约一轮可完成**，
+  且 569 条断言天然兜住每个规则分支（改错立刻红）。
+
+⇒ **结论修正**：`hard_deny_cmd` 不该"单独立项拖着"，它是**一轮可做完的**，
+建议作为 A 阶段真正的收尾项（做完 A 阶段就真的没有争议项了）。
+
 ⇒ **按此标准，A 阶段只剩一项真正的争议项**：`hard_deny_cmd` 的**编排半**(221 行代码，
 谓词已在 `hd.py`)。它被 569 条断言"按名字从 bash 抽函数"的模型锁住，迁它必须同轮改测试装置。
 **建议：把这一项单独立项，而不是算作 A 阶段未完成**——A 阶段的定义（逻辑在 Python、bash 留路由/胶水）
