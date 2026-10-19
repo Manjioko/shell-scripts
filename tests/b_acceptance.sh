@@ -131,6 +131,17 @@ done
                     || p 9 "参数解析 parity($_n 组)" 1 "$_bad 组不一致"
 rm -f "$_po"
 
+# ── 10. -c / -u 的"动作 + break"语义（bash 侧有副作用，故只做 Python 侧断言）──
+# bash 里是 `compact_messages; break` / `print_usage; break` —— 不是标志，是"解析期立即执行并终止"。
+# 关键风险：不 break 时 `-c x` 的 x 会被当正文（静默改变行为）。这里钉住 break。
+_py10=$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -c "
+from wchat_py.cli import parse
+a=parse(['-c','x']); b=parse(['-u','y']); c=parse(['-st','hi'])
+print('%s/%s|%s/%s|%s/%s' % (a['action'], a['content'], b['action'], b['content'], c['action']=='' , c['content']))
+" 2>/dev/null)
+[[ "$_py10" == "compact/|usage/|True/hi" ]] && p 10 "-c/-u 动作+break 语义" 0 "$_py10" \
+                                            || p 10 "-c/-u 动作+break 语义" 1 "$_py10"
+
 echo "----"
 printf 'B 验收:通过 %d / 共 %d（未通过 %d）\n' "$ok" "$((ok+bad))" "$bad"
 if [[ $bad -gt 0 ]]; then

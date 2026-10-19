@@ -107,6 +107,7 @@ def parse(argv):
     forget_history = 0
     quick_mode = 0
     seen_help = 0
+    action = ""
     unknown = []
     i = 0
     while i < len(argv):
@@ -126,6 +127,16 @@ def parse(argv):
         elif a == "-dp":
             thinking = "enabled"
             model = os.environ.get("PRO_MODEL", "")
+        elif a == "-c":
+            # ⚠ -c/-u 不是标志, 是"解析期立即执行 + break":
+            #   bash 里是 `compact_messages; break` / `print_usage; break`。
+            #   所以这里只记 action 并**终止解析**(后面的参数不会被消费) ——
+            #   若不 break, `-c x` 里的 x 会被当正文, 静默改变行为。
+            action = "compact"
+            break
+        elif a == "-u":
+            action = "usage"
+            break
         elif a == "-st" or a == "-to":
             quick_mode = 1
             forget_history = 1
@@ -134,7 +145,7 @@ def parse(argv):
         i += 1
     return {"content": content, "model": model, "thinking": thinking,
             "forget_history": str(forget_history),
-            "quick_mode": str(quick_mode), "seen_help": str(seen_help),
+            "quick_mode": str(quick_mode), "seen_help": str(seen_help), "action": action,
             "unknown": " ".join(unknown)}
 
 
