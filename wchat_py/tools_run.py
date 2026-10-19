@@ -39,3 +39,18 @@ def list_dir(resolved, display_path):
         "\n".join(dirs) if dirs else "(空)")
     return (content, " 已列出 %s" % display_path)
 
+
+
+def read_file(resolved, display_path, offset, limit, read_max, work_root):
+    """等价 bash `tool_read_file` 的格式化后半（授权 `path_access` 在 bash）。
+
+    返回 (content, status_line)。status_line 是印到屏幕的进度行，**不进上下文**。
+    · 非文件 → 错误 content（含解析结果与工作根）+ ` ⛔ 文件不存在:` 状态行
+    · 是文件 → filefmt.read_fmt 出 content + ` 已读取 X(N 行)` 状态行
+    """
+    if not os.path.isfile(resolved):
+        return ("错误:文件不存在: %s(解析为 %s;工作根 %s)" % (display_path, resolved, work_root),
+                " ⛔ 文件不存在:%s" % resolved)
+    from wchat_py.filefmt import read_fmt
+    j = read_fmt(resolved, display_path, offset, limit, read_max)
+    return (j["content"], " 已读取 %s(%s 行)" % (display_path, j["lines"]))

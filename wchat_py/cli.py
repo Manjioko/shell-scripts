@@ -227,7 +227,7 @@ def _call_llm(msgs, model):
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
-    from wchat_py.tools_run import list_dir
+    from wchat_py.tools_run import list_dir, read_file
     try:
         a = _json.loads(args_json or "{}")
     except Exception:
@@ -236,7 +236,18 @@ def _run_tool(name, args_json):
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径
         resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
-        content, _status = list_dir(resolved, path)
+        content, status = list_dir(resolved, path)
+        if status:
+            sys.stdout.write(status + "\n")
+        return content
+    if name == "read_file":
+        path = a.get("path") or ""
+        resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        work_root = os.environ.get("WORK_ROOT") or os.getcwd()
+        content, status = read_file(resolved, path, a.get("offset"), a.get("limit"),
+                                    os.environ.get("READ_MAX_CHARS", "30000"), work_root)
+        if status:
+            sys.stdout.write(status + "\n")
         return content
     return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
 
