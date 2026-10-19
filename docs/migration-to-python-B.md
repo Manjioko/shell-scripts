@@ -103,6 +103,24 @@ bash tests/run_gates.sh --main      # 期望 run=35 pass=35 fail=0（B 期间闸
 第 5 步  删 wchat.sh（此时它已无调用方），跑完整验收清单
 ```
 
+### 5.1 第 1 步（非交互路径）的切片——按可判读性排序
+
+| 切片 | 内容 | 判据 | 说明 |
+|---|---|---|---|
+| **1a** | `wchat.py` 入口 + `print_usage`（46 行） | 回放 `help` 段**逐字节**一致 | 最小可验切片；`bytes` 级判据 |
+| 1b | `parse_options` 的**非 auto 子集**（`-h/-f/-st/-to/-n/-c` 等） | 每个参数一条断言 + `repl_start` 回放 | 不碰 auto（签名时序未解决） |
+| 1c | 单轮流程（`-st`）：组请求 → 调 `llm stream` → 渲染 → 退出 | 回放 `st_text`（bytes） | 已有基线 |
+| 1d | 工具链（`-st` + 工具）：分发 + `add_message` + 续发 | 回放 `st_tool`（norm）+ `orphan_tools==0` | 已有基线 |
+
+**顺序不可换**：1a 先把"入口与输出"钉住，才有地方挂 1b 的参数解析；
+1c/1d 依赖 1b 的参数与 1a 的入口。
+
+**每切片都必须**：`git ls-files '*.sh'` 不变（`wchat.sh` 仍在，作为退路）+ 该切片判据绿 +
+`run_gates --main` 仍 `pass=35 fail=0`。
+
+**入口形态**：`wchat` 保持为 ≤5 行 shim（宪章 §2 豁免 3），`exec python3 -m wchat_py.cli "$@"`；
+等 1a~1d 全绿、且 `wchat.sh` 无调用方后，再把 `wchat` 换成 console_scripts。
+
 **任何时刻都必须有一条能跑的退路**：`wchat.sh` 只在第 5 步删除，之前它始终可用。
 反过来（先删 bash 再补 Python）会在中途失去可运行版本——风险不可控，**禁止**。
 
