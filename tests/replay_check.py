@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""B 阶段回放**比对器**：同 argv 重跑一遍，与录制基线逐字节比对。
+
+这是 B 阶段"删掉 bash 之后有没有退化"的唯一硬判据，所以它自己必须能被判读：
+  · 差异时打印**首个不同字节的偏移 + 两侧上下文**（而不是只报"不一致"）；
+  · `--self-test` 故意篡改基线，验证它**确实会红**（防恒绿）。
+
+用法：
+    python3 tests/replay_check.py            # 跑全部 tests/replay/*.json
+    python3 tests/replay_check.py help       # 只跑某一段
+    python3 tests/replay_check.py --self-test  # 自检：篡改基线必须变红
+"""
+import base64
+import glob
+import json
+import os
+import pty
+import select
+import signal
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+RDIR = os.path.join(HERE, "replay")
+
+
+def run(argv, feed, limit, env_extra):
+    env = dict(os.environ)
+    env.update(env_extra or {})
+    env["TERM"] = env.get("TERM", "xterm-256color")
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir("/tmp")
+        os.execvpe(argv[0], argv, env)
+        os._exit(127)
+    buf = bytearray()
+    feeds = list(feed or [])
+    start = last = time.time()
+    while time.time() - start < limit:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            buf.extend(data)
+            last = time.time()
+        if feeds and time.time() - last > 2.5:
+            os.write(fd, (feeds.pop(0) + "\n").encode())
+            last = time.time()
+        if not feeds and time.time() - last > 4:
+            break
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    time.sleep(0.2)
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    return bytes(buf)
+
+
+def diff_at(a, b):
+    n = min(len(a), len(b))
+    i = next((k for k in range(n) if a[k] != b[k]), None)
+    if i is None:
+        if len(a) == len(b):
+            return None
+        i = n
+    return i, a[max(0, i - 30):i + 30], b[max(0, i - 30):i + 30]
+
+
+def check_one(path, exe=None):
+    d = json.load(open(path, encoding="utf-8"))
+    argv = [exe or os.path.join(REPO, "wchat")] + d["argv"]
+    want = base64.b64decode(d["out_b64"])
+    got = run(argv, d.get("feed") or [], d.get("limit", 30), d.get("env") or {})
+    if got == want:
+        print("  ok   %-16s %d 字节一致" % (d["name"], len(got)))
+        return True
+    dd = diff_at(want, got)
+    print("  FAIL %-16s 期望 %d 字节 / 实得 %d 字节" % (d["name"], len(want), len(got)))
+    if dd:
+        i, wa, ga = dd
+        print("       首个差异偏移 %d\n       基线: %r\n       实得: %r" % (i, wa, ga))
+    return False
+
+
+def main(argv):
+    exe = None
+    names = []
+    self_test = False
+    for a in argv:
+        if a == "--self-test":
+            self_test = True
+        else:
+            names.append(a)
+    files = ([os.path.join(RDIR, n + ".json") for n in names] if names
+             else sorted(glob.glob(os.path.join(RDIR, "*.json"))))
+    if not files:
+        print("没有回放基线（tests/replay/*.json）")
+        return 2
+    if self_test:
+        # 篡改基线 1 个字节 → 比对器必须报 FAIL。防"恒绿判据"。
+        p = files[0]
+        d = json.load(open(p, encoding="utf-8"))
+        raw = bytearray(base64.b64decode(d["out_b64"]))
+        if not raw:
+            print("自检失败：基线为空，无法篡改")
+            return 2
+        raw[len(raw) // 2] ^= 0xFF
+        d["out_b64"] = base64.b64encode(bytes(raw)).decode("ascii")
+        tmp = os.path.join(RDIR, "_selftest.json")
+        d["name"] = "_selftest"
+        json.dump(d, open(tmp, "w", encoding="utf-8"), ensure_ascii=False)
+        ok = check_one(tmp)
+        os.unlink(tmp)
+        print("自检：" + ("✅ 篡改后确实变红（判据有效）" if not ok
+                        else "❌ 篡改后仍然绿 —— 判据是假的！"))
+        return 0 if not ok else 1
+    okall = True
+    for p in files:
+        if not check_one(p, exe):
+            okall = False
+    print("回放：%d 段，%s" % (len(files), "全部一致" if okall else "有差异"))
+    return 0 if okall else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+
