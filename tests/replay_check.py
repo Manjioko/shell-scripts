@@ -135,6 +135,8 @@ def normalize(b):
     t = re.sub(r"\d{8}-\d{6}-\d+", "<SID>", t)
     t = re.sub(r"/var/folders/[^\s]*|/tmp/[^\s]*", "<TMP>", t)
     t = re.sub(r"127\.0\.0\.1:\d+", "127.0.0.1:<PORT>", t)
+    # 终端产物, 非业务输出: pty 无 CPR 支持时 prompt_toolkit 会打这行
+    t = re.sub(r"(?m)^.*doesn.t support cursor position requests.*$", "<CPR-WARN>", t)
     out = []
     for seg in re.split(r"[\r\n]+", t):
         seg = seg.strip()

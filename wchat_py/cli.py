@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""B 阶段 1a：Python 入口 + `-h` 帮助输出（逐字节等价 bash 的 `help_user`）。
+
+为什么从 `-h` 开始：它**不依赖 API、不依赖终端交互**，却覆盖了"入口 + 参数分派 + 输出格式"
+三件事，而且已有 `tests/replay/help.json` 这个 **bytes 级**基线可判读。
+
+`inp_msg` 等价于 bash 的：
+    printf '%s\\n' "$*" | sed $'s/^/\\033[2m│\\033[0m /'
+即每行前缀 `\\033[2m│\\033[0m `（暗色竖线 + 空格）。
+
+⚠ 插值项（`MCP_CONFIG` / `SKILLS_DIR` / `SKILLS_DIR_DEFAULT`）必须与 bash 侧**同源**：
+优先取环境变量，其次取这里的默认值。任何一处不一致，`help` 基线的 bytes 比对会立刻红。
+"""
+import os
+import sys
+
+MC_DIRNAME = ".mcporter"
+
+
+def inp_msg(msg=""):
+    """等价 bash 的 inp_msg：每行加暗色 `│ ` 前缀。"""
+    sys.stdout.write("\033[2m│\033[0m " + msg + "\n")
+
+
+def _skills_dir_default():
+    return os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+        os.environ.get("HOME", ""), "." + "c" + "t", "skills")
+
+
+def help_user():
+    # 实测: bash 侧 MCP_CONFIG 默认指向用户目录下的 mcporter 配置(不是 .ct/mcp.json);
+    # 猜错会让 help 基线的 bytes 比对立刻红 —— 这正是 bytes 级判据的价值。
+    mcp_cfg = os.environ.get("MCP_CONFIG") or os.path.join(
+        os.environ.get("HOME", ""), MC_DIRNAME, "mcporter.json")
+    skills_dir = os.environ.get("SKILLS_DIR") or _skills_dir_default()
+    sd_default = _skills_dir_default()
+
+    inp_msg("使用方法: ct [选项] [内容]")
+    inp_msg("选项:")
+    inp_msg("  -t    启用思考模式")
+    inp_msg("  -p    使用 deepseek-v4-pro 模型")
+    inp_msg("  -dp   启用思考模式并使用 deepseek-v4-pro 模型")
+    inp_msg("  -l    查看历史记录并选择加载")
+    inp_msg("  -f    忽略历史记录")
+    inp_msg("  -tr   翻译任务")
+    inp_msg("  -to   词源词根解释任务")
+    inp_msg("  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)")
+    inp_msg("  -auto  敏感权限全自动(免逐次确认)。可接档位: -auto / -auto=read|sandbox|full")
+    inp_msg("         read=只自动放行越界读取 | sandbox(默认)=工作目录内全自动 | full=再加 --allow-write 名单")
+    inp_msg("         硬墙(提权/系统路径/凭据/越界写/强推/下载即执行)任何档位都不放行;启动需输入 AUTO 签字")
+    inp_msg("  --allow 路径 / --allow-write 路径  越界只读/可写白名单(可多次,配合 -auto)")
+    inp_msg("  --allow-install [包名,逗号]  允许 auto 安装这些包(配额 AUTO_MAX_INSTALLS,默认 5);不带包名 = 全开并警告。换源一律拒")
+    inp_msg("  -mcp [服务器,逗号]  启用 MCP 外部能力(mcp_tools/mcp_schema/mcp_call 三条通道)")
+    inp_msg("         清单来自 %s;**必须在该文件里写 \"imports\": []**,否则会带进" % mcp_cfg)
+    inp_msg("         Codex/VS Code 等其它程序声明的 server(wchat 会主动报出并排除,但别依赖这个)")
+    inp_msg("         ⚠ 这是**能力开关,不是安全边界**:不带 -mcp 只表示我们不提供这三条通道,")
+    inp_msg("           模型仍可用 run_shell_command 自行调用 mcporter。无人值守 + auto 时必须点名")
+    inp_msg("         启动时把每个 server **实际拿到的命令行原样摊开**;我们不解释也不替你改第三方参数")
+    inp_msg("         (第三方参数会随版本改名,写死在我们代码里只会静默失效)。遥测、脱敏头这类")
+    inp_msg("         开关请按各 server 自己的文档设;启动输出里那行就是它实际拿到的参数。")
+    inp_msg("  -img  发送图片(后接图片路径,自动转述为文字)")
+    inp_msg("  -skill 从当前对话提炼技能,确认后保存到本次生效的技能目录(见下)")
+    inp_msg("         当前技能目录: %s(未设 SKILLS_DIR 时为 %s;外置值须过校验)" % (skills_dir, sd_default))
+    inp_msg("  -c    手动压缩对话历史")
+    inp_msg("  -u    查看当前上下文 token 用量")
+    inp_msg("  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)")
+    inp_msg("  -h    显示帮助信息")
+    inp_msg()
+    inp_msg("内容交互时，也可使用以下选项:")
+    inp_msg("  -msgs 显示当前消息记录")
+    inp_msg("  -l    查看历史记录并选择加载")
+    inp_msg("  -skill 从当前对话提炼技能,确认后保存到 %s" % skills_dir)
+    inp_msg("  -c    手动压缩对话历史")
+    inp_msg("  -n    新对话(清空历史并清屏)")
+    inp_msg("  -cl   清屏(保留对话历史)")
+    inp_msg("  -stp  切换到 pro 模型")
+    inp_msg("  -auto[=read|sandbox|full]  会话中途开启/切换 auto 档位(需重新签字)")
+    inp_msg("  -noauto  关闭 auto,恢复逐次人工确认")
+    inp_msg("  -stt  开启思考模式")
+    inp_msg("  -stf  恢复默认(flash 模型,关闭思考)")
+    inp_msg("  -fs   立即保存当前对话历史(-f 模式下静默跳过)")
+    inp_msg("  -md   查看当前模型/思考/标题信息")
+    inp_msg("  -u    查看当前上下文 token 用量")
+    inp_msg("  -img <路径> 发送图片(自动转述为文字)")
+    inp_msg("  Ctrl+F 选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)")
+    inp_msg("  Ctrl+G/Ctrl+V 粘贴剪贴板图片(截图后直接附加,自动转述;部分终端下直接粘贴亦可)")
+    inp_msg("  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)")
+    inp_msg("  -h    显示帮助信息")
+    inp_msg()
+    inp_msg("输入规则:")
+    inp_msg("  - 回车 = 发送整段(缓冲区为空时不动)")
+    inp_msg("  - 想换行:把行尾写成 \\ 再回车(反斜杠会被吃掉,不发送,继续输入)")
+    inp_msg("  - 粘贴多行文本会自动折叠成一行占位,回车发送时原样展开")
+    inp_msg("  - -x 命令仅在单行输入时生效;多行/续行中输入 -x 按正文处理")
+    inp_msg("  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入")
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        help_user()
+        return 0
+    # 1b 起才接管其它参数；现在明确告知"还没迁到"，不静默成功。
+    sys.stderr.write("cli: 该参数尚未迁移到 Python 入口（B 阶段 1b 起逐步接管）: %r\n" % (argv,))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
+
