@@ -566,7 +566,16 @@ ck "E6 对照组正文到达"                   "$(grep -ac 'E6FINALBODY' "$BASE
 # 所以必须钉住。用 -F 固定串匹配(不写正则:这里全是 ${}/%% 这类正则元字符,转义必炸)。
 ck "人类通道'未知命令'兜底仍在(删守卫未留空档)" \
    "$(grep -Fc '未知命令: ${trimmed%% *}' "$REAL")" 1
-[[ $fail -eq 0 ]] && rm -rf "$BASE" || echo "   现场保留:$BASE(cat out-s1.log / req-s1.jsonl / $AUTO_LOG)"
+# KEEP_BASE=1:即使全绿也保留现场 —— B 阶段用它**收割 pty 原始字节**当回放基线
+# (auto_test 的 pty 驱动已把屏幕上每一字节写进 out-s<name>.log, 且它的签名喂键是跑通 e2e 的,
+#  比另造一套确定性签名可靠得多)。
+if [[ "${KEEP_BASE:-0}" == 1 ]]; then
+    echo "   现场保留(KEEP_BASE=1):$BASE"
+elif [[ $fail -eq 0 ]]; then
+    rm -rf "$BASE"
+else
+    echo "   现场保留:$BASE(cat out-s1.log / req-s1.jsonl / $AUTO_LOG)"
+fi
 # 本函数是 `e2e() ( ... )` —— **子 shell**,里面的 fail 出不去。不显式回传的话,
 # 任何 e2e 失败都会被结尾那句"✅ 全部通过"掩盖(run_gates 又只看结论行 + rc=0,
 # 于是整条 e2e 层一直是"永远绿"的假保险)。这里用退出码把失败条数带出去。
