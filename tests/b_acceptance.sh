@@ -167,6 +167,30 @@ PYX
 [[ "$_r11" == same ]] && p 11 "Python run-st 与 bash 基线一致" 0 "$_r11" \
                        || p 11 "Python run-st 与 bash 基线一致" 1 "$_r11"
 
+# ── 12. 1d 跨实现比对：Python run-st + 工具 vs bash st_tool 基线(norm) ──────────
+# 工具链: 请求→tool_calls(list_dir)→执行→续发→DONE。norm 级: TUI 有 spinner/重绘,
+# 逐字节不可比; 归一化后比业务文本序列。orphan_tools 另在桩日志断言(见 auto_test)。
+_r12=$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 - "$RLDIR" <<'PYX' 2>&1 | tail -1
+import base64, importlib.util, json, sys
+repo = sys.argv[1]
+spec = importlib.util.spec_from_file_location("rc", repo + "/tests/replay_check.py")
+rc = importlib.util.module_from_spec(spec); spec.loader.exec_module(rc)
+d = json.load(open(repo + "/tests/replay/st_tool.json", encoding="utf-8"))
+env, stub = rc._sandbox_env(d)
+env["PYTHONPATH"] = repo + ":" + env.get("PYTHONPATH", "")
+try:
+    got = rc.run([sys.executable, "-m", "wchat_py.cli", "run-st", "list"], [], 60, env)
+finally:
+    if stub:
+        stub.terminate()
+a = rc.normalize(base64.b64decode(d["out_b64"]))
+b = rc.normalize(got)
+print("same" if a == b else "diff(bash=%r py=%r)" % (a, b))
+PYX
+)
+[[ "$_r12" == same ]] && p 12 "Python 工具链与 bash 基线一致" 0 "$_r12" \
+                       || p 12 "Python 工具链与 bash 基线一致" 1 "$_r12"
+
 echo "----"
 printf 'B 验收:通过 %d / 共 %d（未通过 %d）\n' "$ok" "$((ok+bad))" "$bad"
 if [[ $bad -gt 0 ]]; then
