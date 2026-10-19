@@ -138,9 +138,18 @@ def normalize(b):
     # 终端产物, 非业务输出: pty 无 CPR 支持时 prompt_toolkit 会打这行
     t = re.sub(r"(?m)^.*doesn.t support cursor position requests.*$", "<CPR-WARN>", t)
     out = []
+    _skip_next_bar = False
     for seg in re.split(r"[\r\n]+", t):
         seg = seg.strip()
         if not seg:
+            continue
+        # CPR 产物: <CPR-WARN> 行 + 紧随其后的孤立 '│'(prompt_toolkit 收到 CPR 响应后打的),
+        # 两者都不是业务输出, 成对丢弃。
+        if _skip_next_bar and seg == "│":
+            _skip_next_bar = False
+            continue
+        _skip_next_bar = (seg == "<CPR-WARN>")
+        if seg == "<CPR-WARN>":
             continue
         if out and out[-1] == seg:
             continue
