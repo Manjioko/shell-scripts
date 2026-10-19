@@ -105,6 +105,32 @@ rm -f "$_ph"
 [[ "$_r" == same* ]] && p 8 "Python -h 与 bash 基线一致" 0 "$_r" \
                       || p 8 "Python -h 与 bash 基线一致" 1 "$_r"
 
+# ── 9. 参数解析 parity：python cli parse vs bash parse_options（逐项一致）──────────
+# ⚠ 读法必须用 eval：shellio.assign 用 shlex.quote，**只在需要时加引号**
+# （content=abc 不加引号、content='' 加引号），用 awk/sed 解析会一半对一半错。
+_po="$RLDIR/.scratch/_po_ref.sh"
+cat > "$_po" <<'REF'
+_WCHAT_LIB_ONLY=1 API_KEY=sk-stub
+. "$1" < /dev/null > /dev/null
+shift
+content=""; quick_mode=0; forget_history=0
+parse_options "$@"
+printf '%s|%s|%s' "$content" "$quick_mode" "$forget_history"
+REF
+_bad=0; _n=0
+for v in "-f -st hello world" "-st" "abc"; do
+    _n=$((_n+1))
+    b=$(/opt/homebrew/bin/bash "$_po" "$RLDIR/wchat.sh" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
+    content=""; quick_mode=0; forget_history=0
+    eval "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
+    [[ "$b" == "$content|$quick_mode|$forget_history" ]] || {
+        _bad=$((_bad+1)); echo "      差异 argv[$v]: bash=$b py=$content|$quick_mode|$forget_history"
+    }
+done
+[[ "$_bad" == 0 ]] && p 9 "参数解析 parity($_n 组)" 0 "全部一致" \
+                    || p 9 "参数解析 parity($_n 组)" 1 "$_bad 组不一致"
+rm -f "$_po"
+
 echo "----"
 printf 'B 验收:通过 %d / 共 %d（未通过 %d）\n' "$ok" "$((ok+bad))" "$bad"
 if [[ $bad -gt 0 ]]; then
@@ -113,4 +139,3 @@ if [[ $bad -gt 0 ]]; then
 fi
 echo "✅ B 阶段验收全部满足：可以删 wchat.sh 了。"
 exit 0
-
