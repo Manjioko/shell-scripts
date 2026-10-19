@@ -95,7 +95,50 @@ def help_user():
     inp_msg("  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入")
 
 
+def parse(argv):
+    """解析命令行 → 状态字典（**纯函数**，不设全局）。
+
+    为什么返回 dict 而不是直接改全局：bash 侧的状态仍归 bash（B 第 4 步才谈所有权）。
+    这里用 shellio.assign 输出赋值语句，由 bash `eval` 回去 —— 与硬墙那条回传通道同一套。
+    """
+    content = ""
+    forget_history = 0
+    quick_mode = 0
+    seen_help = 0
+    unknown = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if not a.startswith("-"):
+            # ⚠ 注意: bash 是 `content+="${!i}"` —— **无分隔符直接拼接**,
+            # 所以 `-st hello world` 得到 `helloworld`。不要"顺手"加空格。
+            content += a
+        elif a == "-h":
+            seen_help = 1
+        elif a == "-f":
+            forget_history = 1
+        elif a == "-st" or a == "-to":
+            quick_mode = 1
+            forget_history = 1
+        else:
+            unknown.append(a)
+        i += 1
+    return {"content": content, "forget_history": str(forget_history),
+            "quick_mode": str(quick_mode), "seen_help": str(seen_help),
+            "unknown": " ".join(unknown)}
+
+
+def cmd_parse(argv):
+    from wchat_py.shellio import assign
+    st = parse(argv)
+    sys.stdout.write(assign(st))
+    return 0
+
+
 def main(argv):
+    if argv and argv[0] == "parse":
+        from wchat_py.shellio import assign
+        return cmd_parse(argv[1:])
     if "-h" in argv or "--help" in argv:
         help_user()
         return 0
