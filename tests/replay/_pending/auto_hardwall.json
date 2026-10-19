@@ -1,0 +1,44 @@
+{
+ "name": "auto_hardwall",
+ "argv": [
+  "-f",
+  "-auto=sandbox",
+  "-st",
+  "probe"
+ ],
+ "feed": [
+  "AUTO",
+  "n"
+ ],
+ "limit": 30.0,
+ "env": {
+  "BASE_URL": "http://127.0.0.1:50220/v1/chat/completions",
+  "WCHAT_API_KEY": "sk-stub",
+  "HOME": "/var/folders/lc/xc4kw8h96h3g5drxy7pdwrmh0000gp/T/tmpfm83ieoh/home",
+  "TMPDIR": "/var/folders/lc/xc4kw8h96h3g5drxy7pdwrmh0000gp/T/tmpfm83ieoh/tmp",
+  "MAX_TOOL_ROUNDS": "25",
+  "CMD_TIMEOUT": "20",
+  "PYTHONPATH": "/Users/jwan/Library/Python/3.9/lib/python/site-packages"
+ },
+ "out_b64": "DQobWzE7MzFt4pWQ4pWQ4pWQIGF1dG8g5qih5byPOnNhbmRib3gg4pWQ4pWQ4pWQG1swbQ0KICDlt6XkvZznm67lvZU6IC9wcml2YXRlL3RtcA0KICDlrqHmibnlmag6ICAgKOS4juaJp+ihjOaooeWeiyAg5YiG56a7KQ0KICDotornlYzor7s6ICAg6Ieq5Yqo5pS+6KGMKOiusOWFpeWuoeiuoSkNCiAg6LaK55WM5YaZOiAgIOehrOWimeaLkue7nSgtLWFsbG93LXdyaXRlIOS4jeeUn+aViCkNCiAgc2hlbGwgTjogIOeUsee7iOWuoeWZqOW4piByZWFzb24g5aSN5a6h5ZCO6Ieq5Yqo5Yaz5a6aDQogIOehrOWimSjku7vkvZXmoaPkvY3pg73kuI3mlL7ooYwpOiBIMSDmj5DmnYMgSDIg5LiL6L295Y2z5omn6KGMIEgzIOWutuebruW9lS/ns7vnu5/liKAgSDQg56OB55uYDQogICAgSDUg5a6255uu5b2V6YWN572uIEg2IOWHreaNriBINyDmlLnlhpnlj5HluIPljoblj7IgSDgg55S15rqQIEg5IOaJuemHj+adgOi/m+eoiyBIMTAg5aSW5Y+R5a+G6ZKlIEgxMSDns7vnu5/ot6/lvoQNCiAgICBIMTIg6LaK55WM5YaZ55uu5qCHIEgxMyDnm67moIfkuI3lj6/op6PmnpAoZGVmYXVsdHMvcGx1dGlsL29zYXNjcmlwdC9sYXVuY2hjdGwv6ZKl5YyZ5LiyKSBIMTQg5a6J6KOFKOm7mOiupOaLkizpmaTpnZ7lkK/liqjml7bngrnlkI0pDQogICAg6LaK55WM5YaZKOW3peS9nOebruW9leS5i+WklinmjInot6/lvoTliKTmja7miqUgUDEvUDIvUDMs5LiO5paH5Lu25bel5YW35ZCM5LiA5Y+j5b6EDQogIOWIuei9pjog5Y2V6L2u5bel5YW34omkMjUg5qyhIMK3IOWNleWRveS7pOKJpDIwcyDCtyDoh6rliqjmlL7ooYzphY3pop0gMjAwIOasoSDCtyDov57nu63mi5IgMyDmrKHpmY3nuqfkurrlt6UNCiAg5a6J6KOF6Z2iOiAgIOS4gOW+i+aLkue7nShIMTQp44CC6KaB5pS+6KGM6K+36YCA5Ye66YeN5ZCv5YqgIC0tYWxsb3ctaW5zdGFsbCDljIXlkI0xLOWMheWQjTINCiAgTUNQOiAgICAgIOacquWQr+eUqCjkuI3luKYgLW1jcCDml7bkuI3ms6jlhowgbWNwXyog6YCa6YGTO+aooeWei+S7jeWPr+e7jyBzaGVsbCDoh6rooYzosIPnlKgs6KeBIC1oKQ0KICDlm57mu5rngrk6ICAg5b+r54WnIOKGkiAvdmFyL2ZvbGRlcnMvbGMveGM0a3c4aDk2aDNnNWRyeHk3cGR3cm1oMDAwMGdwL1QvdG1wZm04M2llb2gvaG9tZS8uY3QvYXV0by9zbmFwc2hvdC8yMDI2MTAxOS0xNDI1MDEtMjkyNDYNCg0KG1sxOzMxbSAg5byA5ZCv5ZCO5pWP5oSf5p2D6ZmQ5LiN5YaN6YCQ5qyh6K+i6Zeu5L2g44CC56Gu6K6k6L6T5YWl5aSn5YaZIEFVVE8o5YW25LuW5Lu75oSP6L6T5YWlID0g5YWz6ZetIGF1dG8pOhtbMG0gQVVUTw0KG1sxOzMxbSAg4pqhIGF1dG8g5bey5byA5ZCvG1swbSAbWzJt5a6h6K6hOiAvdmFyL2ZvbGRlcnMvbGMveGM0a3c4aDk2aDNnNWRyeHk3cGR3cm1oMDAwMGdwL1QvdG1wZm04M2llb2gvaG9tZS8uY3QvYXV0by9hdWRpdC5sb2cgwrcg5aSH5Lu9OiAvdmFyL2ZvbGRlcnMvbGMveGM0a3c4aDk2aDNnNWRyeHk3cGR3cm1oMDAwMGdwL1QvdG1wZm04M2llb2gvaG9tZS8uY3QvYXV0by9iYWNrdXAvMjAyNjEwMTktMTQyNTAxLTI5MjQ2IMK3IOaApeWBnDogQ3RybCtDIOS4pOasoRtbMG0NCg0KG1s/MjVsG1s/N2wbWz8yNWgbWz83aOKaoO+4jyBBUEkg6K+35rGC5aSx6LSlOiBDb25uZWN0aW9uIGVycm9yLiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA0KDQobWz8yNWgbWz83aA0KG1sybeKUgOKUgCBhdXRvIOS8muivneWwj+e7kyDilIDilIAbWzBtDQobWzJtICDoh6rliqjmlL7ooYwgMCDmrKEgwrcg5aSH5Lu9IDAg5Lu9IMK3IOaho+S9jSBzYW5kYm94G1swbQ0KG1sybSAg5a6h6K6h5pel5b+XOiAvdmFyL2ZvbGRlcnMvbGMveGM0a3c4aDk2aDNnNWRyeHk3cGR3cm1oMDAwMGdwL1QvdG1wZm04M2llb2gvaG9tZS8uY3QvYXV0by9hdWRpdC5sb2cbWzBtDQobWzJtICDlm57mu5o6IHJzeW5jIC1hIC0tZGVsZXRlIC92YXIvZm9sZGVycy9sYy94YzRrdzhoOTZoM2c1ZHJ4eTdwZHdybWgwMDAwZ3AvVC90bXBmbTgzaWVvaC9ob21lLy5jdC9hdXRvL3NuYXBzaG90LzIwMjYxMDE5LTE0MjUwMS0yOTI0Ni8gL3ByaXZhdGUvdG1wLxtbMG0NCg==",
+ "requests": [
+  {
+   "kind": "main",
+   "n_messages": 2,
+   "orphan_tools": 0
+  },
+  {
+   "kind": "main",
+   "n_messages": 2,
+   "orphan_tools": 0
+  },
+  {
+   "kind": "main",
+   "n_messages": 2,
+   "orphan_tools": 0
+  }
+ ],
+ "sandbox": true,
+ "mode": "norm",
+ "note": "硬墙拒绝段(auto=sandbox)。**回放不稳定**: 依赖签名面板的喂键时序(feed AUTO|n), 同一字节基线重跑会出现多一行'结束'之类的差异 ⇒ 不是业务退化, 是交互时序。待解决: ①给录制器加确定性签名(等面板就绪再喂, 而非固定 2.5s), 或 ②用 -auto 的免签开关(若存在), 或 ③对 auto 段改用**锚点断言**(断言出现'硬墙拒绝(H1)'即可)。"
+}

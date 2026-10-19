@@ -130,6 +130,11 @@ def normalize(b):
     不做什么：不排序、不去重（非连续重复保留）——顺序仍有意义。
     """
     t = ANSI.sub("", b.decode("utf-8", "replace"))
+    # 掩掉易变量: auto_session_id(时间戳+PID)、临时路径、端口。
+    # 不掩这些, auto 段天然不可重复(实测: 连录两次不一致)。
+    t = re.sub(r"\d{8}-\d{6}-\d+", "<SID>", t)
+    t = re.sub(r"/var/folders/[^\s]*|/tmp/[^\s]*", "<TMP>", t)
+    t = re.sub(r"127\.0\.0\.1:\d+", "127.0.0.1:<PORT>", t)
     out = []
     for seg in re.split(r"[\r\n]+", t):
         seg = seg.strip()

@@ -40,6 +40,12 @@ def main(argv):
     i = argv.index("--")
     name = argv[0]
     reply = argv[1]
+    # --feed "AUTO|n":在 pty 里按顺序喂键(auto 档要签一次字)。放在 reply 之后的选项位。
+    feeds = []
+    opts = argv[2:i]
+    for k, o in enumerate(opts):
+        if o == "--feed":
+            feeds = [x for x in opts[k + 1].split("|") if x]
     target = [os.path.join(REPO, "wchat")] + argv[i + 1:]   # 前置可执行文件(与 replay_record 的约定一致)
     port = free_port()
     import subprocess
@@ -86,7 +92,7 @@ def main(argv):
         oldcwd = os.getcwd()
         os.chdir(proj)
         try:
-            rc = record(name, target, [], 30.0, env_extra)
+            rc = record(name, target, feeds, 30.0, env_extra)
         finally:
             os.chdir(oldcwd)
     finally:
