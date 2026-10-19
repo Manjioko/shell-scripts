@@ -146,7 +146,19 @@ def normalize(b):
     return out
 
 
-def compare(want, got, mode):
+def compare(want, got, mode, anchors=None):
+    # anchor 模式:只要求**关键短语按序出现**,允许其他行差异。
+    # 用途:交互时序不稳定、但"业务结论"必须出现的段(auto 档/弹窗/中断)。
+    # 强度:bytes > norm > anchor —— 用哪个必须在段里写明理由,不许默认降级。
+    if mode == "anchor":
+        text = "\n".join(normalize(got))
+        pos = 0
+        for a in (anchors or []):
+            k = text.find(a, pos)
+            if k < 0:
+                return ("anchor", a, "<缺失或顺序不对>", "")
+            pos = k + len(a)
+        return None
     if mode == "norm":
         nw, ng = normalize(want), normalize(got)
         if nw == ng:
@@ -168,12 +180,14 @@ def check_one(path, exe=None):
         if stub is not None:
             stub.terminate()
     mode = d.get("mode", "bytes")
-    r = compare(want, got, mode)
+    r = compare(want, got, d.get("mode", "bytes"), d.get("anchors"))
     if r is None:
         print("  ok   %-16s %d 字节一致(%s)" % (d["name"], len(got), mode))
         return True
     print("  FAIL %-16s 期望 %d 字节 / 实得 %d 字节(%s)" % (d["name"], len(want), len(got), mode))
-    if r[0] == "norm":
+    if r[0] == "anchor":
+        print("       缺失的锚点: %r (%s)" % (r[1], r[2]))
+    elif r[0] == "norm":
         print("       首个不同的业务行 #%s\n       基线: %r\n       实得: %r" % (r[1], r[2], r[3]))
     else:
         print("       首个差异偏移 %s\n       基线: %r\n       实得: %r" % (r[1], r[2], r[3]))
