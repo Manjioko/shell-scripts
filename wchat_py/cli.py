@@ -195,10 +195,85 @@ def run_single_turn(content, model=""):
     return 0 if rc == 0 else 1
 
 
+def _call_llm(msgs, model):
+    """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。"""
+    import json as _json, subprocess
+    req = {"model": model or os.environ.get("FLASH_MODEL", ""), "messages": msgs,
+           "thinking": "disabled", "tools": []}
+    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
+    text, tcs, err = [], [], None
+    for line in p.stdout:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            ev = _json.loads(line)
+        except Exception:
+            continue
+        t = ev.get("t")
+        if t == "text":
+            text.append(ev.get("v") or "")
+        elif t == "tool_calls":
+            tcs = ev.get("v") or []
+        elif t == "error":
+            err = ev.get("v")
+    p.wait()
+    return "".join(text), tcs, err
+
+
+def _run_tool(name, args_json):
+    """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
+    import json as _json
+    from wchat_py.tools_run import list_dir
+    try:
+        a = _json.loads(args_json or "{}")
+    except Exception:
+        return "错误:工具参数不是合法 JSON"
+    if name == "list_dir":
+        path = a.get("path") or "."
+        # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径
+        resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        content, _status = list_dir(resolved, path)
+        return content
+    return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
+
+
+def run_turn(content, model="", max_rounds=5):
+    """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。"""
+    import json as _json
+    from wchat_py import msg as msgmod
+    from wchat_py.render import StreamBox
+    msgs = msgmod.append_user(msgmod.init(), content)
+    box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
+    for _ in range(max_rounds):
+        text, tcs, err = _call_llm(msgs, model)
+        if text:
+            box.append(text); sys.stdout.write(box.paint()); sys.stdout.flush()
+        if err:
+            sys.stderr.write("API 请求失败: %s\n" % err); return 1
+        if not tcs:
+            return 0
+        # assistant 的 tool_calls 消息(正文也带上, 否则调用前的正文会丢)
+        msgs.append({"role": "assistant", "content": text or None,
+                     "tool_calls": [{"id": tc.get("id") or ("call_%d" % i), "type": "function",
+                                     "function": {"name": tc.get("name") or "",
+                                                  "arguments": tc.get("arguments") or "{}"}}
+                                    for i, tc in enumerate(tcs)]})
+        # 每个调用都必须有配对的 tool 结果, 否则下一轮 400(孤儿 tool_calls)
+        for tc in tcs:
+            out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
+            msgs.append({"role": "tool", "content": out,
+                         "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
+    return 0
+
+
 def main(argv):
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
-        return run_single_turn(st["content"], st.get("model", ""))
+        return run_turn(st["content"], st.get("model", ""))
     if argv and argv[0] == "parse":
         from wchat_py.shellio import assign
         return cmd_parse(argv[1:])
