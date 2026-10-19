@@ -227,7 +227,7 @@ def _call_llm(msgs, model):
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
-    from wchat_py.tools_run import list_dir, read_file
+    from wchat_py.tools_run import list_dir, read_file, grep
     try:
         a = _json.loads(args_json or "{}")
     except Exception:
@@ -246,6 +246,14 @@ def _run_tool(name, args_json):
         work_root = os.environ.get("WORK_ROOT") or os.getcwd()
         content, status = read_file(resolved, path, a.get("offset"), a.get("limit"),
                                     os.environ.get("READ_MAX_CHARS", "30000"), work_root)
+        if status:
+            sys.stdout.write(status + "\n")
+        return content
+    if name == "grep":
+        work_root = os.environ.get("WORK_ROOT") or os.getcwd()
+        content, status = grep(a.get("pattern") or "", a.get("path") or "",
+                               int(os.environ.get("GREP_MAX_MATCHES", "200")),
+                               int(os.environ.get("GREP_MAX_COL", "500")), work_root)
         if status:
             sys.stdout.write(status + "\n")
         return content
@@ -301,4 +309,3 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

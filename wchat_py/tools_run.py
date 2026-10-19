@@ -54,3 +54,36 @@ def read_file(resolved, display_path, offset, limit, read_max, work_root):
     from wchat_py.filefmt import read_fmt
     j = read_fmt(resolved, display_path, offset, limit, read_max)
     return (j["content"], " 已读取 %s(%s 行)" % (display_path, j["lines"]))
+
+
+def grep(pattern, path, max_matches, max_col, work_root):
+    """等价 bash `tool_grep`（授权 `path_access` 在 bash）。
+
+    grep 本体走 subprocess（宪章 §2 豁免 1：外部二进制；不经 shell 解析）。
+    返回 (content, status_line)。`path` 空 ⇒ 搜 work_root。
+    """
+    import subprocess
+    from wchat_py.textutil import clip_bytes
+    if not pattern:
+        return ("错误:pattern 不能为空", None)
+    if path:
+        resolved = os.path.expanduser(path)
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(work_root, resolved)
+    else:
+        resolved = work_root
+    if not os.path.exists(resolved):
+        return ("错误:路径不存在: %s" % path, None)
+    cmd = ["grep", "-rnIE", "--exclude-dir=.git", "--exclude-dir=node_modules",
+           "--exclude-dir=.venv", "-e", pattern, resolved]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    lines = p.stdout.split(b"\n")
+    if lines and lines[-1] == b"":
+        lines = lines[:-1]
+    sel = lines[:max_matches]
+    joined = b"\n".join(sel) + (b"\n" if sel else b"")
+    cl = clip_bytes(joined, max_col, "…(过长已截断)".encode())
+    out = cl.decode("utf-8", "replace").rstrip("\n")
+    if not out:
+        return ('未找到匹配 "%s" 的内容。' % pattern, " 已搜索:%s" % pattern)
+    return ('搜索 "%s" 的结果:\\n%s' % (pattern, out), " 已搜索:%s" % pattern)
