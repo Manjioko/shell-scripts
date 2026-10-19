@@ -80,6 +80,28 @@ fi
 _rep=$(ls tests/replay/*.json 2>/dev/null | wc -l | tr -d ' ')
 [[ "$_rep" -ge 10 ]] && p 7 "回放语料 ≥10 段" 0 "$_rep 段" || p 7 "回放语料 ≥10 段" 1 "${_rep} 段(需 ≥10)"
 
+# ── 8. 跨实现比对：Python 入口的 -h 与 bash 的 help 基线逐行一致 ────────────────
+# 这是 B 阶段**第一个"新实现 vs 旧实现"的等价证据**。归一化后逐行比（剥 ANSI/掩 CPR 产物）,
+# 与 replay_check 用同一套 normalize, 避免两处口径漂移。
+_ph=$(mktemp)
+( cd /tmp && PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli -h > "$_ph" 2>&1 )
+_r=$(python3 - "$_ph" "$RLDIR" <<'PYX' 2>&1 | tail -1
+import base64, importlib.util, json, sys
+got_path, repo = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("rc", repo + "/tests/replay_check.py")
+rc = importlib.util.module_from_spec(spec); spec.loader.exec_module(rc)
+want = base64.b64decode(json.load(open(repo + "/tests/replay/help.json"))["out_b64"])
+got = open(got_path, "rb").read()
+def L(b):
+    return [x for x in (l.split("│ ", 1)[-1].strip() for l in rc.normalize(b)) if x]
+a, b = L(want), L(got)
+print("same(%d)" % len(b) if a == b else "diff(base%d/py%d)" % (len(a), len(b)))
+PYX
+)
+rm -f "$_ph"
+[[ "$_r" == same* ]] && p 8 "Python -h 与 bash 基线一致" 0 "$_r" \
+                      || p 8 "Python -h 与 bash 基线一致" 1 "$_r"
+
 echo "----"
 printf 'B 验收:通过 %d / 共 %d（未通过 %d）\n' "$ok" "$((ok+bad))" "$bad"
 if [[ $bad -gt 0 ]]; then
