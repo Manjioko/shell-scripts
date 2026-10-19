@@ -11,6 +11,9 @@
 #
 # ⚠ 自检要求（§6 第 0 步）：故意改坏一处，本脚本必须变红。做法：
 #   bash tests/b_acceptance.sh --self-test   # 见下方 self_test()
+# TODO(1b): 第9条'参数解析 parity'待补 —— 已手工验过三组 argv(py vs bash 逐项一致),
+#   但固化成断言时卡在读取方式上: shellio.assign 只在需要时加引号, 用 awk/sed 解析易错;
+#   正解是 `eval "$(python3 -m wchat_py.cli parse $v)"` 直接拿变量(这正是生产用法)。
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RLDIR="$(cd "$HERE/.." && pwd)"
