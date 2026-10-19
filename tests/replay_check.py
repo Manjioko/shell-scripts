@@ -23,6 +23,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 RDIR = os.path.join(HERE, "replay")
+DOTS = "." + "c" + "t"
 
 
 def run(argv, feed, limit, env_extra):
@@ -75,11 +76,57 @@ def diff_at(a, b):
     return i, a[max(0, i - 30):i + 30], b[max(0, i - 30):i + 30]
 
 
+def _free_port():
+    import socket
+    sk = socket.socket(); sk.bind(("127.0.0.1", 0)); p = sk.getsockname()[1]; sk.close(); return p
+
+
+def _sandbox_env(d):
+    """重建录制期的环境：桩 + HOME/TMPDIR + 配置目录 + PYTHONPATH。
+
+    三个坑(录制时踩过, 回放同样会踩):
+      1. 沙箱 HOME 让 user-site 失效 ⇒ openai import 不到 ⇒ 补 PYTHONPATH=真实 user-site
+      2. BASE_URL 端口每次不同 ⇒ 起新桩并把端点指过去
+      3. 需要 `-f -st` 才会真发请求(argv 已在基线里)
+    """
+    if not d.get("sandbox"):
+        return (d.get("env") or {}), None
+    import subprocess, tempfile, time, socket, sys as _sys, site as _site
+    dd = tempfile.mkdtemp()
+    home = os.path.join(dd, "home"); tmpd = os.path.join(dd, "tmp")
+    cfgdir = os.path.join(home, DOTS)
+    os.makedirs(cfgdir, exist_ok=True); os.makedirs(tmpd, exist_ok=True)
+    cfg = os.path.join(cfgdir, "config")
+    open(cfg, "w").write("API_KEY=sk-stub\n"); os.chmod(cfg, 0o600)
+    port = _free_port()
+    rp = os.path.join(dd, "reply.json"); open(rp, "w").write(d.get("reply") or "[]")
+    senv = dict(os.environ, STUB_LOG=os.path.join(dd, "req.jsonl"), STUB_REPLY=rp,
+                STUB_AUTH_DENY_IF="", STUB_FINAL_DENY_IF="")
+    stub = subprocess.Popen([_sys.executable, os.path.join(HERE, "stub_gateway.py"), str(port)],
+                            env=senv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(80):
+        try:
+            socket.create_connection(("127.0.0.1", port), 0.3).close(); break
+        except OSError:
+            time.sleep(0.1)
+    us = _site.getusersitepackages()
+    env = {"BASE_URL": "http://127.0.0.1:%d/v1/chat/completions" % port,
+           "WCHAT_API_KEY": "sk-stub", "HOME": home, "TMPDIR": tmpd,
+           "MAX_TOOL_ROUNDS": "25", "CMD_TIMEOUT": "20",
+           "PYTHONPATH": us + ((":" + os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else "")}
+    return env, stub
+
+
 def check_one(path, exe=None):
     d = json.load(open(path, encoding="utf-8"))
     argv = [exe or os.path.join(REPO, "wchat")] + d["argv"]
     want = base64.b64decode(d["out_b64"])
-    got = run(argv, d.get("feed") or [], d.get("limit", 30), d.get("env") or {})
+    env, stub = _sandbox_env(d)
+    try:
+        got = run(argv, d.get("feed") or [], d.get("limit", 30), env)
+    finally:
+        if stub is not None:
+            stub.terminate()
     if got == want:
         print("  ok   %-16s %d 字节一致" % (d["name"], len(got)))
         return True
