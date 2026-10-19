@@ -1,0 +1,26 @@
+{
+ "name": "st_text",
+ "argv": [
+  "-f",
+  "-st",
+  "hi"
+ ],
+ "feed": [],
+ "limit": 30.0,
+ "env": {
+  "WCHAT_API_KEY": "sk-stub",
+  "MAX_TOOL_ROUNDS": "25",
+  "CMD_TIMEOUT": "20"
+ },
+ "out_b64": "G1s/MjVsG1s/N2wNCg0KDQoNCg0KDQoNCg0KDQoNChtbOUEbW3MbW3UbWzJLG1sybeKUghtbMG0gWlpUT1AbW3UbWzJLG1sxQhtbdRtbPzI1aBtbPzdoWlpUT1AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIA0KDQobWz8yNWgbWz83aA==",
+ "requests": [
+  {
+   "kind": "main",
+   "n_messages": 2,
+   "orphan_tools": 0
+  }
+ ],
+ "sandbox": true,
+ "reply": "[{\"type\":\"text\",\"text\":\"ZZTOP\"}]",
+ "note": "业务段。回放时必须重建: ①起桩(STUB_REPLY=本文件 reply 字段) ②沙箱 HOME/TMPDIR+~/.ct/config(0600) ③BASE_URL 指向新端口 ④PYTHONPATH 指向真实 user-site(沙箱 HOME 会让 openai import 不到, 本项目已踩 5 次)。"
+}

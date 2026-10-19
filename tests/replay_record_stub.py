@@ -60,8 +60,23 @@ def main(argv):
             break
         except OSError:
             time.sleep(0.1)
+    # ── 照抄 auto_test::run_case 的沙箱环境 ──────────────────────────────
+    # 少了 HOME/TMPDIR 时 wchat 会在启动阶段就退到"问候语+等输入",**根本不发请求**
+    # (实测:录到的 242 字节只是终端初始化+问候语,桩日志为空)。
+    home = os.path.join(d, "home"); tmpd = os.path.join(d, "tmp")
+    os.makedirs(os.path.join(home, ".ct"), exist_ok=True); os.makedirs(tmpd, exist_ok=True)
+    cfg = os.path.join(home, ".ct", "config")
+    open(cfg, "w").write("API_KEY=sk-stub\n"); os.chmod(cfg, 0o600)
     env_extra = {"BASE_URL": "http://127.0.0.1:%d/v1/chat/completions" % port,
-                 "WCHAT_API_KEY": "sk-stub"}
+                 "WCHAT_API_KEY": "sk-stub",
+                 "HOME": home, "TMPDIR": tmpd,
+                 "MAX_TOOL_ROUNDS": "25", "CMD_TIMEOUT": "20"}
+    # ⚠ 沙箱 HOME 会让 user-site 失效 ⇒ openai import 不到 ⇒ 请求变成"缺少依赖"错误。
+    # 这与 py_prelude / auto_test 顶部是同一个修复(本项目已第 5 次踩):把**真实** user-site
+    # 记进 PYTHONPATH,子进程一路继承。
+    import site as _site
+    _us = _site.getusersitepackages()
+    env_extra["PYTHONPATH"] = _us + ((":" + os.environ["PYTHONPATH"]) if os.environ.get("PYTHONPATH") else "")
     old = {k: os.environ.get(k) for k in env_extra}
     os.environ.update(env_extra)
     try:
@@ -87,6 +102,7 @@ def main(argv):
         d2 = json.load(open(lg, encoding="utf-8"))
         lines = [json.loads(x) for x in open(os.path.join(d, "req.jsonl"), encoding="utf-8") if x.strip()]
         d2["requests"] = [{k: r.get(k) for k in ("kind", "n_messages", "orphan_tools")} for r in lines]
+        d2["sandbox"] = True          # 回放时必须重建同样的 HOME/TMPDIR/.ct/config
         json.dump(d2, open(lg, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
         print("  同时记录请求元信息: %d 条" % len(lines))
     except Exception as e:
