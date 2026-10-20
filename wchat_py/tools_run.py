@@ -33,7 +33,7 @@ def list_dir(resolved, display_path):
         names = []
     files = sorted(n for n in names if os.path.isfile(os.path.join(resolved, n)))
     dirs = sorted(n for n in names if os.path.isdir(os.path.join(resolved, n)))
-    content = "目录 %s:\n[文件]\n%s\n\n[子目录]\n%s" % (
+    content = "目录 %s:\\n[文件]\\n%s\\n\\n[子目录]\\n%s" % (
         display_path,
         "\n".join(files) if files else "(空)",
         "\n".join(dirs) if dirs else "(空)")
