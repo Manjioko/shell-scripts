@@ -19,6 +19,8 @@ try:
 except (AttributeError, OSError):
     pass
 
+_PRE_DISP = signal.getsignal(signal.SIGINT)   # 进入前的处置（可能是默认，也可能是父 shell 的忽略）
+
 p = f = 0
 
 
@@ -60,12 +62,8 @@ dt = time.monotonic() - t0
 ck("两次 SIGINT interrupted>=2", intr >= 2, "intr=%r" % intr)
 ck("两次 SIGINT 及时返回(<4s)", dt < 4.0, "%.2fs" % dt)
 
-# 3) 信号处理后主进程仍正常（handler 已恢复，未留 KeyboardInterrupt 隐患）
-try:
-    os.kill(os.getpid(), signal.SIGINT)
-    ck("SIGINT handler 已恢复(默认)", False, "未恢复:未抛 KeyboardInterrupt")
-except KeyboardInterrupt:
-    ck("SIGINT handler 已恢复(默认)", True)
+# 3) 信号处理恢复为**进入前**的处置（不假定是默认：父 shell trap "" INT 时本就忽略）
+ck("SIGINT handler 恢复为进入前", signal.getsignal(signal.SIGINT) == _PRE_DISP)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
