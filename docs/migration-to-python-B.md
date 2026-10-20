@@ -196,3 +196,26 @@ bash tests/run_gates.sh --main      # 期望 run=35 pass=35 fail=0（B 期间闸
   3. `git add wchat.sh && git commit -m "B 收口(2/2): 删 hard_deny_cmd bash 判据体(仅留 Python seam)"`
   - 回滚：`.scratch/wchat.pre_refactor.bak` 或 `git checkout -- wchat.sh`
   - 注：`tests/hardwall_seam_test.sh` 已改造为不依赖 bash 判据体（只验 `WCHAT_PY_HARDWALL=1` 对期望），删除后闸门仍成立。
+
+## 11. 进展记录（B 阶段第 3 步：终端层）
+
+**已完成（均可隔离验证，已提交）**：
+- **3a** `wchat_py/term.py` `raw_mode`：正常/异常/非 tty 三路都恢复 termios；
+  自检 `tests/term_test.py` 4/4；闸门「终端地基」（第 39 道）。
+  - 坑：pty 上 `lflag` 只差 `PENDIN(0x20000000)`（macOS 内核瞬态位，`tcsetattr` 无法清），比较时掩掉。
+- **3b-1** `wchat_py/termwin.py` `clean_line`/`paint`：bytes parity 3/3（`tests/paint_parity.py`）。
+- **3b-2** `termwin.window_output`（环形缓冲 + 头行 + 省略计数 + 最近 OUT_BUF_SIZE 行）：
+  bytes parity 5/5（`tests/window_parity.py`）。
+- 结论：`run_with_window` 里**所有不碰信号/进程/O 的纯格式化**已迁完并逐字节对齐。
+
+**未完成（高风险，需带真 pty 复验的专轮）**：
+- **3b-3** job control 保存/恢复（`set -m` 语义）：判据 = 函数退出后 `$-` 与进入前一致。
+- **3b-4** 读循环整体：FIFO、`read -t` 轮询、`trap`、进程组 `kill_tree`、Ctrl+C 一次/两次语义
+  （`interrupted=2` + `input_aborted` 回滚未配对 tool_calls，返回 130）。
+  - **关键耦合**：逐行 append（2175–2290）与 trap/信号（2093–2103）交织，不能像 3b-1/3b-2 那样切开，
+    必须整体做。
+- **3c/3d/3e**：`handle_cmd_line`(现在 8758 附近)、确认弹窗（严格 `yes`）、Ctrl+C 急停。
+- 判据：交互四项（弹窗 y/n、Ctrl+C×1 中断、×2 急停、窗口内流式渲染）+「异常中断后终端仍可用」。
+
+> 纪律：3b-3/3b-4 改动若破坏 termios/job control 恢复，终端会卡在 raw / 子进程杀不掉，
+> 必须在真 pty 环境复验后再收；无交互 CI 只能覆盖到 3b-1/3b-2 这一层。
