@@ -128,7 +128,7 @@ def rule(cmd, auto=False, work_root=None, home=None):
     if (_m("hd_re_dotfile", c) or _m("hd_re_dotfile_cfg", c)) and _has_write(c):
         return "H5", ""
     if (_m("hd_re_secret_dir", c) or _m("hd_re_keychain", c) or _m("hd_re_keyfile", c) or _m("hd_re_shadow", c)) \
-            and _recheck(c, hd.mask_msg, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
+            and _recheck(c, _mask_msg_search, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
             and not _creds_all_exempt(c):
         return "H6", ""
     if _m("hd_re_force_push", c) or _m("hd_re_history_rewrite", c):
@@ -199,6 +199,11 @@ try:
         _MSGS = json.load(_fh)
 except Exception:
     _MSGS = {}
+
+
+def _mask_msg_search(s):
+    """等价 bash hd_recheck_msg 的脱敏链：mask_msg -> mask_search_pat。"""
+    return hd.mask_search_pat(hd.mask_msg(s))
 
 
 def _safe(fn, c):
