@@ -180,10 +180,56 @@ except Exception:
     _MSGS = {}
 
 
-def detail(cmd):
-    """返回 (rule, soft, msg)。msg 是 bash 的静态话术（已自动抽取）；未命中返回空串。"""
-    r, s = rule(cmd)
-    return r, s, (_MSGS.get(r, "") if r else "")
+def _safe(fn, c):
+    try:
+        return fn(c)
+    except Exception:
+        return c
+
+
+def _frag(rid, c):
+    """best-effort 复刻 bash hd_note_hit 的 (命中: …) 片段：取决定该规则的正则首个匹配。"""
+    def first(names, text):
+        for n in names:
+            mm = re.search(getattr(R, n), text, _ASCII)
+            if mm:
+                return mm.group(0)
+        return ""
+
+    if rid == "H1":
+        return first(("hd_re_priv", "hd_re_su"), c)
+    if rid == "H2":
+        return first(("hd_re_pipe_exec", "hd_re_proc_sub", "hd_re_dl_exec"), _safe(hd.mask_readonly, c))
+    if rid == "H3":
+        return first(("hd_re_wipe_root", "hd_re_wipe_flag"), _safe(hd.mask_readonly, c))
+    if rid == "H4":
+        return first(("hd_re_disk",), _safe(hd.mask_readonly, c))
+    if rid == "H5":
+        return first(("hd_re_dotfile", "hd_re_dotfile_cfg"), c)
+    if rid == "H6":
+        return first(("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow"),
+                     _safe(hd.mask_msg, c))
+    if rid == "H7":
+        return first(("hd_re_force_push", "hd_re_history_rewrite"), c)
+    if rid == "H8":
+        return first(("hd_re_power",), c)
+    if rid == "H9":
+        return first(("hd_re_killhost",), c)
+    if rid == "H10":
+        return first(("hd_re_secret_ref",), c)
+    if rid == "H11":
+        return first(("hd_re_sys_redirect",), c)
+    return ""
+
+
+def detail(cmd, auto=False):
+    """返回 (rule, soft, msg)。msg = bash 静态话术 + 动态 (命中: …) 片段；未命中返回空串。"""
+    r, s = rule(cmd, auto)
+    if not r:
+        return r, s, ""
+    base = _MSGS.get(r, "")
+    f = _frag(r, cmd or "")
+    return r, s, (base + ("(命中: %s)" % f[:80] if f else ""))
 
 
 if __name__ == "__main__":
