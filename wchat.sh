@@ -4587,7 +4587,7 @@ hard_deny_cmd() {
     # ── B 阶段接线 seam：WCHAT_PY_HARDWALL=1 时判定交给 Python hardwall（唯一活实现候选）──
     # 默认关（不设=0）→ 走下面 bash 原实现，现有套件零影响；置 1 时 bash 只做出口，判定全在 Python。
     # 判据已在 62 条语料上与 bash 逐字等价（rule/soft + msg），见 tests/hdcmd_corpus_test.sh。
-    if [[ "${WCHAT_PY_HARDWALL:-0}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
+    if [[ "${WCHAT_PY_HARDWALL:-1}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
         local _hwj
         _hwj=$(printf '%s' "$1" | py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
         if [[ -n "$_hwj" && "$_hwj" == \{* ]]; then
