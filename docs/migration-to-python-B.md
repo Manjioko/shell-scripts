@@ -176,3 +176,17 @@ bash tests/run_gates.sh --main      # 期望 run=35 pass=35 fail=0（B 期间闸
 > 第 7 条（真实会话回放）是唯一能证明"没退化"的判据；
 > 影子模式，最后一步才删 bash。
 
+---
+
+## 10. 进展记录（B 阶段第 2 步：硬墙）
+
+- `hard_deny_cmd` 判定已迁 Python（`wchat_py/hardwall.py`），**默认活实现**：
+  bash 前端 `hard_deny_cmd` 顶部 seam 调 `py_run hardwall json`；`WCHAT_PY_HARDWALL` 默认 **1**，
+  py_run 缺席时回退 bash 判据体（**尚未删，收口待做**）。
+- 证据（全绿）：
+  - 差分语料 `tests/hdcmd_corpus.json` **62 条** → rule/soft **62/62** + msg 全串 **62/62**；
+  - 前端接缝等价（flag 1 vs 0）**5/5**；硬墙判据 **569/569**；e2e **0 失败**；全量闸门 **38 道全绿**。
+- 话术：`wchat_py/hard_msgs.json` 由 bash **自动抽取**（静态 13 条 + P3/H14REG），非手抄。
+- 闸门：`硬墙语料`（bash 基线 vs Python 差分）+ `硬墙接缝`（前端 flag 1 vs 0 等价）。
+- **收口剩余**：删 bash `hard_deny_cmd` 判据体（4584–~5370，约 370 行，保留出口），
+  需整段替换 + 删后重跑 569/e2e/全量闸门；建议在有余量、可完整复验的独立一轮用脚本化重写完成。
