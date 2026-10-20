@@ -18,11 +18,17 @@ BASE = os.path.join(REPO, "tests/hdcmd_baseline.tsv")
 FX = ('cd "$2"; _WCHAT_LIB_ONLY=1 API_KEY=sk-stub; '
       '. "$1" </dev/null >/dev/null 2>&1; '
       'hard_deny_cmd "$3"; printf "%s\\t%s" "${hd_rule:-}" "${HD_SOFT:-}"')
+FX_AUTO = ('cd "$2"; _WCHAT_LIB_ONLY=1 API_KEY=sk-stub; '
+           '. "$1" </dev/null >/dev/null 2>&1; '
+           'auto_mode=full; AUTO_SHELL_PATHS=1; '
+           'hard_deny_cmd "$3"; printf "%s\\t%s" "${hd_rule:-}" "${HD_SOFT:-}"')
 
 
-def verdict(cmd):
-    out = subprocess.run([BASH, "-c", FX, "_", REPO + "/wchat.sh", "/tmp", cmd],
-                         capture_output=True, env=dict(os.environ))
+def verdict(cmd, auto=False):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = REPO + ((":" + env["PYTHONPATH"]) if env.get("PYTHONPATH") else "")
+    out = subprocess.run([BASH, "-c", FX_AUTO if auto else FX, "_", REPO + "/wchat.sh", "/tmp", cmd],
+                         capture_output=True, env=env)
     s = out.stdout.decode("utf-8", "replace")
     s = ANSI.sub("", s).strip()
     rule, _, soft = s.partition("\t")
@@ -34,7 +40,7 @@ def main(argv):
     cases = json.load(open(CORPUS, encoding="utf-8"))["cases"]
     rows = []
     for c in cases:
-        rule, soft = verdict(c["cmd"])
+        rule, soft = verdict(c["cmd"], c.get("auto", False))
         rows.append((c["id"], c["cat"], rule or "-", soft or "-", c["cmd"]))
         print("%-6s %-14s rule=%-4s soft=%-3s %s" % (c["id"], c["cat"], rule or "-", soft or "-", c["cmd"][:44]))
 
