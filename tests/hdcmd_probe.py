@@ -17,11 +17,11 @@ BASE = os.path.join(REPO, "tests/hdcmd_baseline.tsv")
 
 FX = ('cd "$2"; _WCHAT_LIB_ONLY=1 API_KEY=sk-stub; '
       '. "$1" </dev/null >/dev/null 2>&1; '
-      'hard_deny_cmd "$3"; printf "%s\\t%s" "${hd_rule:-}" "${HD_SOFT:-}"')
+      'hard_deny_cmd "$3"; printf "###HD###%s\\t%s\\n" "${hd_rule:-}" "${HD_SOFT:-}"')
 FX_AUTO = ('cd "$2"; _WCHAT_LIB_ONLY=1 API_KEY=sk-stub; '
            '. "$1" </dev/null >/dev/null 2>&1; '
            'auto_mode=full; AUTO_SHELL_PATHS=1; '
-           'hard_deny_cmd "$3"; printf "%s\\t%s" "${hd_rule:-}" "${HD_SOFT:-}"')
+           'hard_deny_cmd "$3"; printf "###HD###%s\\t%s\\n" "${hd_rule:-}" "${HD_SOFT:-}"')
 
 
 def verdict(cmd, auto=False):
@@ -29,10 +29,11 @@ def verdict(cmd, auto=False):
     env["PYTHONPATH"] = REPO + ((":" + env["PYTHONPATH"]) if env.get("PYTHONPATH") else "")
     out = subprocess.run([BASH, "-c", FX_AUTO if auto else FX, "_", REPO + "/wchat.sh", "/tmp", cmd],
                          capture_output=True, env=env)
-    s = out.stdout.decode("utf-8", "replace")
-    s = ANSI.sub("", s).strip()
+    s = ANSI.sub("", out.stdout.decode("utf-8", "replace"))
+    idx = s.rfind("###HD###")
+    s = s[idx + len("###HD###"):].split("\n", 1)[0].strip() if idx >= 0 else ""
     rule, _, soft = s.partition("\t")
-    return rule, soft
+    return rule.strip(), soft.strip()
 
 
 def main(argv):
@@ -41,7 +42,7 @@ def main(argv):
     rows = []
     for c in cases:
         rule, soft = verdict(c["cmd"], c.get("auto", False))
-        rows.append((c["id"], c["cat"], rule or "-", soft or "-", c["cmd"]))
+        rows.append((c["id"], c["cat"], rule or "-", soft or "-", c["cmd"], bool(c.get("auto", False))))
         print("%-6s %-14s rule=%-4s soft=%-3s %s" % (c["id"], c["cat"], rule or "-", soft or "-", c["cmd"][:44]))
 
     if check and os.path.exists(BASE):
@@ -66,8 +67,8 @@ def main(argv):
             print("无法导入 hardwall: %s" % e)
             return 1
         bad = 0
-        for (i, cat, rl, sf, cmd) in rows:
-            pr, ps = hardwall.rule(cmd)
+        for (i, cat, rl, sf, cmd, _auto) in rows:
+            pr, ps = hardwall.rule(cmd, _auto)
             pr = pr or "-"
             if (pr, ps or "-") != (rl, sf):
                 bad += 1
@@ -81,7 +82,7 @@ def main(argv):
     with open(BASE, "w", encoding="utf-8") as f:
         f.write("# id\tcat\trule\tsoft\tcmd\n")
         for r in rows:
-            f.write("\t".join(r) + "\n")
+            f.write("\t".join((r[0], r[1], r[2], r[3], r[4])) + "\n")
     n_deny = sum(1 for r in rows if r[2] != "-")
     print("wrote %s · 共 %d 条（拒 %d / 放行 %d）" % (BASE, len(rows), n_deny, len(rows) - n_deny))
     return 0
