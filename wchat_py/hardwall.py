@@ -14,6 +14,13 @@ from wchat_py import hd_re as R
 
 _ASCII = re.ASCII
 
+# 系统路径前缀（与 bash hd_re_sys_redirect 的目标集对齐；**不含** var/tmp 等可写临时区）
+_SYS_PATH = re.compile(
+    r"^/(?:etc|usr|bin|sbin|System|Library|Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt"
+    r"|private/(?:etc|usr|bin|sbin|System|Library|var/root|var/log|var/spool/cron|var/db|"
+    r"Applications|proc|sys|run|boot|lib|lib64|root|srv|media|mnt)"
+    r"|var/(?:root|log|spool/cron|db))(/|$)")
+
 
 def _m(name, text):
     pat = getattr(R, name)
@@ -140,11 +147,22 @@ def rule(cmd, auto=False):
     # H10 外发敏感内容
     if _m("hd_re_upload", c) and _m("hd_re_upload_arg", c) and _m("hd_re_secret_ref", c):
         return "H10", ""
-    # H11 重定向/写动词落系统路径
-    if _m("hd_re_sys_redirect", c) or (
-            _m("hd_re_write_verb", c)
-            and re.search(r"(^|[ \t=&])/(etc|usr|bin|sbin|System|Library|var|private)/", c)):
+    # H11 重定向/写动词落系统路径（方向感知：只看**写目标**，源在系统不算）
+    if _m("hd_re_sys_redirect", c):
         return "H11", ""
+    if _m("hd_re_write_verb", c):
+        try:
+            wt = hd.write_targets(c, R.hd_re_write_verb)
+        except Exception:
+            wt = ""
+        home = os.environ.get("HOME", "")
+        for w in (wt or "").splitlines():
+            w = w.strip().rstrip(";,)]")
+            w = w.replace("${HOME}", home).replace("$HOME", home)
+            if w.startswith("~"):
+                w = os.path.expanduser(w)
+            if _SYS_PATH.match(w):
+                return "H11", ""
     # H12 工作根外写（仅 auto 档）：提取写目标，任一越出工作根 → P3（走路径规则）
     if auto and os.environ.get("AUTO_SHELL_PATHS", "1") != "0":
         try:
