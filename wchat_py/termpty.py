@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """终端窗口的 pty 外壳 + 信号语义（B 阶段第 3 步 3b-3/3b-4）。
 
-对应 bash run_with_window 的 pty 分支 + Ctrl+C 语义：
-- pty 给子命令真 tty（行缓冲、实时输出），master 端 select 轮询读；
-- 超时按**进程组**整组杀；
-- SIGINT（用户 Ctrl+C）：**第一次**向子进程组发 SIGTERM（优雅中断），**第二次**发 SIGKILL
-  并放弃本轮（interrupted>=2），读循环立即收尾 —— 等价 bash 的"一次中断/两次急停"。
+- pty 给子命令真 tty；master 端 select 轮询读；超时按进程组整组杀。
+- SIGINT（Ctrl+C）：第一次 → 子进程组 SIGTERM（优雅中断）；第二次 → SIGKILL + 放弃本轮。
+  **关键**：SIGINT handler 必须在 spawn 之前装好，否则"spawn 与装 handler 之间"的窗口里
+  到达的 SIGINT 会走默认处置（KeyboardInterrupt），在负载高时偶发失败（闸门实测踩到）。
 - 返回 (display, full, rc, timed_out, interrupted)。
-
-无头环境用「线程定时向自身发 SIGINT」模拟按键，可自动化验证信号语义与"终端不被搞坏"。
 """
 import os
 import pty
@@ -21,30 +18,43 @@ from wchat_py.termwin import clean_line, window_output
 
 
 def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1, handle_sigint=True):
-    master, slave = pty.openpty()
-    try:
-        p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
-                             start_new_session=True, close_fds=True)
-    except Exception:
-        os.close(master)
-        os.close(slave)
-        raise
-    os.close(slave)
-
     state = {"int": 0}
+    proc = {"p": None}
     old_handler = None
 
     def _on_sigint(signum, frame):
         state["int"] += 1
+        p = proc["p"]
+        if p is None:
+            return
         try:
             sig = signal.SIGTERM if state["int"] == 1 else signal.SIGKILL
             os.killpg(os.getpgid(p.pid), sig)
         except OSError:
             pass
 
+    # 先装 handler 再 spawn，堵住竞态窗口
     if handle_sigint:
         old_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, _on_sigint)
+
+    master = slave = None
+    try:
+        master, slave = pty.openpty()
+        p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
+                             start_new_session=True, close_fds=True)
+        proc["p"] = p
+    except Exception:
+        for fd in (master, slave):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if handle_sigint and old_handler is not None:
+            signal.signal(signal.SIGINT, old_handler)
+        raise
+    os.close(slave)
 
     chunks = []
     deadline = time.monotonic() + timeout
