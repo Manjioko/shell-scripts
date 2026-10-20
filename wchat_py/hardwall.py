@@ -85,18 +85,61 @@ def _has_write(c):
     return False
 
 
-def _creds_all_exempt(c):
-    """保守版：整条命令的凭据引用都必须是**相对本工作根**的路径才豁免。
+def _is_cred_token(t):
+    t = t.strip("'\"")
+    return any(re.search(getattr(R, n), t, _ASCII)
+               for n in ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow"))
 
-    简化判据：出现家目录/绝对系统路径的凭据引用即不豁免（照拒）；纯相对路径（如项目级 .pypirc）豁免。
+
+def _creds_all_exempt(c, work_root, home):
+    """移植 bash hd_creds_all_exempt 的**按位置**语义：cd 基准只影响其后的词。
+
+    返回 True=全部凭据引用都在工作根内（豁免/放行）；False=至少一条在根外或基准不可知（照拒 H6）。
     """
-    c = c or ""
-    if re.search(r"(^|[\s;&|<>'\"])(~|/Users/|/home/|\$HOME|/root)", c):
+    if work_root == home or work_root == "/":      # 边界被整台机器顶掉：豁免失效
         return False
-    for m in re.finditer(r"(^|[\s;&|<>'\"])(/[^\s;&|<>'\"]*)", c):
-        p = m.group(2)
-        if not (p == "/tmp" or p.startswith("/tmp/")):
-            return False
+
+    def under_root(p):
+        np = os.path.normpath(p)
+        return np == work_root or np.startswith(work_root.rstrip("/") + "/")
+
+    toks = re.findall(r"[^\s;&|()]+", c or "")
+    base_ok = True
+    base = work_root
+    i = 0
+    while i < len(toks):
+        t = toks[i].strip("'\"")
+        core = re.sub(r"[();,&|<>$`]", "", t)
+        if core == "popd":
+            base_ok = False
+            i += 1
+            continue
+        if core in ("cd", "pushd"):
+            nxt = toks[i + 1].strip("'\"") if i + 1 < len(toks) else ""
+            ncore = re.sub(r"[();,&|<>$`]", "", nxt)
+            if ncore == "" or ncore in ("&&", "||", ";", "|", "&", "<", ">", ">>") \
+                    or ncore.startswith("-") or "$" in nxt or "`" in nxt:
+                base_ok = False                          # 目标不可知（无参/分隔符/cd -/变量/命令替换）
+            elif nxt in ("~", "$HOME", "${HOME}") or nxt.startswith("~/"):
+                base_ok = False                          # 回家目录（通常不在工作根）
+            elif nxt.startswith("/"):
+                base_ok = under_root(nxt)
+                base = nxt
+            else:
+                base = os.path.join(base, nxt) if base_ok else ""
+                base_ok = bool(base) and under_root(base)
+            i += 2
+            continue
+        if _is_cred_token(t):
+            if t.startswith("/") or t.startswith("~") or t.startswith("$HOME") or t.startswith("${HOME}"):
+                p = t.replace("${HOME}", home).replace("$HOME", home)
+                if p.startswith("~"):
+                    p = os.path.expanduser(p)
+                if not under_root(p):
+                    return False
+            elif not base_ok:
+                return False
+        i += 1
     return True
 
 
@@ -131,7 +174,7 @@ def rule(cmd, auto=False, work_root=None, home=None):
         return "H5", ""
     if (_m("hd_re_secret_dir", c) or _m("hd_re_keychain", c) or _m("hd_re_keyfile", c) or _m("hd_re_shadow", c)) \
             and _recheck(c, _mask_msg_search, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
-            and not _creds_all_exempt(c):
+            and not _creds_all_exempt(c, work_root, home):
         return "H6", ""
     if _m("hd_re_force_push", c) or _m("hd_re_history_rewrite", c):
         return "H7", ""
