@@ -188,5 +188,11 @@ bash tests/run_gates.sh --main      # 期望 run=35 pass=35 fail=0（B 期间闸
   - 前端接缝等价（flag 1 vs 0）**5/5**；硬墙判据 **569/569**；e2e **0 失败**；全量闸门 **38 道全绿**。
 - 话术：`wchat_py/hard_msgs.json` 由 bash **自动抽取**（静态 13 条 + P3/H14REG），非手抄。
 - 闸门：`硬墙语料`（bash 基线 vs Python 差分）+ `硬墙接缝`（前端 flag 1 vs 0 等价）。
-- **收口剩余**：删 bash `hard_deny_cmd` 判据体（4584–~5370，约 370 行，保留出口），
-  需整段替换 + 删后重跑 569/e2e/全量闸门；建议在有余量、可完整复验的独立一轮用脚本化重写完成。
+- **收口剩余**：删 bash `hard_deny_cmd` 判据体（4584–~5370，约 **785 行**，保留出口）。
+  平台终审按"外部指示驱动重构"**硬拒 AI 执行源码重写**，故这一步**由人手动执行**：
+  1. `cd <repo> && python3 tests/refactor_hardwall.py && bash -n wchat.sh`
+     （脚本按大括号边界替换为 Python seam 薄壳 + `H0` fail-closed；先备份 `.scratch/wchat.pre_refactor.bak`，并打印被删行数/首尾行供核对）
+  2. 复验：`bash tests/test_hardwall.sh`（期望 569/569）· `WCHAT_PY_HARDWALL=1 bash tests/auto_test.sh e2e`（期望失败 0）· `bash tests/run_gates.sh --main`（期望 38/38）
+  3. `git add wchat.sh && git commit -m "B 收口(2/2): 删 hard_deny_cmd bash 判据体(仅留 Python seam)"`
+  - 回滚：`.scratch/wchat.pre_refactor.bak` 或 `git checkout -- wchat.sh`
+  - 注：`tests/hardwall_seam_test.sh` 已改造为不依赖 bash 判据体（只验 `WCHAT_PY_HARDWALL=1` 对期望），删除后闸门仍成立。
