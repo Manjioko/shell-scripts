@@ -50,6 +50,21 @@ def window_output(lines, head_n, buf_size):
     return out
 
 
+def capture(argv, win=10, head_n=50, buf_size=300):
+    """非交互核心：跑命令 → 逐行 clean_line → window_output 合成。
+
+    返回 (display_buf, full_output, rc)。display_buf 是最近 win 行（窗口要显示的部分），
+    full_output 是头+省略+最近 buf_size 行的完整回传（进上下文）。
+    不做 tty/信号/进程组——那是 run_with_window 的外壳，后续切片再包。
+    """
+    import subprocess
+    p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    text = p.stdout.decode("utf-8", "replace")
+    lines = [clean_line(ln) for ln in text.splitlines()]
+    display = lines[-win:] if len(lines) > win else lines
+    return display, window_output(lines, head_n, buf_size), p.returncode
+
+
 def paint(buf, partial, drawn):
     """返回一段字符串，等价 bash `paint` 的 printf 输出。
 
