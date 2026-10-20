@@ -187,6 +187,29 @@ def _safe(fn, c):
         return c
 
 
+def _h14_hint(c):
+    """复刻 bash _iht_hint：从安装动词后取"像包名"的词(纯 [A-Za-z0-9./_@~<>=+-]，跳过 -flag)，≤60。"""
+    m = _install_hit(c)
+    tail = c[m.end():] if m else c
+    out = []
+    for w in re.split(r"\s+", tail):
+        w = w.strip(";,)]")
+        if not w or w.startswith("-"):
+            continue
+        if re.search(r"[^A-Za-z0-9./_@~<>=+-]", w):
+            continue
+        if len(" ".join(out + [w])) > 60:
+            break
+        out.append(w)
+    return " ".join(out) or "<没认出可靠包名>"
+
+
+def _h14_msg(hint):
+    return ("安装软件会在 WORK_ROOT 之外落盘、以你的 uid 跑第三方 postinstall 代码,且不在快照回滚范围内"
+            "(模型还会记错包名)。替代:重启时加 --allow-install %s(只点名你认识的那几个),"
+            "或把安装交给人工执行;不要改用别的源、也不要用 curl|sh 绕" % hint)
+
+
 def _frag(rid, c):
     """best-effort 复刻 bash hd_note_hit 的 (命中: …) 片段：取决定该规则的正则首个匹配。"""
     def first(names, text):
@@ -218,15 +241,24 @@ def _frag(rid, c):
     if rid == "H10":
         return first(("hd_re_secret_ref",), c)
     if rid == "H11":
-        return first(("hd_re_sys_redirect",), c)
+        mm = re.search(getattr(R, "hd_re_sys_redirect_wide"), c, _ASCII)
+        if not mm:
+            mm = re.search(getattr(R, "hd_re_sys_redirect"), c, _ASCII)
+        if mm:
+            return "第%d行 %s" % (c[:mm.start()].count("\n") + 1, mm.group(0))
+        mm = re.search(r"(?:^|[ \t=&])(/(?:etc|usr|bin|sbin|System|Library|var|private)/[^\s;&|<>()]*)", c)
+        if mm:
+            return "第%d行 %s" % (c[:mm.start(1)].count("\n") + 1, mm.group(1))
     return ""
 
 
 def detail(cmd, auto=False):
-    """返回 (rule, soft, msg)。msg = bash 静态话术 + 动态 (命中: …) 片段；未命中返回空串。"""
+    """返回 (rule, soft, msg)。msg = bash 话术(+ 动态命中片段)；未命中返回空串。"""
     r, s = rule(cmd, auto)
     if not r:
         return r, s, ""
+    if r == "H14":
+        return r, s, _h14_msg(_h14_hint(cmd or ""))
     base = _MSGS.get(r, "")
     f = _frag(r, cmd or "")
     return r, s, (base + ("(命中: %s)" % f[:80] if f else ""))
