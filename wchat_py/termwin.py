@@ -20,6 +20,36 @@ def clean_line(line):
     return s
 
 
+def window_output(lines, head_n, buf_size):
+    """复刻 run_with_window 的缓冲语义：头 head_n 行 + (省略计数) + 最近 buf_size 行。
+
+    等价 wchat.sh 2170–2289：total 计行；前 head_n 行进 out_head；其余进环形 tail_buf
+    （下标 % buf_size，tail_idx 自增）；最后按 tstart 环绕取最近 tail_count 行。
+    返回**完整输出字符串**（每行带结尾 \\n，与 bash `window_output` 逐字一致）。
+    """
+    out_head = []
+    tail_buf = [None] * buf_size
+    tail_idx = 0
+    total = 0
+    for line in lines:
+        total += 1
+        if total <= head_n:
+            out_head.append(line)
+        else:
+            tail_buf[tail_idx % buf_size] = line
+            tail_idx += 1
+    out = "".join(x + "\n" for x in out_head)
+    tail_count = 0
+    if total > head_n:
+        tail_count = min(total - head_n, buf_size)
+    tstart = (tail_idx - tail_count + buf_size) % buf_size
+    if total > head_n + tail_count:
+        out += "\n... (中间 %d 行已省略) ...\n" % (total - head_n - tail_count)
+    for ti in range(tail_count):
+        out += tail_buf[(tstart + ti) % buf_size] + "\n"
+    return out
+
+
 def paint(buf, partial, drawn):
     """返回一段字符串，等价 bash `paint` 的 printf 输出。
 
@@ -37,4 +67,3 @@ def paint(buf, partial, drawn):
     else:
         out.append("\x1b[?25l")
     return "".join(out)
-
