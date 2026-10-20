@@ -278,6 +278,23 @@ def _run_tool(name, args_json):
         if status:
             sys.stdout.write(status + "\n")
         return content
+    if name == "run_shell_command":
+        cmd = a.get("command") or ""
+        from wchat_py.hardwall import detail as _hd_detail
+        _auto = os.environ.get("AUTO_MODE") == "full"
+        _r, _s, _m = _hd_detail(cmd, _auto)
+        if _r:
+            return ("[硬墙 %s] %s" % (_r, _m))
+        from wchat_py.termpty import pty_run
+        try:
+            _timeout = float(os.environ.get("CMD_TIMEOUT", "20"))
+        except ValueError:
+            _timeout = 20.0
+        _disp, _full, _rc, _to, _intr = pty_run(
+            ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")))
+        if _to:
+            _full += "\n[命令超过单条上限 %gs,已终止 · rc=%s]\n" % (_timeout, _rc)
+        return _full
     return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
 
 
