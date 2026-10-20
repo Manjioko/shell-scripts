@@ -87,3 +87,31 @@ def grep(pattern, path, max_matches, max_col, work_root):
     if not out:
         return ('未找到匹配 "%s" 的内容。' % pattern, " 已搜索:%s" % pattern)
     return ('搜索 "%s" 的结果:\\n%s' % (pattern, out), " 已搜索:%s" % pattern)
+
+
+def write_file(resolved, display_path, text, work_root):
+    """等价 bash `tool_write_file` 的核心（授权 / auto_backup / 熔断在别处）。
+
+    非 auto 档 `auto_backup` / `auto_write_fuse_record` 是 no-op，故此处不调。
+    返回 (content, status_line)。`text` 是模型给的 .content 原串。
+    ⚠ 落盘 = text + '\\n'：bash 用 `jq -r` 输出原文会**追加一个换行**。
+    """
+    parent = os.path.dirname(resolved) or "."
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError:
+        return ("错误:无法创建目录: %s" % display_path, None)
+    try:
+        with open(resolved, "wb") as fh:
+            fh.write((text + "\n").encode("utf-8"))
+    except OSError:
+        pass
+    if not os.path.exists(resolved):
+        return ("❌ 写入未落地:%s(相对路径 %s 按工作根 %s 解析,写后该绝对路径上不存在)"
+                % (resolved, display_path, work_root), " ⛔ 写入未落地:%s" % resolved)
+    with open(resolved, "rb") as fh:
+        nlines = fh.read().count(b"\n")
+    msg = "✅ 已写入 %s(%d 行)· 实际落点 %s" % (display_path, nlines, resolved)
+    if not os.path.isabs(display_path):
+        msg += "\n" + "   (相对路径按工作根 %s 解析;若这不是你要的位置,改用绝对路径。工作根由进程启动时的目录决定,与后续 cd 无关)" % work_root
+    return (msg, " 已写入 %s" % resolved)
