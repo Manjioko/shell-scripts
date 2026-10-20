@@ -211,6 +211,11 @@ def rule(cmd, auto=False, work_root=None, home=None):
                 w = os.path.expanduser(w)
             if _SYS_PATH.match(w):
                 return "H11", ""
+        # dd 的 of= 与直接重定向：write_targets 不解析 of=，这里补扫
+        for m in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", c):
+            p = m.group(1).strip("'\"")
+            if _SYS_PATH.match(p):
+                return "H11", ""
     # H12 工作根外写（仅 auto 档）：逐写目标走 pathrule.hard_deny_path → P1/P2/P3
     if auto:
         from wchat_py import pathrule

@@ -12,6 +12,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.termpty import pty_run  # noqa: E402
 
+# run_gates 环境下进程可能继承了被 block 的 SIGINT；显式 unblock，否则自发的 SIGINT
+# 会一直 pending，handler 永不触发（单独跑没事、进闸门偶发失败）。
+try:
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+except (AttributeError, OSError):
+    pass
+
 p = f = 0
 
 
