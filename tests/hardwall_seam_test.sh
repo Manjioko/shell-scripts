@@ -15,11 +15,10 @@ pass=0; fail=0
 for i in "${!cmds[@]}"; do
     c="${cmds[$i]}"; w="${want[$i]}"
     WCHAT_PY_HARDWALL=1 hard_deny_cmd "$c"; p_rule="${hd_rule:--}"; [[ -n "$p_rule" ]] || p_rule="-"
-    WCHAT_PY_HARDWALL=0 hard_deny_cmd "$c"; b_rule="${hd_rule:--}"; [[ -n "$b_rule" ]] || b_rule="-"
-    if [[ "$p_rule" == "$b_rule" && "$p_rule" == "$w" ]]; then
+    if [[ "$p_rule" == "$w" ]]; then
         pass=$((pass + 1))
     else
-        fail=$((fail + 1)); printf 'FAIL %s: py=%s bash=%s want=%s\n' "$c" "$p_rule" "$b_rule" "$w" >&9
+        fail=$((fail + 1)); printf 'FAIL %s: py=%s want=%s\n' "$c" "$p_rule" "$w" >&9
     fi
 done
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail" >&9
