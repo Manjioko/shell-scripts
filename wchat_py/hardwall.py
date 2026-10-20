@@ -5,6 +5,8 @@
 规则顺序照 bash（wchat.sh 4727–4937）：H1→H9、H13、H14、H10、H11、H12(auto)。
 谓词全部复用已收口的 Python：hd_re（正则）、hd（mask_readonly/mask_msg/mask_search_pat 等）。
 """
+import json
+import os
 import re
 
 from wchat_py import hd
@@ -146,8 +148,21 @@ def rule(cmd):
     return "", ""
 
 
+_MSGS = {}
+try:
+    with open(os.path.join(os.path.dirname(__file__), "hard_msgs.json"), encoding="utf-8") as _fh:
+        _MSGS = json.load(_fh)
+except Exception:
+    _MSGS = {}
+
+
+def detail(cmd):
+    """返回 (rule, soft, msg)。msg 是 bash 的静态话术（已自动抽取）；未命中返回空串。"""
+    r, s = rule(cmd)
+    return r, s, (_MSGS.get(r, "") if r else "")
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "-":
-        for ln in sys.stdin:
-            print("%s\t%s" % rule(ln.rstrip("\n")))
+    for ln in sys.stdin:
+        print("%s\t%s" % rule(ln.rstrip("\n")))
