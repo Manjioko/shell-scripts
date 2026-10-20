@@ -115,3 +115,33 @@ def write_file(resolved, display_path, text, work_root):
     if not os.path.isabs(display_path):
         msg += "\n" + "   (相对路径按工作根 %s 解析;若这不是你要的位置,改用绝对路径。工作根由进程启动时的目录决定,与后续 cd 无关)" % work_root
     return (msg, " 已写入 %s" % resolved)
+
+
+def edit_file(resolved, display_path, old_string, new_string, work_root):
+    """等价 bash `tool_edit_file`（授权 `path_access` 在 bash）。
+
+    返回 (content, status_line)。
+    ⚠ 复刻 bash 的两处"怪行为"：
+      1. `data=$(<"$resolved")` 命令替换**剥掉文件末尾所有换行**，写回用 `printf '%s'`
+         不补 ⇒ 成功编辑后文件末尾换行会**丢失**。这是原实现真实行为, 只做等价。
+      2. count = 非重叠出现次数(与 bash `${data//old/}` 的口径一致)。
+    """
+    if not os.path.isfile(resolved):
+        return ("错误:文件不存在: %s(解析为 %s;工作根 %s)" % (display_path, resolved, work_root),
+                " ⛔ 文件不存在:%s" % resolved)
+    if not old_string:
+        return ("错误:old_string 不能为空", None)
+    with open(resolved, "rb") as fh:
+        data = fh.read().decode("utf-8", "replace")
+    data = data.rstrip("\n")
+    count = data.count(old_string)
+    if count == 0:
+        return ("错误:在 %s 中未找到指定内容,未做任何修改。请用 read_file 重新确认原文。" % display_path,
+                " ⚠️  未找到待替换内容,文件未修改")
+    if count > 1:
+        return ("错误:指定内容在 %s 中出现 %d 次,不唯一,未做任何修改。请提供更长的上下文使其唯一。" % (display_path, count),
+                " ⚠️  待替换内容出现 %d 次,不唯一,文件未修改" % count)
+    new_data = data.replace(old_string, new_string, 1)
+    with open(resolved, "wb") as fh:
+        fh.write(new_data.encode("utf-8"))
+    return ("✅ 已修改 %s(替换 1 处)" % display_path, " 已修改 %s" % display_path)
