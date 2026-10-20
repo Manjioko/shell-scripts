@@ -4584,6 +4584,20 @@ hd_fold_lines() {
 hard_deny_cmd() {
     local c="$1" word c2="" c3=""
     hd_rule=""; hd_msg=""; HD_SOFT=""
+    # ── B 阶段接线 seam：WCHAT_PY_HARDWALL=1 时判定交给 Python hardwall（唯一活实现候选）──
+    # 默认关（不设=0）→ 走下面 bash 原实现，现有套件零影响；置 1 时 bash 只做出口，判定全在 Python。
+    # 判据已在 62 条语料上与 bash 逐字等价（rule/soft + msg），见 tests/hdcmd_corpus_test.sh。
+    if [[ "${WCHAT_PY_HARDWALL:-0}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
+        local _hwj
+        _hwj=$(printf '%s' "$1" | py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
+        if [[ -n "$_hwj" && "$_hwj" == \{* ]]; then
+            hd_rule=$(printf '%s' "$_hwj" | jq -r '.rule // ""')
+            hd_msg=$(printf '%s' "$_hwj" | jq -r '.msg // ""')
+            HD_SOFT=$(printf '%s' "$_hwj" | jq -r '.soft // ""')
+            [[ -n "$hd_rule" ]] && return 0
+            return 1
+        fi
+    fi
     # C 阶段(2):H1–H11 统一改读"剔掉非执行类 heredoc 正文"的那一份。
     # 只替换 c 一处、不在各分支分别处理:否则会出现"heredoc 里的叙述逃过 H3、却仍被
     # H5/H6 按原文拦" —— 同一条命令换个规则号继续误拦,B 阶段已经吃过这个教训。

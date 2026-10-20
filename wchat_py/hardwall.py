@@ -320,7 +320,19 @@ def detail(cmd, auto=False):
     return r, s, (base + ("(命中: %s)" % f[:80] if f else ""))
 
 
+def cmd_json(argv):
+    """CLI seam：从 stdin 读命令，输出 JSON {rule,soft,msg,deny}，供 bash 硬墙前端调用。"""
+    import sys
+    auto = "--auto" in argv
+    c = sys.stdin.read().rstrip("\n")
+    r, s, m = detail(c, auto)
+    sys.stdout.write(json.dumps({"rule": r, "soft": s, "msg": m, "deny": bool(r)}, ensure_ascii=False) + "\n")
+    return 0
+
+
 if __name__ == "__main__":
     import sys
+    if "json" in sys.argv[1:] or "--json" in sys.argv[1:]:
+        raise SystemExit(cmd_json(sys.argv[1:]))
     for ln in sys.stdin:
         print("%s\t%s" % rule(ln.rstrip("\n")))
