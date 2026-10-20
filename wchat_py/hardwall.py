@@ -228,7 +228,23 @@ def _frag(rid, c):
     if rid == "H4":
         return first(("hd_re_disk",), _safe(hd.mask_readonly, c))
     if rid == "H5":
-        return first(("hd_re_dotfile", "hd_re_dotfile_cfg"), c)
+        # 近似 hd_has_write 的 BASH_REMATCH：先抹 dev_sink/fd，若残留 '>' 且目标不干净 → 早返(片段空)；
+        # 否则片段取写动词匹配。
+        s = c
+        while True:
+            mm = re.search(R.hd_re_dev_sink, s, _ASCII)
+            if not mm:
+                break
+            s = s.replace(mm.group(0), "", 1)
+        while True:
+            mm = re.search(r"[0-9]+>&[0-9-]|>&[0-9-]", s)
+            if not mm:
+                break
+            s = s.replace(mm.group(0), "", 1)
+        if ">" in s and not _redir_targets_all_clean(s):
+            return ""
+        mm = re.search(getattr(R, "hd_re_write_verb"), c, _ASCII)
+        return mm.group(0) if mm else ""
     if rid == "H6":
         return first(("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow"),
                      _safe(hd.mask_msg, c))
@@ -249,18 +265,58 @@ def _frag(rid, c):
         mm = re.search(r"(?:^|[ \t=&])(/(?:etc|usr|bin|sbin|System|Library|var|private)/[^\s;&|<>()]*)", c)
         if mm:
             return "第%d行 %s" % (c[:mm.start(1)].count("\n") + 1, mm.group(1))
+    if rid == "H13":
+        mm = re.search(
+            r"(?:defaults\s+(?:write|delete|read\[)|plutil\s+(?:-replace|-insert|-remove|-convert)|"
+            r"launchctl\s+(?:load|unload|bootstrap|bootout|kickstart|enable|disable)|osascript|"
+            r"git\s+config\s+(?:--global|--system)|networksetup|htpasswd|codesign|xattr\s+(?:-w|-d|--delete|--set))(?:\s|$)",
+            c)
+        return mm.group(0) if mm else ""
+    return ""
+
+
+def _h12_target(c):
+    try:
+        wt = hd.write_targets(c, R.hd_re_write_verb)
+    except Exception:
+        wt = ""
+    home = os.environ.get("HOME", "")
+    for w in (wt or "").splitlines():
+        w = w.strip().rstrip(";,)]")
+        if not w:
+            continue
+        w = w.replace("${HOME}", home).replace("$HOME", home)
+        if w.startswith("/dev/"):
+            continue
+        if w == "~" or w.startswith("~/"):
+            w = os.path.expanduser(w)
+        elif w.startswith("../"):
+            w = "/tmp/" + w
+        elif not w.startswith("/"):
+            continue
+        if not (w == "/tmp" or w.startswith("/tmp/")):
+            return w
     return ""
 
 
 def detail(cmd, auto=False):
     """返回 (rule, soft, msg)。msg = bash 话术(+ 动态命中片段)；未命中返回空串。"""
-    r, s = rule(cmd, auto)
+    c = cmd or ""
+    r, s = rule(c, auto)
     if not r:
         return r, s, ""
     if r == "H14":
-        return r, s, _h14_msg(_h14_hint(cmd or ""))
+        mm = re.search(r"--index-url|--registry|--extra-index-url|--find-links", c)
+        if mm:
+            return r, s, _MSGS.get("H14REG", "") + "(命中: %s)" % mm.group(0)
+        return r, s, _h14_msg(_h14_hint(c))
+    if r == "P3":
+        base = _MSGS.get("P3", "")
+        pre = (base.split("--allow-write '")[0] + "--allow-write '") if "--allow-write '" in base else base
+        tgt = _h12_target(c)
+        return r, s, pre + tgt + "'" + ("(命中目标: %s)" % tgt if tgt else "")
     base = _MSGS.get(r, "")
-    f = _frag(r, cmd or "")
+    f = _frag(r, c)
     return r, s, (base + ("(命中: %s)" % f[:80] if f else ""))
 
 
