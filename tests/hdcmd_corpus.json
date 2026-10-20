@@ -44,7 +44,18 @@
     {"id": "N-12", "cat": "neg-readonly", "cmd": "head -n 3 ~/.ct/history/2024.log"},
     {"id": "N-13", "cat": "neg-readonly", "cmd": "cp a.txt b.txt"},
     {"id": "N-14", "cat": "neg-readonly", "cmd": "echo 'hello world' > /tmp/x"},
-    {"id": "N-15", "cat": "neg-readonly", "cmd": "ls > /dev/null 2>&1"}
+    {"id": "N-15", "cat": "neg-readonly", "cmd": "ls > /dev/null 2>&1"},
+    {"id": "H14-1", "cat": "install", "cmd": "pip install requests"},
+    {"id": "H14-2", "cat": "install", "cmd": "pip3 install flask"},
+    {"id": "H14-3", "cat": "install", "cmd": "npm install -g left-pad"},
+    {"id": "H14-4", "cat": "install", "cmd": "brew install jq"},
+    {"id": "H14-5", "cat": "install", "cmd": "yarn add lodash"},
+    {"id": "H14-6", "cat": "install-regsrc", "cmd": "pip install --index-url https://x/simple pkg"},
+    {"id": "H6-7", "cat": "read-cred-cd", "cmd": "cd ~ && cat .npmrc"},
+    {"id": "H6-8", "cat": "read-cred-rel", "cmd": "cat foo/.npmrc"},
+    {"id": "H11-5", "cat": "write-system", "cmd": "tee /etc/hosts < x"},
+    {"id": "H11-6", "cat": "write-system", "cmd": "dd if=a of=/etc/x"},
+    {"id": "N-16", "cat": "neg-readonly", "cmd": "rm a.txt"},
+    {"id": "N-17", "cat": "neg-readonly", "cmd": "mv a.txt b.txt"}
   ]
 }
-

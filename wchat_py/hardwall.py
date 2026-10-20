@@ -91,6 +91,15 @@ def _creds_all_exempt(c):
     return True
 
 
+def _install_hit(c):
+    """近似 hd_install_tail 的"这是安装类动作"判定（非 auto 即拒；源替换也归 H14）。"""
+    return re.search(
+        r"(^|[\s;&|(])(pip[0-9.]*\s+install|python[0-9.]*\s+-m\s+pip\s+install|"
+        r"npm\s+(install|i|add)|yarn\s+(add|install)|pnpm\s+(add|install)|"
+        r"brew\s+install|gem\s+install|cargo\s+install|go\s+install|"
+        r"apt-get\s+install|apt\s+install|dpkg\s+-i|pipx\s+install)", c)
+
+
 def rule(cmd):
     """返回 (rule, soft)。rule 非空即拒绝；soft 非空表示降级出口。"""
     c = cmd or ""
@@ -123,13 +132,16 @@ def rule(cmd):
                  r"git\s+config\s+(--global|--system)|networksetup|htpasswd|codesign|xattr\s+(-w|-d|--delete|--set))"
                  r"(\s|$)", c):
         return "H13", ""
+    # H14 安装类动作（非自动放行即拒；源替换同归 H14）
+    if _install_hit(c):
+        return "H14", ""
     # H10 外发敏感内容
     if _m("hd_re_upload", c) and _m("hd_re_upload_arg", c) and _m("hd_re_secret_ref", c):
         return "H10", ""
     # H11 重定向/写动词落系统路径
     if _m("hd_re_sys_redirect", c) or (
             _m("hd_re_write_verb", c)
-            and re.search(r"[ \t]/(etc|usr|bin|sbin|System|Library|var|private)/", c)):
+            and re.search(r"(^|[ \t=&])/(etc|usr|bin|sbin|System|Library|var|private)/", c)):
         return "H11", ""
     return "", ""
 

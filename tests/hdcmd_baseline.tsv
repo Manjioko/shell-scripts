@@ -43,3 +43,15 @@ N-12	neg-readonly	H6	-	head -n 3 ~/.ct/history/2024.log
 N-13	neg-readonly	-	-	cp a.txt b.txt
 N-14	neg-readonly	-	-	echo 'hello world' > /tmp/x
 N-15	neg-readonly	-	-	ls > /dev/null 2>&1
+H14-1	install	H14	-	pip install requests
+H14-2	install	H14	-	pip3 install flask
+H14-3	install	H14	-	npm install -g left-pad
+H14-4	install	H14	-	brew install jq
+H14-5	install	H14	-	yarn add lodash
+H14-6	install-regsrc	H14	-	pip install --index-url https://x/simple pkg
+H6-7	read-cred-cd	H6	-	cd ~ && cat .npmrc
+H6-8	read-cred-rel	-	-	cat foo/.npmrc
+H11-5	write-system	H11	-	tee /etc/hosts < x
+H11-6	write-system	H11	-	dd if=a of=/etc/x
+N-16	neg-readonly	-	-	rm a.txt
+N-17	neg-readonly	-	-	mv a.txt b.txt
