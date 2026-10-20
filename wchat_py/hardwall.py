@@ -103,9 +103,11 @@ def _creds_all_exempt(c):
 def _install_hit(c):
     """近似 hd_install_tail 的"这是安装类动作"判定（非 auto 即拒；源替换也归 H14）。"""
     return re.search(
-        r"(^|[\s;&|(])(pip[0-9.]*\s+install|python[0-9.]*\s+-m\s+pip\s+install|"
-        r"npm\s+(install|i|add)|yarn\s+(add|install)|pnpm\s+(add|install)|"
-        r"brew\s+install|gem\s+install|cargo\s+install|go\s+install|"
+        r"(^|[\s;&|(])("
+        r"pip[0-9.]*\s+install|python[0-9.]*\s+-m\s+pip\s+install|"
+        r"python[0-9.]*\s+setup\.py\s+install|"
+        r"npm\b[^;&|]*\b(install|add|i)\b|yarn\s+(add|install)|pnpm\s+(add|install)|"
+        r"brew\s+(install|tap)|gem\s+install|cargo\s+install|go\s+install|"
         r"apt-get\s+install|apt\s+install|dpkg\s+-i|pipx\s+install)", c)
 
 
@@ -140,6 +142,7 @@ def rule(cmd, auto=False, work_root=None, home=None):
     # H13 opaque write（近似：复用 hd_has_write 之外的动词族；先给已知形态）
     if re.search(r"(defaults\s+(write|delete|read\[)|plutil\s+(-replace|-insert|-remove|-convert)|"
                  r"launchctl\s+(load|unload|bootstrap|bootout|kickstart|enable|disable)|osascript|"
+                 r"sqlite3\s+[^;&|]*\b(update|delete|insert|drop|alter|create|vacuum|attach)\b|"
                  r"git\s+config\s+(--global|--system)|networksetup|htpasswd|codesign|xattr\s+(-w|-d|--delete|--set))"
                  r"(\s|$)", c):
         return "H13", ""
