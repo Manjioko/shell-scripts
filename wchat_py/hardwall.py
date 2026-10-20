@@ -109,9 +109,11 @@ def _install_hit(c):
         r"apt-get\s+install|apt\s+install|dpkg\s+-i|pipx\s+install)", c)
 
 
-def rule(cmd, auto=False):
+def rule(cmd, auto=False, work_root=None, home=None):
     """返回 (rule, soft)。rule 非空即拒绝；soft 非空表示降级出口。`auto=True` 启用 H12 越界写判据。"""
     c = cmd or ""
+    work_root = work_root or os.environ.get("WORK_ROOT") or "/tmp"
+    home = home or os.environ.get("HOME") or ""
 
     if _m("hd_re_priv", c) or _m("hd_re_su", c):
         return "H1", ""
@@ -163,13 +165,13 @@ def rule(cmd, auto=False):
                 w = os.path.expanduser(w)
             if _SYS_PATH.match(w):
                 return "H11", ""
-    # H12 工作根外写（仅 auto 档）：提取写目标，任一越出工作根 → P3（走路径规则）
-    if auto and os.environ.get("AUTO_SHELL_PATHS", "1") != "0":
+    # H12 工作根外写（仅 auto 档）：逐写目标走 pathrule.hard_deny_path → P1/P2/P3
+    if auto:
+        from wchat_py import pathrule
         try:
             wt = hd.write_targets(c, R.hd_re_write_verb)
         except Exception:
             wt = ""
-        home = os.environ.get("HOME", "")
         for w in (wt or "").splitlines():
             w = w.strip().rstrip(";,)]")
             if not w:
@@ -182,11 +184,12 @@ def rule(cmd, auto=False):
             if w == "~" or w.startswith("~/"):
                 w = os.path.expanduser(w)
             elif w.startswith("../"):
-                w = "/tmp/" + w
+                w = os.path.join(work_root, w)
             elif not w.startswith("/"):
                 continue
-            if not (w == "/tmp" or w.startswith("/tmp/")):
-                return "P3", ""
+            res = pathrule.hard_deny_path(w, "rw", "full", home, work_root, [], [], [])
+            if res.get("rule"):
+                return res["rule"], ""
     return "", ""
 
 

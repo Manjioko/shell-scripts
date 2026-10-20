@@ -37,7 +37,7 @@ diffs = []
 for want, cmd in rows:
     want = want.strip("'\"")
     try:
-        r, _soft = rule(cmd)
+        r, _soft = rule(cmd, auto=want.startswith("P"), work_root="/tmp", home="/Users/x")
     except Exception as e:  # noqa: BLE001
         skip += 1
         continue
@@ -52,4 +52,3 @@ for want, cmd in rows:
 for d in diffs:
     print("DIFF want=%-3s got=%-3s  %s" % (d[0], d[1], d[2][:60]))
 print("VEC total=%d same=%d diff=%d skip=%d" % (len(rows), same, diff, skip))
-
