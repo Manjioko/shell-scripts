@@ -53,6 +53,23 @@ def main(argv):
             print("基线不一致")
             return 1
         print("基线与当前一致(%d 条)" % len(new))
+        # Python hard_deny_cmd 差分（rule/soft）：bash 基线 vs Python 实现
+        try:
+            from wchat_py import hardwall
+        except Exception as e:
+            print("无法导入 hardwall: %s" % e)
+            return 1
+        bad = 0
+        for (i, cat, rl, sf, cmd) in rows:
+            pr, ps = hardwall.rule(cmd)
+            pr = pr or "-"
+            if (pr, ps or "-") != (rl, sf):
+                bad += 1
+                print("PY-DIFF %s bash=(%s,%s) py=(%s,%s) %s" % (i, rl, sf, pr, ps or "-", cmd[:40]))
+        if bad:
+            print("硬墙差分 Python 不一致: %d/%d" % (bad, len(rows)))
+            return 1
+        print("硬墙差分 Python 一致(%d/%d)" % (len(rows), len(rows)))
         return 0
 
     with open(BASE, "w", encoding="utf-8") as f:
