@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """把 tests/test_hardwall.sh 的 expect 向量灌进 Python hardwall，量真实一致率（只读，不改源码）。
 
-用法: python3 tests/vector_parity.py
-输出: 每条差异 + `VEC total=N same=N diff=N`。用于判断"Python 硬墙能否替代 bash 判据体"。
+改进（去 harness 假差异）：
+- want 含 '|'（如 H8|H13）按**集合**比：got 落在集合内即算一致；
+- 含 $'...'（ANSI-C 引号，多行/转义）的向量 shlex 无法可靠解析 -> 计入 skip，不算 diff；
+用于判断"Python 硬墙能否替代 bash 判据体"。
 """
 import os
-import re
 import shlex
 import sys
 
@@ -16,39 +17,44 @@ from wchat_py.hardwall import rule  # noqa: E402
 SRC = os.path.join(REPO, "tests/test_hardwall.sh")
 
 rows = []
+skipped = 0
 for ln in open(SRC, encoding="utf-8"):
     s = ln.strip()
     if not s.startswith("expect "):
         continue
     rest = s[len("expect "):]
+    if "$'" in rest:          # ANSI-C 引号：shlex 解析不可靠，跳过（不算产品差异）
+        skipped += 1
+        continue
     try:
         toks = shlex.split(rest, posix=True)
     except ValueError:
+        skipped += 1
         continue
     if len(toks) < 3:
         continue
-    want = toks[0]
+    want = toks[0].strip("'\"")
     cmd = " ".join(toks[2:])
-    # 期望规则: NP=放行; 其余为规则号; 有的写 'NP'
     rows.append((want, cmd))
 
-same = diff = skip = 0
+same = diff = 0
 diffs = []
 for want, cmd in rows:
-    want = want.strip("'\"")
     try:
         r, _soft = rule(cmd, auto=want.startswith("P"), work_root="/tmp", home="/Users/x")
-    except Exception as e:  # noqa: BLE001
-        skip += 1
+    except Exception:  # noqa: BLE001
+        skipped += 1
         continue
     got = r or "NP"
-    if got == want:
+    want_set = want.split("|")
+    if got in want_set:
         same += 1
     else:
         diff += 1
-        if len(diffs) < 20:
+        if len(diffs) < 25:
             diffs.append((want, got, cmd))
 
 for d in diffs:
-    print("DIFF want=%-3s got=%-3s  %s" % (d[0], d[1], d[2][:60]))
-print("VEC total=%d same=%d diff=%d skip=%d" % (len(rows), same, diff, skip))
+    print("DIFF want=%-6s got=%-3s  %s" % (d[0], d[1], d[2][:58]))
+print("VEC total=%d same=%d diff=%d skip=%d" % (len(rows), same, diff, skipped))
+
