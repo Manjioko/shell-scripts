@@ -52,14 +52,16 @@ fi
 unset _rf_probe_arr
 
 cd "$(dirname "$0")/.." || exit 1
+# 收口：本表测"bash 判据体的行为/话术"，取值源改指冻结快照(删 bash 体后仍可测)。
+WH="${WH:-$(cd "$(dirname "$0")" && pwd)/fixtures/wchat_hardwall_oracle.sh}"
 
 # ── 装载 ────────────────────────────────────────────────────────────────
 # 顶层赋值(grep -vF '$(' 跳过右边是命令替换的那些,不能在这儿 eval)
-eval "$(grep -E '^(hd_[a-z0-9_]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' wchat.sh | grep -vF '$(')" 2>/dev/null
+eval "$(grep -E '^(hd_[a-z0-9_]*|auto_[a-zA-Z0-9_]*|AUTO_[A-Z0-9_]*|WCHAT_[A-Z0-9_]*|TTY_[A-Z0-9_]*)=' "$WH" | grep -vF '$(')" 2>/dev/null
 # 逐个抽函数:必须 `/^}$/ {exit}`,不能 {p=0} 拼段 —— 函数体内嵌的 awk/sed 程序里有顶格 `}`,
 # 拼段会在那里截断,eval 语法失败后一个函数都装不上(与 3) 同类的"静默空转")。
-for _fn in $(grep -oE '^(_py_on|py_run|hd_[a-z0-9_]*|hard_deny_cmd)\(\) \{' wchat.sh | sed 's/() {//'); do
-    eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' wchat.sh)" 2>/dev/null
+for _fn in $(grep -oE '^(_py_on|py_run|hd_[a-z0-9_]*|hard_deny_cmd)\(\) \{' "$WH" | sed 's/() {//'); do
+    eval "$(awk -v f="$_fn" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$WH")" 2>/dev/null
 done
 unset _fn
 # 迁移通道:hd_* 已收口(铁律 3,旧 bash 回退已删)→ 必须装载真实 _py_on/py_run 走 **Python
@@ -216,7 +218,7 @@ fi
 [[ -n "${SEEN[P3]-}" ]] && ok "越界写(编号 P3)也被覆盖" || printf '  \033[33mNOTE\033[0m 越界写 P3 未覆盖(它只在 auto 档且有写目标提取器时才判,需另配语境)\n'
 
 echo "调用点接线 — 理由必须真的被递出去(钉在已读到的真实代码上)"
-if grep -q 'content="错误:命令被硬墙拒绝\[规则 ${hd_rule}\]:${hd_msg}' wchat.sh; then
+if grep -q 'content="错误:命令被硬墙拒绝\[规则 ${hd_rule}\]:${hd_msg}' "$WH"; then
     ok "回传给模型的文案里带 hd_msg"
 else
     bad "回传文案没带 hd_msg" "模型看不到替代方案,只会换个写法再撞一次"

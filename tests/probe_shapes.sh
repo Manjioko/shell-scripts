@@ -27,7 +27,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     echo "⛔ 需要 bash 5+" >&2; exit 1
 fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
-SRC_ARG=${1:-wchat.sh}
+SRC_ARG=${1:-$(cd "$(dirname "$0")" && pwd)/fixtures/wchat_hardwall_oracle.sh}
 VEC=${2:-tests/probe_shapes.txt}
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/wchat-probe.XXXXXX") || exit 1
