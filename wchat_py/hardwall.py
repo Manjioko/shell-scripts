@@ -433,9 +433,16 @@ def cmd_json(argv):
     return 0
 
 
-if __name__ == "__main__":
+def main(argv):
+    """py_run 入口：`python3 _run.py hardwall json [--auto]`（stdin=命令）。"""
     import sys
-    if "json" in sys.argv[1:] or "--json" in sys.argv[1:]:
-        raise SystemExit(cmd_json(sys.argv[1:]))
+    if "json" in argv or "--json" in argv:
+        return cmd_json(argv)
     for ln in sys.stdin:
         print("%s\t%s" % rule(ln.rstrip("\n")))
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    raise SystemExit(main(sys.argv[1:]))
