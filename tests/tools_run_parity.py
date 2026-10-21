@@ -38,7 +38,9 @@ def bash_tool(tool, d, args, env_extra=None):
     env["PYTHONPATH"] = REPO + ":" + os.environ.get("PYTHONPATH", "")
     env["WORK_ROOT"] = d
     env.update(env_extra or {})
-    out = subprocess.run([BASH, "-c", fx, "_", REPO + "/wchat.sh", d, json.dumps(args)],
+    out = subprocess.run([BASH, "-c", fx, "_",
+                          os.path.join(REPO, "tests/fixtures/wchat_tools_oracle.sh"),
+                          d, json.dumps(args)],
                          capture_output=True, env=env).stdout.decode("utf-8", "replace")
     return _norm(ANSI.sub("", out), d)
 
