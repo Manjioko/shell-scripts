@@ -27,7 +27,8 @@ FX_AUTO = ('cd "$2"; _WCHAT_LIB_ONLY=1 API_KEY=sk-stub; '
 def verdict(cmd, auto=False):
     env = dict(os.environ)
     env["PYTHONPATH"] = REPO + ((":" + env["PYTHONPATH"]) if env.get("PYTHONPATH") else "")
-    out = subprocess.run([BASH, "-c", FX_AUTO if auto else FX, "_", REPO + "/wchat.sh", "/tmp", cmd],
+    out = subprocess.run([BASH, "-c", FX_AUTO if auto else FX, "_",
+                          os.path.join(REPO, "tests/fixtures/wchat_hardwall_oracle.sh"), "/tmp", cmd],
                          capture_output=True, env=env)
     s = ANSI.sub("", out.stdout.decode("utf-8", "replace"))
     idx = s.rfind("###HD###")

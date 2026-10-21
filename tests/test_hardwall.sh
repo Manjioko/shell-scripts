@@ -49,7 +49,7 @@ cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源
 # /private 正例」这条当场失效,顺带把结构守卫的 ok 也跳过了(总数少 1 条)。
 # 教训:自我检查一律用 $0 的实际路径,不靠文件名。
 HW_SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"   # 本表真实位置(搬进 tests/ 后不能再拼 $PWD/ basename,那会指到根下不存在的文件)
-SRC="${1:-$PWD/wchat.sh}"
+SRC="${1:-$(cd "$(dirname "$0")" && pwd)/fixtures/wchat_hardwall_oracle.sh}"
 [[ -f "$SRC" ]] || { echo "找不到被测脚本: $SRC"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 

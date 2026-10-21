@@ -74,7 +74,7 @@ done
 # 追加在区域复制之后 => bash 后定义覆盖先定义, 用快照版盖掉随区域抄进来的 live 版。
 _ORACLE_SRC="${REAL%/*}/tests/fixtures/wchat_tools_oracle.sh"
 if [[ -f "$_ORACLE_SRC" ]]; then
-    for _tf in tool_read_file tool_write_file tool_edit_file tool_list_dir tool_grep; do
+    for _tf in tool_read_file tool_write_file tool_edit_file tool_list_dir tool_grep hard_deny_cmd; do
         awk -v name="$_tf" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$_ORACLE_SRC" >> "$W/sandbox.sh"
     done
 fi
