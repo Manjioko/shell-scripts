@@ -7980,6 +7980,22 @@ tool_run_and_parse() {
             (( ${#args_preview} > 160 )) && args_preview="${args_preview:0:160}…"
             tool_banner "$fn_name" "$args_preview"
             echo
+            # ── §12 影子分发：WCHAT_PY_TOOLS=1 时纯格式化工具改由 Python toolcall 执行 ──
+            # 默认关（不设=0），走下面的 bash tool_$fn_name；开时 status 打屏幕、content 进消息（分离）。
+            _py_tool_done=0
+            if [[ "${WCHAT_PY_TOOLS:-0}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
+                case "$fn_name" in
+                    read_file|write_file|edit_file|list_dir|grep)
+                        _tj=$(printf '%s' "$fn_args" | py_run toolcall "$fn_name" 2>/dev/null)
+                        if [[ -n "$_tj" && "$_tj" == \{* ]]; then
+                            _ts=$(printf '%s' "$_tj" | jq -r '.status // ""')
+                            content=$(printf '%s' "$_tj" | jq -r '.content // ""')
+                            [[ -n "$_ts" ]] && printf '%s\n' "$_ts"
+                            _py_tool_done=1
+                        fi ;;
+                esac
+            fi
+            if [[ "${_py_tool_done:-0}" != 1 ]]; then
             case "$fn_name" in
                 read_file|write_file|edit_file|list_dir|grep|web_fetch|read_image|read_skill|web_search) "tool_$fn_name" ;;
                 # MCP 三条通道同样是**白名单里点名**,仍走"未知工具一律拒"这张表;
@@ -7994,6 +8010,7 @@ tool_run_and_parse() {
                     else content="错误:MCP 通道本次未启用(启动时没带 -mcp,或装配阶段退回)。不要重试,按无 MCP 的方式继续。"; printf ' ⛔ MCP 未启用\n'; fi ;;
                 *) content="错误:未知工具 $fn_name" ;;
             esac
+            fi
         fi
 
         # 工具执行期间 Ctrl+C(如 read_image/web_fetch 的同步转述/抓取被 SIGINT
