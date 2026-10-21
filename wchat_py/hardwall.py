@@ -167,6 +167,18 @@ def rule(cmd, auto=False, work_root=None, home=None):
     c = cmd or ""
     work_root = work_root or os.environ.get("WORK_ROOT") or "/tmp"
     home = home or os.environ.get("HOME") or ""
+    # 与 bash hard_deny_cmd 开头一致的预处理：先剥"数据型 heredoc"正文(非代码)，
+    # 再折行(续行→空格、裸换行→`;`)。fail-closed: 组件异常/无正文 → 保留原文。
+    try:
+        _pl = hd.noncode_payload(c)
+        if _pl is not None:
+            c = _pl
+    except Exception:
+        pass
+    try:
+        c = hd.fold_lines(c)
+    except Exception:
+        pass
 
     if _m("hd_re_priv", c) or _m("hd_re_su", c):
         return "H1", ""
