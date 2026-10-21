@@ -23,7 +23,7 @@ for ln in open(SRC, encoding="utf-8"):
     if not s.startswith("expect "):
         continue
     rest = s[len("expect "):]
-    if "$'" in rest:          # ANSI-C 引号：shlex 解析不可靠，跳过（不算产品差异）
+    if "$'" in rest or "$_" in rest:   # ANSI-C / 动态注入变量($_x): 静态不可判, 跳过
         skipped += 1
         continue
     try:

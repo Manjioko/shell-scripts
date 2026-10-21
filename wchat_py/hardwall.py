@@ -87,8 +87,13 @@ def _has_write(c):
 
 def _is_cred_token(t):
     t = t.strip("'\"")
-    return any(re.search(getattr(R, n), t, _ASCII)
-               for n in ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow"))
+    if any(re.search(getattr(R, n), t, _ASCII)
+           for n in ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")):
+        return True
+    # 裸点目录(无前导字符): .aws/credentials、.config/gh/hosts、.ct/history 等
+    if re.search(r"(^|/)\.(ssh|aws|gnupg|kube|docker|subversion|config|ct)(/|$)", t):
+        return True
+    return re.search(r"(^|/)\.(npmrc|netrc|pypirc|htpasswd|pgpass)$", t) is not None
 
 
 def _creds_all_exempt(c, work_root, home):
@@ -117,7 +122,10 @@ def _creds_all_exempt(c, work_root, home):
         if core in ("cd", "pushd"):
             nxt = toks[i + 1].strip("'\"") if i + 1 < len(toks) else ""
             ncore = re.sub(r"[();,&|<>$`]", "", nxt)
-            if ncore == "" or ncore in ("&&", "||", ";", "|", "&", "<", ">", ">>") \
+            if nxt in ("$PWD", "${PWD}"):
+                base = work_root if base_ok else ""
+                # 未 cd 前 $PWD == 工作根；若已不确定则保持不确定
+            elif ncore == "" or ncore in ("&&", "||", ";", "|", "&", "<", ">", ">>") \
                     or ncore.startswith("-") or "$" in nxt or "`" in nxt:
                 base_ok = False                          # 目标不可知（无参/分隔符/cd -/变量/命令替换）
             elif nxt in ("~", "$HOME", "${HOME}") or nxt.startswith("~/"):
@@ -198,23 +206,41 @@ def rule(cmd, auto=False, work_root=None, home=None):
     # H11 重定向/写动词落系统路径（方向感知：只看**写目标**，源在系统不算）
     if _m("hd_re_sys_redirect", c):
         return "H11", ""
-    if _m("hd_re_write_verb", c):
+    _home = os.environ.get("HOME", "")
+
+    def _sys(p):
+        p = p.strip("'\"")
+        p = p.replace("${HOME}", _home).replace("$HOME", _home)
+        if p.startswith("~"):
+            p = os.path.expanduser(p)
+        np = os.path.normpath(p)
+        return _SYS_PATH.match(np) or _SYS_PATH.match(p)
+
+    # 重定向/of= 目标（归一后判系统路径）——无条件
+    for m in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", c):
+        if _sys(m.group(1)):
+            return "H11", ""
+    # 通用写动词的目标（sed -i 让位给路径规则 H12/P2，不在此判）
+    if _m("hd_re_write_verb", c) and not re.search(r"\bsed\s+-i", c):
         try:
             wt = hd.write_targets(c, R.hd_re_write_verb)
         except Exception:
             wt = ""
-        home = os.environ.get("HOME", "")
         for w in (wt or "").splitlines():
             w = w.strip().rstrip(";,)]")
-            w = w.replace("${HOME}", home).replace("$HOME", home)
-            if w.startswith("~"):
-                w = os.path.expanduser(w)
-            if _SYS_PATH.match(w):
+            if not w:
+                continue
+            if _sys(w):
                 return "H11", ""
-        # dd 的 of= 与直接重定向：write_targets 不解析 of=，这里补扫
-        for m in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", c):
-            p = m.group(1).strip("'\"")
-            if _SYS_PATH.match(p):
+    # mv/rm 的**源**在系统路径也算破坏；cp 从系统读入不算。先在**去掉引号内容**的串上找，
+    # 避免 git commit -m '…rm…' 之类"引号里的字面量"被当命令。
+    c_nq = re.sub(r"'[^']*'|\"[^\"]*\"", "", c)
+    if re.search(r"(^|[;&|]|\s)(mv|rm)\s", c_nq):
+        for m in re.finditer(r"[^\s;&|<>()]+", c_nq):
+            p = m.group(0)
+            if p in ("mv", "rm"):
+                continue
+            if _sys(p):
                 return "H11", ""
     # H12 工作根外写（仅 auto 档）：逐写目标走 pathrule.hard_deny_path → P1/P2/P3
     if auto:
@@ -224,7 +250,7 @@ def rule(cmd, auto=False, work_root=None, home=None):
         except Exception:
             wt = ""
         for w in (wt or "").splitlines():
-            w = w.strip().rstrip(";,)]")
+            w = w.strip().rstrip(";,)]").strip("'\"")
             if not w:
                 continue
             w = w.replace("${HOME}", home).replace("$HOME", home)
