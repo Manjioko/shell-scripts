@@ -245,7 +245,7 @@ Python `cli._run_tool`（已实现 list_dir/read_file/grep/write_file/edit_file/
 - 1 `wchat_py/toolcall.py`（JSON `{status,content}` 分离）+ `tests/toolcall_test.py` 8/8。
 - 2 影子 seam：`wchat.sh:7984` 前插 `WCHAT_PY_TOOLS`（默认关）；双 e2e 0 失败。
 - 3 **默认切 1** → `run_gates --main` **40/40** 认证（工具由 Python 跑）。py_run 缺席回退 bash `tool_*`。
-- 4（未做，收口）：删/桩化 bash `tool_read_file/tool_write_file/tool_edit_file/tool_list_dir/tool_grep`
+- 4（**已完成**，桩化态 40/40）：删/桩化 bash `tool_read_file/tool_write_file/tool_edit_file/tool_list_dir/tool_grep`
   体（`tool_run_shell_command` 另行处理），删后 40 闸门重认证。授权 `path_access` 仍在 bash 前置。
   **⚠ 实测阻断（勿重犯）**：直接桩化 bash `tool_*` 会让 4 道闸门红——`工具运行`(拿 `bash tool_$name`
   当 parity 参照)、`主套件`(e2e 工具流)、`写熔断`、`文件格式`(依赖 `tool_*` 行为)。根因同"删
