@@ -5937,154 +5937,35 @@ auto_report_exit() {
 # 作为 tool 角色消息回传给模型;屏幕只打印一行摘要,全量内容悄悄进上下文。
 
 tool_read_file() {
-    local path offset limit resolved
-    path=$(jq -r '.path // empty' <<< "$fn_args")
-    offset=$(jq -r '.offset // empty' <<< "$fn_args")
-    limit=$(jq -r '.limit // empty' <<< "$fn_args")
-    [[ -z "$offset" || "$offset" == "null" ]] && offset=1
-    [[ -z "$limit" || "$limit" == "null" ]] && limit=0
-
-    # 沙箱内外走同一个裁决入口:resolve_path 只回答"在不在目录内",不回答"该不该给"。
-    # 以前只在它失败时才调 path_access,于是目录内的凭据文件 read_file 直读、cat 被拦。
-    resolved=$(resolve_path "$path") || resolved=""
-    path_access "$path" r "读" || return 0
-    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    # 报错也要带解析结果:只说"文件不存在: wchat.sh"会误导成"文件被删了",
-    # 真实原因往往是相对路径落到了另一个工作根下(本轮实例:根=$HOME,报的是 wchat.sh 不存在)。
-    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path(解析为 $resolved;工作根 $WORK_ROOT)"; printf ' ⛔ 文件不存在:%s\n' "$resolved"; return 0; }
-
-    # 纯格式化半交给 Python(见 wchat_py/filefmt.py);安全裁决(resolve_path/path_access)已在上面。
-    if _py_on filefmt; then
-        local _j _rc=0 _ln
-        _j=$(py_run filefmt read "$resolved" "$path" "$offset" "$limit" "$READ_MAX_CHARS") || _rc=$?
-        if (( _rc == 0 )); then
-            content=$(printf '%s' "$_j" | jq -r '.content')
-            _ln=$(printf '%s' "$_j" | jq -r '.lines')
-            printf ' 已读取 %s(%s 行)\n' "$path" "$_ln"
-            return 0
-        fi
-    fi
-
-    # 【已收口】旧 bash 格式化回退**已删除**;组件不可用 → **明示失败**,绝不返回半截/错行号内容
-    # (行号是 edit_file 定位与沟通引用的依据,错一行比不返回更坏)。
-    content="错误:读取组件不可用(filefmt),本次未返回内容"
-    printf ' ⛔ 读取组件不可用,未返回内容\n' >&2
+    content="错误:工具 tool_read_file 的 bash 版已收口删除; Python 组件不可用, 本次不执行"
+    printf ' ⛔ %s 组件不可用\n' tool_read_file >&2
     return 0
 }
 
 tool_write_file() {
-    local path resolved
-    path=$(jq -r '.path // empty' <<< "$fn_args")
-    resolved=$(resolve_path "$path") || resolved=""
-    path_access "$path" rw "写入" || return 0
-    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-
-    mkdir -p "$(dirname "$resolved")" 2>/dev/null || { content="错误:无法创建目录: $path"; return 0; }
-    # auto 模式下覆盖前落备份(~/.ct/auto/backup,不污染工作树)。auto 去掉了人工
-    # 确认这一环,误判写坏文件时必须有东西可恢复;checkpoint 只覆盖 git 仓库,
-    # 非仓库目录就靠这里。
-    auto_backup "$resolved"
-    # 内容直接由 jq 流式写入文件,不经过命令替换(命令替换会剥掉末尾换行)
-    jq -r '.content' <<< "$fn_args" > "$resolved"
-    # 写后必须按绝对路径复核落地。真实事故形状:会话的工作根是 $HOME,而调用方心里的根
-    # 是它上一次 cd 的仓库目录 —— 相对路径确实写成功了,只是写在 $HOME 下面;回显又只带
-    # 相对路径,于是下一次 read_file 报"文件不存在",人以为文件被删了,实际在另一个根下。
-    # 所以:不存在即明确失败(不许报 ✅),存在则把解析后的绝对路径与工作根一起回显。
-    # 判"存在"用 -e 而不是 -s:允许写空文件,那是合法操作。
-    if [[ ! -e "$resolved" ]]; then
-        content="❌ 写入未落地:$resolved(相对路径 $path 按工作根 $WORK_ROOT 解析,写后该绝对路径上不存在)"
-        printf ' ⛔ 写入未落地:%s\n' "$resolved"
-        return 0
-    fi
-    content="✅ 已写入 $path($(wc -l < "$resolved" | tr -d ' ') 行)· 实际落点 $resolved"
-    [[ "$path" == /* ]] || content+=$'\n'"   (相对路径按工作根 $WORK_ROOT 解析;若这不是你要的位置,改用绝对路径。工作根由进程启动时的目录决定,与后续 cd 无关)"
-    printf ' 已写入 %s\n' "$resolved"
-    # 熔断记账放在**确认落地之后**:这就是"失败的编辑不吃额度"的落点本体。
-    # 旧版在 path_access 第 0 步计数,于是"未匹配""不唯一""创建目录失败""写后复核不存在"
-    # 这些一个字节都没改的路径全都白扣一次额度(缺陷详见 auto_write_fuse 头注)。
-    auto_write_fuse_record "$resolved"
+    content="错误:工具 tool_write_file 的 bash 版已收口删除; Python 组件不可用, 本次不执行"
+    printf ' ⛔ %s 组件不可用\n' tool_write_file >&2
+    return 0
 }
 
 # 纯 bash 精确替换引擎:
 #   出现次数 = (原文长度 - 删掉 old 后长度) / old 长度,多行字符串同样成立
 tool_edit_file() {
-    local path old_str new_str resolved data tmp count
-    path=$(jq -r '.path // empty' <<< "$fn_args")
-    old_str=$(jq -r '.old_string // empty' <<< "$fn_args")
-    new_str=$(jq -r '.new_string // empty' <<< "$fn_args")
-
-    resolved=$(resolve_path "$path") || resolved=""
-    path_access "$path" rw "修改" || return 0
-    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    # 与读侧同口径:报错必须带上解析后的绝对路径,否则"改不到"会被误读成"文件没了"。
-    [[ -f "$resolved" ]] || { content="错误:文件不存在: $path(解析为 $resolved;工作根 $WORK_ROOT)"; printf ' ⛔ 文件不存在:%s\n' "$resolved"; return 0; }
-    [[ -z "$old_str" ]] && { content="错误:old_string 不能为空"; return 0; }
-
-    data=$(<"$resolved")
-    tmp=${data//"$old_str"/}
-    count=$(( (${#data} - ${#tmp}) / ${#old_str} ))
-
-    if (( count == 0 )); then
-        content="错误:在 $path 中未找到指定内容,未做任何修改。请用 read_file 重新确认原文。"
-        printf ' ⚠️  未找到待替换内容,文件未修改\n'
-    elif (( count > 1 )); then
-        content="错误:指定内容在 $path 中出现 ${count} 次,不唯一,未做任何修改。请提供更长的上下文使其唯一。"
-        printf ' ⚠️  待替换内容出现 %s 次,不唯一,文件未修改\n' "$count"
-    else
-        auto_backup "$resolved"
-        data=${data//"$old_str"/"$new_str"}
-        printf '%s' "$data" > "$resolved"
-        content="✅ 已修改 $path(替换 1 处)"
-        printf ' 已修改 %s\n' "$path"
-        # 记账只在这个分支(真的写了盘)发生。上面 count==0 / count>1 两条"未做任何修改"
-        # 的路径一条都不记账 —— 闸门 tests/write_fuse_test.sh 第 4 组就是钉这件事。
-        auto_write_fuse_record "$resolved"
-    fi
+    content="错误:工具 tool_edit_file 的 bash 版已收口删除; Python 组件不可用, 本次不执行"
+    printf ' ⛔ %s 组件不可用\n' tool_edit_file >&2
+    return 0
 }
 
 tool_list_dir() {
-    local path resolved files dirs
-    path=$(jq -r '.path // empty' <<< "$fn_args")
-    [[ -z "$path" || "$path" == "null" ]] && path="."
-    resolved=$(resolve_path "$path") || resolved=""
-    path_access "$path" r "列出目录" || return 0
-    [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    [[ -d "$resolved" ]] || { content="错误:目录不存在: $path"; return 0; }
-
-    files=$(find "$resolved" -maxdepth 1 -type f -exec basename {} \; | sort)
-    dirs=$(find "$resolved" -maxdepth 1 -mindepth 1 -type d -exec basename {} \; | sort)
-    content="目录 $path:\n[文件]\n${files:-"(空)"}\n\n[子目录]\n${dirs:-"(空)"}"
-    printf ' 已列出 %s\n' "$path"
+    content="错误:工具 tool_list_dir 的 bash 版已收口删除; Python 组件不可用, 本次不执行"
+    printf ' ⛔ %s 组件不可用\n' tool_list_dir >&2
+    return 0
 }
 
 tool_grep() {
-    local pattern path max_matches resolved out
-    pattern=$(jq -r '.pattern // empty' <<< "$fn_args")
-    path=$(jq -r '.path // empty' <<< "$fn_args")
-    max_matches=$(jq -r '.max_matches // empty' <<< "$fn_args")
-    [[ -z "$pattern" ]] && { content="错误:pattern 不能为空"; return 0; }
-    [[ -z "$max_matches" || "$max_matches" == "null" ]] && max_matches=$GREP_MAX_MATCHES
-
-    if [[ -n "$path" && "$path" != "null" ]]; then
-        resolved=$(resolve_path "$path") || resolved=""
-        path_access "$path" r "搜索" || return 0
-        [[ -n "$resolved" ]] || resolved="$(expand_tilde "$path")"
-    else
-        resolved="$WORK_ROOT"
-    fi
-    [[ -e "$resolved" ]] || { content="错误:路径不存在: $path"; return 0; }
-
-    # -E 正则 -r 递归 -n 行号 -I 跳过二进制;结果单行截宽,防 minified 长行污染上下文
-    out=$(grep -rnIE --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=.venv \
-        -e "$pattern" "$resolved" 2>/dev/null | head -n "$max_matches" | \
-        clip_line_width "$GREP_MAX_COL" '…(过长已截断)')
-
-    if [[ -z "$out" ]]; then
-        content="未找到匹配 \"$pattern\" 的内容。"
-    else
-        content="搜索 \"$pattern\" 的结果:\n$out"
-    fi
-    printf ' 已搜索:%s\n' "$pattern"
+    content="错误:工具 tool_grep 的 bash 版已收口删除; Python 组件不可用, 本次不执行"
+    printf ' ⛔ %s 组件不可用\n' tool_grep >&2
+    return 0
 }
 
 # 网页抓取:获取 URL 并渲染为纯文本。渲染器优先级 w3m > lynx > textutil(macOS)
