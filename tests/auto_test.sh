@@ -394,6 +394,9 @@ rm -rf "$W"
 e2e() (
 BASE=$(cd "$(mktemp -d)" && pwd -P)
 export HOME="$BASE/home"; mkdir -p "$HOME" "$BASE/proj"; export TMPDIR="$BASE/tmp"; mkdir -p "$TMPDIR"
+# §12-A(4): 真脚本 pty 跑、HOME 已换；显式把 PY_HELPER_DIR 指回真仓库，确保 py_run toolcall 可用
+# (否则分发 seam 的 py_run 失败会回退 bash tool_*，桩化后即失败)。
+export PY_HELPER_DIR="$(dirname "$REAL")"; export WCHAT_PY=1
 AUTO_LOG="$HOME/.ct/auto/audit.log"       # 由脚本自身 CT_HOME=$HOME/.ct 推导,测试不改写
 # 凭据走**生产路**:写进 ~/.ct/config(0600),由 wchat 读成普通 shell 变量。
 # 关键:这里**不 export WCHAT_API_KEY** —— 那正是 2026-xx 假绿的根源:夹具直接给子进程
