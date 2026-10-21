@@ -48,7 +48,7 @@ done
 # --- 闸门表:名字 | 命令 | 结论行的匹配正则(pass) | 说明 ---------------------------
 # pass 正则**必须**锚定到该闸门自己打印的结论行;匹配不到就判失败(见硬规矩 1)。
 GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件 内联图片 写熔断 py通道 硬墙双路 网络搜索 视觉转述 py工具 认证解析 硬墙谓词 技能解析 MCP客户端 图片逻辑 压缩py 消息构造 历史变换 文件格式 路径归一 配置打包 路径裁决 会话授权 LLM适配 请求建体 消息存储 权限状态 工具规格 工具运行 硬墙语料 硬墙接缝 终端地基 终端引擎)
-GATE_CMDS=("bash -n wchat.sh && bash -n tests/test_hardwall.sh && bash -n tests/run_gates.sh && echo SYNTAX-ok-3-files" "bash tests/test_hardwall.sh" "bash tests/rulefail_check.sh"
+GATE_CMDS=("bash -n wchat.sh && bash -n tests/test_hardwall.sh && bash -n tests/run_gates.sh && echo SYNTAX-ok-3-files" "bash tests/hardwall_py_vectors.sh" "bash tests/rulefail_check.sh"
            "bash tests/compaction_pin_probe.sh" "bash tests/audit_field_probe.sh"
            "bash tests/probe_shapes.sh" "bash tests/skills_dir_test.sh"
            "bash tests/mcp_channel_test.sh"
