@@ -70,6 +70,14 @@ for _hn in $(grep -oE '^hd_[a-z0-9_]*\(\) \{' "$REAL" | sed 's/() {//'); do
     grep -q "^${_hn}() {" "$W/sandbox.sh" 2>/dev/null || \
         awk -v name="$_hn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
 done
+# §12-A(4): unit 沙箱里的 5 个 tool_* 也从冻结快照取(不依赖 live wchat.sh, 便于桩化收口)。
+# 追加在区域复制之后 => bash 后定义覆盖先定义, 用快照版盖掉随区域抄进来的 live 版。
+_ORACLE_SRC="${REAL%/*}/tests/fixtures/wchat_tools_oracle.sh"
+if [[ -f "$_ORACLE_SRC" ]]; then
+    for _tf in tool_read_file tool_write_file tool_edit_file tool_list_dir tool_grep; do
+        awk -v name="$_tf" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$_ORACLE_SRC" >> "$W/sandbox.sh"
+    done
+fi
 curl() { echo "NETWORK-LEAK" >&2; return 99; }   # 桩:被测路径不该触网
 stty() { :; }
 inp_msg() { :; }
