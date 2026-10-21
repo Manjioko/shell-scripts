@@ -240,3 +240,15 @@ Python `cli._run_tool`（已实现 list_dir/read_file/grep/write_file/edit_file/
 
 **当前**：未开始；`wchat` 入口仍 bash shim、跑 bash `tool_*`。Python 的工具实现由 1d 的
 `run-st` 直跑工具链用到，尚未接管交互/auto 主分发。
+
+**进展（已完成 1–3）**：
+- 1 `wchat_py/toolcall.py`（JSON `{status,content}` 分离）+ `tests/toolcall_test.py` 8/8。
+- 2 影子 seam：`wchat.sh:7984` 前插 `WCHAT_PY_TOOLS`（默认关）；双 e2e 0 失败。
+- 3 **默认切 1** → `run_gates --main` **40/40** 认证（工具由 Python 跑）。py_run 缺席回退 bash `tool_*`。
+- 4（未做，收口）：删/桩化 bash `tool_read_file/tool_write_file/tool_edit_file/tool_list_dir/tool_grep`
+  体（`tool_run_shell_command` 另行处理），删后 40 闸门重认证。授权 `path_access` 仍在 bash 前置。
+
+**硬墙剩余（未收口，属第 2 步尾）**：`vector_parity` 229/240，剩 11 处：
+H6 cd 语境边角（`cd $PWD`、`cd ~` 后 `cat .aws` 类脱敏粒度过宽）、H11 方向/归一（`mv` 源在系统、
+`dd of=`、相对跳写系统）、`sed -i` 落系统让位 P2、动态向量（`$变量`，静态不可判）。
+生产默认走 Python seam、bash 判据体作 fallback，这些差异被 fallback 兜住，未在 40 闸门中暴露。
