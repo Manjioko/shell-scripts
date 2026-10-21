@@ -4,7 +4,7 @@
 # 收口(方案铁律 3)后 `filefmt.read` 已是**唯一活实现**(tool_read_file 里的旧 bash
 # 格式化回退已删)。本闸门钉:语义锚点 + 函数体内结构锁 + 不可用降级。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-$(dirname "${BASH_SOURCE[0]}")/fixtures/wchat_tools_oracle.sh}" || exit 2
 
 RLDIR="$(dirname "$REAL")"
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }

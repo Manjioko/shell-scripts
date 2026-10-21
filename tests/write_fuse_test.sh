@@ -7,7 +7,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 SRC=${1:-}
-[[ -n "$SRC" ]] || SRC="$(pwd)/wchat.sh"
+[[ -n "$SRC" ]] || SRC="$(cd "$(dirname "$0")" && pwd)/fixtures/wchat_tools_oracle.sh"
 [[ -f "$SRC" ]] || { printf '找不到被测脚本:%s\n' "$SRC"; exit 1; }
 SRC_ABS=$(cd "$(dirname "$SRC")" && pwd -P)/$(basename "$SRC")
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
