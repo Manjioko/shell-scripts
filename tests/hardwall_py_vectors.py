@@ -13,7 +13,8 @@ import shlex
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, REPO)
+_pp = os.environ.get("HW_VEC_PYPATH")
+sys.path.insert(0, _pp if _pp else REPO)   # 负对照可用坏副本覆盖包路径
 from wchat_py.hardwall import rule  # noqa: E402
 
 SRC = os.path.join(REPO, "tests/test_hardwall.sh")
@@ -60,4 +61,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
