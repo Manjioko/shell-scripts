@@ -7983,7 +7983,7 @@ tool_run_and_parse() {
             # ── §12 影子分发：WCHAT_PY_TOOLS=1 时纯格式化工具改由 Python toolcall 执行 ──
             # 默认关（不设=0），走下面的 bash tool_$fn_name；开时 status 打屏幕、content 进消息（分离）。
             _py_tool_done=0
-            if [[ "${WCHAT_PY_TOOLS:-0}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
+            if [[ "${WCHAT_PY_TOOLS:-1}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
                 case "$fn_name" in
                     read_file|write_file|edit_file|list_dir|grep)
                         _tj=$(printf '%s' "$fn_args" | py_run toolcall "$fn_name" 2>/dev/null)
