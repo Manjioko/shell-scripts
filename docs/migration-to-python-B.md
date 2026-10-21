@@ -219,3 +219,24 @@ bash tests/run_gates.sh --main      # 期望 run=35 pass=35 fail=0（B 期间闸
 
 > 纪律：3b-3/3b-4 改动若破坏 termios/job control 恢复，终端会卡在 raw / 子进程杀不掉，
 > 必须在真 pty 环境复验后再收；无交互 CI 只能覆盖到 3b-1/3b-2 这一层。
+
+## 12. 计划：把 bash 工具分发切到 Python（最终集成，未开始）
+
+**目标**：`wchat.sh:7984` 的 `case "$fn_name" in ... ) "tool_$fn_name" ;;` 分发，改为可委托
+Python `cli._run_tool`（已实现 list_dir/read_file/grep/write_file/edit_file/run_shell_command）。
+
+**照硬墙经验，必须分三步，不许大爆炸**：
+1. **影子 seam（默认关）**：在 7984 前加 `if [[ "${WCHAT_PY_TOOLS:-0}" == 1 ]]` 分支，
+   调 `py_run` 一个 `toolcall` CLI（stdin=fn_args JSON，输出 JSON `{status,content}`），
+   bash 侧：`status` 打到屏幕（与旧状态行一致），`content` 进消息。默认 0 → 走旧 `tool_$fn_name`。
+2. **差分**：写 `tests/tool_parity.py`，对每工具（list_dir/read_file/grep/write_file/edit_file）
+   在夹具上比较 **Python toolcall content/status vs bash tool_***（已有 `工具运行` 23 条为底）+
+   `run_shell_command` 走 pty(已 3/3)。全绿再谈。
+3. **切默认 + 全量 e2e**：`WCHAT_PY_TOOLS` 默认切 1，跑 `run_gates --main`（当前 40/40）与 e2e 零退化；
+   绿了再收口删 bash `tool_*` 体（届时 `tool_$fn_name` 只剩 run_shell_command 外壳或全删）。
+
+**风险**：状态行（如 ` 已列出 .`）必须仍打到终端但**不进 content**；授权 `path_access` 仍在 bash
+（Python `_run_tool` 目前假定已授权）。这两点是主要坑，seam 设计必须把它们显式分开。
+
+**当前**：未开始；`wchat` 入口仍 bash shim、跑 bash `tool_*`。Python 的工具实现由 1d 的
+`run-st` 直跑工具链用到，尚未接管交互/auto 主分发。
