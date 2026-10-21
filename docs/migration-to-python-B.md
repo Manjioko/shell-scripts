@@ -247,6 +247,10 @@ Python `cli._run_tool`（已实现 list_dir/read_file/grep/write_file/edit_file/
 - 3 **默认切 1** → `run_gates --main` **40/40** 认证（工具由 Python 跑）。py_run 缺席回退 bash `tool_*`。
 - 4（未做，收口）：删/桩化 bash `tool_read_file/tool_write_file/tool_edit_file/tool_list_dir/tool_grep`
   体（`tool_run_shell_command` 另行处理），删后 40 闸门重认证。授权 `path_access` 仍在 bash 前置。
+  **⚠ 实测阻断（勿重犯）**：直接桩化 bash `tool_*` 会让 4 道闸门红——`工具运行`(拿 `bash tool_$name`
+  当 parity 参照)、`主套件`(e2e 工具流)、`写熔断`、`文件格式`(依赖 `tool_*` 行为)。根因同"删
+  `hard_deny_cmd` 判据体让 569 红"：**被测对象就是 oracle**。所以收口 4 的前置是**先把这 4 处的
+  判据从 live bash `tool_*` 换成字面期望/Python 自证**，再桩化；否则必红。已在未提交状态验证并回滚。
 
 **硬墙剩余（未收口，属第 2 步尾）**：`vector_parity` 229/240，剩 11 处：
 H6 cd 语境边角（`cd $PWD`、`cd ~` 后 `cat .aws` 类脱敏粒度过宽）、H11 方向/归一（`mv` 源在系统、
