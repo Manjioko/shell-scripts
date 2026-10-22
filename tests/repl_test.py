@@ -46,5 +46,16 @@ finally:
     sys.stdout = old
 ck("默认 meta 打占位", "list_history" in out.getvalue(), repr(out.getvalue()))
 
+# 4) -h 默认 handler 调 cli.help_user（真打印，非占位）
+out2 = io.StringIO()
+old = sys.stdout
+sys.stdout = out2
+try:
+    run_repl(io.StringIO("-h\n"), lambda t: None)
+finally:
+    sys.stdout = old
+_hv = out2.getvalue()
+ck("-h 打印 help(非占位)", len(_hv) > 50 and "尚未在 Python 主循环实现" not in _hv, repr(_hv[:60]))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

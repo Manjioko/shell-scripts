@@ -14,6 +14,10 @@ from wchat_py.cmdline import classify
 
 
 def _default_meta(action, arg):
+    if action == "help":
+        from wchat_py.cli import help_user
+        help_user()
+        return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
 
@@ -39,4 +43,3 @@ def run_repl(stream, on_text, on_meta=None):
 if __name__ == "__main__":
     from wchat_py.cli import run_turn
     sys.exit(run_repl(sys.stdin, lambda t: run_turn(t)))
-
