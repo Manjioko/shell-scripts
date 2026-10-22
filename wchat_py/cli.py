@@ -198,8 +198,14 @@ def run_single_turn(content, model=""):
 def _call_llm(msgs, model):
     """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。"""
     import json as _json, subprocess
+    from wchat_py import tools as _tools
+    try:
+        _tb = _tools.build()
+        _tlist = _json.loads(_tb) if isinstance(_tb, str) else _tb
+    except Exception:
+        _tlist = []
     req = {"model": model or os.environ.get("FLASH_MODEL", ""), "messages": msgs,
-           "thinking": "disabled", "tools": []}
+           "thinking": "disabled", "tools": _tlist}
     p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)

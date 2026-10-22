@@ -53,7 +53,8 @@ ck("rc=0", r.returncode == 0, "rc=%r stderr=%r" % (r.returncode, r.stderr[:120])
 ck("回复 R1", "R1" in out, repr(out[:80]))
 ck("回复 R2", "R2" in out, repr(out[:80]))
 ck("请求数=2", len([1 for l in open(logp) if l.strip()]) == 2)
+_first = json.loads(open(logp).readline())
+ck("请求含 tools(schema)", _first.get("has_tools") is True, str(_first.get("has_tools")))
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
-
