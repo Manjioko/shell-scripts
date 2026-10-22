@@ -60,6 +60,12 @@ def _default_meta(action, arg):
         path = save_history(d, Session.from_env().messages_json, name)
         sys.stdout.write("✅ 已保存: %s\n" % path)
         return True
+    if action == "model_status":
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session, model_status_lines
+        for ln in model_status_lines(Session.from_env()):
+            inp_msg(ln)
+        return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
 

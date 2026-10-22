@@ -5,7 +5,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from wchat_py.session import Session, usage_lines, save_history, messages_list, compact_status  # noqa: E402
+from wchat_py.session import Session, usage_lines, save_history, messages_list, compact_status, model_status_lines  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -65,6 +65,25 @@ s4 = Session.from_env({"TOKEN_THRESHOLD": "100", "WCHAT_LAST_PROMPT_TOKENS": "50
 ck("compact 不需压缩", compact_status(s4)[2] is False)
 s5 = Session.from_env({"TOKEN_THRESHOLD": "0"})
 ck("阈值为0 不due", compact_status(s5)[2] is False)
+
+# model_status_lines: auto 开/关
+ma = Session.from_env({"WCHAT_MODEL": "stub-pro", "WCHAT_THINKING": "enabled",
+                       "WEB_SEARCH_PROVIDER": "openai", "WEB_SEARCH_TIMEOUT": "9",
+                       "TOKEN_THRESHOLD": "50000", "WCHAT_AUTO_MODE": "full",
+                       "WCHAT_AUTO_APPROVALS": "3", "AUTO_MAX_APPROVALS": "50",
+                       "WCHAT_TOOL_ROUND": "2", "MAX_TOOL_ROUNDS": "25",
+                       "WCHAT_AUTO_CK_NOTE": "ck-1", "WCHAT_BACKUP_COUNT": "4",
+                       "WCHAT_AUDIT_LOG": "/a.log", "WCHAT_RO_COUNT": "2", "WCHAT_RW_COUNT": "1"})
+j = "\n".join(model_status_lines(ma))
+ck("md 模型/思考", "模型: stub-pro" in j and "思考: enabled" in j, j)
+ck("md 联网/阈值", "联网搜索: openai(超时 9s)" in j and "压缩阈值: 50000 tokens" in j)
+ck("md auto 开", "auto: full 档 · 已自动放行 3/50 次 · 本轮工具 2/25 轮" in j, j)
+ck("md 回滚点/备份/审计", "回滚点: ck-1 · 备份 4 份 · 审计 /a.log" in j)
+ck("md 越界名单", "越界名单: 只读 2 项 / 可写 1 项" in j)
+mc = Session.from_env({})
+jk = "\n".join(model_status_lines(mc))
+ck("md 标题空 => （空）", "标题: （空）" in jk, jk)
+ck("md auto 关", "auto: 关闭(权限逐次人工确认)" in jk)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

@@ -27,6 +27,20 @@ class Session:
     model: str = ""
     autocal: int = 1
     calib_count: int = 0
+    thinking: str = "disabled"
+    web_provider: str = "none"
+    web_timeout: int = 0
+    chat_title: str = ""
+    auto_mode: str = ""
+    auto_approvals: int = 0
+    auto_max: int = 200
+    tool_round: int = 0
+    max_tool_rounds: int = 25
+    auto_ck_note: str = ""
+    backup_count: int = 0
+    audit_log: str = ""
+    ro_count: int = 0
+    rw_count: int = 0
 
     @classmethod
     def from_env(cls, env=None):
@@ -55,6 +69,20 @@ class Session:
             model=e.get("WCHAT_MODEL", ""),
             autocal=i("IMG_TOKENS_AUTOCAL", 1),
             calib_count=i("WCHAT_CALIB_COUNT", 0),
+            thinking=e.get("WCHAT_THINKING", "disabled"),
+            web_provider=e.get("WEB_SEARCH_PROVIDER", "none"),
+            web_timeout=i("WEB_SEARCH_TIMEOUT", 0),
+            chat_title=e.get("WCHAT_CHAT_TITLE", ""),
+            auto_mode=e.get("WCHAT_AUTO_MODE", ""),
+            auto_approvals=i("WCHAT_AUTO_APPROVALS", 0),
+            auto_max=i("AUTO_MAX_APPROVALS", 200),
+            tool_round=i("WCHAT_TOOL_ROUND", 0),
+            max_tool_rounds=i("MAX_TOOL_ROUNDS", 25),
+            auto_ck_note=e.get("WCHAT_AUTO_CK_NOTE", ""),
+            backup_count=i("WCHAT_BACKUP_COUNT", 0),
+            audit_log=e.get("WCHAT_AUDIT_LOG", ""),
+            ro_count=i("WCHAT_RO_COUNT", 0),
+            rw_count=i("WCHAT_RW_COUNT", 0),
         )
 
 
@@ -95,6 +123,26 @@ def compact_status(s):
     from wchat_py import compaction
     due = bool(s.token_threshold > 0 and compaction.due(cur, s.token_threshold))
     return cur, s.token_threshold, due
+
+
+def model_status_lines(s):
+    """复刻 bash `-md` 的模型状态行（不含 `│ ` 前缀）。"""
+    out = [
+        "模型: %s" % s.model,
+        "思考: %s" % s.thinking,
+        "联网搜索: %s(超时 %ss)" % (s.web_provider or "none", s.web_timeout),
+        "压缩阈值: %d tokens" % s.token_threshold,
+        "标题: %s" % (s.chat_title or "（空）"),
+    ]
+    if s.auto_mode:
+        out.append("auto: %s 档 · 已自动放行 %d/%d 次 · 本轮工具 %d/%d 轮"
+                   % (s.auto_mode, s.auto_approvals, s.auto_max, s.tool_round, s.max_tool_rounds))
+        out.append("  回滚点: %s · 备份 %d 份 · 审计 %s"
+                   % (s.auto_ck_note or "无", s.backup_count, s.audit_log))
+        out.append("  越界名单: 只读 %d 项 / 可写 %d 项 · 输入 -noauto 关闭" % (s.ro_count, s.rw_count))
+    else:
+        out.append("auto: 关闭(权限逐次人工确认)")
+    return out
 
 
 def usage_lines(s):
