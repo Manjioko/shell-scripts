@@ -238,7 +238,7 @@ if grep -q 'soft_${HD_SOFT}' wchat.sh; then
 else
     bad "降级没有留痕" "事后无法判断这条降级判据是不是放宽过头"
 fi
-_seen_rules=$(grep -c 'hd_rule="H' wchat.sh)
+_seen_rules=$(grep -c 'hd_rule="H' "$WH")
 (( _seen_rules == 15 )) && ok "判据出口行共 15 条(H1–H11 + H13 + H14 的三个出口),与预期一致" || bad "判据分支数变了" "实到 ${_seen_rules} 条(预期 11)—— 加/删规则时请同步本表的覆盖清单与 EXPECT_TOTAL"
 
 echo "语法"
