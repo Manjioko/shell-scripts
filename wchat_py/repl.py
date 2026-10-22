@@ -35,6 +35,21 @@ def _default_meta(action, arg):
             for n in names:
                 sys.stdout.write(n + "\n")
         return True
+    if action == "show_msgs":
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session
+        inp_msg(Session.from_env().messages_json)
+        return True
+    if action == "save_history":
+        from wchat_py.session import Session, save_history
+        d = os.environ.get("WCHAT_HISTORY_DIR", "")
+        if not d:
+            sys.stdout.write("⚠️ 未设置 WCHAT_HISTORY_DIR,未保存\n")
+            return True
+        name = os.environ.get("WCHAT_HISTORY_NAME", "py-session.json")
+        path = save_history(d, Session.from_env().messages_json, name)
+        sys.stdout.write("✅ 已保存: %s\n" % path)
+        return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
 

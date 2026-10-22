@@ -2,9 +2,11 @@
 """session.Session.from_env 自检：env 字段正确读入 + usage_lines 反映真实值。末行 RESULT ...。"""
 import os
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from wchat_py.session import Session, usage_lines  # noqa: E402
+from wchat_py.session import Session, usage_lines, save_history, messages_list  # noqa: E402
+from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
 
@@ -47,6 +49,13 @@ ck("空env默认 ctx_window=0", s2.ctx_window == 0)
 ck("空env默认 autocal=1", s2.autocal == 1)
 ck("空env model=?", "model=?" in "\n".join(usage_lines(s2)))
 
+# save_history 往返（经 msgstore 原子写）
+d = tempfile.mkdtemp()
+mj = '[{"role":"user","content":"hi"}]'
+path = save_history(d, mj, "s.json", "title-x")
+ck("save 落盘", os.path.exists(path), path)
+ck("load 回读等值", msgstore.load(path) == messages_list(mj), repr(msgstore.load(path)))
+ck("messages_list 容错", messages_list("not json") == [])
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
-

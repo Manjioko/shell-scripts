@@ -5,6 +5,7 @@
 auto 计数、图片观测/标定）。`usage_lines(s)` 复刻 bash `print_usage` 的每行文案（不含 `│ `
 前缀——由调用方用 inp_msg 加）。字段来源（env/config/文件）后续接；此处先保证**渲染逐字对齐**。
 """
+import json
 from dataclasses import dataclass
 import os
 
@@ -69,6 +70,22 @@ def history_list(history_dir):
     except OSError:
         return []
     return sorted(n for n in names if n.endswith(".json"))
+
+
+def messages_list(messages_json):
+    try:
+        v = json.loads(messages_json) if messages_json else []
+        return v if isinstance(v, list) else []
+    except (ValueError, TypeError):
+        return []
+
+
+def save_history(history_dir, messages_json, name, title=""):
+    """把当前 messages 存成历史文档（原子写，经 msgstore.save_doc）。返回落盘路径。"""
+    from wchat_py import msgstore
+    path = os.path.join(history_dir, name)
+    msgstore.save_doc(path, {"messages": messages_list(messages_json), "title": title})
+    return path
 
 
 def usage_lines(s):
