@@ -107,6 +107,17 @@ def _default_meta(action, arg):
             add_image(Session.from_env(), arg)
             inp_msg("[图片] %s" % arg)
         return True
+    if action == "clear":
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.flush()
+        return True
+    if action == "new_session":
+        from wchat_py import msg
+        from wchat_py.cli import inp_msg
+        msg.init()                       # 新会话初始消息(系统注入后续接)
+        sys.stdout.write("\033[H\033[2J")
+        inp_msg("✅ 已开始新会话")
+        return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
 

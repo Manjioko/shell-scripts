@@ -68,5 +68,20 @@ finally:
 _uv = out3.getvalue()
 ck("-u 渲染 usage", "消息条数" in _uv and "单价自标定" in _uv, repr(_uv[:40]))
 
+
+def _cap(line):
+    b = io.StringIO()
+    o = sys.stdout
+    sys.stdout = b
+    try:
+        run_repl(io.StringIO(line + "\n"), lambda t: None)
+    finally:
+        sys.stdout = o
+    return b.getvalue()
+
+
+ck("-cl 清屏转义", "\033[H\033[2J" in _cap("-cl"), repr(_cap("-cl")))
+ck("-n 新会话提示", "已开始新会话" in _cap("-n"), repr(_cap("-n")))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
