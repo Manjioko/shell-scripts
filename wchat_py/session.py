@@ -47,6 +47,8 @@ class Session:
     input_images: list = field(default_factory=list)
     deny_streak: int = 0
     deny_streak_max: int = 3
+    allow_ro: list = field(default_factory=list)
+    allow_rw: list = field(default_factory=list)
 
     @classmethod
     def from_env(cls, env=None):
@@ -93,6 +95,8 @@ class Session:
             flash_model=e.get("FLASH_MODEL", ""),
             auto_tiers=(e.get("AUTO_TIERS", "").split() or ["sandbox", "full"]),
             deny_streak_max=i("AUTO_DENY_STREAK", 3),
+            allow_ro=e.get("WCHAT_ALLOW_RO", "").split(),
+            allow_rw=e.get("WCHAT_ALLOW_RW", "").split(),
         )
 
 
@@ -253,6 +257,8 @@ def enter_auto(s, tier):
     s.auto_mode = tier
     s.auto_approvals = 0
     s.deny_streak = 0
+    s.ro_count = len(s.allow_ro)
+    s.rw_count = len(s.allow_rw)
     return tier
 
 
@@ -266,6 +272,22 @@ def record_deny(s):
     """连续拒绝 +1；达到阈值返回 True(刹车)。任一放行清零由 record_allow 负责。"""
     s.deny_streak += 1
     return s.deny_streak >= s.deny_streak_max
+
+
+def make_checkpoint(s, work_root=None):
+    """回滚点：work_root 是 git 仓库则记 HEAD 短哈希到 auto_ck_note；否则清空。"""
+    import subprocess
+    wr = work_root or os.environ.get("WORK_ROOT") or os.getcwd()
+    try:
+        out = subprocess.run(["git", "-C", wr, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            s.auto_ck_note = "git@" + out.stdout.strip()
+            return s.auto_ck_note
+    except Exception:
+        pass
+    s.auto_ck_note = ""
+    return ""
 
 
 def usage_lines(s):

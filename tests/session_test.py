@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
                                auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto,
-                               record_allow, record_deny)  # noqa: E402
+                               record_allow, record_deny, make_checkpoint)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -157,6 +157,14 @@ bs.deny_streak = 1
 ck("record_deny 达阈值触发刹车", record_deny(bs) is True and bs.deny_streak == 2)
 ck("record_allow 清刹车", record_allow(bs) == 2 and bs.deny_streak == 0)
 ck("阈值从 env", bs.deny_streak_max == 2)
+
+# 名单装配 + 回滚点
+al = Session.from_env({"AUTO_TIERS": "full", "WCHAT_ALLOW_RO": "a b c", "WCHAT_ALLOW_RW": "x y"})
+enter_auto(al, "full")
+ck("名单 → ro/rw 计数", (al.ro_count, al.rw_count) == (3, 2), str((al.ro_count, al.rw_count)))
+_ck_repo = make_checkpoint(al, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ck("git 仓回滚点 git@", _ck_repo.startswith("git@"), _ck_repo)
+ck("非 git 回滚点空", make_checkpoint(al, tempfile.mkdtemp()) == "")
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
