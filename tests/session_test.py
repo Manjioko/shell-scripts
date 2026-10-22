@@ -7,7 +7,8 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
-                               auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto)  # noqa: E402
+                               auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto,
+                               record_allow, record_deny)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -148,6 +149,14 @@ ea.auto_approvals = 5
 ck("enter_auto full", enter_auto(ea, "full") == "full" and ea.auto_mode == "full" and ea.auto_approvals == 0,
    str((ea.auto_mode, ea.auto_approvals)))
 ck("enter_auto 非法档 None", enter_auto(ea, "bogus") is None)
+
+# 刹车计数
+bs = Session.from_env({"AUTO_DENY_STREAK": "2"})
+ck("record_allow 计数+清零", record_allow(bs) == 1 and bs.deny_streak == 0)
+bs.deny_streak = 1
+ck("record_deny 达阈值触发刹车", record_deny(bs) is True and bs.deny_streak == 2)
+ck("record_allow 清刹车", record_allow(bs) == 2 and bs.deny_streak == 0)
+ck("阈值从 env", bs.deny_streak_max == 2)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

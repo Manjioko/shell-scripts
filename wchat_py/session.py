@@ -45,6 +45,8 @@ class Session:
     flash_model: str = ""
     auto_tiers: list = field(default_factory=lambda: ["sandbox", "full"])
     input_images: list = field(default_factory=list)
+    deny_streak: int = 0
+    deny_streak_max: int = 3
 
     @classmethod
     def from_env(cls, env=None):
@@ -90,6 +92,7 @@ class Session:
             pro_model=e.get("PRO_MODEL", ""),
             flash_model=e.get("FLASH_MODEL", ""),
             auto_tiers=(e.get("AUTO_TIERS", "").split() or ["sandbox", "full"]),
+            deny_streak_max=i("AUTO_DENY_STREAK", 3),
         )
 
 
@@ -249,7 +252,20 @@ def enter_auto(s, tier):
         return None
     s.auto_mode = tier
     s.auto_approvals = 0
+    s.deny_streak = 0
     return tier
+
+
+def record_allow(s):
+    s.auto_approvals += 1
+    s.deny_streak = 0
+    return s.auto_approvals
+
+
+def record_deny(s):
+    """连续拒绝 +1；达到阈值返回 True(刹车)。任一放行清零由 record_allow 负责。"""
+    s.deny_streak += 1
+    return s.deny_streak >= s.deny_streak_max
 
 
 def usage_lines(s):
