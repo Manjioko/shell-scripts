@@ -201,6 +201,35 @@ def orchestrate_turn(session, content, llm):
     return text
 
 
+def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
+    """带工具续发的一轮编排（llm/tool 可注入，便于离线自测配对）。
+
+    call_llm(msgs)->(text, tool_calls, err)；tool_calls 为 [{id,name,arguments},...]；
+    run_tool(name, arguments)->str。有 tool_calls → 追加 assistant(tool_calls) + 每个 tool 结果
+    → 续发；无则落 assistant(text) 结束。回写 Session 并返回最终 text（err 时返回 err）。
+    """
+    msgs = messages_list(session.messages_json)
+    msgs.append({"role": "user", "content": content})
+    text = ""
+    for _ in range(max_rounds):
+        text, tcs, err = call_llm(msgs)
+        if err:
+            session.messages_json = json.dumps(msgs, ensure_ascii=False)
+            session.msg_count = len(msgs)
+            return err
+        if tcs:
+            msgs.append({"role": "assistant", "content": text or "", "tool_calls": tcs})
+            for tc in tcs:
+                out = run_tool(tc.get("name") or "", tc.get("arguments") or "")
+                msgs.append({"role": "tool", "tool_call_id": tc.get("id") or "", "content": out})
+            continue
+        msgs.append({"role": "assistant", "content": text or ""})
+        break
+    session.messages_json = json.dumps(msgs, ensure_ascii=False)
+    session.msg_count = len(msgs)
+    return text
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]
