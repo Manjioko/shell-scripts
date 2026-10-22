@@ -244,14 +244,11 @@ def rule(cmd, auto=False, work_root=None, home=None):
                 continue
             if _sys(w):
                 return "H11", ""
-    # mv/rm 的**源**在系统路径也算破坏；cp 从系统读入不算。先在**去掉引号内容**的串上找，
-    # 避免 git commit -m '…rm…' 之类"引号里的字面量"被当命令。
+    # mv/rm 的**源**在系统路径也算破坏；cp 从系统读入不算。只扫 mv/rm **自己的操作数**
+    # （到 ;&| 为止），避免把 `mv a b && cmp /etc/hosts` 里 cmp 的只读参数误算成写目标。
     c_nq = re.sub(r"'[^']*'|\"[^\"]*\"", "", c)
-    if re.search(r"(^|[;&|]|\s)(mv|rm)\s", c_nq):
-        for m in re.finditer(r"[^\s;&|<>()]+", c_nq):
-            p = m.group(0)
-            if p in ("mv", "rm"):
-                continue
+    for mm in re.finditer(r"(?:^|[;&|]|\s)(?:mv|rm)\s+([^;&|]+)", c_nq):
+        for p in re.findall(r"[^\s;&|<>()]+", mm.group(1)):
             if _sys(p):
                 return "H11", ""
     # H12 工作根外写（仅 auto 档）：逐写目标走 pathrule.hard_deny_path → P1/P2/P3
