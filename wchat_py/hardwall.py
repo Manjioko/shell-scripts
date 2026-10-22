@@ -213,8 +213,28 @@ def rule(cmd, auto=False, work_root=None, home=None):
                  r"git\s+config\s+(--global|--system)|networksetup|htpasswd|codesign|xattr\s+(-w|-d|--delete|--set))"
                  r"(\s|$)", c):
         return "H13", ""
-    # H14 安装类动作（非自动放行即拒；源替换同归 H14）
+    # H14 安装类动作（非自动放行即拒；源替换同归 H14）。点名白名单经 WCHAT_INSTALL_ALLOW 传入。
     if _install_hit(c):
+        # 换源(registry/index-url/tap URL)一律 H14，白名单也不放
+        if re.search(r"--index-url|--extra-index-url|--registry|--find-links|"
+                     r"(^|\s)-i\s+https?:|PIP_INDEX_URL=|NPM_CONFIG_REGISTRY=|YARN_REGISTRY=|"
+                     r"brew\s+tap\s+https?://", c):
+            return "H14", ""
+        _allow = os.environ.get("WCHAT_INSTALL_ALLOW", "")
+        if _allow:
+            _mm = _install_hit(c)
+            _tail = c[_mm.end():] if _mm else ""
+            _pkgs = []
+            for _w in re.split(r"\s+", _tail):
+                _w = _w.strip(";,)]")
+                if not _w or _w.startswith("-"):
+                    continue
+                if re.search(r"[^A-Za-z0-9./_@~<>=+-]", _w):
+                    continue
+                _pkgs.append(_w)
+            _al = set(_allow.split())
+            if _pkgs and all(_pk in _al for _pk in _pkgs):
+                return "", ""
         return "H14", ""
     # H10 外发敏感内容
     if _m("hd_re_upload", c) and _m("hd_re_upload_arg", c) and _m("hd_re_secret_ref", c):

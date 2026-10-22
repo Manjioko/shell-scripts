@@ -4588,8 +4588,9 @@ hard_deny_cmd() {
     # 默认关（不设=0）→ 走下面 bash 原实现，现有套件零影响；置 1 时 bash 只做出口，判定全在 Python。
     # 判据已在 62 条语料上与 bash 逐字等价（rule/soft + msg），见 tests/hdcmd_corpus_test.sh。
     if [[ "${WCHAT_PY_HARDWALL:-1}" == "1" ]] && declare -F py_run >/dev/null 2>&1; then
-        local _hwj
-        _hwj=$(printf '%s' "$1" | py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
+        local _hwj _ial
+        _ial=$(printf '%s\n' ${AUTO_ALLOW_INSTALL[@]+"${AUTO_ALLOW_INSTALL[@]}"})
+        _hwj=$(printf '%s' "$1" | WCHAT_INSTALL_ALLOW="$_ial" py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
         if [[ -n "$_hwj" && "$_hwj" == \{* ]]; then
             hd_rule=$(printf '%s' "$_hwj" | jq -r '.rule // ""')
             hd_msg=$(printf '%s' "$_hwj" | jq -r '.msg // ""')
