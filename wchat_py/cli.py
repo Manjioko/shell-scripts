@@ -379,6 +379,21 @@ def main(argv):
             _extra = ""
         seed_system(_s, extra=_extra)
         from wchat_py.repl import run_interactive
+
+        def _on_quit():
+            if _s.msg_count <= 1 or os.environ.get("WCHAT_FORGET") == "1":
+                return
+            _d = os.environ.get("WCHAT_HISTORY_DIR", "")
+            if not _d:
+                return
+            import time as _t
+            from wchat_py.session import save_history as _sh
+            _name = os.environ.get("WCHAT_HISTORY_NAME") or ("chat-%d.json" % int(_t.time()))
+            try:
+                _sh(_d, _s.messages_json, _name, os.environ.get("WCHAT_CHAT_TITLE", ""))
+            except Exception:
+                pass
+
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
@@ -391,9 +406,9 @@ def main(argv):
                 return _call_llm(m, "", on_text=_emit)
 
             _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a), write_final=False)
-            return run_interactive(_h)
+            return run_interactive(_h, on_quit=_on_quit)
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
-        return run_repl(sys.stdin, _h)
+        return run_repl(sys.stdin, _h, on_quit=_on_quit)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
         return run_turn(st["content"], st.get("model", ""))

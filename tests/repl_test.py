@@ -110,5 +110,11 @@ run_repl(io.StringIO("z\n"), _h2)
 ck("write_final=False 不输出", _b2.getvalue() == "", repr(_b2.getvalue()))
 ck("write_final=False 仍更新 session", _s2.msg_count == 2)
 
+# on_quit: -q 时调用一次
+_q = iter(["x", "-q", "y"])
+_qflag = []
+run_repl_loop(lambda: next(_q, None), lambda t: None, None, lambda: _qflag.append(1))
+ck("on_quit 在 -q 调用一次", _qflag == [1], str(_qflag))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

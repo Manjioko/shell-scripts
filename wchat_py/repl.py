@@ -139,8 +139,11 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
     return handler
 
 
-def run_repl_loop(next_line, on_text, on_meta=None):
-    """核心循环：next_line()->str|None(EOF)。可注入，便于单测交互与非交互两种来源。"""
+def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
+    """核心循环：next_line()->str|None(EOF)。可注入，便于单测交互与非交互两种来源。
+
+    on_quit() 在读到 -q 时、返回前调用一次（用于退出保存历史）。
+    """
     on_meta = on_meta or _default_meta
     while True:
         line = next_line()
@@ -151,6 +154,8 @@ def run_repl_loop(next_line, on_text, on_meta=None):
             continue
         action, arg = classify(line)
         if action == "quit":
+            if on_quit is not None:
+                on_quit()
             return 0
         if action == "text":
             on_text(arg)
@@ -159,19 +164,19 @@ def run_repl_loop(next_line, on_text, on_meta=None):
                 return 0
 
 
-def run_repl(stream, on_text, on_meta=None):
+def run_repl(stream, on_text, on_meta=None, on_quit=None):
     it = iter(stream)
-    return run_repl_loop(lambda: next(it, None), on_text, on_meta)
+    return run_repl_loop(lambda: next(it, None), on_text, on_meta, on_quit)
 
 
-def run_interactive(on_text, on_meta=None, prompt="❯ "):
+def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
     """交互式：从 tty 逐行读。EOF(Ctrl-D) 结束。"""
     def nxt():
         try:
             return input(prompt)
         except EOFError:
             return None
-    return run_repl_loop(nxt, on_text, on_meta)
+    return run_repl_loop(nxt, on_text, on_meta, on_quit)
 
 
 if __name__ == "__main__":
