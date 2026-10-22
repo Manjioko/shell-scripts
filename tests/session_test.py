@@ -7,7 +7,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
-                               auto_off, add_image)  # noqa: E402
+                               auto_off, add_image, orchestrate_turn)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -96,6 +96,22 @@ ck("set_auto 合法", set_auto(sw, "full") == "full" and sw.auto_mode == "full")
 ck("set_auto 非法", set_auto(sw, "bogus") is None)
 ck("auto_off 返回旧值", auto_off(sw) == "full" and sw.auto_mode == "")
 ck("add_image 计数", add_image(sw, "/tmp/a.png") == 1 and sw.input_images == ["/tmp/a.png"])
+
+# orchestrate_turn: 多轮累积(user/assistant 交替, msg_count 递增)
+ot = Session()
+
+
+def _echo(msgs):
+    return "echo:" + msgs[-1]["content"]
+
+
+ck("turn1 返回", orchestrate_turn(ot, "hi", _echo) == "echo:hi")
+ck("turn1 msg_count=2", ot.msg_count == 2, str(ot.msg_count))
+orchestrate_turn(ot, "again", _echo)
+ml = messages_list(ot.messages_json)
+ck("turn2 msg_count=4", ot.msg_count == 4)
+ck("角色交替", [m["role"] for m in ml] == ["user", "assistant", "user", "assistant"], str(ml))
+ck("上下文累积", ml[2]["content"] == "again" and ml[1]["content"] == "echo:hi")
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

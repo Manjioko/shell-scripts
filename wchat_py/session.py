@@ -186,6 +186,21 @@ def add_image(s, path):
     return len(s.input_images)
 
 
+def orchestrate_turn(session, content, llm):
+    """一轮对话的编排骨架（不含流式/工具；llm(messages)->text 可注入）。
+
+    messages 归属 Session：追加 user → 调 llm → 追加 assistant → 回写 messages_json/msg_count。
+    返回 assistant 文本。多轮调用即累积上下文——这是 ask_ai 编排的最小可测内核。
+    """
+    msgs = messages_list(session.messages_json)
+    msgs.append({"role": "user", "content": content})
+    text = llm(msgs)
+    msgs.append({"role": "assistant", "content": text})
+    session.messages_json = json.dumps(msgs, ensure_ascii=False)
+    session.msg_count = len(msgs)
+    return text
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]
