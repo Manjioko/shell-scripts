@@ -103,5 +103,12 @@ run_repl_loop(lambda: next(_seq, None), lambda t: _tc.append(t), lambda a, g: _m
 ck("loop reader: text 只到 -q 前", _tc == ["x"], str(_tc))
 ck("loop reader: meta 捕获 -l", _mc == ["list_history"], str(_mc))
 
+# write_final=False: 不整段输出, 但 session 更新
+_b2 = io.StringIO(); _s2 = _S()
+_h2 = session_text_handler(_s2, lambda m: ("T", [], None), lambda n, a: "", out=_b2, write_final=False)
+run_repl(io.StringIO("z\n"), _h2)
+ck("write_final=False 不输出", _b2.getvalue() == "", repr(_b2.getvalue()))
+ck("write_final=False 仍更新 session", _s2.msg_count == 2)
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

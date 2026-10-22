@@ -378,10 +378,21 @@ def main(argv):
         except Exception:
             _extra = ""
         seed_system(_s, extra=_extra)
-        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
         from wchat_py.repl import run_interactive
         if sys.stdin.isatty():
+            from wchat_py.render import StreamBox
+            _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
+
+            def _cl_stream(m):
+                def _emit(d):
+                    _box.append(d)
+                    sys.stdout.write(_box.paint())
+                    sys.stdout.flush()
+                return _call_llm(m, "", on_text=_emit)
+
+            _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a), write_final=False)
             return run_interactive(_h)
+        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
         return run_repl(sys.stdin, _h)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
