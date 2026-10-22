@@ -331,6 +331,12 @@ def run_turn(content, model="", max_rounds=5):
 
 
 def main(argv):
+    if argv and argv[0] == "repl":
+        from wchat_py.session import Session
+        from wchat_py.repl import run_repl, session_text_handler
+        _s = Session.from_env()
+        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
+        return run_repl(sys.stdin, _h)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
         return run_turn(st["content"], st.get("model", ""))
