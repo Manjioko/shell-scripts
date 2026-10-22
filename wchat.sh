@@ -4589,7 +4589,7 @@ hard_deny_cmd() {
     if declare -F py_run >/dev/null 2>&1; then
         local _hwj _ial
         _ial=$(printf '%s\n' ${AUTO_ALLOW_INSTALL[@]+"${AUTO_ALLOW_INSTALL[@]}"})
-        _hwj=$(printf '%s' "$1" | WCHAT_INSTALL_ALLOW="$_ial" py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
+        _hwj=$(printf '%s' "$1" | WORK_ROOT="$WORK_ROOT" HOME="$HOME" AUTO_MODE="$auto_mode" WCHAT_INSTALL_ALLOW="$_ial" py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
         if [[ -n "$_hwj" && "$_hwj" == \{* ]]; then
             hd_rule=$(printf '%s' "$_hwj" | jq -r '.rule // ""')
             hd_msg=$(printf '%s' "$_hwj" | jq -r '.msg // ""')
