@@ -373,6 +373,9 @@ def main(argv):
             _extra = ""
         seed_system(_s, extra=_extra)
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
+        from wchat_py.repl import run_interactive
+        if sys.stdin.isatty():
+            return run_interactive(_h)
         return run_repl(sys.stdin, _h)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
