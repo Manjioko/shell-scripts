@@ -235,6 +235,14 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     return text
 
 
+def seed_system(s, base="You are a helpful assistant.", extra=""):
+    """用 system 消息初始化会话(新会话/刷新注入时用)。extra 可为技能清单文本。"""
+    text = base + (("\n\n" + extra) if extra else "")
+    s.messages_json = json.dumps([{"role": "system", "content": text}], ensure_ascii=False)
+    s.msg_count = 1
+    return text
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]

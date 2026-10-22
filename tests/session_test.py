@@ -7,7 +7,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
-                               auto_off, add_image, orchestrate_turn, orchestrate)  # noqa: E402
+                               auto_off, add_image, orchestrate_turn, orchestrate, seed_system)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -132,6 +132,15 @@ ck("orchestrate 角色序列", [m["role"] for m in _ml] == ["user", "assistant",
 ck("tool 配对 id", _ml[2]["tool_call_id"] == _ml[1]["tool_calls"][0]["id"] == "c1")
 ck("tool 结果内容", _ml[2]["content"] == "OUT")
 ck("msg_count=4", oc.msg_count == 4)
+
+# seed_system
+sd = Session()
+t = seed_system(sd, "BASE", "SKILLS")
+_sm = messages_list(sd.messages_json)
+ck("seed system 单条", len(_sm) == 1 and _sm[0]["role"] == "system", str(_sm))
+ck("seed 合并 base+extra", _sm[0]["content"] == "BASE\n\nSKILLS", repr(_sm[0]["content"]))
+ck("seed return 文本", t == "BASE\n\nSKILLS")
+ck("seed msg_count=1", sd.msg_count == 1)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

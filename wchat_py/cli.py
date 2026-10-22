@@ -359,9 +359,19 @@ def run_turn(content, model="", max_rounds=5):
 
 def main(argv):
     if argv and argv[0] == "repl":
-        from wchat_py.session import Session
+        from wchat_py.session import Session, seed_system
         from wchat_py.repl import run_repl, session_text_handler
         _s = Session.from_env()
+        _extra = ""
+        try:
+            from wchat_py import skill as _skill
+            _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+                os.environ.get("HOME", ""), "." + "c" + "t", "skills")
+            _r = _skill.scan_skills(_sd, "8", "200", "")
+            _extra = _r if isinstance(_r, str) else ""
+        except Exception:
+            _extra = ""
+        seed_system(_s, extra=_extra)
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
         return run_repl(sys.stdin, _h)
     if argv and argv[0] == "run-st":
