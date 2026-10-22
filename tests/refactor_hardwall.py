@@ -20,8 +20,9 @@ NEW = r'''hard_deny_cmd() {
     # bash 前端只做出口：取 JSON 回填 hd_rule/hd_msg/HD_SOFT。组件不可用 -> fail-closed 拒，
     # 绝不静默放行（与全仓其它模块"组件缺席即拒"的降级方向一致）。
     if declare -F py_run >/dev/null 2>&1; then
-        local _hwj
-        _hwj=$(printf '%s' "$1" | py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
+        local _hwj _ial
+        _ial=$(printf '%s\n' ${AUTO_ALLOW_INSTALL[@]+"${AUTO_ALLOW_INSTALL[@]}"})
+        _hwj=$(printf '%s' "$1" | WCHAT_INSTALL_ALLOW="$_ial" py_run hardwall json ${auto_mode:+--auto} 2>/dev/null) || _hwj=""
         if [[ -n "$_hwj" && "$_hwj" == \{* ]]; then
             hd_rule=$(printf '%s' "$_hwj" | jq -r '.rule // ""')
             hd_msg=$(printf '%s' "$_hwj" | jq -r '.msg // ""')
@@ -57,4 +58,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
