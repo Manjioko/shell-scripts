@@ -208,6 +208,17 @@ def orchestrate_turn(session, content, llm):
     return text
 
 
+def _data_url(path):
+    import base64
+    import mimetypes
+    mt = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    try:
+        with open(path, "rb") as f:
+            return "data:%s;base64,%s" % (mt, base64.b64encode(f.read()).decode())
+    except OSError:
+        return path
+
+
 def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     """带工具续发的一轮编排（llm/tool 可注入，便于离线自测配对）。
 
@@ -216,7 +227,14 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     → 续发；无则落 assistant(text) 结束。回写 Session 并返回最终 text（err 时返回 err）。
     """
     msgs = messages_list(session.messages_json)
-    msgs.append({"role": "user", "content": content})
+    if session.input_images:
+        _parts = [{"type": "text", "text": content}]
+        for _p in session.input_images:
+            _parts.append({"type": "image_url", "image_url": {"url": _data_url(_p)}})
+        msgs.append({"role": "user", "content": _parts})
+        session.input_images = []
+    else:
+        msgs.append({"role": "user", "content": content})
     text = ""
     for _ in range(max_rounds):
         text, tcs, err = call_llm(msgs)

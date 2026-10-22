@@ -166,5 +166,25 @@ _ck_repo = make_checkpoint(al, os.path.dirname(os.path.dirname(os.path.abspath(_
 ck("git 仓回滚点 git@", _ck_repo.startswith("git@"), _ck_repo)
 ck("非 git 回滚点空", make_checkpoint(al, tempfile.mkdtemp()) == "")
 
+# 图片部件
+_img = os.path.join(tempfile.mkdtemp(), "a.png")
+open(_img, "wb").write(b"\x89PNG\r\n")
+_si = Session()
+_si.input_images = [_img]
+_cap = {}
+
+
+def _cl_img(m):
+    _cap["msgs"] = list(m)
+    return "ok", [], None
+
+
+orchestrate(_si, "看看图", _cl_img, lambda n, a: "")
+_um = _cap["msgs"][-1]
+ck("图片 user content 是部件数组", isinstance(_um["content"], list), str(type(_um["content"])))
+_imgs = [p for p in _um["content"] if p.get("type") == "image_url"]
+ck("含 image_url data:image/png", bool(_imgs) and _imgs[0]["image_url"]["url"].startswith("data:image/png"), str(_imgs)[:80])
+ck("图片消费后清空", _si.input_images == [])
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

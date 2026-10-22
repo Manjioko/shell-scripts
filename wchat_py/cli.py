@@ -203,7 +203,9 @@ def _call_llm(msgs, model, on_text=None):
     import json as _json, subprocess
     from wchat_py import tools as _tools
     try:
-        _tb = _tools.build(provider=os.environ.get("WEB_SEARCH_PROVIDER", ""))
+        _tb = _tools.build(provider=os.environ.get("WEB_SEARCH_PROVIDER", ""),
+                           mcp_enable=(1 if os.environ.get("MCP_ENABLE") == "1" else 0),
+                           mcp_tools=None)
         _tlist = _json.loads(_tb) if isinstance(_tb, str) else _tb
     except Exception:
         _tlist = []
