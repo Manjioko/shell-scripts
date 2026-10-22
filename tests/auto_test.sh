@@ -452,6 +452,12 @@ PYEOF
 run_case() {
     local name="$1" script="$2" tier="$3" authmark="$4" finalmark="$5"
     local mtr="${6:-25}" feed="${7:-AUTO|n}" port spid i=0
+    local -a _entry
+    if [[ "${PY_ENTRY:-0}" == "1" ]]; then
+        _entry=(python3 -m wchat_py.cli)
+    else
+        _entry=("$BASH5" "$REAL")
+    fi
     port=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')
     printf '%s' "$script" > "$BASE/reply-$name.json"; : > "$BASE/req-$name.jsonl"
     STUB_LOG="$BASE/req-$name.jsonl" STUB_REPLY="$BASE/reply-$name.json" \
@@ -468,9 +474,10 @@ run_case() {
     # 就会掩盖"SDK 的 base_url 是根、会再拼一层"这整类接线错(2026-xx 已因此连挂两次:
     # 凭据没继承、URL 拼双 404)。curl 调用与 SDK 调用都必须落在同一路径上。
     ( cd "$BASE/proj" && BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \
+      PYTHONPATH="$(dirname "$REAL")${PYTHONPATH:+:$PYTHONPATH}" \
       E2E_FEED="$feed" MAX_TOOL_ROUNDS="$mtr" CMD_TIMEOUT="${CMD_TIMEOUT:-20}" \
       python3 "$BASE/pty_drive.py" "$BASE/out-$name.log" 60 -- \
-      "$BASH5" "$REAL" -f ${tier:+-auto=$tier} -st "按脚本依次调用工具,不要多问" ) \
+      "${_entry[@]}" -f ${tier:+-auto=$tier} -st "按脚本依次调用工具,不要多问" ) \
       > "$BASE/drive-$name.out" 2>&1
     kill $spid 2>/dev/null; wait $spid 2>/dev/null
 }
