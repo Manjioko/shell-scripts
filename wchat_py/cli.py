@@ -108,6 +108,7 @@ def parse(argv):
     quick_mode = 0
     seen_help = 0
     action = ""
+    auto_mode = ""
     unknown = []
     i = 0
     while i < len(argv):
@@ -137,6 +138,8 @@ def parse(argv):
         elif a == "-u":
             action = "usage"
             break
+        elif a == "-auto" or a.startswith("-auto="):
+            auto_mode = a.split("=", 1)[1] if "=" in a else "sandbox"
         elif a == "-st" or a == "-to":
             quick_mode = 1
             forget_history = 1
@@ -146,7 +149,7 @@ def parse(argv):
     return {"content": content, "model": model, "thinking": thinking,
             "forget_history": str(forget_history),
             "quick_mode": str(quick_mode), "seen_help": str(seen_help), "action": action,
-            "unknown": " ".join(unknown)}
+            "auto_mode": auto_mode, "unknown": " ".join(unknown)}
 
 
 def cmd_parse(argv):
@@ -422,6 +425,9 @@ def main(argv):
         return 0
     # 参数路由：-u/usage、有正文走单轮、其余进 REPL(交互/标准输入)
     st = parse(argv)
+    if st.get("auto_mode"):
+        os.environ["AUTO_MODE"] = st["auto_mode"]
+        os.environ["WCHAT_AUTO_MODE"] = st["auto_mode"]
     if st["action"] == "usage":
         from wchat_py.session import Session, usage_lines
         for ln in usage_lines(Session.from_env()):
