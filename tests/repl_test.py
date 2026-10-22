@@ -57,5 +57,16 @@ finally:
 _hv = out2.getvalue()
 ck("-h 打印 help(非占位)", len(_hv) > 50 and "尚未在 Python 主循环实现" not in _hv, repr(_hv[:60]))
 
+# 5) -u 默认 handler 渲染 usage(含"消息条数")
+out3 = io.StringIO()
+old = sys.stdout
+sys.stdout = out3
+try:
+    run_repl(io.StringIO("-u\n"), lambda t: None)
+finally:
+    sys.stdout = old
+_uv = out3.getvalue()
+ck("-u 渲染 usage", "消息条数" in _uv and "单价自标定" in _uv, repr(_uv[:40]))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
