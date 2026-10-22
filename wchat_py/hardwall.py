@@ -111,6 +111,7 @@ def _creds_all_exempt(c, work_root, home):
     toks = re.findall(r"[^\s;&|()]+", c or "")
     base_ok = True
     base = work_root
+    found = False
     i = 0
     while i < len(toks):
         t = toks[i].strip("'\"")
@@ -139,6 +140,7 @@ def _creds_all_exempt(c, work_root, home):
             i += 2
             continue
         if _is_cred_token(t):
+            found = True
             if t.startswith("/") or t.startswith("~") or t.startswith("$HOME") or t.startswith("${HOME}"):
                 p = t.replace("${HOME}", home).replace("$HOME", home)
                 if p.startswith("~"):
@@ -147,8 +149,10 @@ def _creds_all_exempt(c, work_root, home):
                     return False
             elif not base_ok:
                 return False
+            elif re.search(r"[^A-Za-z0-9_./-]", t):   # 相对凭据词含 @/变量等非路径字符 → 证不了在根内
+                return False
         i += 1
-    return True
+    return found
 
 
 def _install_hit(c):
