@@ -420,9 +420,16 @@ def main(argv):
     if "-h" in argv or "--help" in argv:
         help_user()
         return 0
-    # 1b 起才接管其它参数；现在明确告知"还没迁到"，不静默成功。
-    sys.stderr.write("cli: 该参数尚未迁移到 Python 入口（B 阶段 1b 起逐步接管）: %r\n" % (argv,))
-    return 2
+    # 参数路由：-u/usage、有正文走单轮、其余进 REPL(交互/标准输入)
+    st = parse(argv)
+    if st["action"] == "usage":
+        from wchat_py.session import Session, usage_lines
+        for ln in usage_lines(Session.from_env()):
+            inp_msg(ln)
+        return 0
+    if st.get("content"):
+        return run_turn(st["content"], st.get("model", ""))
+    return main(["repl"])
 
 
 if __name__ == "__main__":
