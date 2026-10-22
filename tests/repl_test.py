@@ -95,5 +95,13 @@ ck("session 两轮 msg_count=4", _sess.msg_count == 4, str(_sess.msg_count))
 ck("session 输出两行", _buf.getvalue() == "echo:p\necho:q\n", repr(_buf.getvalue()))
 ck("session 上下文累积", [m["role"] for m in _ml2(_sess.messages_json)] == ["user", "assistant", "user", "assistant"])
 
+# run_repl_loop 注入式 reader
+from wchat_py.repl import run_repl_loop  # noqa: E402
+_seq = iter(["x", "-l", "-q", "y"])
+_tc, _mc = [], []
+run_repl_loop(lambda: next(_seq, None), lambda t: _tc.append(t), lambda a, g: _mc.append(a) or True)
+ck("loop reader: text 只到 -q 前", _tc == ["x"], str(_tc))
+ck("loop reader: meta 捕获 -l", _mc == ["list_history"], str(_mc))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

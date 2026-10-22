@@ -137,11 +137,14 @@ def session_text_handler(session, call_llm, run_tool, out=None):
     return handler
 
 
-def run_repl(stream, on_text, on_meta=None):
-    """读 stream（每行一条）直到 EOF 或 -q。on_text(arg)、on_meta(action,arg)->bool。"""
+def run_repl_loop(next_line, on_text, on_meta=None):
+    """核心循环：next_line()->str|None(EOF)。可注入，便于单测交互与非交互两种来源。"""
     on_meta = on_meta or _default_meta
-    for raw in stream:
-        line = raw.rstrip("\n")
+    while True:
+        line = next_line()
+        if line is None:
+            return 0
+        line = line.rstrip("\n")
         if line == "":
             continue
         action, arg = classify(line)
@@ -152,7 +155,21 @@ def run_repl(stream, on_text, on_meta=None):
         else:
             if on_meta(action, arg) is False:
                 return 0
-    return 0
+
+
+def run_repl(stream, on_text, on_meta=None):
+    it = iter(stream)
+    return run_repl_loop(lambda: next(it, None), on_text, on_meta)
+
+
+def run_interactive(on_text, on_meta=None, prompt="❯ "):
+    """交互式：从 tty 逐行读。EOF(Ctrl-D) 结束。"""
+    def nxt():
+        try:
+            return input(prompt)
+        except EOFError:
+            return None
+    return run_repl_loop(nxt, on_text, on_meta)
 
 
 if __name__ == "__main__":
