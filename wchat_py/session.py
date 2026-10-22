@@ -243,6 +243,15 @@ def seed_system(s, base="You are a helpful assistant.", extra=""):
     return text
 
 
+def enter_auto(s, tier):
+    """进入 auto 档（纯状态部分）：校验档位→置 auto_mode→清会话计数。回滚点/名单/刹车后续接。"""
+    if tier not in s.auto_tiers:
+        return None
+    s.auto_mode = tier
+    s.auto_approvals = 0
+    return tier
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]

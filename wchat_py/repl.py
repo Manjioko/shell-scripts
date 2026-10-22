@@ -80,10 +80,10 @@ def _default_meta(action, arg):
         return True
     if action == "auto_on":
         from wchat_py.cli import inp_msg
-        from wchat_py.session import Session, set_auto
+        from wchat_py.session import Session, enter_auto
         s = Session.from_env()
         tier = arg or s.auto_mode or (s.auto_tiers[0] if s.auto_tiers else "")
-        if set_auto(s, tier) is None:
+        if enter_auto(s, tier) is None:
             inp_msg("未知档位: %s(可选: %s)" % (tier, " ".join(s.auto_tiers)))
         else:
             inp_msg("✅ 已开启 auto: %s 档(装配/回滚点由 auto_enable 负责，未迁)" % tier)
