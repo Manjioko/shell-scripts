@@ -319,8 +319,14 @@ def _run_tool(name, args_json):
         _auto = os.environ.get("AUTO_MODE") == "full"
         _r, _s, _m = _hd_detail(cmd, _auto)
         if _r:
+            from wchat_py import audit as _audit
+            _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                          rule=_r, decision="deny", cmd=cmd)
             return ("[硬墙 %s] %s" % (_r, _m))
         if not _shell_approved(cmd):
+            from wchat_py import audit as _audit
+            _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                          decision="deny", reason="no-approval", cmd=cmd)
             return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;当前无交互 tty 或未确认,已拒)"
                     % cmd)
         from wchat_py.termpty import pty_run
