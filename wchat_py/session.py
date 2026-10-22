@@ -218,10 +218,15 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
             session.msg_count = len(msgs)
             return err
         if tcs:
-            msgs.append({"role": "assistant", "content": text or "", "tool_calls": tcs})
-            for tc in tcs:
-                out = run_tool(tc.get("name") or "", tc.get("arguments") or "")
-                msgs.append({"role": "tool", "tool_call_id": tc.get("id") or "", "content": out})
+            msgs.append({"role": "assistant", "content": text or None,
+                         "tool_calls": [{"id": tc.get("id") or ("call_%d" % i), "type": "function",
+                                         "function": {"name": tc.get("name") or "",
+                                                      "arguments": tc.get("arguments") or "{}"}}
+                                        for i, tc in enumerate(tcs)]})
+            for i, tc in enumerate(tcs):
+                out = run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
+                msgs.append({"role": "tool", "content": out,
+                             "tool_call_id": tc.get("id") or ("call_%d" % i)})
             continue
         msgs.append({"role": "assistant", "content": text or ""})
         break
