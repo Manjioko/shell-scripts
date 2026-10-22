@@ -195,8 +195,11 @@ def run_single_turn(content, model=""):
     return 0 if rc == 0 else 1
 
 
-def _call_llm(msgs, model):
-    """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。"""
+def _call_llm(msgs, model, on_text=None):
+    """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。
+
+    on_text(delta) 若给: 每个 text 增量实时回调(供流式渲染); text 仍被累积返回。
+    """
     import json as _json, subprocess
     from wchat_py import tools as _tools
     try:
@@ -221,7 +224,10 @@ def _call_llm(msgs, model):
             continue
         t = ev.get("t")
         if t == "text":
-            text.append(ev.get("v") or "")
+            _d = ev.get("v") or ""
+            text.append(_d)
+            if on_text is not None and _d:
+                on_text(_d)
         elif t == "tool_calls":
             tcs = ev.get("v") or []
         elif t == "error":
