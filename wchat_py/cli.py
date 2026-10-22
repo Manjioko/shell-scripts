@@ -230,6 +230,24 @@ def _call_llm(msgs, model):
     return "".join(text), tcs, err
 
 
+def _shell_approved(cmd):
+    """shell 工具人工审批：auto=full 由硬墙裁决(此处放行)；显式 ASSUME_YES 放行；
+    有 tty 弹 y/N；否则 fail-closed 拒（无头环境绝不静默执行）。"""
+    if os.environ.get("AUTO_MODE") == "full":
+        return True
+    if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
+        return True
+    try:
+        if not sys.stdin.isatty():
+            return False
+    except Exception:
+        return False
+    sys.stdout.write("执行命令? [y/N] ")
+    sys.stdout.flush()
+    ans = (sys.stdin.readline() or "").strip().lower()
+    return ans in ("y", "yes")
+
+
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
@@ -291,6 +309,9 @@ def _run_tool(name, args_json):
         _r, _s, _m = _hd_detail(cmd, _auto)
         if _r:
             return ("[硬墙 %s] %s" % (_r, _m))
+        if not _shell_approved(cmd):
+            return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;当前无交互 tty 或未确认,已拒)"
+                    % cmd)
         from wchat_py.termpty import pty_run
         try:
             _timeout = float(os.environ.get("CMD_TIMEOUT", "20"))
