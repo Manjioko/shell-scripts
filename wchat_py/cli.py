@@ -329,6 +329,8 @@ def _run_tool(name, args_json):
                           decision="deny", reason="no-approval", cmd=cmd)
             return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;当前无交互 tty 或未确认,已拒)"
                     % cmd)
+        from wchat_py import audit as _audit
+        _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell", decision="allow", cmd=cmd)
         from wchat_py.termpty import pty_run
         try:
             _timeout = float(os.environ.get("CMD_TIMEOUT", "20"))

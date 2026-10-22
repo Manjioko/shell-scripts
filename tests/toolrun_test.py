@@ -41,8 +41,12 @@ os.environ.pop("AUTO_AUDIT_LOG", None)
 
 # 3) 显式放行 => 执行
 os.environ["WCHAT_AUTO_ASSUME_YES"] = "1"
+_alogy = os.path.join(tempfile.mkdtemp(), "a.log")
+os.environ["AUTO_AUDIT_LOG"] = _alogy
 out = run("printf 'hi\\n'")
 ck("显式放行执行", "hi\n" in out, repr(out))
+ck("审计记放行 allow", os.path.exists(_alogy) and '"allow"' in open(_alogy).read(), open(_alogy).read() if os.path.exists(_alogy) else "")
+os.environ.pop("AUTO_AUDIT_LOG", None)
 
 # 4) 超时（放行 + CMD_TIMEOUT=1）
 os.environ["CMD_TIMEOUT"] = "1"
