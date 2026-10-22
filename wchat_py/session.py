@@ -57,6 +57,20 @@ class Session:
         )
 
 
+def history_list(history_dir):
+    """列出已存历史文件（`~/.ct/history/*.json` 的 basename，排序）。
+
+    状态所有权起步：把 bash `-l` 里 `ls $HISTORY_DIR` 的部分搬成纯函数，便于单测/复用。
+    """
+    if not history_dir:
+        return []
+    try:
+        names = os.listdir(history_dir)
+    except OSError:
+        return []
+    return sorted(n for n in names if n.endswith(".json"))
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]

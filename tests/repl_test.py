@@ -41,10 +41,10 @@ out = io.StringIO()
 old = sys.stdout
 sys.stdout = out
 try:
-    run_repl(io.StringIO("-l\n"), lambda t: None)
+    run_repl(io.StringIO("-md\n"), lambda t: None)
 finally:
     sys.stdout = old
-ck("默认 meta 打占位", "list_history" in out.getvalue(), repr(out.getvalue()))
+ck("默认 meta 打占位", "model_status" in out.getvalue(), repr(out.getvalue()))
 
 # 4) -h 默认 handler 调 cli.help_user（真打印，非占位）
 out2 = io.StringIO()

@@ -8,6 +8,7 @@
 
 只做**循环与分发**，不碰 tty/信号/网络——便于用假 stream + 假 handler 单测。
 """
+import os
 import sys
 
 from wchat_py.cmdline import classify
@@ -23,6 +24,16 @@ def _default_meta(action, arg):
         from wchat_py.session import Session, usage_lines
         for ln in usage_lines(Session.from_env()):
             inp_msg(ln)
+        return True
+    if action == "list_history":
+        from wchat_py.session import history_list
+        d = os.environ.get("WCHAT_HISTORY_DIR", "")
+        names = history_list(d)
+        if not names:
+            sys.stdout.write("(无历史)\n")
+        else:
+            for n in names:
+                sys.stdout.write(n + "\n")
         return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
