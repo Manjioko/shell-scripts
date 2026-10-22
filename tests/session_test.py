@@ -5,7 +5,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from wchat_py.session import Session, usage_lines, save_history, messages_list  # noqa: E402
+from wchat_py.session import Session, usage_lines, save_history, messages_list, compact_status  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -56,6 +56,15 @@ path = save_history(d, mj, "s.json", "title-x")
 ck("save 落盘", os.path.exists(path), path)
 ck("load 回读等值", msgstore.load(path) == messages_list(mj), repr(msgstore.load(path)))
 ck("messages_list 容错", messages_list("not json") == [])
+
+# compact_status: cur>=threshold => due
+s3 = Session.from_env({"TOKEN_THRESHOLD": "100", "WCHAT_LAST_PROMPT_TOKENS": "200"})
+cur, th, due = compact_status(s3)
+ck("compact due(cur>=th)", due is True and cur == 200 and th == 100, str((cur, th, due)))
+s4 = Session.from_env({"TOKEN_THRESHOLD": "100", "WCHAT_LAST_PROMPT_TOKENS": "50"})
+ck("compact 不需压缩", compact_status(s4)[2] is False)
+s5 = Session.from_env({"TOKEN_THRESHOLD": "0"})
+ck("阈值为0 不due", compact_status(s5)[2] is False)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

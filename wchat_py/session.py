@@ -88,6 +88,15 @@ def save_history(history_dir, messages_json, name, title=""):
     return path
 
 
+def compact_status(s):
+    """返回 (cur, threshold, due)。cur 用 last_prompt_tokens，无则按字节粗算(同 -u)。"""
+    est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
+    cur = s.last_prompt_tokens if s.last_prompt_tokens > 0 else est
+    from wchat_py import compaction
+    due = bool(s.token_threshold > 0 and compaction.due(cur, s.token_threshold))
+    return cur, s.token_threshold, due
+
+
 def usage_lines(s):
     est = len((s.messages_json or "").encode("utf-8")) * 2 // 5
     out = ["消息条数: %d" % s.msg_count]

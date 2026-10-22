@@ -35,6 +35,16 @@ def _default_meta(action, arg):
             for n in names:
                 sys.stdout.write(n + "\n")
         return True
+    if action == "compact":
+        from wchat_py.session import Session, compact_status
+        cur, th, due = compact_status(Session.from_env())
+        if th <= 0:
+            sys.stdout.write("压缩阈值未设置,不动\n")
+        elif due:
+            sys.stdout.write("上下文已达压缩点(%d/%d)，需压缩(apply 需 ask_ai，暂未自动执行)\n" % (cur, th))
+        else:
+            sys.stdout.write("无需压缩(%d/%d)\n" % (cur, th))
+        return True
     if action == "show_msgs":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session
