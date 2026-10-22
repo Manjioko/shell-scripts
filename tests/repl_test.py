@@ -83,5 +83,17 @@ def _cap(line):
 ck("-cl 清屏转义", "\033[H\033[2J" in _cap("-cl"), repr(_cap("-cl")))
 ck("-n 新会话提示", "已开始新会话" in _cap("-n"), repr(_cap("-n")))
 
+# session 跨轮：run_repl + session_text_handler + 假 llm
+from wchat_py.session import Session as _S, messages_list as _ml2  # noqa: E402
+from wchat_py.repl import session_text_handler  # noqa: E402
+
+_sess = _S()
+_buf = io.StringIO()
+_h = session_text_handler(_sess, lambda m: ("echo:" + m[-1]["content"], [], None), lambda n, a: "OUT", out=_buf)
+run_repl(io.StringIO("p\nq\n"), _h)
+ck("session 两轮 msg_count=4", _sess.msg_count == 4, str(_sess.msg_count))
+ck("session 输出两行", _buf.getvalue() == "echo:p\necho:q\n", repr(_buf.getvalue()))
+ck("session 上下文累积", [m["role"] for m in _ml2(_sess.messages_json)] == ["user", "assistant", "user", "assistant"])
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

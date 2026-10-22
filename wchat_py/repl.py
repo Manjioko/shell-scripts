@@ -122,6 +122,21 @@ def _default_meta(action, arg):
     return True
 
 
+def session_text_handler(session, call_llm, run_tool, out=None):
+    """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
+
+    Session 跨轮持久（messages 累积），这是 REPL 与 ask_ai 编排的接线点。
+    """
+    from wchat_py.session import orchestrate
+    out = out if out is not None else sys.stdout
+
+    def handler(text):
+        r = orchestrate(session, text, call_llm, run_tool)
+        out.write((r or "") + "\n")
+
+    return handler
+
+
 def run_repl(stream, on_text, on_meta=None):
     """读 stream（每行一条）直到 EOF 或 -q。on_text(arg)、on_meta(action,arg)->bool。"""
     on_meta = on_meta or _default_meta
