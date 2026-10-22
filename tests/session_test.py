@@ -5,7 +5,9 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from wchat_py.session import Session, usage_lines, save_history, messages_list, compact_status, model_status_lines  # noqa: E402
+from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
+                               model_status_lines, set_pro, set_flash, thinking_on, set_auto,
+                               auto_off, add_image)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -84,6 +86,16 @@ mc = Session.from_env({})
 jk = "\n".join(model_status_lines(mc))
 ck("md 标题空 => （空）", "标题: （空）" in jk, jk)
 ck("md auto 关", "auto: 关闭(权限逐次人工确认)" in jk)
+
+# 切换函数
+sw = Session.from_env({"PRO_MODEL": "pro-x", "FLASH_MODEL": "flash-y", "AUTO_TIERS": "sandbox full"})
+ck("set_pro", set_pro(sw) == "pro-x" and sw.model == "pro-x")
+ck("set_flash+thinking off", set_flash(sw) == "flash-y" and sw.thinking == "disabled")
+ck("thinking_on", thinking_on(sw) == "enabled" and sw.thinking == "enabled")
+ck("set_auto 合法", set_auto(sw, "full") == "full" and sw.auto_mode == "full")
+ck("set_auto 非法", set_auto(sw, "bogus") is None)
+ck("auto_off 返回旧值", auto_off(sw) == "full" and sw.auto_mode == "")
+ck("add_image 计数", add_image(sw, "/tmp/a.png") == 1 and sw.input_images == ["/tmp/a.png"])
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

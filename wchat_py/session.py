@@ -6,7 +6,7 @@ auto 计数、图片观测/标定）。`usage_lines(s)` 复刻 bash `print_usage
 前缀——由调用方用 inp_msg 加）。字段来源（env/config/文件）后续接；此处先保证**渲染逐字对齐**。
 """
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os
 
 
@@ -41,6 +41,10 @@ class Session:
     audit_log: str = ""
     ro_count: int = 0
     rw_count: int = 0
+    pro_model: str = ""
+    flash_model: str = ""
+    auto_tiers: list = field(default_factory=lambda: ["sandbox", "full"])
+    input_images: list = field(default_factory=list)
 
     @classmethod
     def from_env(cls, env=None):
@@ -83,6 +87,9 @@ class Session:
             audit_log=e.get("WCHAT_AUDIT_LOG", ""),
             ro_count=i("WCHAT_RO_COUNT", 0),
             rw_count=i("WCHAT_RW_COUNT", 0),
+            pro_model=e.get("PRO_MODEL", ""),
+            flash_model=e.get("FLASH_MODEL", ""),
+            auto_tiers=(e.get("AUTO_TIERS", "").split() or ["sandbox", "full"]),
         )
 
 
@@ -143,6 +150,40 @@ def model_status_lines(s):
     else:
         out.append("auto: 关闭(权限逐次人工确认)")
     return out
+
+
+def set_pro(s):
+    s.model = s.pro_model or s.model
+    return s.model
+
+
+def set_flash(s):
+    s.model = s.flash_model or s.model
+    s.thinking = "disabled"
+    return s.model
+
+
+def thinking_on(s):
+    s.thinking = "enabled"
+    return s.thinking
+
+
+def set_auto(s, tier):
+    if tier not in s.auto_tiers:
+        return None
+    s.auto_mode = tier
+    return tier
+
+
+def auto_off(s):
+    was = s.auto_mode
+    s.auto_mode = ""
+    return was
+
+
+def add_image(s, path):
+    s.input_images.append(path)
+    return len(s.input_images)
 
 
 def usage_lines(s):

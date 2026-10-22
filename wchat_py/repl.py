@@ -66,6 +66,47 @@ def _default_meta(action, arg):
         for ln in model_status_lines(Session.from_env()):
             inp_msg(ln)
         return True
+    if action in ("model_pro", "thinking_on", "model_flash"):
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session, set_pro, set_flash, thinking_on
+        s = Session.from_env()
+        if action == "model_pro":
+            inp_msg("✅ 已切换到 pro 模型 (%s)" % set_pro(s))
+        elif action == "thinking_on":
+            thinking_on(s)
+            inp_msg("✅ 已开启思考模式")
+        else:
+            inp_msg("✅ 已恢复默认 (model=%s, thinking=disabled)" % set_flash(s))
+        return True
+    if action == "auto_on":
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session, set_auto
+        s = Session.from_env()
+        tier = arg or s.auto_mode or (s.auto_tiers[0] if s.auto_tiers else "")
+        if set_auto(s, tier) is None:
+            inp_msg("未知档位: %s(可选: %s)" % (tier, " ".join(s.auto_tiers)))
+        else:
+            inp_msg("✅ 已开启 auto: %s 档(装配/回滚点由 auto_enable 负责，未迁)" % tier)
+        return True
+    if action == "auto_off":
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session, auto_off
+        s = Session.from_env()
+        if not s.auto_mode:
+            inp_msg("当前未开启 auto")
+        else:
+            auto_off(s)
+            inp_msg("✅ 已关闭 auto,恢复逐次人工确认")
+        return True
+    if action == "image":
+        from wchat_py.cli import inp_msg
+        from wchat_py.session import Session, add_image
+        if not arg:
+            inp_msg("用法: -img <图片路径>")
+        else:
+            add_image(Session.from_env(), arg)
+            inp_msg("[图片] %s" % arg)
+        return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
     return True
 
