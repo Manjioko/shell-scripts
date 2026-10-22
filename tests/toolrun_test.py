@@ -46,5 +46,28 @@ ck("超时提示", "超过单条上限" in out, repr(out))
 os.environ.pop("CMD_TIMEOUT", None)
 os.environ.pop("WCHAT_AUTO_ASSUME_YES", None)
 
+
+# 严格语义：非 auto 必逐字 yes（假 tty）
+class _FakeIn:
+    def __init__(self, ans):
+        self.ans = ans
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self.ans + "\n"
+
+
+_old = sys.stdin
+os.environ.pop("AUTO_MODE", None)
+try:
+    for ans, want in [("yes", True), ("y", False), ("", False), ("YES", False), ("yes ", True)]:
+        sys.stdin = _FakeIn(ans)
+        got = cli._shell_approved("echo")
+        ck("逐字yes %r -> %s" % (ans, want), got is want, str(got))
+finally:
+    sys.stdin = _old
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

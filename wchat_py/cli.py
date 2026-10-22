@@ -248,10 +248,10 @@ def _shell_approved(cmd):
             return False
     except Exception:
         return False
-    sys.stdout.write("执行命令? [y/N] ")
+    sys.stdout.write("执行命令? 必须逐字输入 yes 确认: ")
     sys.stdout.flush()
-    ans = (sys.stdin.readline() or "").strip().lower()
-    return ans in ("y", "yes")
+    ans = (sys.stdin.readline() or "").strip()
+    return ans == "yes"
 
 
 def _run_tool(name, args_json):
