@@ -21,7 +21,7 @@ def _default_meta(action, arg):
     if action == "usage":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, usage_lines
-        for ln in usage_lines(Session()):
+        for ln in usage_lines(Session.from_env()):
             inp_msg(ln)
         return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)

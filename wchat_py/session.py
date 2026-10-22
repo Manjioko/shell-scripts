@@ -6,6 +6,7 @@ auto 计数、图片观测/标定）。`usage_lines(s)` 复刻 bash `print_usage
 前缀——由调用方用 inp_msg 加）。字段来源（env/config/文件）后续接；此处先保证**渲染逐字对齐**。
 """
 from dataclasses import dataclass
+import os
 
 
 @dataclass
@@ -25,6 +26,35 @@ class Session:
     model: str = ""
     autocal: int = 1
     calib_count: int = 0
+
+    @classmethod
+    def from_env(cls, env=None):
+        """从环境构造状态（过渡期：bash/编排层把这些经 env 传出；全 Python 后改为进程内持有）。"""
+        e = env if env is not None else os.environ
+
+        def i(k, d=0):
+            try:
+                return int(e.get(k, d))
+            except (TypeError, ValueError):
+                return d
+
+        return cls(
+            messages_json=e.get("WCHAT_MESSAGES_JSON", "[]"),
+            msg_count=i("WCHAT_MSG_COUNT", 0),
+            last_prompt_tokens=i("WCHAT_LAST_PROMPT_TOKENS", 0),
+            last_cached_tokens=i("WCHAT_LAST_CACHED_TOKENS", 0),
+            last_image_tokens=i("WCHAT_LAST_IMAGE_TOKENS", 0),
+            ctx_window=i("CTX_WINDOW", 0),
+            token_threshold=i("TOKEN_THRESHOLD", 0),
+            ctx_overflow_gate=i("CTX_OVERFLOW_GATE", 80),
+            img_prune_events=i("IMG_PRUNE_EVENTS", 0),
+            img_obs_unexpected=i("WCHAT_IMG_OBS_UNEXPECTED", 0),
+            img_obs_tokens=i("WCHAT_IMG_OBS_TOKENS", 0),
+            img_ref_count=i("WCHAT_IMG_REF_COUNT", 0),
+            model=e.get("WCHAT_MODEL", ""),
+            autocal=i("IMG_TOKENS_AUTOCAL", 1),
+            calib_count=i("WCHAT_CALIB_COUNT", 0),
+        )
 
 
 def usage_lines(s):
@@ -53,4 +83,3 @@ def usage_lines(s):
     out.append("  单价自标定: %d 条样本(model=%s，AUTOCAL=%d)"
                % (s.calib_count, s.model if s.model else "?", s.autocal))
     return out
-
