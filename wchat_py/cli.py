@@ -234,10 +234,30 @@ def _call_llm(msgs, model, on_text=None):
             if on_text is not None and _d:
                 on_text(_d)
         elif t == "tool_calls":
-            tcs = ev.get("v") or []
+            # 网关按增量分片下发:首片带 name+args 前段,后续片只补 args。必须按 index
+            # 累积合并,不能覆盖(覆盖会让 name 变空、args 只剩尾巴 -> 工具永不执行)。
+            for _d in (ev.get("v") or []):
+                _idx = _d.get("index")
+                if _idx is None:
+                    _idx = len(tcs)
+                _slot = None
+                for _s in tcs:
+                    if _s.get("_i") == _idx:
+                        _slot = _s; break
+                if _slot is None:
+                    _slot = {"_i": _idx, "id": "", "name": "", "arguments": ""}
+                    tcs.append(_slot)
+                if _d.get("id"):
+                    _slot["id"] = _d["id"]
+                if _d.get("name"):
+                    _slot["name"] = _d["name"]
+                if _d.get("arguments"):
+                    _slot["arguments"] += _d["arguments"]
         elif t == "error":
             err = ev.get("v")
     p.wait()
+    for _s in tcs:
+        _s.pop("_i", None)
     return "".join(text), tcs, err
 
 
