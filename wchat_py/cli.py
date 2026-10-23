@@ -575,6 +575,9 @@ def main(argv):
     if not os.environ.get("AUTO_AUDIT_LOG"):
         _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
         os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")
+    if not os.environ.get("WCHAT_HISTORY_DIR"):
+        _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+        os.environ["WCHAT_HISTORY_DIR"] = os.path.join(_ct, "history")
     if argv and argv[0] == "repl":
         from wchat_py.session import Session, seed_system
         from wchat_py.repl import run_repl, session_text_handler
@@ -600,13 +603,25 @@ def main(argv):
             _d = os.environ.get("WCHAT_HISTORY_DIR", "")
             if not _d:
                 return
+            # 与 bash 一致:退出前问是否保存(默认保存,N/n 才不存);非交互不阻塞,按默认保存
+            if sys.stdin.isatty() and os.environ.get("WCHAT_FORGET") != "1":
+                sys.stdout.write("│ 退出前保存对话? [Y/n] "); sys.stdout.flush()
+                try:
+                    _ans = (sys.stdin.readline() or "").strip()
+                except Exception:
+                    _ans = ""
+                sys.stdout.write("\n"); sys.stdout.flush()
+                if _ans[:1] in ("N", "n"):
+                    sys.stdout.write("未保存对话\n"); sys.stdout.flush()
+                    return
             import time as _t
             from wchat_py.session import save_history as _sh
             _name = os.environ.get("WCHAT_HISTORY_NAME") or ("chat-%d.json" % int(_t.time()))
             try:
                 _sh(_d, _s.messages_json, _name, os.environ.get("WCHAT_CHAT_TITLE", ""))
-            except Exception:
-                pass
+                sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
+            except Exception as _e:
+                sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
 
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox
@@ -653,6 +668,12 @@ def main(argv):
     if st.get("auto_mode"):
         os.environ["AUTO_MODE"] = st["auto_mode"]
         os.environ["WCHAT_AUTO_MODE"] = st["auto_mode"]
+    if str(st.get("forget_history", "0")) not in ("0", "", "False", "None"):
+        os.environ["WCHAT_FORGET"] = "1"
+    if st.get("model"):
+        os.environ["WCHAT_MODEL"] = st["model"]
+    if st.get("thinking"):
+        os.environ["WCHAT_THINKING"] = st["thinking"]
     if st["action"] == "usage":
         from wchat_py.session import Session, usage_lines
         for ln in usage_lines(Session.from_env()):
