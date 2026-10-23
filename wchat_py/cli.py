@@ -584,7 +584,10 @@ def main(argv):
             from wchat_py import skill as _skill
             _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
                 os.environ.get("HOME", ""), "." + "c" + "t", "skills")
-            _r = _skill.scan_skills(_sd, "8", "200", "")
+            _r = _skill.scan_skills(_sd,
+                                    os.environ.get("SKILL_MAX_INJECT", "30"),
+                                    os.environ.get("SKILL_DESC_MAX", "200"),
+                                    os.environ.get("SKILLS_DIR_EXTERNAL", "0"))
             _extra = _r if isinstance(_r, str) else ""
         except Exception:
             _extra = ""

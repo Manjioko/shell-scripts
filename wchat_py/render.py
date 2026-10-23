@@ -52,7 +52,10 @@ class StreamBox:
         if self.anchor:
             return ""
         self.anchor = True
-        return ("\n" * self.win) + ("\033[%dA" % (self.win - 1)) + "\033[s"
+        # 关自动换行 + 隐光标(等价 stream_box_open):长行不折行,行数才可数;
+        # 否则终端自动折行 -> drawn 计错 -> 重画重复、close 擦不净(用户实测)。
+        return ("\033[?25l\033[?7l" + ("\n" * self.win)
+                + ("\033[%dA" % (self.win - 1)) + "\033[s")
 
     def paint_full(self):
         """reserve + paint:调用方想"真的画到终端"时用它(单测仍用纯 paint)。"""
@@ -66,7 +69,7 @@ class StreamBox:
         out = ["\033[u"]
         for _ in range(self.drawn):
             out.append("\033[2K\033[1B")
-        out.append("\033[u\033[?25h")
+        out.append("\033[u\033[?25h\033[?7h")
         self.buf = []
         self.line = ""
         self.drawn = 0
