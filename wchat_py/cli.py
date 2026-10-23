@@ -364,7 +364,7 @@ def _run_tool(name, args_json):
     if name == "run_shell_command":
         cmd = a.get("command") or ""
         from wchat_py.hardwall import detail as _hd_detail
-        _auto = os.environ.get("AUTO_MODE") == "full"
+        _auto = os.environ.get("AUTO_MODE") in ("full", "sandbox")
         _r, _s, _m = _hd_detail(cmd, _auto)
         if _r:
             from wchat_py import audit as _audit
