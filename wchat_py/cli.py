@@ -441,6 +441,26 @@ def _run_tool(name, args_json):
         if status:
             sys.stdout.write(status + "\n")
         return content
+    if name == "read_image":
+        import base64 as _b64
+        import mimetypes as _mt
+        _p = os.path.expanduser(a.get("path") or "")
+        if not os.path.isabs(_p):
+            _p = os.path.join(os.environ.get("WORK_ROOT") or os.getcwd(), _p)
+        if not os.path.isfile(_p):
+            return "错误:文件不存在: %s" % (a.get("path") or "")
+        _ext = os.path.splitext(_p)[1].lower()
+        if _ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
+            return "错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): %s" % a.get("path")
+        _mime = _mt.guess_type(_p)[0] or "image/png"
+        try:
+            with open(_p, "rb") as _f:
+                _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_f.read()).decode())
+        except OSError as _e:
+            return "错误:读取图片失败: %s" % _e
+        import json as _json
+        return "IMGJSON:" + _json.dumps({"url": _url, "path": _p,
+                                         "text": "已读取图片: %s" % _p}, ensure_ascii=False)
     if name == "run_shell_command":
         from wchat_py import audit as _audit
         cmd = a.get("command") or ""
@@ -542,6 +562,19 @@ def run_turn(content, model="", max_rounds=5):
             sys.stdout.write(tool_banner(tc.get("name") or "", args_preview(tc.get("arguments") or "")))
             sys.stdout.write("\n"); sys.stdout.flush()
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
+            if isinstance(out, str) and out.startswith("IMGJSON:"):
+                import json as _j
+                try:
+                    _d = _j.loads(out[len("IMGJSON:"):])
+                except ValueError:
+                    _d = None
+                if _d:
+                    msgs.append({"role": "tool", "content": _d.get("text", "图片已读取"),
+                                 "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
+                    msgs.append({"role": "user", "content": [
+                        {"type": "text", "text": "(工具 read_image 返回的图片)"},
+                        {"type": "image_url", "image_url": {"url": _d.get("url", "")}}]})
+                    continue
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
     sys.stdout.write(box.close()); sys.stdout.flush()

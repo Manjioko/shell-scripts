@@ -250,6 +250,18 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                                         for i, tc in enumerate(tcs)]})
             for i, tc in enumerate(tcs):
                 out = run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
+                if isinstance(out, str) and out.startswith("IMGJSON:"):
+                    try:
+                        _d = json.loads(out[len("IMGJSON:"):])
+                    except ValueError:
+                        _d = None
+                    if _d:
+                        msgs.append({"role": "tool", "content": _d.get("text", "图片已读取"),
+                                     "tool_call_id": tc.get("id") or ("call_%d" % i)})
+                        msgs.append({"role": "user", "content": [
+                            {"type": "text", "text": "(工具 read_image 返回的图片)"},
+                            {"type": "image_url", "image_url": {"url": _d.get("url", "")}}]})
+                        continue
                 msgs.append({"role": "tool", "content": out,
                              "tool_call_id": tc.get("id") or ("call_%d" % i)})
             continue
