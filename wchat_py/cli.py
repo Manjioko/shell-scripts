@@ -780,6 +780,12 @@ def run_turn(content, model="", max_rounds=5):
                 sys.stdout.write(render_reason("".join(reason)))
             sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
             return 0
+        # 工具执行前先关流箱并 flush 思考:否则权限提示/工具横幅会打在箱内光标处,
+        # 下一帧 paint 的 \033[u 会把提示擦掉(用户实测:提示在箱上方且被滚掉)。
+        sys.stdout.write(box.close()); sys.stdout.flush()
+        if reason:
+            sys.stdout.write(render_reason("".join(reason)))
+            reason.clear()
         # assistant 的 tool_calls 消息(正文也带上, 否则调用前的正文会丢)
         msgs.append({"role": "assistant", "content": text or None,
                      "tool_calls": [{"id": tc.get("id") or ("call_%d" % i), "type": "function",
@@ -999,7 +1005,15 @@ def main(argv):
                 sys.stdout.flush()
                 _sync_runtime(_s)
 
-            _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a),
+            def _run_tool_boxed(n, a):
+                # 工具执行/权限提示前关箱并 flush 思考,避免提示被下一帧 paint 擦掉
+                sys.stdout.write(_box.close()); sys.stdout.flush()
+                if _reason_acc:
+                    sys.stdout.write(render_reason("".join(_reason_acc)))
+                    _reason_acc.clear()
+                return _run_tool(n, a)
+
+            _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
                                       write_final=False, on_final=_finish)
             return run_interactive(_h, on_meta=_meta, on_quit=_on_quit)
         def _finish_plain(r):
