@@ -741,6 +741,22 @@ def _run_tool(name, args_json):
                             "当前无交互 tty 或未确认,已拒)" % cmd)
         from wchat_py import audit as _audit
         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell", decision="allow", cmd=cmd)
+        _bg = a.get("run_in_background")
+        if _bg is True or str(_bg).lower() == "true":
+            # 真后台(对齐 master):nohup 语义 + stdin 断开 + 输出到日志,立即返回 PID。
+            import subprocess as _sp
+            import tempfile as _tf
+            _fd, _log = _tf.mkstemp(prefix="ct_bg_")
+            os.close(_fd)
+            with open(_log, "ab") as _lf:
+                _p = _sp.Popen(["bash", "-c", cmd], stdin=_sp.DEVNULL,
+                               stdout=_lf, stderr=_sp.STDOUT, start_new_session=True)
+            _msg = ("✅ 服务已在后台启动:PID %d\n日志: %s\n"
+                    "查看输出: 用 shell 工具执行 tail -f %s\n"
+                    "停止服务: kill %d(若有残留子进程,先 pkill -P %d 再 kill %d)"
+                    % (_p.pid, _log, _log, _p.pid, _p.pid, _p.pid))
+            sys.stdout.write(" 后台启动 PID %s · 日志 %s\n" % (_p.pid, _log)); sys.stdout.flush()
+            return _msg
         from wchat_py.termpty import pty_run
         try:
             _timeout = float(os.environ.get("CMD_TIMEOUT", "120"))
