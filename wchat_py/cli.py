@@ -200,10 +200,11 @@ def run_single_turn(content, model=""):
     return 0 if rc == 0 else 1
 
 
-def _call_llm(msgs, model, on_text=None):
+def _call_llm(msgs, model, on_text=None, on_reason=None):
     """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。
 
     on_text(delta) 若给: 每个 text 增量实时回调(供流式渲染); text 仍被累积返回。
+    on_reason(delta) 若给: 思考增量回调(-dp/思考模式); 未给但有 on_text 时暗色直出。
     """
     import json as _json, subprocess
     from wchat_py import tools as _tools
@@ -214,13 +215,19 @@ def _call_llm(msgs, model, on_text=None):
         _tlist = _json.loads(_tb) if isinstance(_tb, str) else _tb
     except Exception:
         _tlist = []
-    req = {"model": model or os.environ.get("FLASH_MODEL", ""), "messages": msgs,
-           "thinking": "disabled", "tools": _tlist}
+    _model = model or os.environ.get("WCHAT_MODEL") or os.environ.get("FLASH_MODEL", "")
+    _think = os.environ.get("WCHAT_THINKING", "disabled") or "disabled"
+    req = {"model": _model, "messages": msgs,
+           "thinking": _think, "tools": _tlist}
+    if os.environ.get("WCHAT_TRACE") == "1":
+        sys.stderr.write("TRACE llm model=%r thinking=%r\n" % (_model, _think)); sys.stderr.flush()
     p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
     p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
     text, tcs, err = [], [], None
+    _had_reason = False
+    _sep_done = False
     for line in p.stdout:
         line = line.strip()
         if not line.startswith("{"):
@@ -234,7 +241,21 @@ def _call_llm(msgs, model, on_text=None):
             _d = ev.get("v") or ""
             text.append(_d)
             if on_text is not None and _d:
+                if _had_reason and not _sep_done:
+                    sys.stdout.write("\n"); sys.stdout.flush()
+                    _sep_done = True
                 on_text(_d)
+        elif t == "reasoning":
+            _r = ev.get("v") or ""
+            if not _r:
+                continue
+            _had_reason = True
+            if on_reason is not None:
+                on_reason(_r)
+            elif on_text is not None:
+                # 未单独给思考回调:暗色直出(不混进正文,也不进 StreamBox)
+                sys.stdout.write("\033[2m" + _r + "\033[0m")
+                sys.stdout.flush()
         elif t == "tool_calls":
             # 网关按增量分片下发:首片带 name+args 前段,后续片只补 args。必须按 index
             # 累积合并,不能覆盖(覆盖会让 name 变空、args 只剩尾巴 -> 工具永不执行)。
@@ -676,7 +697,9 @@ def run_turn(content, model="", max_rounds=5):
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     last_text = ""
     for _ in range(max_rounds):
-        text, tcs, err = _call_llm(msgs, model)
+        text, tcs, err = _call_llm(msgs, model,
+                                   on_reason=lambda d: (sys.stdout.write("\033[2m" + d + "\033[0m"),
+                                                        sys.stdout.flush()))
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
@@ -886,7 +909,11 @@ def main(argv):
                     _box.append(d)
                     sys.stdout.write(_box.paint_full())
                     sys.stdout.flush()
-                _t, _tc, _err = _call_llm(m, "", on_text=_emit)
+
+                def _emit_reason(d):
+                    sys.stdout.write("\033[2m" + d + "\033[0m")
+                    sys.stdout.flush()
+                _t, _tc, _err = _call_llm(m, "", on_text=_emit, on_reason=_emit_reason)
                 if _err:
                     sys.stderr.write("API 请求失败: %s\n" % _err); sys.stderr.flush()
                 return _t, _tc, _err
