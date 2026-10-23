@@ -226,19 +226,6 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
     p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
     text, tcs, err = [], [], None
-    _reason = []
-    _r_flushed = [False]
-
-    def _flush_reason():
-        if _r_flushed[0] or not _reason:
-            return
-        _r_flushed[0] = True
-        _full = "".join(_reason)
-        if on_reason is not None:
-            on_reason(_full)
-        elif on_text is not None:
-            sys.stdout.write("\033[2m" + _full + "\033[0m\n")
-            sys.stdout.flush()
     for line in p.stdout:
         line = line.strip()
         if not line.startswith("{"):
@@ -250,14 +237,13 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         t = ev.get("t")
         if t == "text":
             _d = ev.get("v") or ""
-            _flush_reason()
             text.append(_d)
             if on_text is not None and _d:
                 on_text(_d)
         elif t == "reasoning":
             _r = ev.get("v") or ""
-            if _r:
-                _reason.append(_r)
+            if _r and on_reason is not None:
+                on_reason(_r)
         elif t == "tool_calls":
             # 网关按增量分片下发:首片带 name+args 前段,后续片只补 args。必须按 index
             # 累积合并,不能覆盖(覆盖会让 name 变空、args 只剩尾巴 -> 工具永不执行)。
@@ -289,7 +275,6 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         elif t == "error":
             err = ev.get("v")
     p.wait()
-    _flush_reason()
     for _s in tcs:
         _s.pop("_i", None)
     return "".join(text), tcs, err
@@ -699,11 +684,15 @@ def run_turn(content, model="", max_rounds=5):
     msgs = msgmod.append_user(msgmod.init(), content)
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     last_text = ""
+    reason = []
+
+    def _on_reason(d):
+        reason.append(d)
+        box.append(d)
+        sys.stdout.write(box.paint_full())
+        sys.stdout.flush()
     for _ in range(max_rounds):
-        text, tcs, err = _call_llm(msgs, model,
-                                   on_reason=lambda d: (
-                                       sys.stdout.write(render_reason(d)),
-                                       sys.stdout.flush()))
+        text, tcs, err = _call_llm(msgs, model, on_reason=_on_reason)
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
@@ -715,6 +704,8 @@ def run_turn(content, model="", max_rounds=5):
             sys.stderr.write("API 请求失败: %s\n" % err); return 1
         if not tcs:
             sys.stdout.write(box.close()); sys.stdout.flush()
+            if reason:
+                sys.stdout.write(render_reason("".join(reason)))
             sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
             return 0
         # assistant 的 tool_calls 消息(正文也带上, 否则调用前的正文会丢)
@@ -745,6 +736,8 @@ def run_turn(content, model="", max_rounds=5):
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
     sys.stdout.write(box.close()); sys.stdout.flush()
+    if reason:
+        sys.stdout.write(render_reason("".join(reason)))
     sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
     sys.stdout.write("已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\n" % max_rounds)
     return 0
@@ -905,8 +898,9 @@ def main(argv):
                 sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
 
         if sys.stdin.isatty():
-            from wchat_py.render import StreamBox
+            from wchat_py.render import StreamBox, render_reason, render_markdown
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
+            _reason_acc = []
 
             def _cl_stream(m):
                 def _emit(d):
@@ -915,8 +909,9 @@ def main(argv):
                     sys.stdout.flush()
 
                 def _emit_reason(d):
-                    from wchat_py.render import render_reason
-                    sys.stdout.write(render_reason(d))
+                    _reason_acc.append(d)
+                    _box.append(d)
+                    sys.stdout.write(_box.paint_full())
                     sys.stdout.flush()
                 _t, _tc, _err = _call_llm(m, "", on_text=_emit, on_reason=_emit_reason)
                 if _err:
@@ -924,8 +919,10 @@ def main(argv):
                 return _t, _tc, _err
 
             def _finish(r):
-                from wchat_py.render import render_markdown
                 sys.stdout.write(_box.close()); sys.stdout.flush()
+                if _reason_acc:
+                    sys.stdout.write(render_reason("".join(_reason_acc)))
+                    _reason_acc.clear()
                 sys.stdout.write(render_markdown(r or "")); sys.stdout.write("\n")
                 sys.stdout.flush()
                 _sync_runtime(_s)
