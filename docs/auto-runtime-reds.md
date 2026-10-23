@@ -1,5 +1,17 @@
 # Python 入口 auto/交互面 —— 25 红清单（交接）
 
+## ⚠ 首因（2024 复核，务必先查这条）
+跑一次 e2e 后看 `.scratch/e2e_py.log`：
+- `audit.log: No such file or directory` → 审计文件根本没生成；
+- `屏幕无'API 请求失败' 期望[0] 实际[1]` → 屏幕出现了一次"API 请求失败"；
+- `硬墙不消耗审批请求 期望[3] 实际[0]`、`终审被调 2 次 实际[0]`。
+
+⇒ **Python 入口在 PY_ENTRY 沙箱里、走工具链之前就中断了**（LLM 请求失败/配置未取到），
+屏幕串/审计缺失是**次生现象**。修 A 簇之前，先把这条查出来：在 e2e 沙箱 HOME 下
+`py_run llm stream` 能否拿到 base_url/api_key（见历史坑：`py_prelude.sh` 覆写 HOME 致
+user-site openai import 失败，需保留 `$REAL_HOME` + PYTHONPATH 补 user-site）。
+首因不清，改屏幕串是白改。
+
 `PY_ENTRY=1 bash tests/auto_test.sh e2e` → **失败 25 项**（rc=1）。
 bash 基线 unit 40/40 + e2e 0 红。此清单是"切入口→删 wchat.sh"前必须清零的账。
 
@@ -45,4 +57,3 @@ bash 基线 unit 40/40 + e2e 0 红。此清单是"切入口→删 wchat.sh"前�
 3. 非 auto 审批 + read 确认提示 → 簇 B/D。
 4. 上限闸门 → 簇 C。
 5. 工具环续发（E5/E6）→ 簇 E（与主请求计数/桩轮次强相关）。
-
