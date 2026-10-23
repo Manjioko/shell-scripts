@@ -400,6 +400,61 @@ def _auto_judge(cmd, call=None, reason=""):
 
 _IMG_REFS = {}
 _IMG_SEQ = [0]
+_GRANTED_PATHS = set()
+
+
+def _path_guard(path, mode):
+    """工作目录外访问闸(对应 bash path_access):返回 None=放行, 字符串=拒绝原因。"""
+    if not path:
+        return None
+    p = os.path.realpath(os.path.expanduser(path))
+    root = os.path.realpath(os.environ.get("WORK_ROOT") or os.getcwd())
+    home = os.path.realpath(os.environ.get("HOME") or "")
+    try:
+        import tempfile as _tf
+        tmp = os.path.realpath(_tf.gettempdir())
+    except Exception:
+        tmp = "/tmp"
+
+    def under(x, r):
+        r = r.rstrip("/")
+        return bool(r) and (x == r or x.startswith(r + "/"))
+
+    if under(p, root) or under(p, tmp):
+        return None
+    _creds = (".ct/config", ".ct/history", ".ssh", ".aws", ".kube", ".docker",
+              ".netrc", ".npmrc", ".mcporter")
+    is_cred = home and any(under(p, os.path.join(home, x)) for x in _creds)
+    auto = os.environ.get("AUTO_MODE") in ("full", "sandbox")
+    if is_cred:
+        if auto:
+            return "AI 拒绝:凭据/会话数据路径不可访问(auto 档): %s" % path
+        sys.stdout.write("\n ⚠ AI 请求访问凭据/会话数据 %s\n\n 逐字输入 yes 放行(其他=拒绝): " % path)
+        sys.stdout.flush()
+        try:
+            ans = (sys.stdin.readline() or "").strip()
+        except Exception:
+            ans = ""
+        sys.stdout.write("\n"); sys.stdout.flush()
+        return None if ans == "yes" else "用户拒绝访问: %s" % path
+    if auto:
+        if mode == "r":
+            return None
+        return "AI 拒绝:工作目录外写入(auto 档): %s" % path
+    key = (mode, p)
+    if key in _GRANTED_PATHS:
+        return None
+    sys.stdout.write("\n ⚠ AI 请求访问工作目录外文件 %s\n\n 是否放行?(y 或 yes,n/回车 = 拒绝): " % path)
+    sys.stdout.flush()
+    try:
+        ans = (sys.stdin.readline() or "").strip().lower()
+    except Exception:
+        ans = ""
+    sys.stdout.write("\n"); sys.stdout.flush()
+    if ans in ("y", "yes"):
+        _GRANTED_PATHS.add(key)
+        return None
+    return "用户拒绝访问工作目录外文件: %s" % path
 
 
 def _run_tool(name, args_json):
@@ -414,6 +469,9 @@ def _run_tool(name, args_json):
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径
         resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        _deny = _path_guard(resolved, "r")
+        if _deny:
+            return _deny
         content, status = list_dir(resolved, path)
         if status:
             sys.stdout.write(status + "\n")
@@ -421,6 +479,9 @@ def _run_tool(name, args_json):
     if name == "read_file":
         path = a.get("path") or ""
         resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        _deny = _path_guard(resolved, "r")
+        if _deny:
+            return _deny
         work_root = os.environ.get("WORK_ROOT") or os.getcwd()
         content, status = read_file(resolved, path, a.get("offset"), a.get("limit"),
                                     os.environ.get("READ_MAX_CHARS", "30000"), work_root)
@@ -429,6 +490,11 @@ def _run_tool(name, args_json):
         return content
     if name == "grep":
         work_root = os.environ.get("WORK_ROOT") or os.getcwd()
+        _gp = a.get("path") or ""
+        if _gp:
+            _deny = _path_guard(_gp, "r")
+            if _deny:
+                return _deny
         content, status = grep(a.get("pattern") or "", a.get("path") or "",
                                int(os.environ.get("GREP_MAX_MATCHES", "200")),
                                int(os.environ.get("GREP_MAX_COL", "500")), work_root)
@@ -441,6 +507,9 @@ def _run_tool(name, args_json):
         resolved = os.path.expanduser(path)
         if not os.path.isabs(resolved):
             resolved = os.path.join(work_root, resolved)
+        _deny = _path_guard(resolved, "rw")
+        if _deny:
+            return _deny
         content, status = write_file(resolved, path, a.get("content") or "", work_root)
         if status:
             sys.stdout.write(status + "\n")
@@ -451,6 +520,9 @@ def _run_tool(name, args_json):
         resolved = os.path.expanduser(path)
         if not os.path.isabs(resolved):
             resolved = os.path.join(work_root, resolved)
+        _deny = _path_guard(resolved, "rw")
+        if _deny:
+            return _deny
         content, status = edit_file(resolved, path, a.get("old_string") or "",
                                     a.get("new_string") or "", work_root)
         if status:
