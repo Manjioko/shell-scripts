@@ -184,6 +184,9 @@ def _surface(srv):
     if badn > 0:
         sys.stderr.write("  %s  · 耗时长的失败(数秒~数十秒)多为冷启动或端口/实例被占,再启一次即可;"
                          "几十毫秒就失败的多半是命令或参数本身不对。%s\n" % (dim, rst))
+    if okn == 0 and int((mb.LAST_COUNTS or {}).get("error") or 0) > 0:
+        sys.stderr.write("  %s⚠ MCP 全部不可用:daemon 上次异常退出后留下了阻塞标记,"
+                         "stop/start 都清不掉。%s\n" % (ylw, rst))
     sys.stderr.write("  %s  · 提醒:MCP 结果会进对话上下文并发到 API 端;要关遥测/脱敏头,"
                      "请按上面 server 的文档自己加到它的参数里。%s\n" % (dim, rst))
     sys.stderr.write("  %s[mcp] 已暴露: %s %s\n" % (dim, " ".join(exposed_line), rst))

@@ -99,26 +99,73 @@ def list_json(timeout=60):
         return None, "mcporter list 输出非 JSON: %s" % (err or out[:120])
     LAST_COUNTS = d.get("counts") or {}
     srv = d.get("servers") or []
+    _cm = config_map()
+    for _s in srv:
+        _al = (_cm.get(_s.get("name")) or {}).get("allowedTools")
+        if isinstance(_al, list) and _al:
+            _allow = set(str(x) for x in _al)
+            _s["tools"] = [t for t in (_s.get("tools") or [])
+                           if t.get("name") in _allow]
     only = [x for x in (os.environ.get("MCP_ONLY", "") or "").replace(",", " ").split() if x]
     if only:
         srv = [s for s in srv if s.get("name") in only]
     return srv, None
 
 
-def manifest(srv, max_tools=40):
-    """系统提示用的一行摘要。"""
-    lines = ["## 可用外部能力(MCP)"]
+ROUTE_HINT = (
+    "用 **mcp_call** 的场景:答案取决于**某个外部程序自己的运行态**——它界面渲染出来的结果、"
+    "它内部的数据、它此刻的状态,或以工具为单位提供的任何\"只有那个程序里才知道\"的东西。\n"
+    "与内置工具的分工:read_file/grep 读的是磁盘上的静态文本,web_fetch 取的是静态 HTML;"
+    "**只要答案依赖 JS 执行后或程序运行后才成立的状态,内置工具一律给不出**——这时用 mcp_call,"
+    "不要拿前两者凑一个看起来像的答案。\n"
+    "每个 server 具体能做什么,以下面清单里它自己那行的说明为准(写\"未提供用途说明\"的表示信息缺失,"
+    "先 mcp_tools 看它的工具名单,别猜)。"
+)
+
+
+def config_map():
+    """配置里的 mcpServers 字典(只用结构,如 allowedTools;不输出凭据值)。"""
+    p = os.environ.get("MCP_CONFIG") or os.path.expanduser("~/.mcporter/mcporter.json")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            d = json.load(f)
+        return d.get("mcpServers") or {}
+    except Exception:
+        return {}
+
+
+def manifest(srv, max_bytes=None):
+    """复刻 bash mcp_catalog_text:路由提示 + 每 server 工具名/说明,超预算折叠。"""
+    try:
+        cap = int(os.environ.get("MCP_CATALOG_MAX_BYTES") or 6144)
+    except ValueError:
+        cap = 6144
+    if max_bytes is not None:
+        try:
+            cap = int(max_bytes)
+        except ValueError:
+            pass
+    out = ROUTE_HINT + "\n"
     for s in srv or []:
-        names = [t.get("name") for t in (s.get("tools") or [])][:max_tools]
-        lines.append("- %s: %s。工具: %s" % (s.get("name"), s.get("description") or "",
-                                             ", ".join(names) or "(无)"))
-    return "\n".join(lines)
+        names = ", ".join(t.get("name", "") for t in (s.get("tools") or []))
+        desc = s.get("description") or ""
+        sd = ("  —— " + desc) if desc else \
+            "  —— (未提供用途说明:先 mcp_tools 看它的工具名单,别凭名字猜它能做什么)"
+        out += "- %s: %s%s\n" % (s.get("name"), names, sd)
+    if len(out.encode("utf-8")) > cap:
+        out = ROUTE_HINT + "\n"
+        for s in srv or []:
+            out += "- %s: %d 个工具(清单超限已折叠,用 mcp_tools 现查)\n" % (
+                s.get("name"), len(s.get("tools") or []))
+        out += "\n⚠ 外部能力过多已折叠,不要凭记忆猜工具名;先 mcp_tools <server> 再调。"
+    return out
 
 
 def tools_text(srv, server):
     for s in srv or []:
         if s.get("name") == server:
-            return "\n".join("- %s: %s" % (t.get("name"), t.get("description") or "")
+            return "\n".join("- %s: %s" % (t.get("name"),
+                                           (t.get("description") or "").replace("\n", " ")[:200])
                              for t in (s.get("tools") or [])) or "(该 server 无工具)"
     return "错误:server '%s' 未启用。可用: %s" % (server, ", ".join(x.get("name") for x in srv or []))
 
