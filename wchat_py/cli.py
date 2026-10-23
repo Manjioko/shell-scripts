@@ -259,16 +259,38 @@ def _shell_approved(cmd):
     return ans == "yes"
 
 
-def _auto_judge(cmd, call=None):
-    """auto 终审：call(cmd)->raw 文本，用 authparse.parse_verdict 判 Y/N。
+AUTO_FINAL_SYS = (
+    "你是终端 AI 助手在 auto 模式下的终审器。初审器只看到命令本身、看不到执行意图,已判 N。"
+    "现在给你「命令」与「模型自述的执行理由」,你只回一行:ALLOW 或 DENY,后接不超过 25 字的中文理由。"
+    "判 ALLOW 必须同时满足:1. 理由与命令自洽(命令确实在做理由说的事,不是夹带);"
+    "2. 影响范围在工作目录内或属只读/常规开发流程;3. 不涉提权、系统配置、凭据、发布历史改写。"
+    "凡\"理由含糊/与命令不符/想用别的写法绕过限制\",一律 DENY。宁可 DENY:被拒后模型会换方案或退回人工,放行错一条可能毁掉用户环境。"
+)
 
-    返回 (verdict, reason)；call 缺省/异常 → (None,None) 供调用方 fail-closed（拒绝）。
-    WCHAT_AUTO_ASSUME_YES=1 直接放行（测试用）。
+
+def _default_final_call(cmd, reason=""):
+    model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
+    msgs = [{"role": "system", "content": AUTO_FINAL_SYS},
+            {"role": "user", "content": "命令: %s\n执行理由: %s\n初审结论: N\n" % (cmd, reason)}]
+    try:
+        text, _tc, err = _call_llm(msgs, model)
+    except Exception:
+        return ""
+    if err:
+        return ""
+    return text or ""
+
+
+def _auto_judge(cmd, call=None, reason=""):
+    """auto 终审：call(cmd)->raw 文本，判 ALLOW/DENY(或 Y/N)。
+
+    返回 (verdict, reason)；call 缺省走真实终审 LLM(_default_final_call)；异常/无判定 →
+    (None,None) 供调用方 fail-closed（拒绝）。WCHAT_AUTO_ASSUME_YES=1 直接放行（测试用）。
     """
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
         return "Y", "assume-yes"
     if call is None:
-        return None, None
+        call = lambda c: _default_final_call(c, reason)
     try:
         raw = call(cmd)
     except Exception:
@@ -350,7 +372,7 @@ def _run_tool(name, args_json):
                           rule=_r, decision="deny", cmd=cmd)
             return ("[硬墙 %s] %s" % (_r, _m))
         if _auto:
-            _v, _rs = _auto_judge(cmd)
+            _v, _rs = _auto_judge(cmd, reason=(args.get("reason", "") if isinstance(args, dict) else ""))
             if _v == "Y":
                 sys.stdout.write("auto 终审放行: %s\n" % cmd)
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
