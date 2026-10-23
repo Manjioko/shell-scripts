@@ -54,13 +54,16 @@ def _default_meta(action, arg, session=None):
         inp_msg(sess.messages_json)
         return True
     if action == "save_history":
-        from wchat_py.session import Session, save_history
+        from wchat_py.session import save_history
         d = os.environ.get("WCHAT_HISTORY_DIR", "")
         if not d:
             sys.stdout.write("⚠️ 未设置 WCHAT_HISTORY_DIR,未保存\n")
             return True
-        name = os.environ.get("WCHAT_HISTORY_NAME", "py-session.json")
-        path = save_history(d, sess.messages_json, name)
+        from wchat_py.cli import _gen_title
+        title = os.environ.get("WCHAT_CHAT_TITLE", "") or _gen_title(sess.messages_json)
+        name = os.environ.get("WCHAT_HISTORY_NAME") or (
+            (title + ".json") if title else "py-session.json")
+        path = save_history(d, sess.messages_json, name, title)
         sys.stdout.write("✅ 已保存: %s\n" % path)
         return True
     if action == "model_status":
@@ -80,6 +83,71 @@ def _default_meta(action, arg, session=None):
             inp_msg("✅ 已开启思考模式")
         else:
             inp_msg("✅ 已恢复默认 (model=%s, thinking=disabled)" % set_flash(s))
+        return True
+    if action == "skill_save":
+        import json as _json
+        import re as _re
+        from wchat_py.cli import _call_llm, inp_msg
+        try:
+            _msgs = _json.loads(sess.messages_json)
+        except ValueError:
+            _msgs = []
+        if len(_msgs) <= 1:
+            inp_msg("⚠️ 当前对话为空,没有可沉淀的经验")
+            return True
+        inp_msg("📦 正在从当前对话提炼技能…")
+        _conv = []
+        for _m in _msgs:
+            _c = _m.get("content")
+            if not isinstance(_c, str):
+                _c = "[非文本内容]"
+            _conv.append("%s: %s" % (_m.get("role"), _c))
+        _sys = ("你是技能提炼助手。根据对话记录提炼一个可复用技能,只输出严格 JSON:"
+                '{"name":"小写英文连字符名","description":"何时使用的1-2句检索词",'
+                '"body":"markdown 正文,步骤/命令/注意事项,<=800字"}。不要代码围栏,不要多余文字。')
+        _t, _tc, _err = _call_llm([{"role": "system", "content": _sys},
+                                   {"role": "user", "content": "\n".join(_conv)}],
+                                  os.environ.get("FLASH_MODEL", ""))
+        if _err or not _t:
+            inp_msg("⚠️ 技能提炼失败: %s" % (_err or "模型无输出"))
+            return True
+        _s = _t.strip()
+        _s = _re.sub(r"^```[a-zA-Z]*\n?|```$", "", _s).strip()
+        try:
+            _a, _b = _s.find("{"), _s.rfind("}")
+            _d = _json.loads(_s[_a:_b + 1]) if _a >= 0 and _b > _a else {}
+        except ValueError:
+            _d = {}
+        _name = str(_d.get("name", "")).strip().lower()
+        _name = _re.sub(r"[^a-z0-9-]+", "-", _name).strip("-")[:30]
+        _desc = str(_d.get("description", "")).strip()
+        _body = str(_d.get("body", "")).strip()
+        if not _name or not _desc or not _body:
+            inp_msg("⚠️ 技能提炼失败(模型未给出合法 JSON 草稿)")
+            return True
+        inp_msg("📝 技能草稿: %s — %s" % (_name, _desc))
+        if sys.stdin.isatty():
+            sys.stdout.write("保存为技能 %s? [y/N] " % _name); sys.stdout.flush()
+            try:
+                _ans = (sys.stdin.readline() or "").strip().lower()
+            except Exception:
+                _ans = ""
+            sys.stdout.write("\n"); sys.stdout.flush()
+            if _ans not in ("y", "yes"):
+                inp_msg("已取消")
+                return True
+        _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+            os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct"),
+            "skills")
+        _dir = os.path.join(_sd, _name)
+        try:
+            os.makedirs(_dir, exist_ok=True)
+            with open(os.path.join(_dir, "SKILL.md"), "w", encoding="utf-8") as _f:
+                _f.write("---\nname: %s\ndescription: %s\n---\n\n%s\n"
+                         % (_name, _desc, _body))
+            inp_msg("✅ 已保存技能: %s" % os.path.join(_dir, "SKILL.md"))
+        except OSError as _e:
+            inp_msg("⚠️ 保存技能失败: %s" % _e)
         return True
     if action == "auto_on":
         from wchat_py.cli import inp_msg
