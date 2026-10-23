@@ -273,12 +273,16 @@ def _auto_judge(cmd, call=None):
         raw = call(cmd)
     except Exception:
         return None, None
-    from wchat_py.authparse import parse_verdict
-    try:
-        v = parse_verdict(raw or "")
-    except Exception:
+    if not raw:
         return None, None
-    return (v.get("verdict") or ""), (v.get("reason") or "")
+    line = str(raw).split("\n", 1)[0].replace("\r", "").strip()
+    tok = line.split(" ", 1)[0].strip().upper()
+    reason = line[len(line.split(" ", 1)[0]):].strip()
+    if tok in ("Y", "YES", "ALLOW"):
+        return "Y", reason
+    if tok in ("N", "NO", "DENY"):
+        return "N", reason
+    return None, None
 
 
 def _run_tool(name, args_json):

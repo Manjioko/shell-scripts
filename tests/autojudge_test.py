@@ -11,6 +11,8 @@ def ck(n, ok):
     if ok: print("ok -", n)
     else: print("FAIL -", n); F += 1
 
+ck("ALLOW -> Y", c._auto_judge("ls", call=lambda x: "ALLOW 安全只读") == ("Y", "安全只读"))
+ck("DENY -> N", c._auto_judge("rm", call=lambda x: "DENY 破坏性")[0] == "N")
 ck("Y 放行", c._auto_judge("ls", call=lambda x: "Y 安全")[0] == "Y")
 ck("N 拒绝", c._auto_judge("rm", call=lambda x: "N 危险")[0] == "N")
 ck("无 call -> None(fail-closed)", c._auto_judge("ls", call=None) == (None, None))
@@ -21,4 +23,3 @@ ck("ASSUME_YES 直接 Y", c._auto_judge("ls")[0] == "Y")
 os.environ.pop("WCHAT_AUTO_ASSUME_YES", None)
 print("RESULT total=%d pass=%d fail=%d" % (T, T - F, F))
 sys.exit(0 if F == 0 else 1)
-
