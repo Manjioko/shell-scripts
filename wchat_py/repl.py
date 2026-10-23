@@ -123,10 +123,11 @@ def _default_meta(action, arg):
     return True
 
 
-def session_text_handler(session, call_llm, run_tool, out=None, write_final=True):
+def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None):
     """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
 
     write_final=False 时不在末尾整段输出（正文已由 call_llm 的 on_text 流式画过）。
+    on_final(r) 若给：编排结束后调用（用于关流箱 + markdown 渲染）。
     Session 跨轮持久（messages 累积），这是 REPL 与 ask_ai 编排的接线点。
     """
     from wchat_py.session import orchestrate
@@ -134,7 +135,9 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
 
     def handler(text):
         r = orchestrate(session, text, call_llm, run_tool)
-        if write_final:
+        if on_final is not None:
+            on_final(r)
+        elif write_final:
             out.write((r or "") + "\n")
 
     return handler

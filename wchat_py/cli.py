@@ -503,19 +503,24 @@ def run_turn(content, model="", max_rounds=5):
     """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。"""
     import json as _json
     from wchat_py import msg as msgmod
-    from wchat_py.render import StreamBox
+    from wchat_py.render import StreamBox, render_markdown
     msgs = msgmod.append_user(msgmod.init(), content)
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
+    last_text = ""
     for _ in range(max_rounds):
         text, tcs, err = _call_llm(msgs, model)
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
         if text:
-            box.append(text); sys.stdout.write(box.paint()); sys.stdout.flush()
+            last_text = text
+            box.append(text); sys.stdout.write(box.paint_full()); sys.stdout.flush()
         if err:
+            sys.stdout.write(box.close()); sys.stdout.flush()
             sys.stderr.write("API 请求失败: %s\n" % err); return 1
         if not tcs:
+            sys.stdout.write(box.close()); sys.stdout.flush()
+            sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
             return 0
         # assistant 的 tool_calls 消息(正文也带上, 否则调用前的正文会丢)
         msgs.append({"role": "assistant", "content": text or None,
@@ -531,6 +536,8 @@ def run_turn(content, model="", max_rounds=5):
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
+    sys.stdout.write(box.close()); sys.stdout.flush()
+    sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
     sys.stdout.write("已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\n" % max_rounds)
     return 0
 
@@ -605,14 +612,21 @@ def main(argv):
             def _cl_stream(m):
                 def _emit(d):
                     _box.append(d)
-                    sys.stdout.write(_box.paint())
+                    sys.stdout.write(_box.paint_full())
                     sys.stdout.flush()
                 _t, _tc, _err = _call_llm(m, "", on_text=_emit)
                 if _err:
                     sys.stderr.write("API 请求失败: %s\n" % _err); sys.stderr.flush()
                 return _t, _tc, _err
 
-            _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a), write_final=False)
+            def _finish(r):
+                from wchat_py.render import render_markdown
+                sys.stdout.write(_box.close()); sys.stdout.flush()
+                sys.stdout.write(render_markdown(r or "")); sys.stdout.write("\n")
+                sys.stdout.flush()
+
+            _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a),
+                                      write_final=False, on_final=_finish)
             return run_interactive(_h, on_quit=_on_quit)
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
         return run_repl(sys.stdin, _h, on_quit=_on_quit)

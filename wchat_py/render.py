@@ -27,7 +27,10 @@ stream_box_append() {
 **节流**（`STREAM_THROTTLE` + `EPOCHREALTIME`）**不在本模块**：重绘次数依赖墙钟，属调用方的策略；
 本模块只负责"给定缓冲状态，paint 应该吐出什么字节"——这样它才能被确定性地单测与比对。
 """
+import os
 import re
+import subprocess
+import sys
 
 BAR = "\033[2m│\033[0m "
 
@@ -39,6 +42,36 @@ class StreamBox:
         self.win = int(win)
         self.buf = []
         self.line = ""          # 残行（未遇到换行的部分）
+        self.anchor = False
+        self.drawn = 0
+
+    def reserve(self):
+        """首次真正上屏前预留箱区(等价 stream_box_reserve):在内容下方留 win 行,
+        光标上移回箱顶并保存锚点 \\033[s。缺了它 paint 的 \\033[u 会跳到未知位置,
+        表现为"回复把屏幕上原有内容清空/覆盖"(历史现象)。"""
+        if self.anchor:
+            return ""
+        self.anchor = True
+        return ("\n" * self.win) + ("\033[%dA" % (self.win - 1)) + "\033[s"
+
+    def paint_full(self):
+        """reserve + paint:调用方想"真的画到终端"时用它(单测仍用纯 paint)。"""
+        return self.reserve() + self.paint()
+
+    def close(self):
+        """关箱(等价 stream_box_close):回锚点,逐行 2K 擦除,再回锚点,
+        让后续 markdown 从箱顶接续;恢复光标。返回应写出的字节。"""
+        if not self.anchor:
+            return ""
+        out = ["\033[u"]
+        for _ in range(self.drawn):
+            out.append("\033[2K\033[1B")
+        out.append("\033[u\033[?25h")
+        self.buf = []
+        self.line = ""
+        self.drawn = 0
+        self.anchor = False
+        return "".join(out)
 
     def push(self, line):
         """等价 stream_box_push：入队，超窗口丢最旧。"""
@@ -66,8 +99,24 @@ class StreamBox:
             out.append("\033[2K" + BAR + ln + "\r\033[1B")
         if self.line:
             out.append("\033[2K" + BAR + self.line)
+        self.drawn = len(self.buf) + (1 if self.line else 0)
         return "".join(out)
 
+
+
+def render_markdown(text):
+    """整篇 markdown -> rich(ANSI)：调用项目既有 render_helper.py(与 bash 同一组件)。
+    缺 rich/文件时回退原文，不阻断输出。"""
+    helper = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "render_helper.py")
+    try:
+        p = subprocess.run([sys.executable, helper], input=(text or ""),
+                           capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout:
+            return p.stdout
+    except OSError:
+        pass
+    return text or ""
 
 
 def tool_banner(name, preview):
