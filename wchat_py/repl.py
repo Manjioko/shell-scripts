@@ -183,10 +183,24 @@ def _default_meta(action, arg, session=None):
         sys.stdout.flush()
         return True
     if action == "new_session":
-        from wchat_py import msg
+        import json as _json
         from wchat_py.cli import inp_msg
-        msg.init()                       # 新会话初始消息(系统注入后续接)
-        sys.stdout.write("\033[H\033[2J")
+        # master: messages=msg init + system_inject_all + chat_title="" + clear
+        # 这里保留当前 system(已含技能/MCP 注入)作为新会话首条,清空其余消息与标题。
+        try:
+            _msgs = _json.loads(sess.messages_json or "[]")
+        except ValueError:
+            _msgs = []
+        _sysmsg = (_msgs[0] if _msgs and _msgs[0].get("role") == "system"
+                   else {"role": "system", "content": "You are a helpful assistant."})
+        sess.messages_json = _json.dumps([_sysmsg], ensure_ascii=False)
+        sess.msg_count = 1
+        sess.chat_title = ""
+        sess.last_prompt_tokens = 0
+        sess.last_cached_tokens = 0
+        sess.input_images = []
+        os.environ.pop("WCHAT_CHAT_TITLE", None)
+        sys.stdout.write("\033[H\033[2J"); sys.stdout.flush()
         inp_msg("✅ 已开始新会话")
         return True
     sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
