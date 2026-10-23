@@ -14,6 +14,27 @@ import subprocess
 
 PKG = os.environ.get("MCP_PKG", "mcporter@0.14.1")
 LAUNCHER = os.environ.get("MCP_LAUNCHER", "npx")
+SOCK_PATH = os.path.expanduser("~/.mcporter/daemon/user.sock")
+
+
+def sock_state():
+    """2=无 socket;0=可连接(daemon 在跑);1=陈旧连不上。"""
+    import socket as _s
+    if not os.path.exists(SOCK_PATH):
+        return 2
+    s = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+    s.settimeout(1.0)
+    try:
+        s.connect(SOCK_PATH)
+        s.close()
+        return 0
+    except Exception:
+        return 1
+
+
+def daemon_stop(timeout=20):
+    out, err = _run([LAUNCHER, "-y", PKG, "daemon", "stop"], timeout=timeout)
+    return out is not None
 
 TOOL_SPECS = [
     {"type": "function", "function": {
@@ -96,9 +117,16 @@ def schema(server, tool, timeout=60):
 
 def call(server, tool, args, timeout=120):
     aj = json.dumps(args or {}, ensure_ascii=False)
-    out, err = _run([LAUNCHER, "-y", PKG, "call", "%s.%s" % (server, tool),
-                     "--args", aj, "--output", "json",
-                     "--timeout", str(int(timeout * 1000))], timeout=timeout + 15)
+    argv = [LAUNCHER, "-y", PKG, "call", "%s.%s" % (server, tool),
+            "--args", aj, "--output", "json", "--timeout", str(int(timeout * 1000))]
+    _img_dir = os.environ.get("MCP_SAVE_IMAGES", "")
+    if _img_dir:
+        try:
+            os.makedirs(_img_dir, exist_ok=True)
+            argv += ["--save-images", _img_dir]
+        except OSError:
+            pass
+    out, err = _run(argv, timeout=timeout + 15)
     if out is None:
         return "错误:MCP 调用失败: %s" % err
     try:
@@ -107,6 +135,10 @@ def call(server, tool, args, timeout=120):
         return out.strip() or (err or "(无输出)")
     texts = [c.get("text", "") for c in (d.get("content") or []) if c.get("type") == "text"]
     res = "\n".join(texts) if texts else json.dumps(d, ensure_ascii=False)
+    nimg = len([c for c in (d.get("content") or []) if c.get("type") == "image"])
+    if nimg:
+        res += "\n(返回含 %d 个图片块,已保存到 %s;要看图请调用 read_image 读该目录下路径)" % (
+            nimg, _img_dir or "(未配置 MCP_SAVE_IMAGES,图片未落盘)")
     if d.get("isError"):
         return "错误(MCP isError): %s" % res
     return res
