@@ -288,6 +288,41 @@ AUTO_FINAL_SYS = (
 )
 
 
+AUTH_SYS = (
+    "你是 bash 命令安全审查器。只看命令本身,判断它能否在工作目录内安全自动执行。"
+    "只回一行:安全回 Y;不安全回 N 加编号与不超过 25 字的中文原因。"
+    "涉及提权/系统配置/凭据/发布历史改写/工作目录外写入一律判 N。"
+)
+
+
+def _auth_think(cmd):
+    """初审：Y 放行 / N(带原因) 交终审。异常返回 (None,None) 供调用方 fail-closed。"""
+    model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
+    try:
+        raw = _nonstream([{"role": "system", "content": AUTH_SYS},
+                          {"role": "user", "content": cmd}], model)
+    except Exception:
+        return None, None
+    line = (raw or "").split("\n", 1)[0].strip()
+    if line[:1] in ("Y", "y"):
+        return "Y", ""
+    if line[:1] in ("N", "n"):
+        return "N", line[1:].strip()
+    return None, None
+
+
+def _nonstream(msgs, model):
+    """非流式单次调用(审批器/终审器用),返回 content；失败抛异常由调用方处理。"""
+    from wchat_py.llm import _make_client
+    cli = _make_client(os.environ.get("BASE_URL", ""),
+                       os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or "",
+                       os.environ.get("API_KEY_HEADER", "api-key"))
+    resp = cli.chat.completions.create(model=(model or "default"), messages=msgs,
+                                       stream=False,
+                                       extra_body={"thinking": {"type": "disabled"}})
+    return resp.choices[0].message.content or ""
+
+
 def _default_final_call(cmd, reason=""):
     model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
     msgs = [{"role": "system", "content": AUTO_FINAL_SYS},
@@ -410,31 +445,45 @@ def _run_tool(name, args_json):
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
-            from wchat_py import audit as _audit
+            sys.stdout.write("硬墙拒绝(%s): %s\n" % (_r, _m or ""))
             _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
-                          rule=_r, decision="deny", cmd=cmd)
+                          rule=_r, verdict="auto_deny", cmd=cmd)
             return ("[硬墙 %s] %s" % (_r, _m))
         if _auto:
-            _v, _rs = _auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
-            if _v == "Y":
-                sys.stdout.write("auto 终审放行: %s\n" % cmd)
-                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
-                              decision="allow", cmd=cmd)
-            elif _v == "N":
-                sys.stdout.write("auto 终审拒绝: %s\n" % cmd)
-                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
-                              decision="deny", reason=_rs or "", cmd=cmd)
-                return "auto 终审拒绝(%s): %s" % (_rs or "no-reason", cmd)
-            else:
-                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
-                              decision="deny", reason="judge-unavailable", cmd=cmd)
-                return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
-        if not _shell_approved(cmd):
-            from wchat_py import audit as _audit
-            _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
-                          decision="deny", reason="no-approval", cmd=cmd)
-            return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;当前无交互 tty 或未确认,已拒)"
-                    % cmd)
+            _av, _ars = _auth_think(cmd)
+            if _av != "Y":
+                _v, _rs = _auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
+                if _v == "Y":
+                    sys.stdout.write("auto 终审放行: %s\n" % cmd)
+                    _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                                  rule="final", verdict="auto_allow", cmd=cmd)
+                elif _v == "N":
+                    sys.stdout.write("auto 终审拒绝: %s\n" % cmd)
+                    _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                                  rule="final", verdict="auto_deny", reason=_rs or "", cmd=cmd)
+                    return "auto 终审拒绝(%s): %s" % (_rs or "no-reason", cmd)
+                else:
+                    _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                                  rule="final", verdict="auto_deny", reason="judge-unavailable", cmd=cmd)
+                    return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
+        if not _auto:
+            _av2, _ars2 = _auth_think(cmd)
+            if _av2 != "Y":
+                if os.environ.get("AUTO_MODE") == "read":
+                    sys.stdout.write("该命令需人工确认: %s [y/N] " % cmd); sys.stdout.flush()
+                    try:
+                        _ans = (sys.stdin.readline() or "").strip().lower()
+                    except Exception:
+                        _ans = ""
+                    if _ans not in ("y", "yes"):
+                        _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                                      decision="deny", reason="human-n", cmd=cmd)
+                        return "用户未批准(转人工): %s" % cmd
+                elif not _shell_approved(cmd):
+                    _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                                  decision="deny", reason="no-approval", cmd=cmd)
+                    return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;"
+                            "当前无交互 tty 或未确认,已拒)" % cmd)
         from wchat_py import audit as _audit
         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell", decision="allow", cmd=cmd)
         from wchat_py.termpty import pty_run
@@ -482,6 +531,7 @@ def run_turn(content, model="", max_rounds=5):
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
+    sys.stdout.write("已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\n" % max_rounds)
     return 0
 
 
@@ -489,6 +539,9 @@ def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
+    if not os.environ.get("AUTO_AUDIT_LOG"):
+        _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+        os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")
     if argv and argv[0] == "repl":
         from wchat_py.session import Session, seed_system
         from wchat_py.repl import run_repl, session_text_handler
@@ -536,7 +589,13 @@ def main(argv):
         return run_repl(sys.stdin, _h, on_quit=_on_quit)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
-        return run_turn(st["content"], st.get("model", ""))
+        from wchat_py import audit as _audit
+        _alog = os.environ.get("AUTO_AUDIT_LOG", "")
+        _audit.record(_alog, "session", verdict="started")
+        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
+        _rc = run_turn(st["content"], st.get("model", ""), _mr)
+        _audit.record(_alog, "session", verdict="finished")
+        return _rc
     if argv and argv[0] == "parse":
         from wchat_py.shellio import assign
         return cmd_parse(argv[1:])
@@ -554,7 +613,13 @@ def main(argv):
             inp_msg(ln)
         return 0
     if st.get("content"):
-        return run_turn(st["content"], st.get("model", ""))
+        from wchat_py import audit as _audit
+        _alog = os.environ.get("AUTO_AUDIT_LOG", "")
+        _audit.record(_alog, "session", verdict="started")
+        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
+        _rc = run_turn(st["content"], st.get("model", ""), _mr)
+        _audit.record(_alog, "session", verdict="finished")
+        return _rc
     return main(["repl"])
 
 
