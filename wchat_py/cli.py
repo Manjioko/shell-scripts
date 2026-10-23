@@ -259,6 +259,28 @@ def _shell_approved(cmd):
     return ans == "yes"
 
 
+def _auto_judge(cmd, call=None):
+    """auto 终审：call(cmd)->raw 文本，用 authparse.parse_verdict 判 Y/N。
+
+    返回 (verdict, reason)；call 缺省/异常 → (None,None) 供调用方 fail-closed（拒绝）。
+    WCHAT_AUTO_ASSUME_YES=1 直接放行（测试用）。
+    """
+    if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
+        return "Y", "assume-yes"
+    if call is None:
+        return None, None
+    try:
+        raw = call(cmd)
+    except Exception:
+        return None, None
+    from wchat_py.authparse import parse_verdict
+    try:
+        v = parse_verdict(raw or "")
+    except Exception:
+        return None, None
+    return (v.get("verdict") or ""), (v.get("reason") or "")
+
+
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
@@ -323,6 +345,21 @@ def _run_tool(name, args_json):
             _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                           rule=_r, decision="deny", cmd=cmd)
             return ("[硬墙 %s] %s" % (_r, _m))
+        if _auto:
+            _v, _rs = _auto_judge(cmd)
+            if _v == "Y":
+                sys.stdout.write("auto 终审放行: %s\n" % cmd)
+                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                              decision="allow", cmd=cmd)
+            elif _v == "N":
+                sys.stdout.write("auto 终审拒绝: %s\n" % cmd)
+                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                              decision="deny", reason=_rs or "", cmd=cmd)
+                return "auto 终审拒绝(%s): %s" % (_rs or "no-reason", cmd)
+            else:
+                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
+                              decision="deny", reason="judge-unavailable", cmd=cmd)
+                return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
         if not _shell_approved(cmd):
             from wchat_py import audit as _audit
             _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
