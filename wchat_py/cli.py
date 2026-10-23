@@ -1052,6 +1052,9 @@ def main(argv):
     if st.get("auto_mode"):
         os.environ["AUTO_MODE"] = st["auto_mode"]
         os.environ["WCHAT_AUTO_MODE"] = st["auto_mode"]
+        from wchat_py import auto_enable as _ae
+        if not _ae.enable(st["auto_mode"]):
+            os.environ.pop("AUTO_MODE", None)
     if str(st.get("forget_history", "0")) not in ("0", "", "False", "None"):
         os.environ["WCHAT_FORGET"] = "1"
     if st.get("model"):
@@ -1066,7 +1069,6 @@ def main(argv):
     if st.get("content"):
         from wchat_py import audit as _audit
         _alog = os.environ.get("AUTO_AUDIT_LOG", "")
-        _audit.record(_alog, "session", verdict="started")
         _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
         _rc = run_turn(st["content"], st.get("model", ""), _mr)
         _audit.record(_alog, "session", verdict="finished")
