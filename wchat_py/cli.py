@@ -253,6 +253,14 @@ def _call_llm(msgs, model, on_text=None):
                     _slot["name"] = _d["name"]
                 if _d.get("arguments"):
                     _slot["arguments"] += _d["arguments"]
+        elif t == "usage":
+            _u = ev.get("v") or {}
+            try:
+                os.environ["WCHAT_LAST_PROMPT_TOKENS"] = str(int(_u.get("prompt") or 0))
+                os.environ["WCHAT_LAST_CACHED_TOKENS"] = str(int(_u.get("cached") or 0))
+                os.environ["WCHAT_LAST_IMAGE_TOKENS"] = str(int(_u.get("image") or 0))
+            except (TypeError, ValueError):
+                pass
         elif t == "error":
             err = ev.get("v")
     p.wait()
@@ -562,9 +570,35 @@ def _load_ct_config():
                 v = v.strip()
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
-                os.environ.setdefault(k, v)
+                os.environ[k] = v
     except OSError:
         pass
+
+
+def _detect_web_provider():
+    """复刻 bash detect_web_search_provider:按 BASE_URL 与 flash 模型判断家在谁家。"""
+    base = os.environ.get("BASE_URL", "")
+    fm = os.environ.get("FLASH_MODEL", "") or os.environ.get("WCHAT_MODEL", "")
+    if "xiaomimimo" in base or "mimo" in base or fm.startswith("mimo"):
+        return "mimo"
+    if any(k in base for k in ("maas.aliyuncs.com", "dashscope", "aliyuncs.com")) \
+            or fm.startswith("qwen") or fm.startswith("qwq"):
+        return "qwen"
+    return "none"
+
+
+def _apply_runtime_defaults():
+    """补齐 bash 的派生默认值:窗口/压缩阈值/联网方式/超时。缺这些 -md/-u 显示全 0/空。"""
+    os.environ.setdefault("CTX_WINDOW", "1000000")
+    try:
+        _ctx = int(os.environ.get("CTX_WINDOW") or 1000000)
+    except ValueError:
+        _ctx = 1000000
+    os.environ.setdefault("TOKEN_THRESHOLD", str(_ctx * 3 // 4))
+    os.environ.setdefault("WEB_SEARCH_TIMEOUT", "90")
+    _wp = os.environ.get("WEB_SEARCH_PROVIDER", "")
+    if _wp in ("", "auto"):
+        os.environ["WEB_SEARCH_PROVIDER"] = _detect_web_provider()
 
 
 def _gen_title(msgs_json):
@@ -586,11 +620,26 @@ def _gen_title(msgs_json):
         return ""
 
 
+def _sync_runtime(s):
+    """把本轮 usage 回填活会话;首轮生成对话标题(与 bash 一致)。"""
+    try:
+        s.last_prompt_tokens = int(os.environ.get("WCHAT_LAST_PROMPT_TOKENS") or 0)
+        s.last_cached_tokens = int(os.environ.get("WCHAT_LAST_CACHED_TOKENS") or 0)
+    except ValueError:
+        pass
+    if not getattr(s, "chat_title", ""):
+        _t = _gen_title(s.messages_json)
+        if _t:
+            s.chat_title = _t
+            os.environ["WCHAT_CHAT_TITLE"] = _t
+
+
 def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
     _load_ct_config()
+    _apply_runtime_defaults()
     if not os.environ.get("AUTO_AUDIT_LOG"):
         _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
         os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")
@@ -674,11 +723,18 @@ def main(argv):
                 sys.stdout.write(_box.close()); sys.stdout.flush()
                 sys.stdout.write(render_markdown(r or "")); sys.stdout.write("\n")
                 sys.stdout.flush()
+                _sync_runtime(_s)
 
             _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a),
                                       write_final=False, on_final=_finish)
             return run_interactive(_h, on_meta=_meta, on_quit=_on_quit)
-        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
+        def _finish_plain(r):
+            if r:
+                sys.stdout.write(r + "\n"); sys.stdout.flush()
+            _sync_runtime(_s)
+
+        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a),
+                                  write_final=False, on_final=_finish_plain)
         return run_repl(sys.stdin, _h, on_meta=_meta, on_quit=_on_quit)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
