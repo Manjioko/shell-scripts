@@ -535,10 +535,36 @@ def run_turn(content, model="", max_rounds=5):
     return 0
 
 
+def _load_ct_config():
+    """源化 ~/.ct/config 到环境(与 bash `source` 同语义):只认 KEY=value 行,
+    跳过注释/空行;行尾 ` # ...` 注释剥掉;值去引号。已存在的环境变量不覆盖。"""
+    _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+    p = os.path.join(_ct, "config")
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                s = line.strip()
+                if not s or s.startswith("#") or "=" not in s:
+                    continue
+                k, v = s.split("=", 1)
+                k = k.strip()
+                if not k or not (k[0].isalpha() or k[0] == "_"):
+                    continue
+                if " #" in v:
+                    v = v.split(" #", 1)[0]
+                v = v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                    v = v[1:-1]
+                os.environ.setdefault(k, v)
+    except OSError:
+        pass
+
+
 def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
+    _load_ct_config()
     if not os.environ.get("AUTO_AUDIT_LOG"):
         _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
         os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")
@@ -581,7 +607,10 @@ def main(argv):
                     _box.append(d)
                     sys.stdout.write(_box.paint())
                     sys.stdout.flush()
-                return _call_llm(m, "", on_text=_emit)
+                _t, _tc, _err = _call_llm(m, "", on_text=_emit)
+                if _err:
+                    sys.stderr.write("API 请求失败: %s\n" % _err); sys.stderr.flush()
+                return _t, _tc, _err
 
             _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a), write_final=False)
             return run_interactive(_h, on_quit=_on_quit)

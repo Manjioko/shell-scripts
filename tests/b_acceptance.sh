@@ -120,9 +120,9 @@ REF
 _bad=0; _n=0
 for v in "-f -st hello world" "-st" "abc" "-t" "-p" "-dp" "-f -dp 问题文本"; do
     _n=$((_n+1))
-    b=$(/opt/homebrew/bin/bash "$_po" "$RLDIR/wchat.sh" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
+    b=$(CT_HOME="$RLDIR/.scratch/_noct" /opt/homebrew/bin/bash "$_po" "$RLDIR/wchat.sh" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
     content=""; quick_mode=0; forget_history=0; model=""; thinking=disabled
-    eval "$(PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
+    eval "$(CT_HOME="$RLDIR/.scratch/_noct" PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
     [[ "$b" == "$content|$quick_mode|$forget_history|$model|$thinking" ]] || {
         _bad=$((_bad+1)); echo "      差异 argv[$v]: bash=$b py=$content|$quick_mode|$forget_history|$model|$thinking"
     }

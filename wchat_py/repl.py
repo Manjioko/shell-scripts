@@ -9,6 +9,7 @@
 只做**循环与分发**，不碰 tty/信号/网络——便于用假 stream + 假 handler 单测。
 """
 import os
+import subprocess
 import sys
 
 from wchat_py.cmdline import classify
@@ -170,8 +171,32 @@ def run_repl(stream, on_text, on_meta=None, on_quit=None):
 
 
 def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
-    """交互式：从 tty 逐行读。EOF(Ctrl-D) 结束。"""
+    """交互式：经 input_helper.py(prompt_toolkit) 读行；缺文件时退回 input()。
+
+    input_helper 提供历史/补全/多行/粘贴/Ctrl-F，是 bash 时代的同一组件；不自己造输入框。
+    退出码:0=提交文本,1=EOF/中断,4=Ctrl-F 文件选择(此处退化为一轮空输入重来)。
+    """
+    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _helper = os.path.join(_repo, "input_helper.py")
+    _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+    _hist = os.path.join(_ct, "input_history")
+    _clip = os.path.join(_ct, "clip")
+
     def nxt():
+        if os.path.isfile(_helper):
+            try:
+                p = subprocess.run([sys.executable, _helper, "--history", _hist,
+                                    "--clip-dir", _clip, "--no-commands"],
+                                   capture_output=True, text=True)
+            except OSError:
+                p = None
+            if p is not None:
+                if p.returncode == 1 or p.returncode == 4:
+                    return None if p.returncode == 1 else ""
+                _t = (p.stdout or "")
+                if _t.endswith("\n"):
+                    _t = _t[:-1]
+                return _t
         try:
             return input(prompt)
         except EOFError:
