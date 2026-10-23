@@ -250,10 +250,6 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                                                       "arguments": tc.get("arguments") or "{}"}}
                                         for i, tc in enumerate(tcs)]})
             for i, tc in enumerate(tcs):
-                from wchat_py.render import tool_banner, args_preview
-                sys.stdout.write(tool_banner(tc.get("name") or "",
-                                             args_preview(tc.get("arguments") or "")))
-                sys.stdout.write("\n"); sys.stdout.flush()
                 out = run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
                 if isinstance(out, str) and out.startswith("IMGJSON:"):
                     try:

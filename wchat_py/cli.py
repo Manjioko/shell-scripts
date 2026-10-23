@@ -468,7 +468,9 @@ def _run_tool(name, args_json):
     if name == "list_dir":
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径
-        resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        resolved = os.path.expanduser(path)
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(os.getcwd(), resolved)
         _deny = _path_guard(resolved, "r")
         if _deny:
             return _deny
@@ -478,7 +480,9 @@ def _run_tool(name, args_json):
         return content
     if name == "read_file":
         path = a.get("path") or ""
-        resolved = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+        resolved = os.path.expanduser(path)
+        if not os.path.isabs(resolved):
+            resolved = os.path.join(os.getcwd(), resolved)
         _deny = _path_guard(resolved, "r")
         if _deny:
             return _deny
@@ -490,12 +494,12 @@ def _run_tool(name, args_json):
         return content
     if name == "grep":
         work_root = os.environ.get("WORK_ROOT") or os.getcwd()
-        _gp = a.get("path") or ""
+        _gp = os.path.expanduser(a.get("path") or "")
         if _gp:
             _deny = _path_guard(_gp, "r")
             if _deny:
                 return _deny
-        content, status = grep(a.get("pattern") or "", a.get("path") or "",
+        content, status = grep(a.get("pattern") or "", _gp,
                                int(os.environ.get("GREP_MAX_MATCHES", "200")),
                                int(os.environ.get("GREP_MAX_COL", "500")), work_root)
         if status:
@@ -1006,11 +1010,15 @@ def main(argv):
                 _sync_runtime(_s)
 
             def _run_tool_boxed(n, a):
-                # 工具执行/权限提示前关箱并 flush 思考,避免提示被下一帧 paint 擦掉
+                # 工具执行/权限提示前关箱并 flush 思考,避免提示被下一帧 paint 擦掉;
+                # 横幅必须在关箱**之后**打印,否则刚打到箱内就被 close 擦掉(用户实测)。
                 sys.stdout.write(_box.close()); sys.stdout.flush()
                 if _reason_acc:
                     sys.stdout.write(render_reason("".join(_reason_acc)))
                     _reason_acc.clear()
+                from wchat_py.render import tool_banner, args_preview
+                sys.stdout.write(tool_banner(n or "", args_preview(a or "")))
+                sys.stdout.write("\n"); sys.stdout.flush()
                 return _run_tool(n, a)
 
             _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
