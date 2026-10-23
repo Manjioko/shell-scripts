@@ -226,8 +226,19 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
     p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
     text, tcs, err = [], [], None
-    _had_reason = False
-    _sep_done = False
+    _reason = []
+    _r_flushed = [False]
+
+    def _flush_reason():
+        if _r_flushed[0] or not _reason:
+            return
+        _r_flushed[0] = True
+        _full = "".join(_reason)
+        if on_reason is not None:
+            on_reason(_full)
+        elif on_text is not None:
+            sys.stdout.write("\033[2m" + _full + "\033[0m\n")
+            sys.stdout.flush()
     for line in p.stdout:
         line = line.strip()
         if not line.startswith("{"):
@@ -239,23 +250,14 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         t = ev.get("t")
         if t == "text":
             _d = ev.get("v") or ""
+            _flush_reason()
             text.append(_d)
             if on_text is not None and _d:
-                if _had_reason and not _sep_done:
-                    sys.stdout.write("\n"); sys.stdout.flush()
-                    _sep_done = True
                 on_text(_d)
         elif t == "reasoning":
             _r = ev.get("v") or ""
-            if not _r:
-                continue
-            _had_reason = True
-            if on_reason is not None:
-                on_reason(_r)
-            elif on_text is not None:
-                # 未单独给思考回调:暗色直出(不混进正文,也不进 StreamBox)
-                sys.stdout.write("\033[2m" + _r + "\033[0m")
-                sys.stdout.flush()
+            if _r:
+                _reason.append(_r)
         elif t == "tool_calls":
             # 网关按增量分片下发:首片带 name+args 前段,后续片只补 args。必须按 index
             # 累积合并,不能覆盖(覆盖会让 name 变空、args 只剩尾巴 -> 工具永不执行)。
@@ -287,6 +289,7 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         elif t == "error":
             err = ev.get("v")
     p.wait()
+    _flush_reason()
     for _s in tcs:
         _s.pop("_i", None)
     return "".join(text), tcs, err
@@ -692,14 +695,15 @@ def run_turn(content, model="", max_rounds=5):
     """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。"""
     import json as _json
     from wchat_py import msg as msgmod
-    from wchat_py.render import StreamBox, render_markdown
+    from wchat_py.render import StreamBox, render_markdown, render_reason
     msgs = msgmod.append_user(msgmod.init(), content)
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     last_text = ""
     for _ in range(max_rounds):
         text, tcs, err = _call_llm(msgs, model,
-                                   on_reason=lambda d: (sys.stdout.write("\033[2m" + d + "\033[0m"),
-                                                        sys.stdout.flush()))
+                                   on_reason=lambda d: (
+                                       sys.stdout.write(render_reason(d)),
+                                       sys.stdout.flush()))
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
@@ -911,7 +915,8 @@ def main(argv):
                     sys.stdout.flush()
 
                 def _emit_reason(d):
-                    sys.stdout.write("\033[2m" + d + "\033[0m")
+                    from wchat_py.render import render_reason
+                    sys.stdout.write(render_reason(d))
                     sys.stdout.flush()
                 _t, _tc, _err = _call_llm(m, "", on_text=_emit, on_reason=_emit_reason)
                 if _err:

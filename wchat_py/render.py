@@ -122,6 +122,19 @@ def render_markdown(text):
     return text or ""
 
 
+def render_reason(text):
+    """复刻 bash flush_thinking:灰色 ▸ + 每行两空格缩进 + dim(markdown 渲染后整体灰)。"""
+    body = render_markdown(text or "")
+    body = body.replace("\033[0m", "\033[0m\033[2m")   # 保持整段灰,rich 内部 reset 后补 dim
+    lines = body.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    out = "\033[2m▸\033[0m\n"
+    out += "".join("  \033[2m" + ln + "\n" for ln in lines)
+    out += "\033[0m\n"
+    return out
+
+
 def tool_banner(name, preview):
     """等价 bash `tool_banner`：`printf ' \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n'`。"""
     return " \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n" % (name, preview)
