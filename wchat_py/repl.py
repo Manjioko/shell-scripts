@@ -15,7 +15,9 @@ import sys
 from wchat_py.cmdline import classify
 
 
-def _default_meta(action, arg):
+def _default_meta(action, arg, session=None):
+    from wchat_py.session import Session as _S
+    sess = session if session is not None else _S.from_env()
     if action == "help":
         from wchat_py.cli import help_user
         help_user()
@@ -23,7 +25,7 @@ def _default_meta(action, arg):
     if action == "usage":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, usage_lines
-        for ln in usage_lines(Session.from_env()):
+        for ln in usage_lines(sess):
             inp_msg(ln)
         return True
     if action == "list_history":
@@ -38,7 +40,7 @@ def _default_meta(action, arg):
         return True
     if action == "compact":
         from wchat_py.session import Session, compact_status
-        cur, th, due = compact_status(Session.from_env())
+        cur, th, due = compact_status(sess)
         if th <= 0:
             sys.stdout.write("压缩阈值未设置,不动\n")
         elif due:
@@ -49,7 +51,7 @@ def _default_meta(action, arg):
     if action == "show_msgs":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session
-        inp_msg(Session.from_env().messages_json)
+        inp_msg(sess.messages_json)
         return True
     if action == "save_history":
         from wchat_py.session import Session, save_history
@@ -58,19 +60,19 @@ def _default_meta(action, arg):
             sys.stdout.write("⚠️ 未设置 WCHAT_HISTORY_DIR,未保存\n")
             return True
         name = os.environ.get("WCHAT_HISTORY_NAME", "py-session.json")
-        path = save_history(d, Session.from_env().messages_json, name)
+        path = save_history(d, sess.messages_json, name)
         sys.stdout.write("✅ 已保存: %s\n" % path)
         return True
     if action == "model_status":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, model_status_lines
-        for ln in model_status_lines(Session.from_env()):
+        for ln in model_status_lines(sess):
             inp_msg(ln)
         return True
     if action in ("model_pro", "thinking_on", "model_flash"):
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, set_pro, set_flash, thinking_on
-        s = Session.from_env()
+        s = sess
         if action == "model_pro":
             inp_msg("✅ 已切换到 pro 模型 (%s)" % set_pro(s))
         elif action == "thinking_on":
@@ -82,7 +84,7 @@ def _default_meta(action, arg):
     if action == "auto_on":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, enter_auto
-        s = Session.from_env()
+        s = sess
         tier = arg or s.auto_mode or (s.auto_tiers[0] if s.auto_tiers else "")
         if enter_auto(s, tier) is None:
             inp_msg("未知档位: %s(可选: %s)" % (tier, " ".join(s.auto_tiers)))
@@ -92,7 +94,7 @@ def _default_meta(action, arg):
     if action == "auto_off":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, auto_off
-        s = Session.from_env()
+        s = sess
         if not s.auto_mode:
             inp_msg("当前未开启 auto")
         else:
@@ -105,7 +107,7 @@ def _default_meta(action, arg):
         if not arg:
             inp_msg("用法: -img <图片路径>")
         else:
-            add_image(Session.from_env(), arg)
+            add_image(sess, arg)
             inp_msg("[图片] %s" % arg)
         return True
     if action == "clear":

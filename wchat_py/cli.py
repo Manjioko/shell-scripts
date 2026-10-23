@@ -567,6 +567,25 @@ def _load_ct_config():
         pass
 
 
+def _gen_title(msgs_json):
+    """根据对话让模型生成短标题（用于保存文件名/标题）。失败返回空,回退时间戳名。"""
+    import json as _json
+    try:
+        msgs = _json.loads(msgs_json)
+        msgs = list(msgs) + [{"role": "user", "content":
+                              "根据以上对话总结一个标题:简短精炼,不超过20字,"
+                              "不含标点、引号与换行,只输出标题本身。"}]
+        t, _tc, err = _call_llm(msgs, os.environ.get("FLASH_MODEL", ""))
+        if err or not t:
+            return ""
+        t = (t or "").strip().splitlines()[0].strip() if t.strip() else ""
+        bad = ' /\\:*?"<>|\n\r\t'
+        out = "".join("_" if ch in bad else ch for ch in t).strip("_")
+        return out[:40]
+    except Exception:
+        return ""
+
+
 def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
@@ -595,6 +614,12 @@ def main(argv):
         except Exception:
             _extra = ""
         seed_system(_s, extra=_extra)
+        if not getattr(_s, "model", ""):
+            _s.model = os.environ.get("FLASH_MODEL", "") or os.environ.get("WCHAT_MODEL", "")
+        from wchat_py.repl import _default_meta as _dm
+
+        def _meta(action, arg):
+            return _dm(action, arg, session=_s)
         from wchat_py.repl import run_interactive
 
         def _on_quit():
@@ -616,9 +641,16 @@ def main(argv):
                     return
             import time as _t
             from wchat_py.session import save_history as _sh
-            _name = os.environ.get("WCHAT_HISTORY_NAME") or ("chat-%d.json" % int(_t.time()))
+            _title = os.environ.get("WCHAT_CHAT_TITLE", "")
+            if not _title:
+                try:
+                    _title = _gen_title(_s.messages_json)
+                except Exception:
+                    _title = ""
+            _name = os.environ.get("WCHAT_HISTORY_NAME") or (
+                (_title + ".json") if _title else ("chat-%d.json" % int(_t.time())))
             try:
-                _sh(_d, _s.messages_json, _name, os.environ.get("WCHAT_CHAT_TITLE", ""))
+                _sh(_d, _s.messages_json, _name, _title)
                 sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
             except Exception as _e:
                 sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
@@ -645,9 +677,9 @@ def main(argv):
 
             _h = session_text_handler(_s, _cl_stream, lambda n, a: _run_tool(n, a),
                                       write_final=False, on_final=_finish)
-            return run_interactive(_h, on_quit=_on_quit)
+            return run_interactive(_h, on_meta=_meta, on_quit=_on_quit)
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a))
-        return run_repl(sys.stdin, _h, on_quit=_on_quit)
+        return run_repl(sys.stdin, _h, on_meta=_meta, on_quit=_on_quit)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
         from wchat_py import audit as _audit
