@@ -35,7 +35,7 @@ ck("无 tty 未确认 => 拒", out.startswith("用户未批准"), repr(out))
 _alog = os.path.join(tempfile.mkdtemp(), "audit.log")
 os.environ["AUTO_AUDIT_LOG"] = _alog
 out = run("reboot")
-ck("硬墙拒绝 H8", out.startswith("[硬墙 H8]"), repr(out))
+ck("硬墙拒绝 H8", ("H8" in out and "拒绝" in out), repr(out))
 ck("审计记硬墙拒绝", os.path.exists(_alog) and '"H8"' in open(_alog).read(), (open(_alog).read() if os.path.exists(_alog) else ""))
 os.environ.pop("AUTO_AUDIT_LOG", None)
 

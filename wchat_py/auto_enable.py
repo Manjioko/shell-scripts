@@ -91,8 +91,8 @@ def enable(tier):
     os.environ["AUTO_AUDIT_LOG"] = alog
     audit.record(alog, "session", verdict="started", tier=tier, work_root=root,
                  backup=bdir, rollback=_git_rev())
-    w("⚡ auto 已开启 审计: %s · 备份: %s · 急停: Ctrl+C 两次\n\n" % (alog, bdir))
-    w("⚡ auto=%s · 本次会话已自动放行 0 次 · 审计 %s · -noauto 关闭 · Ctrl+C 两次中止并急停\n"
+    w("\033[2m⚡ auto 已开启 审计: %s · 备份: %s · 急停: Ctrl+C 两次\033[0m\n\n" % (alog, bdir))
+    w("\033[2m⚡ auto=%s · 本次会话已自动放行 0 次 · 审计 %s · -noauto 关闭 · Ctrl+C 两次中止并急停\033[0m\n"
       % (tier, alog.replace(os.path.expanduser("~"), "~")))
     sys.stdout.flush()
     return True

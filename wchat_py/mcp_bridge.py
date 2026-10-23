@@ -164,9 +164,11 @@ def manifest(srv, max_bytes=None):
 def tools_text(srv, server):
     for s in srv or []:
         if s.get("name") == server:
-            return "\n".join("- %s: %s" % (t.get("name"),
+            body = "\n".join("- %s: %s" % (t.get("name"),
                                            (t.get("description") or "").replace("\n", " ")[:200])
                              for t in (s.get("tools") or [])) or "(该 server 无工具)"
+            return ("MCP server '%s' 的工具(名称+一行摘要,不含参数结构;要结构用 mcp_schema):\n%s"
+                    % (server, body))
     return "错误:server '%s' 未启用。可用: %s" % (server, ", ".join(x.get("name") for x in srv or []))
 
 
