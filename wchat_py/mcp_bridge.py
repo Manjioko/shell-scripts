@@ -71,8 +71,23 @@ def _run(argv, timeout=60):
     return p.stdout, (p.stderr if p.returncode != 0 else None)
 
 
+LAST_COUNTS = {}
+
+
+def config_servers():
+    """按配置声明顺序返回 server 名(只读 keys,不读值/凭据)。"""
+    p = os.environ.get("MCP_CONFIG") or os.path.expanduser("~/.mcporter/mcporter.json")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            d = json.load(f)
+        return list((d.get("mcpServers") or {}).keys())
+    except Exception:
+        return []
+
+
 def list_json(timeout=60):
     """返回 (servers 列表, err)。servers = [{name,description,tools:[{name,description}]}]"""
+    global LAST_COUNTS
     if not shutil.which(LAUNCHER):
         return None, "找不到启动器 %s(本次按无 MCP 运行)" % LAUNCHER
     out, err = _run([LAUNCHER, "-y", PKG, "list", "--json"], timeout=timeout)
@@ -82,6 +97,7 @@ def list_json(timeout=60):
         d = json.loads(out)
     except ValueError:
         return None, "mcporter list 输出非 JSON: %s" % (err or out[:120])
+    LAST_COUNTS = d.get("counts") or {}
     srv = d.get("servers") or []
     only = [x for x in (os.environ.get("MCP_ONLY", "") or "").replace(",", " ").split() if x]
     if only:

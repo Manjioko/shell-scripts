@@ -139,6 +139,57 @@ def _dispatch(name, args_json):
     return "错误:未知 MCP 工具 %s" % name
 
 
+def _surface(srv):
+    """复刻 bash mcp_show_surface 的启动暴露面文案。"""
+    from wchat_py import mcp_bridge as mb
+    by = {s.get("name"): s for s in (srv or [])}
+    order = mb.config_servers() or [s.get("name") for s in (srv or [])]
+    order = sorted(order)                       # bash 用 jq keys[],字典序
+    exposed = [n for n in order
+               if n in by and by[n].get("status") == "ok" and (by[n].get("tools") or [])]
+    exposed_line = [s.get("name") for s in (srv or [])
+                    if s.get("status") == "ok" and (s.get("tools") or [])]
+    dim, rst, grn, ylw, red = "\033[2m", "\033[0m", "\033[32m", "\033[33m", "\033[31m"
+    sys.stderr.write("  %s[mcp] 暴露面(命令行归你,wchat 不解释也不替你改):%s\n" % (dim, rst))
+    okn = badn = 0
+    for n in order:
+        s = by.get(n)
+        if s is None:
+            badn += 1
+            sys.stderr.write("    %s✗%s %s · 上游清单里**根本没有这个 server**(status=缺席)\n" % (red, rst, n))
+            sys.stderr.write("      含义:它被配置声明了,但 mcporter 没报回来。先跑 list --status 看它怎么说。\n")
+        elif n in exposed:
+            okn += 1
+            sys.stderr.write("    %s✓%s %s · %d 个工具 · %s\n"
+                             % (grn, rst, n, len(s.get("tools") or []), s.get("transport") or "?"))
+        elif s.get("status") == "ok":
+            badn += 1
+            sys.stderr.write("    %s⚠%s %s · 在线但没提供工具(status=ok,tools=0)· %s\n"
+                             % (ylw, rst, n, s.get("transport") or "?"))
+            sys.stderr.write("      含义:连上了,只是它不暴露任何工具(可能全被自己的开关裁掉了)。本次不注册它。\n")
+        else:
+            badn += 1
+            st = s.get("status") or "?"
+            issue = s.get("issue") or {}
+            rs = str(issue.get("rawMessage") or s.get("error") or "?").replace("\n", " ")[:160]
+            ms = s.get("durationMs")
+            extra = (" · 耗时 %sms" % ms) if ms else ""
+            sys.stderr.write("    %s✗%s %s · status=%s · 原因(上游原文): %s%s\n"
+                             % (red, rst, n, st, rs, extra))
+            if s.get("transport"):
+                sys.stderr.write("      命令行: %s\n" % s.get("transport"))
+    counts = " ".join("%s=%s" % (k, v) for k, v in (mb.LAST_COUNTS or {}).items()) or "无"
+    sys.stderr.write("  %s[mcp] 本次共声明 %d 个:可用 %d,未启用 %d;上游 counts: %s%s\n"
+                     % (dim, len(order), okn, badn, counts, rst))
+    if badn > 0:
+        sys.stderr.write("  %s  · 耗时长的失败(数秒~数十秒)多为冷启动或端口/实例被占,再启一次即可;"
+                         "几十毫秒就失败的多半是命令或参数本身不对。%s\n" % (dim, rst))
+    sys.stderr.write("  %s  · 提醒:MCP 结果会进对话上下文并发到 API 端;要关遥测/脱敏头,"
+                     "请按上面 server 的文档自己加到它的参数里。%s\n" % (dim, rst))
+    sys.stderr.write("  %s[mcp] 已暴露: %s %s\n" % (dim, " ".join(exposed_line), rst))
+    sys.stderr.flush()
+
+
 def install(argv=None):
     argv = list(argv if argv is not None else sys.argv)
     enable, only = _arg_mcp(argv)
@@ -185,5 +236,4 @@ def install(argv=None):
         sys.stderr.write("⚠ -mcp 已请求,但 MCP 不可用: %s\n" % err)
     else:
         os.environ["MCP_MANIFEST"] = mcp_bridge.manifest(srv)
-        sys.stderr.write("🛡 MCP 已启用: %d 个 server(%s)\n"
-                         % (len(srv), ", ".join(s.get("name") for s in srv)))
+        _surface(srv)
