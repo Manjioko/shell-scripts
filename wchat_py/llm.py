@@ -56,7 +56,7 @@ def _make_client(base_url, api_key, api_key_header=""):
     headers = {}
     if api_key_header:                 # 如 MiMo 需要的兼容头 api-key
         headers[api_key_header] = api_key
-    return OpenAI(base_url=_normalize_base_url(base_url), api_key=api_key,
+    return OpenAI(base_url=_normalize_base_url(base_url), api_key=(api_key or "sk-no-key"),
                   default_headers=headers or None)
 
 
