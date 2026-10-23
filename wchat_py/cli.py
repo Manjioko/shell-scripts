@@ -387,6 +387,10 @@ def _auto_judge(cmd, call=None, reason=""):
     return None, None
 
 
+_IMG_REFS = {}
+_IMG_SEQ = [0]
+
+
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
@@ -443,6 +447,7 @@ def _run_tool(name, args_json):
         return content
     if name == "read_image":
         import base64 as _b64
+        import json as _json
         import mimetypes as _mt
         _p = os.path.expanduser(a.get("path") or "")
         if not os.path.isabs(_p):
@@ -452,15 +457,148 @@ def _run_tool(name, args_json):
         _ext = os.path.splitext(_p)[1].lower()
         if _ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
             return "错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): %s" % a.get("path")
+        _rp = os.path.realpath(_p)
+        _st = _IMG_REFS.get(_rp)
+        if _st is not None:
+            # 刀2 同图去重:已挂过就不重挂;模型坚持"看不到"再给它一次(两次原则)
+            if not _st.get("gone"):
+                if not _st.get("recheck"):
+                    _st["recheck"] = True
+                    return ("该图片此前已经给过你(引用 #%d,档位 %d px)。此刻若确实看不清细节,"
+                            "可再次调用 read_image 重看一次。" % (_st["id"], _st.get("side", 0)))
+                _st["gone"] = True
+                sys.stdout.write(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)\\n" % _st["id"])
+                sys.stdout.flush()
+        else:
+            _IMG_SEQ[0] += 1
+            _st = {"id": _IMG_SEQ[0], "gone": False, "recheck": False, "side": 0}
+            _IMG_REFS[_rp] = _st
+        # 刀1 inline 降档:超过 IMG_INLINE_MAX_SIDE 的图缩到该边长(控 token);
+        # 无 Pillow 时保持原图(降级但不崩)
         _mime = _mt.guess_type(_p)[0] or "image/png"
+        _data = None
+        _side = 0
         try:
-            with open(_p, "rb") as _f:
-                _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_f.read()).decode())
-        except OSError as _e:
-            return "错误:读取图片失败: %s" % _e
+            from PIL import Image as _Image
+            _im = _Image.open(_p)
+            _side = max(_im.size)
+            _lim = int(os.environ.get("IMG_INLINE_MAX_SIDE", "2048"))
+            if _lim > 0 and _side > _lim:
+                _im.thumbnail((_lim, _lim))
+                import io as _io
+                _buf = _io.BytesIO()
+                _im.convert("RGB").save(_buf, format="PNG")
+                _data = _buf.getvalue()
+                _mime = "image/png"
+                _side = _lim
+        except Exception:
+            _data = None
+            _side = 0
+        if _data is None:
+            # Pillow 不可用时的降档兜底:macOS sips(自带)
+            try:
+                import shutil as _sh
+                _lim = int(os.environ.get("IMG_INLINE_MAX_SIDE", "2048"))
+                if _lim > 0 and _sh.which("sips"):
+                    import subprocess as _sp
+                    _g = _sp.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", _p],
+                                 capture_output=True, text=True)
+                    _nums = [int(x.split(":")[1]) for x in _g.stdout.splitlines()
+                             if "pixel" in x and x.split(":")[1].strip().isdigit()]
+                    if _nums:
+                        _side = max(_nums)
+                    if _nums and max(_nums) > _lim:
+                        import tempfile as _tf
+                        _tmp = _tf.mktemp(suffix=".png")
+                        _r2 = _sp.run(["sips", "-Z", str(_lim), _p, "--out", _tmp],
+                                      capture_output=True, text=True)
+                        if _r2.returncode == 0 and os.path.isfile(_tmp):
+                            with open(_tmp, "rb") as _f:
+                                _data = _f.read()
+                            os.unlink(_tmp)
+                            _mime = "image/png"
+                            _side = _lim
+            except Exception:
+                _data = None
+        if _data is None:
+            try:
+                with open(_p, "rb") as _f:
+                    _data = _f.read()
+            except OSError as _e:
+                return "错误:读取图片失败: %s" % _e
+        _st["side"] = _side
+        _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_data).decode())
+        return "IMGJSON:" + _json.dumps(
+            {"url": _url, "path": _p,
+             "text": "已读取图片 #%d: %s(档位 %d px)" % (_st["id"], _p, _side)},
+            ensure_ascii=False)
+    if name == "read_skill":
+        from wchat_py import skill as _sk
+        _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+            os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct"), "skills")
+        _r = _sk.read_skill(a.get("name") or "", _sd,
+                            os.environ.get("SKILL_READ_MAX", "20000"),
+                            os.environ.get("SKILLS_DIR_EXTERNAL", "0"))
+        return _r.get("content", "")
+    if name == "web_fetch":
+        import re as _re
+        import urllib.request as _ur
+        import urllib.error as _ue
+        from wchat_py import webs as _webs
+        _url = a.get("url") or ""
+        if not (_url.startswith("http://") or _url.startswith("https://")):
+            return "错误:url 必须以 http:// 或 https:// 开头: %s" % _url
+        _req = _ur.Request(_url, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36"})
+        try:
+            with _ur.urlopen(_req, timeout=30) as _r:
+                _raw = _r.read().decode("utf-8", "replace")
+        except _ue.HTTPError as _e:
+            return _webs.fetch_error(str(_e.code), _url)
+        except Exception:
+            return _webs.fetch_error("000", _url)
+        # 优先 w3m 渲染;否则去标签兜底
+        _txt = None
+        if _raw:
+            try:
+                import subprocess as _sp
+                _p = _sp.run(["w3m", "-dump", "-T", "text/html"], input=_raw,
+                             capture_output=True, text=True, timeout=30)
+                if _p.returncode == 0 and _p.stdout:
+                    _txt = _p.stdout
+            except Exception:
+                _txt = None
+        if _txt is None:
+            _t = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", _raw)
+            _t = _re.sub(r"(?s)<[^>]+>", " ", _t)
+            _txt = _re.sub(r"\s+", " ", _t).strip()
+        return _txt
+    if name == "web_search":
         import json as _json
-        return "IMGJSON:" + _json.dumps({"url": _url, "path": _p,
-                                         "text": "已读取图片: %s" % _p}, ensure_ascii=False)
+        import urllib.request as _ur
+        from wchat_py import webs as _webs
+        _prov = os.environ.get("WEB_SEARCH_PROVIDER", "none")
+        if _prov in ("", "none"):
+            return "错误:当前接口未启用原生联网(web_search)。请改用 web_fetch 抓指定网页。"
+        _q = a.get("query") or a.get("keyword") or ""
+        _body = _webs.build_body(_prov, _q, os.environ.get("FLASH_MODEL", ""))
+        if not _body:
+            return "错误:联网参数构建失败(provider=%s)" % _prov
+        _key = os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or ""
+        _hdrs = {"Content-Type": "application/json", "Authorization": "Bearer " + _key,
+                 "api-key": _key}
+        _req = _ur.Request(os.environ.get("BASE_URL", ""),
+                           data=_json.dumps(_body).encode("utf-8"), headers=_hdrs)
+        try:
+            with _ur.urlopen(_req, timeout=int(os.environ.get("WEB_SEARCH_TIMEOUT", "90"))) as _r:
+                _resp = _json.loads(_r.read().decode("utf-8", "replace"))
+        except Exception as _e:
+            return "错误:联网搜索失败: %s" % _e
+        try:
+            return _resp["choices"][0]["message"].get("content") or ""
+        except (KeyError, IndexError, TypeError):
+            return "错误:联网搜索返回格式异常"
     if name == "run_shell_command":
         from wchat_py import audit as _audit
         cmd = a.get("command") or ""
