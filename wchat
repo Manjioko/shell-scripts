@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+from wchat_py import mcp_boot
 from wchat_py.cli import main
+mcp_boot.install(sys.argv)
 sys.exit(main(sys.argv[1:]))
-

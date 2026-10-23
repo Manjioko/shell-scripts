@@ -109,6 +109,8 @@ def parse(argv):
     seen_help = 0
     action = ""
     auto_mode = ""
+    mcp_enable = 0
+    mcp_only = ""
     unknown = []
     i = 0
     while i < len(argv):
