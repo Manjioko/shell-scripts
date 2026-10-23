@@ -49,7 +49,7 @@ def enable(tier):
         "未启用(不带 -mcp 时不注册 mcp_* 通道;模型仍可经 shell 自行调用,见 -h)"
 
     w = sys.stdout.write
-    w("═══ auto 模式:%s ═══\n" % tier)
+    w("\n\033[1;31m═══ auto 模式:%s ═══\033[0m\n" % tier)
     w("  工作目录: %s\n" % root)
     w("  审批器:   %s(与执行模型 %s 分离)\n" % (auth, flash))
     w("  越界读:   自动放行(记入审计)\n")
@@ -67,7 +67,7 @@ def enable(tier):
     sys.stdout.flush()
 
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") != "1":
-        w("  开启后敏感权限不再逐次询问你。确认输入大写 AUTO(其他任意输入 = 关闭 auto): ")
+        w("\n\033[1;31m  开启后敏感权限不再逐次询问你。确认输入大写 AUTO(其他任意输入 = 关闭 auto):\033[0m ")
         sys.stdout.flush()
         try:
             ans = (sys.stdin.readline() or "").strip()
@@ -96,4 +96,3 @@ def enable(tier):
       % (tier, alog.replace(os.path.expanduser("~"), "~")))
     sys.stdout.flush()
     return True
-

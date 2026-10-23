@@ -429,7 +429,8 @@ def _path_guard(path, mode):
     if is_cred:
         if auto:
             return "AI 拒绝:凭据/会话数据路径不可访问(auto 档): %s" % path
-        sys.stdout.write("\n ⚠ AI 请求访问凭据/会话数据 %s\n\n 逐字输入 yes 放行(其他=拒绝): " % path)
+        sys.stdout.write("\033[2K \033[1;31m⛔ 高危路径\033[0m \033[2m%s\033[0m\n\n" % path)
+        sys.stdout.write(" \033[1;31m确需放行?必须输入 yes(n/回车 = 拒绝): \033[0m")
         sys.stdout.flush()
         try:
             ans = (sys.stdin.readline() or "").strip()
@@ -444,7 +445,8 @@ def _path_guard(path, mode):
     key = (mode, p)
     if key in _GRANTED_PATHS:
         return None
-    sys.stdout.write("\n ⚠ AI 请求访问工作目录外文件 %s\n\n 是否放行?(y 或 yes,n/回车 = 拒绝): " % path)
+    sys.stdout.write("\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n\n" % path)
+    sys.stdout.write(" \033[1;31m是否放行?(y 或 yes,n/回车 = 拒绝): \033[0m")
     sys.stdout.flush()
     try:
         ans = (sys.stdin.readline() or "").strip().lower()
