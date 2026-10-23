@@ -293,9 +293,23 @@ def _default_final_call(cmd, reason=""):
     msgs = [{"role": "system", "content": AUTO_FINAL_SYS},
             {"role": "user", "content": "命令: %s\n执行理由: %s\n初审结论: N\n" % (cmd, reason)}]
     try:
-        text, _tc, err = _call_llm(msgs, model)
-    except Exception:
+        from wchat_py.llm import _make_client
+        _base = os.environ.get("BASE_URL", "")
+        _key = os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or ""
+        _hdr = os.environ.get("API_KEY_HEADER", "api-key")
+        _cli = _make_client(_base, _key, _hdr)
+        _resp = _cli.chat.completions.create(model=(model or "default"),
+                                             messages=msgs, stream=False,
+                                             extra_body={"thinking": {"type": "disabled"}})
+        text = (_resp.choices[0].message.content or "")
+        err = None
+    except Exception as _e:
+        if os.environ.get("WCHAT_TRACE") == "1":
+            sys.stderr.write("TRACE final EXC %r\n" % (_e,)); sys.stderr.flush()
         return ""
+    if os.environ.get("WCHAT_TRACE") == "1":
+        sys.stderr.write("TRACE final model=%r text=%.50r err=%r\n"
+                         % (model, text, err)); sys.stderr.flush()
     if err:
         return ""
     return text or ""
@@ -309,6 +323,9 @@ def _auto_judge(cmd, call=None, reason=""):
     """
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
         return "Y", "assume-yes"
+    if os.environ.get("WCHAT_TRACE") == "1":
+        sys.stderr.write("TRACE judge enter call_none=%r reason=%r\n"
+                         % (call is None, reason)); sys.stderr.flush()
     if call is None:
         call = lambda c: _default_final_call(c, reason)
     try:
@@ -382,17 +399,23 @@ def _run_tool(name, args_json):
             sys.stdout.write(status + "\n")
         return content
     if name == "run_shell_command":
+        from wchat_py import audit as _audit
         cmd = a.get("command") or ""
         from wchat_py.hardwall import detail as _hd_detail
         _auto = os.environ.get("AUTO_MODE") in ("full", "sandbox")
+        if os.environ.get("WCHAT_TRACE") == "1":
+            sys.stderr.write("TRACE shell auto=%r mode=%r cmd=%.20s\n"
+                             % (_auto, os.environ.get("AUTO_MODE"), cmd)); sys.stderr.flush()
         _r, _s, _m = _hd_detail(cmd, _auto)
+        if os.environ.get("WCHAT_TRACE") == "1":
+            sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
             from wchat_py import audit as _audit
             _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                           rule=_r, decision="deny", cmd=cmd)
             return ("[硬墙 %s] %s" % (_r, _m))
         if _auto:
-            _v, _rs = _auto_judge(cmd, reason=(args.get("reason", "") if isinstance(args, dict) else ""))
+            _v, _rs = _auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
             if _v == "Y":
                 sys.stdout.write("auto 终审放行: %s\n" % cmd)
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
@@ -436,6 +459,9 @@ def run_turn(content, model="", max_rounds=5):
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     for _ in range(max_rounds):
         text, tcs, err = _call_llm(msgs, model)
+        if os.environ.get("WCHAT_TRACE") == "1":
+            sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
+                             % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
         if text:
             box.append(text); sys.stdout.write(box.paint()); sys.stdout.flush()
         if err:
@@ -460,6 +486,9 @@ def run_turn(content, model="", max_rounds=5):
 
 
 def main(argv):
+    # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
+    # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
+    os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
     if argv and argv[0] == "repl":
         from wchat_py.session import Session, seed_system
         from wchat_py.repl import run_repl, session_text_handler

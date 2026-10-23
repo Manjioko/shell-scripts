@@ -22,8 +22,7 @@ def record(log_path, kind, **fields):
     row.update(fields)
     try:
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
         return True
     except OSError:
         return False
-
