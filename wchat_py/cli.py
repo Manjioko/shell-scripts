@@ -743,13 +743,24 @@ def _run_tool(name, args_json):
         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell", decision="allow", cmd=cmd)
         from wchat_py.termpty import pty_run
         try:
-            _timeout = float(os.environ.get("CMD_TIMEOUT", "20"))
+            _timeout = float(os.environ.get("CMD_TIMEOUT", "120"))
         except ValueError:
-            _timeout = 20.0
+            _timeout = 120.0
         _disp, _full, _rc, _to, _intr = pty_run(
             ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")))
+        # 与 master run_with_window 一致:输出逐行 dim │ 前缀上屏,底部一行 dim 汇总。
+        _n = len(_full.splitlines())
+        for _ln in _disp:
+            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _ln)
         if _to:
-            _full += "\n[命令超过单条上限 %gs,已终止 · rc=%s]\n" % (_timeout, _rc)
+            sys.stdout.write("\033[2m└─ 超过单命令上限 %ss,已终止 · 共 %d 行 ─┘\033[0m\n"
+                             % (os.environ.get("CMD_TIMEOUT", "120"), _n))
+            _full += "\n(命令超过单条上限 %ss,已终止 · rc=%s)" % (_timeout, _rc)
+        elif _intr:
+            sys.stdout.write("\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n" % _n)
+        else:
+            sys.stdout.write("\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n" % _n)
+        sys.stdout.flush()
         return _full
     return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
 
