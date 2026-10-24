@@ -219,6 +219,13 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
     _think = os.environ.get("WCHAT_THINKING", "disabled") or "disabled"
     req = {"model": _model, "messages": msgs,
            "thinking": _think, "tools": _tlist}
+    _ref_tmp = None
+    if _IMG_URLS:
+        import tempfile as _tf
+        _fd, _ref_tmp = _tf.mkstemp(prefix="ct_refmap_")
+        with os.fdopen(_fd, "w", encoding="utf-8") as _rf:
+            _json.dump({k: {"url": v} for k, v in _IMG_URLS.items()}, _rf)
+        req["ref_map_file"] = _ref_tmp
     if os.environ.get("WCHAT_TRACE") == "1":
         sys.stderr.write("TRACE llm model=%r thinking=%r\n" % (_model, _think)); sys.stderr.flush()
     p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
@@ -275,6 +282,11 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         elif t == "error":
             err = ev.get("v")
     p.wait()
+    if _ref_tmp:
+        try:
+            os.unlink(_ref_tmp)
+        except OSError:
+            pass
     for _s in tcs:
         _s.pop("_i", None)
     return "".join(text), tcs, err
@@ -453,13 +465,29 @@ def _auto_judge(cmd, call=None, reason=""):
 
 
 _IMG_REFS = {}
+_IMG_URLS = {}
 _IMG_SEQ = [0]
 _GRANTED_PATHS = set()
+
+
+def _register_image_url(path, url, side=0):
+    """登记一张待挂载图片,返回引用号(供 messages 里存 [[IMGREF:id]])。"""
+    _IMG_SEQ[0] += 1
+    ref = "r%d%d" % (_IMG_SEQ[0], os.getpid())
+    _IMG_URLS[ref] = url
+    try:
+        _IMG_REFS[os.path.realpath(path)] = {
+            "id": _IMG_SEQ[0], "ref": ref, "gone": False,
+            "recheck": False, "side": side}
+    except Exception:
+        pass
+    return ref
 
 
 def _reset_image_refs():
     """-n 新会话:历史被清空,图片引用登记也必须清零(否则首次读图会被误判'已在上下文')。"""
     _IMG_REFS.clear()
+    _IMG_URLS.clear()
     _IMG_SEQ[0] = 0
 
 
@@ -751,8 +779,9 @@ def _run_tool(name, args_json):
                              % (_disp, _dw, _dh))
         sys.stdout.flush()
         _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_data).decode())
+        _IMG_URLS[_st["ref"]] = _url
         return "IMGJSON:" + _json.dumps(
-            {"url": _url, "path": _p,
+            {"url": _url, "path": _p, "ref": _st["ref"],
              "text": "已读取图片 #%d: %s(档位 %d px)" % (_st["id"], _p, _side)},
             ensure_ascii=False)
     if name == "read_skill":
@@ -994,11 +1023,12 @@ def run_turn(content, model="", max_rounds=5):
                 except ValueError:
                     _d = None
                 if _d:
-                    msgs.append({"role": "tool", "content": _d.get("text", "图片已读取"),
+                    _ref = _d.get("ref") or ""
+                    _txt = _d.get("text", "图片已读取")
+                    if _ref:
+                        _txt += "\n[[IMGREF:%s]]" % _ref
+                    msgs.append({"role": "tool", "content": _txt,
                                  "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
-                    msgs.append({"role": "user", "content": [
-                        {"type": "text", "text": "(工具 read_image 返回的图片)"},
-                        {"type": "image_url", "image_url": {"url": _d.get("url", "")}}]})
                     continue
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})

@@ -230,11 +230,12 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     msgs = messages_list(session.messages_json)
     if session.input_images:
         from wchat_py import img as _img
+        from wchat_py import cli as _cli
         try:
             _maxside = int(os.environ.get("IMG_INLINE_MAX_SIDE") or 2048)
         except ValueError:
             _maxside = 2048
-        _parts = [{"type": "text", "text": content}]
+        _markers = []
         _shrunk = 0
         _n = len(session.input_images)
         for _p in session.input_images:
@@ -243,12 +244,14 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                 sys.stdout.write(" ⤷ %s 已缩到 %dpx(精度随之下调)\n"
                                  % (os.path.basename(_p), _actual))
                 _shrunk += 1
-            _parts.append({"type": "image_url", "image_url": {"url": _url}})
+            _ref = _cli._register_image_url(_p, _url, _actual)
+            _markers.append("[[IMGREF:%s]]" % _ref)
         sys.stdout.write(" 🖼 %d/%d 张原图已随本轮消息交给主模型"
                          "(其中 %d 张已缩过,逐张档位见上面各行的说明)\n"
                          % (_n, _n, _shrunk))
         sys.stdout.flush()
-        msgs.append({"role": "user", "content": _parts})
+        msgs.append({"role": "user",
+                     "content": content + ("\n" if content else "") + "\n".join(_markers)})
         session.input_images = []
     else:
         msgs.append({"role": "user", "content": content})
@@ -273,11 +276,12 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                     except ValueError:
                         _d = None
                     if _d:
-                        msgs.append({"role": "tool", "content": _d.get("text", "图片已读取"),
+                        _ref = _d.get("ref") or ""
+                        _txt = _d.get("text", "图片已读取")
+                        if _ref:
+                            _txt += "\n[[IMGREF:%s]]" % _ref
+                        msgs.append({"role": "tool", "content": _txt,
                                      "tool_call_id": tc.get("id") or ("call_%d" % i)})
-                        msgs.append({"role": "user", "content": [
-                            {"type": "text", "text": "(工具 read_image 返回的图片)"},
-                            {"type": "image_url", "image_url": {"url": _d.get("url", "")}}]})
                         continue
                 msgs.append({"role": "tool", "content": out,
                              "tool_call_id": tc.get("id") or ("call_%d" % i)})
