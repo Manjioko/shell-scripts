@@ -995,18 +995,34 @@ def _apply_runtime_defaults():
         os.environ["WEB_SEARCH_PROVIDER"] = _detect_web_provider()
 
 
+TITLE_TOOL = {"type": "function", "function": {
+    "name": "set_title",
+    "description": "提交为本次对话总结的标题",
+    "parameters": {"type": "object", "properties": {
+        "title": {"type": "string", "description": "对话标题,简短精炼,不超过 30 字,不含特殊字符与换行"}},
+        "required": ["title"]}}}
+
+
 def _gen_title(msgs_json):
-    """根据对话让模型生成短标题（用于保存文件名/标题）。失败返回空,回退时间戳名。"""
+    """根据对话生成短标题(与 master 一致:调用 set_title 工具)。失败回退内容/空。"""
     import json as _json
     try:
         msgs = _json.loads(msgs_json)
         msgs = list(msgs) + [{"role": "user", "content":
                               "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,"
-                              "不超过 30 字,不含特殊字符与换行;只输出标题本身。"}]
-        t, _tc, err = _call_llm(msgs, os.environ.get("FLASH_MODEL", ""))
-        if err or not t:
-            return ""
-        t = (t or "").strip().splitlines()[0].strip() if t.strip() else ""
+                              "不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]
+        msg = _nonstream_msg(msgs, os.environ.get("FLASH_MODEL", ""), tools=[TITLE_TOOL])
+        t = ""
+        tcs = getattr(msg, "tool_calls", None) or []
+        if tcs:
+            try:
+                t = (_json.loads(getattr(tcs[0].function, "arguments", "") or "{}")
+                     or {}).get("title") or ""
+            except ValueError:
+                t = ""
+        if not t:
+            t = getattr(msg, "content", "") or ""
+            t = t.strip().splitlines()[0] if t.strip() else ""
         bad = ' /\\:*?"<>|\n\r\t'
         out = "".join("_" if ch in bad else ch for ch in t).strip("_")
         return out[:40]
