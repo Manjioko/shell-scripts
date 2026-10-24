@@ -193,6 +193,49 @@ def _default_meta(action, arg, session=None):
     return True
 
 
+_PLACE_IMG = "📋 [图片] "
+_PLACE_FILE = "📋 [文件] "
+_PLACE_SKIP = "📋 [跳过] "
+
+
+def parse_placeholders(text):
+    """把 Ctrl-F/@ 带进来的占位行解析成授权 + 转述(等价 bash parse_placeholders)。
+    返回 (新文本, 图片路径列表)。"""
+    imgs = []
+    out = []
+    for line in (text or "").split("\n"):
+        raw = line
+        line = line.replace("\u200b", "")
+        if line.startswith(_PLACE_IMG):
+            p = line[len(_PLACE_IMG):].strip()
+            if os.path.isfile(p) and _is_image(p):
+                imgs.append(p)
+                _grant_read(p)
+                continue
+        elif line.startswith(_PLACE_FILE):
+            p = line[len(_PLACE_FILE):].strip()
+            if os.path.isfile(p) and _is_text_file(p):
+                _grant_read(p)
+                out.append("(用户通过 @ 选择了文件: %s。该文件已获只读授权,如需查看内容,"
+                           "请先调用 read_file 工具读取,再回答用户问题。)" % p)
+                continue
+        elif line.startswith(_PLACE_SKIP):
+            p = line[len(_PLACE_SKIP):].strip()
+            out.append("(用户尝试选择文件: %s,但该文件不是文本/图片格式,已被跳过。"
+                       "请勿尝试读取;如需处理请告知用户先转换格式。)" % p)
+            continue
+        out.append(raw)
+    return "\n".join(out), imgs
+
+
+def _grant_read(path):
+    try:
+        from wchat_py import cli as _cli
+        _cli._GRANTED_PATHS.add(("r", os.path.realpath(os.path.expanduser(path))))
+    except Exception:
+        pass
+
+
 def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None):
     """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
 
@@ -204,6 +247,12 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
     out = out if out is not None else sys.stdout
 
     def handler(text):
+        text, _imgs = parse_placeholders(text)
+        if _imgs:
+            try:
+                session.input_images.extend(_imgs)
+            except Exception:
+                pass
         r = orchestrate(session, text, call_llm, run_tool)
         if on_final is not None:
             on_final(r)
@@ -252,11 +301,77 @@ def run_repl(stream, on_text, on_meta=None, on_quit=None):
     return run_repl_loop(lambda: next(it, None), on_text, on_meta, on_quit)
 
 
+_IMG_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+_TEXT_EXTS = (".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
+              ".toml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".c", ".h", ".cpp", ".hpp",
+              ".java", ".go", ".rs", ".rb", ".php", ".sql", ".html", ".css", ".xml", ".csv",
+              ".log", ".conf", ".env", ".dockerfile", "makefile", ".gitignore")
+
+
+def _is_image(p):
+    return os.path.splitext(p)[1].lower() in _IMG_EXTS
+
+
+def _is_text_file(p):
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        with open(p, "rb") as f:
+            chunk = f.read(4096)
+        if b"\0" in chunk:
+            return False
+    except OSError:
+        return False
+    return ext in _TEXT_EXTS or os.path.basename(p).lower() in _TEXT_EXTS
+
+
+def _pick_file():
+    """Ctrl-F 文件选择器(master read_file 等价):macOS osascript / Linux zenity/kdialog / WSL。"""
+    import shutil
+    if sys.platform == "darwin":
+        try:
+            p = subprocess.run(
+                ["osascript", "-e", "try", "-e", "POSIX path of (choose file)",
+                 "-e", "on error", "-e", 'return "CANCELLED"', "-e", "end try"],
+                capture_output=True, text=True)
+            return (p.stdout or "").strip()
+        except OSError:
+            return ""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        try:
+            p = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command",
+                 "Add-Type -AssemblyName System.Windows.Forms;"
+                 "$f=New-Object System.Windows.Forms.OpenFileDialog;"
+                 "if($f.ShowDialog() -eq 'OK'){$f.FileName}else{'CANCELLED'}"],
+                capture_output=True, text=True)
+            return (p.stdout or "").strip()
+        except OSError:
+            return ""
+    for cmd in (["zenity", "--file-selection"], ["kdialog", "--getopenfilename"]):
+        if shutil.which(cmd[0]):
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True)
+                return (p.stdout or "").strip()
+            except OSError:
+                return ""
+    return ""
+
+
+def _file_placeholder(path):
+    if _is_image(path):
+        tag = "📋 [图片] "
+    elif _is_text_file(path):
+        tag = "📋 [文件] "
+    else:
+        tag = "📋 [跳过] "
+    return tag + path + "\u200b"
+
+
 def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
     """交互式：经 input_helper.py(prompt_toolkit) 读行；缺文件时退回 input()。
 
-    input_helper 提供历史/补全/多行/粘贴/Ctrl-F，是 bash 时代的同一组件；不自己造输入框。
-    退出码:0=提交文本,1=EOF/中断,4=Ctrl-F 文件选择(此处退化为一轮空输入重来)。
+    Ctrl-F(rc=4) 按 master 逻辑:弹系统文件选择器 → 把占位行带回输入框继续编辑;
+    取消且输入为空 → 本轮无输入。
     """
     _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _helper = os.path.join(_repo, "input_helper.py")
@@ -266,15 +381,32 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
 
     def nxt():
         if os.path.isfile(_helper):
-            try:
-                p = subprocess.run([sys.executable, _helper, "--history", _hist,
-                                    "--clip-dir", _clip, "--no-commands"],
-                                   capture_output=True, text=True)
-            except OSError:
-                p = None
-            if p is not None:
-                if p.returncode == 1 or p.returncode == 4:
-                    return None if p.returncode == 1 else ""
+            default = ""
+            while True:
+                argv = [sys.executable, _helper, "--history", _hist,
+                        "--clip-dir", _clip, "--no-commands"]
+                if default:
+                    argv += ["--default", default]
+                try:
+                    p = subprocess.run(argv, capture_output=True, text=True)
+                except OSError:
+                    p = None
+                if p is None:
+                    break
+                if p.returncode == 4:
+                    cur = (p.stdout or "")
+                    if cur.endswith("\n"):
+                        cur = cur[:-1]
+                    path = _pick_file()
+                    if not path or path == "CANCELLED" or not os.path.isfile(path):
+                        if not cur:
+                            return ""
+                        default = cur
+                    else:
+                        default = cur + ("\n" if cur else "") + _file_placeholder(path)
+                    continue
+                if p.returncode == 1:
+                    return None
                 _t = (p.stdout or "")
                 if _t.endswith("\n"):
                     _t = _t[:-1]
