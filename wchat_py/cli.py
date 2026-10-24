@@ -656,14 +656,20 @@ def _run_tool(name, args_json):
             if not _st.get("gone"):
                 if not _st.get("recheck"):
                     _st["recheck"] = True
-                    return ("该图片此前已经给过你(引用 #%d,档位 %d px)。此刻若确实看不清细节,"
-                            "可再次调用 read_image 重看一次。" % (_st["id"], _st.get("side", 0)))
+                    _rid = _st.get("ref") or ("r%d" % _st.get("id", 0))
+                    sys.stdout.write(" 🖼 同一张图已在上下文(引用号 %s),未重复挂载\n" % _rid)
+                    sys.stdout.flush()
+                    return ("read_image: %s —— 这张图本会话已经给过你了(见引用号 %s 所在的那条消息),"
+                            "本次不再重复挂载。请回看那条消息里的画面作答;若那里已看不到图片本体"
+                            "(例如它被回收过),再调用一次本工具,我会收回旧引用并重新挂载。"
+                            % (a.get("path") or _p, _rid))
                 _st["gone"] = True
-                sys.stdout.write(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)\\n" % _st["id"])
+                sys.stdout.write(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)\n" % _st["id"])
                 sys.stdout.flush()
         else:
             _IMG_SEQ[0] += 1
-            _st = {"id": _IMG_SEQ[0], "gone": False, "recheck": False, "side": 0}
+            _st = {"id": _IMG_SEQ[0], "ref": "r%d%d" % (_IMG_SEQ[0], os.getpid()),
+                   "gone": False, "recheck": False, "side": 0}
             _IMG_REFS[_rp] = _st
         # 刀1 inline 降档:超过 IMG_INLINE_MAX_SIDE 的图缩到该边长(控 token);
         # 无 Pillow 时保持原图(降级但不崩)
