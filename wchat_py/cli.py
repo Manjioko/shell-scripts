@@ -1005,6 +1005,12 @@ def run_turn(content, model="", max_rounds=5):
         if reason:
             sys.stdout.write(render_reason("".join(reason)))
             reason.clear()
+        # 前导正文(assistant 在 tool_calls 之前说的话)必须在工具横幅前重新渲染:
+        # 它刚才只在流箱里滚动过,close 已擦除;不渲染就会像"没说过话"。
+        if last_text:
+            sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n")
+            sys.stdout.flush()
+            last_text = ""
         # assistant 的 tool_calls 消息(正文也带上, 否则调用前的正文会丢)
         msgs.append({"role": "assistant", "content": text or None,
                      "tool_calls": [{"id": tc.get("id") or ("call_%d" % i), "type": "function",
@@ -1267,9 +1273,11 @@ def main(argv):
             from wchat_py.render import StreamBox, render_reason, render_markdown
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
             _reason_acc = []
+            _text_acc = []
 
             def _cl_stream(m):
                 def _emit(d):
+                    _text_acc.append(d)
                     _box.append(d)
                     sys.stdout.write(_box.paint_full())
                     sys.stdout.flush()
@@ -1291,6 +1299,7 @@ def main(argv):
                     _reason_acc.clear()
                 sys.stdout.write(render_markdown(r or "")); sys.stdout.write("\n")
                 sys.stdout.flush()
+                _text_acc.clear()
                 _sync_runtime(_s)
 
             def _run_tool_boxed(n, a):
@@ -1300,6 +1309,11 @@ def main(argv):
                 if _reason_acc:
                     sys.stdout.write(render_reason("".join(_reason_acc)))
                     _reason_acc.clear()
+                # tool_calls 之前的前导正文:流箱已擦,这里补渲染
+                if _text_acc:
+                    sys.stdout.write(render_markdown("".join(_text_acc)))
+                    sys.stdout.write("\n"); sys.stdout.flush()
+                    _text_acc.clear()
                 sys.stdout.write(_banner_text(n, a))
                 sys.stdout.write("\n"); sys.stdout.flush()
                 return _run_tool(n, a)
