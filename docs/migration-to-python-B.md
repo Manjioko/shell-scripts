@@ -256,3 +256,41 @@ Python `cli._run_tool`（已实现 list_dir/read_file/grep/write_file/edit_file/
 H6 cd 语境边角（`cd $PWD`、`cd ~` 后 `cat .aws` 类脱敏粒度过宽）、H11 方向/归一（`mv` 源在系统、
 `dd of=`、相对跳写系统）、`sed -i` 落系统让位 P2、动态向量（`$变量`，静态不可判）。
 生产默认走 Python seam、bash 判据体作 fallback，这些差异被 fallback 兜住，未在 40 闸门中暴露。
+
+---
+
+## 9. 结项记录（2026-10-24）
+
+**状态：B 阶段验收 11/11 全绿；主闸门 run=41 pass=41 fail=0。**
+
+### 运行方式（新布局）
+
+```bash
+python3 setup.py          # 检测/安装依赖(原 setup.sh)
+./wchat                   # 入口(Python 5 行 shim → wchat_py.cli)
+./wchat -h                # 帮助
+python3 configs/ctmodel.py <model>   # 切换模型(原 configs/ctmodel.sh)
+```
+
+配置文件：`~/.ct/config`（模板见 `configs/config.example`）。
+
+### 文件布局变更
+
+| 原 | 现 |
+|---|---|
+| `wchat.sh`（8k 行业务） | `tests/legacy_wchat.sh` —— **仅测试 oracle**，产品不再引用；根目录 `wchat_ref` 是非 `.sh` 的 symlink，供测试推导仓库根 |
+| `configs/config.sh`（含明文 key） | 已移出版本库；新增无凭据模板 `configs/config.example` |
+| `configs/ctmodel.sh` | `configs/ctmodel.py`（list/current/switch/-n/undo/check） |
+| `setup.sh` | `setup.py` |
+
+`git ls-files '*.sh' | grep -v '^tests/'` 为空 —— 业务 `.sh` 清零。
+
+### 安全遗留（必须人工处理）
+
+`configs/config.sh` 曾含三家 API key 且已进 git 历史；文件虽已移出，**历史仍可翻到旧值**。
+H7 禁止改写已发布历史，正确处理是**轮换这些 key**，不是清史。
+
+### 待退役
+
+`tests/legacy_wchat.sh` 仍被回放/parity/硬墙接缝等闸门当作 bash oracle 使用。
+等确认不再需要"新旧逐字节对比"后，可连同依赖它的 parity 闸门一起退役。
