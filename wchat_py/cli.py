@@ -646,6 +646,9 @@ def _run_tool(name, args_json):
         _ext = os.path.splitext(_p)[1].lower()
         if _ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"):
             return "错误:不是支持的图片格式(仅 JPEG/PNG/GIF/WebP/BMP): %s" % a.get("path")
+        _deny = _path_guard(_p, "r")
+        if _deny:
+            return _deny
         _rp = os.path.realpath(_p)
         _st = _IMG_REFS.get(_rp)
         if _st is not None:
@@ -667,19 +670,23 @@ def _run_tool(name, args_json):
         _mime = _mt.guess_type(_p)[0] or "image/png"
         _data = None
         _side = 0
+        _ow = _oh = _w = _h = 0
         try:
             from PIL import Image as _Image
             _im = _Image.open(_p)
+            _ow, _oh = _im.size
+            _w, _h = _ow, _oh
             _side = max(_im.size)
             _lim = int(os.environ.get("IMG_INLINE_MAX_SIDE", "2048"))
             if _lim > 0 and _side > _lim:
                 _im.thumbnail((_lim, _lim))
+                _w, _h = _im.size
                 import io as _io
                 _buf = _io.BytesIO()
                 _im.convert("RGB").save(_buf, format="PNG")
                 _data = _buf.getvalue()
                 _mime = "image/png"
-                _side = _lim
+                _side = max(_w, _h)
         except Exception:
             _data = None
             _side = 0
@@ -696,6 +703,8 @@ def _run_tool(name, args_json):
                              if "pixel" in x and x.split(":")[1].strip().isdigit()]
                     if _nums:
                         _side = max(_nums)
+                        _ow, _oh = _nums[0], _nums[1]
+                        _w, _h = _ow, _oh
                     if _nums and max(_nums) > _lim:
                         import tempfile as _tf
                         _tmp = _tf.mktemp(suffix=".png")
@@ -707,6 +716,10 @@ def _run_tool(name, args_json):
                             os.unlink(_tmp)
                             _mime = "image/png"
                             _side = _lim
+                            if _ow and _oh:
+                                _ratio = float(_lim) / max(_ow, _oh)
+                                _w = max(1, round(_ow * _ratio))
+                                _h = max(1, round(_oh * _ratio))
             except Exception:
                 _data = None
         if _data is None:
@@ -716,6 +729,15 @@ def _run_tool(name, args_json):
             except OSError as _e:
                 return "错误:读取图片失败: %s" % _e
         _st["side"] = _side
+        _disp = a.get("path") or _p
+        if _ow and _oh and (_w < _ow or _h < _oh):
+            sys.stdout.write(" 🖼 原图已交给主模型 %s(已缩到 %spx)\n" % (_disp, _side))
+        else:
+            _dw = _w or _ow or _side
+            _dh = _h or _oh or _side
+            sys.stdout.write(" 🖼 原图已交给主模型 %s(交付 %dx%d,与原文件同尺寸)\n"
+                             % (_disp, _dw, _dh))
+        sys.stdout.flush()
         _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_data).decode())
         return "IMGJSON:" + _json.dumps(
             {"url": _url, "path": _p,
