@@ -530,6 +530,33 @@ def _banner_text(name, args_json):
     return tool_banner(name or "", args_preview(args_json or ""))
 
 
+def _auto_backup(path):
+    """auto 档下写文件前做一次会话备份(首次落备份,不覆盖);返回是否新增。"""
+    if not (os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE")):
+        return False
+    if not os.path.isfile(path):
+        return False
+    try:
+        dest = os.environ.get("WCHAT_AUTO_BACKUP_DIR") or ""
+        if not dest:
+            return False
+        os.makedirs(dest, exist_ok=True)
+        rel = path.replace("+", "%2b").replace("/", "+")
+        bak = os.path.join(dest, rel + ".bak")
+        if os.path.exists(bak):
+            return False
+        import shutil as _sh
+        _sh.copy2(path, bak)
+        try:
+            n = int(os.environ.get("WCHAT_AUTO_BACKUPS") or 0)
+        except ValueError:
+            n = 0
+        os.environ["WCHAT_AUTO_BACKUPS"] = str(n + 1)
+        return True
+    except OSError:
+        return False
+
+
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
@@ -587,6 +614,7 @@ def _run_tool(name, args_json):
         _deny = _path_guard(resolved, "rw")
         if _deny:
             return _deny
+        _auto_backup(resolved)
         content, status = write_file(resolved, path, a.get("content") or "", work_root)
         if status:
             sys.stdout.write(status + "\n")
@@ -600,6 +628,7 @@ def _run_tool(name, args_json):
         _deny = _path_guard(resolved, "rw")
         if _deny:
             return _deny
+        _auto_backup(resolved)
         content, status = edit_file(resolved, path, a.get("old_string") or "",
                                     a.get("new_string") or "", work_root)
         if status:
@@ -967,6 +996,10 @@ def _auto_summary():
     except ValueError:
         n = 0
     try:
+        bn = int(os.environ.get("WCHAT_AUTO_BACKUPS") or 0)
+    except ValueError:
+        bn = 0
+    try:
         import subprocess as _sp
         p = _sp.run(["git", "rev-parse", "--short", "HEAD"],
                     capture_output=True, text=True, timeout=5)
@@ -974,10 +1007,20 @@ def _auto_summary():
     except Exception:
         rev = "(非 git 仓库)"
     w = sys.stdout.write
-    w("\n── auto 会话小结 ──\n")
-    w("  自动放行 %d 次 · 备份 0 份 · 档位 %s\n" % (n, tier))
-    w("  审计日志: %s\n" % alog)
-    w("  回滚: git diff %s 查看改动;git checkout %s -- . 复原\n" % (rev, rev))
+    d, r = "\033[2m", "\033[0m"
+    w("\n%s── auto 会话小结 ──%s\n" % (d, r))
+    w("%s  自动放行 %d 次 · 备份 %d 份 · 档位 %s%s\n" % (d, n, bn, tier, r))
+    w("%s  审计日志: %s%s\n" % (d, alog, r))
+    w("%s  回滚: git diff %s 查看改动;git checkout %s -- . 复原%s\n" % (d, rev, rev, r))
+    bdir = os.environ.get("WCHAT_AUTO_BACKUP_DIR", "")
+    if bn > 0 and bdir:
+        w("%s  备份目录: %s%s\n" % (d, bdir, r))
+    try:
+        from wchat_py import audit as _audit
+        _audit.record(alog, "exit", tier=tier, verdict="finished",
+                      approvals=n, backups=bn)
+    except Exception:
+        pass
     sys.stdout.flush()
 
 

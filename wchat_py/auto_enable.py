@@ -103,9 +103,12 @@ def enable(tier):
         pass
     alog = os.environ.get("AUTO_AUDIT_LOG") or os.path.join(ct, "auto", "audit.log")
     os.environ["AUTO_AUDIT_LOG"] = alog
+    os.environ["WCHAT_AUTO_BACKUP_DIR"] = bdir
+    os.environ["WCHAT_AUTO_BACKUPS"] = "0"
     audit.record(alog, "session", verdict="started", tier=tier, work_root=root,
                  backup=bdir, rollback=_git_rev())
-    w("\033[2m⚡ auto 已开启 审计: %s · 备份: %s · 急停: Ctrl+C 两次\033[0m\n\n" % (alog, bdir))
+    w("\033[1;31m  ⚡ auto 已开启\033[0m \033[2m审计: %s · 备份: %s · 急停: Ctrl+C 两次\033[0m\n\n"
+      % (alog, bdir))
     os.environ["WCHAT_AUTO_APPROVALS"] = "0"
     w(marker_text() + "\n")
     os.environ["WCHAT_AUTO_MARKER_ALREADY"] = "1"
