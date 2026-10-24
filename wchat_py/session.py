@@ -229,9 +229,25 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     """
     msgs = messages_list(session.messages_json)
     if session.input_images:
+        from wchat_py import img as _img
+        try:
+            _maxside = int(os.environ.get("IMG_INLINE_MAX_SIDE") or 2048)
+        except ValueError:
+            _maxside = 2048
         _parts = [{"type": "text", "text": content}]
+        _shrunk = 0
+        _n = len(session.input_images)
         for _p in session.input_images:
-            _parts.append({"type": "image_url", "image_url": {"url": _data_url(_p)}})
+            _url, _mime, _orig, _actual = _img.load_data_url(_p, _maxside)
+            if _orig and _actual and _actual < _orig:
+                sys.stdout.write(" ⤷ %s 已缩到 %dpx(精度随之下调)\n"
+                                 % (os.path.basename(_p), _actual))
+                _shrunk += 1
+            _parts.append({"type": "image_url", "image_url": {"url": _url}})
+        sys.stdout.write(" 🖼 %d/%d 张原图已随本轮消息交给主模型"
+                         "(其中 %d 张已缩过,逐张档位见上面各行的说明)\n"
+                         % (_n, _n, _shrunk))
+        sys.stdout.flush()
         msgs.append({"role": "user", "content": _parts})
         session.input_images = []
     else:

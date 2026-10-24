@@ -20,6 +20,67 @@ import sys
 from . import _contract
 
 
+def load_data_url(path, max_side=2048):
+    """读图片为 data URL,超过 max_side 先缩(Pillow 优先, 否则 macOS sips)。
+    返回 (url, mime, orig_side, actual_side)。失败返回 (path, "", 0, 0)。"""
+    import base64
+    import mimetypes
+    import os
+    import subprocess
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    orig = actual = 0
+    data = None
+    try:
+        from PIL import Image
+        im = Image.open(path)
+        orig = max(im.size)
+        if max_side and orig > max_side:
+            im.thumbnail((max_side, max_side))
+            import io
+            buf = io.BytesIO()
+            im.convert("RGB").save(buf, format="PNG")
+            data = buf.getvalue()
+            mime = "image/png"
+            actual = max_side
+        else:
+            actual = orig
+    except Exception:
+        data = None
+    if data is None:
+        try:
+            import shutil
+            if max_side and shutil.which("sips"):
+                g = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", path],
+                                   capture_output=True, text=True)
+                nums = [int(x.split(":")[1]) for x in g.stdout.splitlines()
+                        if "pixel" in x and x.split(":")[1].strip().isdigit()]
+                if nums:
+                    orig = max(nums)
+                    actual = orig
+                if nums and max(nums) > max_side:
+                    import tempfile
+                    tmp = tempfile.mktemp(suffix=".png")
+                    r = subprocess.run(["sips", "-Z", str(max_side), path, "--out", tmp],
+                                       capture_output=True, text=True)
+                    if r.returncode == 0 and os.path.isfile(tmp):
+                        with open(tmp, "rb") as f:
+                            data = f.read()
+                        os.unlink(tmp)
+                        mime = "image/png"
+                        actual = max_side
+        except Exception:
+            data = None
+    if data is None:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            actual = actual or orig
+        except OSError:
+            return (path, "", 0, 0)
+    return ("data:%s;base64,%s" % (mime, base64.b64encode(data).decode()),
+            mime, orig, actual)
+
+
 def _not_then_support(lc: str) -> bool:
     """bash 的 `*"not"*"support"*`:存在 "not" 后面还有 "support"(顺序敏感)。"""
     return re.search(r"not.*support", lc, re.S) is not None
