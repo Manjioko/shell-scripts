@@ -8,7 +8,7 @@
 # 没有这个手法,我会去"修"一个不存在的判据 bug,顺手把真的那次误报写进提交说明。
 #
 # 用法:
-#   tests/isolate_section.sh T26 [被测源码,默认 wchat.sh]
+#   tests/isolate_section.sh T26 [被测源码,默认 wchat_ref]
 #   退出码:0 = 这段独立跑全绿;1 = 这段自己有问题(或它的依赖没进装载器)
 #
 # 读结果的正确姿势:
@@ -19,7 +19,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1          # 仓库根:表里所有相对路径都以它为基准
 
 TAG="${1:-}"
-SRC_ARG="${2:-wchat.sh}"
+SRC_ARG="${2:-wchat_ref}"
 [[ -n "$TAG" ]] || { echo "用法: $0 <段标签,如 T26> [被测源码]"; exit 2; }
 TABLE="test_hardwall.sh"
 [[ -r "$TABLE" ]] || { echo "找不到 $TABLE"; exit 2; }
@@ -66,7 +66,7 @@ OUT="$(bash "$TMP" "$SRC_ARG" 2>&1)"; rc=$?
 printf '%s\n' "$OUT"
 rc=$?
 # 三档结论。第二档是今天挣出来的:我把副本改放进 $TMPDIR 后,装载器按 dirname $0 去找
-# wchat.sh 找不到,段里一条判定都没跑出来 —— 而装置当时说的是"本段单独跑就有问题"。
+# wchat_ref 找不到,段里一条判定都没跑出来 —— 而装置当时说的是"本段单独跑就有问题"。
 # "跑不出汇总行"是**不可判定**,不是红。把工具自己的故障报成被测对象的结论,正是本文件
 # 开头警告的那件事,所以这一档必须由代码保证而不是靠我记得。
 if grep -qF "ISO $TAG " <<< "$OUT"; then

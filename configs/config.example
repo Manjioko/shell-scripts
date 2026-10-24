@@ -1,0 +1,10 @@
+# 模型切换用 ~/.ct/ctmodel(终端敲 `ctmodel qwen` / `ctmodel deepseek`)
+# 行尾的 "@model <名字>" 标记是给脚本看的:哪行生效、哪行注释由脚本维护,不要手改;
+# 想加第四家(如 mimo)= 照抄一组赋值行并打上 "@model mimo" 标记,脚本无需改动。
+# (本段说明刻意不写成 "# @model" 那种形式 —— 那会被脚本当成一条真标记。)
+
+BASE_URL="https://api.example.com/v1/chat/completions" # @model example
+WCHAT_API_KEY="<在此填入你的 API key>" # @model example
+FLASH_MODEL="example-flash" # @model example
+PRO_MODEL="example-pro" # @model example
+

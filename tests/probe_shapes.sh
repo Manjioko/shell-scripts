@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 命令形状试金石:把一批形状喂给判据,只看端到端结论,不执行任何一条。
 #   用法:tests/probe_shapes.sh [来源] [形状文件]
-#         来源 = 工作树 wchat.sh(默认)/ 任意文件路径 / git 参数(如 HEAD^:wchat.sh)
+#         来源 = 工作树 wchat_ref(默认)/ 任意文件路径 / git 参数(如 HEAD^:wchat_ref)
 #         形状文件默认 tests/probe_shapes.txt,每行 `RULE|命令`(RULE 留空 = 只要现象)
 #
 # 为什么要有它:很多形状**上不了命令行** —— 含 dotfile + `>` 的串会被"当前进程已加载的那版

@@ -45,7 +45,10 @@ stat_num() {   # $1=GNU 格式  $2=BSD 格式  $3=文件
 # "python 环境不齐不会把功能打死"(与既有 input_helper/render_helper 的兜底同取向)。
 # ⚠ 位置必须在**任何迁移函数的首次调用之前**:inject_skills 在脚本源化时(顶层)
 #   就会经 scan_skills 调到 clip_line_width,定义晚于该调用点就是 command not found。
-PY_HELPER_DIR="${WCHAT_PY_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+_pd=$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)
+# 本文件作为测试 oracle 放在 tests/ 下:组件目录在上一级
+[[ -d "$_pd/wchat_py" ]] || _pd=$(dirname "$_pd")
+PY_HELPER_DIR="${WCHAT_PY_DIR:-$_pd}"
 WCHAT_PY="${WCHAT_PY:-1}"
 if ! command -v python3 >/dev/null 2>&1 || [[ ! -f "$PY_HELPER_DIR/wchat_py/_run.py" ]]; then
     WCHAT_PY=0
@@ -113,7 +116,7 @@ fi
 BASE_URL="${BASE_URL:-}"
 # api key 读取顺序:环境变量 WCHAT_API_KEY → ~/.ct/config(0600)。
 # 刻意**不再把明文 key 写回本脚本**:本目录是 git 仓库(且已 push 到 github),
-# auto 模式下模型有无次数的 cat wchat.sh + curl 机会,"脚本里没有 key"是唯一
+# auto 模式下模型有无次数的 cat wchat_ref + curl 机会,"脚本里没有 key"是唯一
 # 能让"读脚本+外发"这条链路失效的做法。旧 key 已进 git 历史与 ~/.ct/history,
 # 建议到服务商后台轮换(轮换后只改 ~/.ct/config 即可)。
 API_KEY="${WCHAT_API_KEY:-${API_KEY:-}}"
@@ -363,7 +366,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     # 实测对照(同一 pty):循环内 exec → NOT-TTY;循环外 exec → TTY。
     # exec 的前提是 "$0" 真是一份 bash 能读下去的脚本。source 进来的调用里 $0 是**调用方**
     # 的 $0,不是本文件路径,于是有两种坏值(都已实测,不是推测):
-    #   `bash -c 'source ./wchat.sh; …'`(没给 name)→ $0 就是 $BASH 本身 → 让 bash5 去
+    #   `bash -c 'source ./wchat_ref; …'`(没给 name)→ $0 就是 $BASH 本身 → 让 bash5 去
     #       exec 一个 Mach-O 二进制,现象 "/bin/bash: /bin/bash: cannot execute binary file";
     #   `bash -c '…' _ args`(给了占位 name)→ $0="_" → 现象 "bash5: _: No such file…"。
     # 两种都到不了判据层,而是把整段装载**静默变成空输出**:上一轮就是拿这种测法跑 16 条
@@ -375,7 +378,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
             printf '⛔ 需要 bash 5.x,但无法安全切换:调用方的 $0=%s 不是脚本文件' "$0" >&2
             printf '(re-exec 会 exec 到垃圾目标,把整段装载变成静默空输出)\n' >&2
             printf '   正确姿势:用 bash 5 直接跑那个脚本 —— %s <你的脚本.sh>' "$wchat_reexec_bash" >&2
-            printf '   或在已经是 bash 5 的 shell 里 source ./wchat.sh;别用 bash -c '"'"'source …'"'"' 装载本脚本\n' >&2
+            printf '   或在已经是 bash 5 的 shell 里 source ./wchat_ref;别用 bash -c '"'"'source …'"'"' 装载本脚本\n' >&2
             printf '   显式指路:WCHAT_BASH=/path/to/bash5\n' >&2
             exit 1
         fi
@@ -4528,7 +4531,7 @@ hd_mask_msg() {
 # --include/--exclude/--glob 的取值,永远只被当正则/通配文本使用,不会被读。
 # 真实流量里 H6 的误拦几乎全属这一类(在源码里检索 ".npmrc" / "credentials" 这个词本身),
 # 所以只放这一格,一格以外都不动:
-#   grep -n '\.npmrc' wchat.sh   → 模式位脱掉,文件位 wchat.sh 干净 → 不再误拦
+#   grep -n '\.npmrc' wchat_ref   → 模式位脱掉,文件位 wchat_ref 干净 → 不再误拦
 #   grep 'x' '.npmrc'            → 第二个引号参数是操作数,一个字不脱 → 照拦
 #   grep -f '~/.npmrc' x         → -f 的取值是"模式文件",真会被打开 → 照拦
 #   rg --pre='cat ~/.ssh/id_rsa' → --pre 不在取值白名单里 → 照拦
@@ -7671,7 +7674,7 @@ ask_ai() {
         # 长流也砍掉)。目前**未接上**,停滞时不会在 SSE_STALL_TIMEOUT 内报错。
         # 补上之前不要删这条注释(见 docs §8.5「已知缺口」)。
         # 本次尝试的请求走 **Python(官方 SDK)**,不再用 curl(见 docs §8.5)。
-        # ⚠ 凭据必须**显式**注入:API_KEY/BASE_URL 在 wchat.sh 里是普通 shell
+        # ⚠ 凭据必须**显式**注入:API_KEY/BASE_URL 在 wchat_ref 里是普通 shell
         # 变量(第 113/119 行),**从未 export**,子进程继承不到;只靠环境会让
         # SDK 报 "Missing credentials"(实测)。这也是 e2e 旧夹具假绿的根源——
         # 它直接 export WCHAT_API_KEY,把这条接线整个盖住了。

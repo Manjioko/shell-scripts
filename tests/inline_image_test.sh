@@ -12,7 +12,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 SRC=${1:-}
-[[ -n "$SRC" ]] || SRC="$(pwd)/wchat.sh"
+[[ -n "$SRC" ]] || SRC="$(pwd)/wchat_ref"
 [[ -f "$SRC" ]] || { printf '找不到被测脚本:%s\n' "$SRC"; exit 1; }
 # 与生产同解释器:片段里有 bash4+ 语法,3.2 上测出来的不是同一套行为
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
@@ -136,7 +136,7 @@ ck "gone 里无标记残留" "$(jq -r '.[0].content' <<<"$exp3" | grep -c IMGREF
 ck "新那条仍是数组带图" "$(jq -r '.[2].content[0].type' <<<"$exp3")" "image_url"
 
 echo "=== 7. 请求体契约(独立子 shell,不与上面的状态共享) ==="
-# ⚠ 重定向必须放在**子 shell 内层**:wchat.sh:980 的 EXIT trap 会 printf "\033[?25h\033[?7h"
+# ⚠ 重定向必须放在**子 shell 内层**:wchat_ref:980 的 EXIT trap 会 printf "\033[?25h\033[?7h"
 #   恢复光标/终端。在子 shell 里 source 它 = 把这条 trap 也装上,子 shell 退出时才输出,
 #   于是"外层重定向/命令替换"会把这串转义收进请求体尾巴 → jq -e 判非法(而 jq -r 单键
 #   取值却照样成功,现象是"一半断言红一半绿",极难归因)。放内层就与请求体无关了。

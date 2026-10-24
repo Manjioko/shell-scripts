@@ -11,7 +11,7 @@
 set -uo pipefail
 cd "$(cd "$(dirname "$0")/.." && pwd)" || exit 1
 mkdir -p .scratch
-sed -n '/^auto_audit()/,/^}/p' wchat.sh > .scratch/aa.sh || exit 1
+sed -n '/^auto_audit()/,/^}/p' wchat_ref > .scratch/aa.sh || exit 1
 grep -q '^auto_audit()' .scratch/aa.sh || { echo "抽取 auto_audit 失败(函数名或花括号形状变了)"; exit 1; }
 
 AUTO_DIR=.scratch/aud_probe

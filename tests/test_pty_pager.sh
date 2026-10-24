@@ -1,5 +1,5 @@
 #!/bin/bash
-# 工具窗口「关分页 env」回归测试 —— 覆盖 wchat.sh run_with_window 的 pty 分页器挂死修复。
+# 工具窗口「关分页 env」回归测试 —— 覆盖 wchat_ref run_with_window 的 pty 分页器挂死修复。
 #   背景:子命令在 pty 里 isatty(stdout)=true → git 自动起 less;模型没有"发按键"的
 #   通道,只能等 CMD_TIMEOUT(120s) 到点,期间只拿到首屏输出。wrapped_cmd 必须注入
 #   GIT_PAGER=cat PAGER=cat GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0。
@@ -13,7 +13,7 @@
 # 用法: bash test_pty_pager.sh [-v]
 set -u
 cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源与 *_helper.py 都在根目录
-TARGET=./wchat.sh
+TARGET=./wchat_ref
 [[ -f "$TARGET" ]] || { echo "找不到 $TARGET"; exit 1; }
 command -v git >/dev/null 2>&1 || { echo "缺少 git"; exit 1; }
 
@@ -24,7 +24,7 @@ ok() { pass=$((pass + 1)); [[ $VERBOSE -eq 1 ]] && printf '  \033[32mPASS\033[0m
 ng() { fail=$((fail + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$1"; [[ -n "${2:-}" ]] && printf '       %s\n' "$2"; return 0; }
 sk() { skip=$((skip + 1)); printf '  \033[33mSKIP\033[0m %s\n' "$1"; return 0; }
 
-bash -n "$TARGET" 2>/dev/null && ok "wchat.sh 语法检查" || ng "wchat.sh 语法检查" "bash -n 报错"
+bash -n "$TARGET" 2>/dev/null && ok "wchat_ref 语法检查" || ng "wchat_ref 语法检查" "bash -n 报错"
 
 PAGER_ENV='GIT_PAGER=cat PAGER=cat GIT_EDITOR=true GIT_SEQUENCE_EDITOR=true GIT_TERMINAL_PROMPT=0'
 

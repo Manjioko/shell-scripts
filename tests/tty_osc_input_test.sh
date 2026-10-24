@@ -3,7 +3,7 @@
 #
 # 用法: bash tests/tty_osc_input_test.sh
 #       bash tests/tty_osc_input_test.sh --source .scratch/input_helper.old.py   # 负对照
-#       REAL=… HELPER=… 可分别指定被测 wchat.sh / input_helper.py
+#       REAL=… HELPER=… 可分别指定被测 wchat_ref / input_helper.py
 #
 # 现象(用户实报,截图为准):`wchat -dp -l` 选完编号后,输入框里出现
 #   ]11;rgb:2828/2c2c/3434]11;rgb:2828/2c2c/3434…
@@ -40,7 +40,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
 fi
 export LC_ALL=C
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-REAL=${REAL:-$DIR/wchat.sh}
+REAL=${REAL:-$DIR/wchat_ref}
 HELP=${HELP:-$DIR/input_helper.py}
 if [[ "${1:-}" == "--source" && -n "${2:-}" ]]; then HELP="$2"; fi
 [[ -f "$HELP" ]] || { echo "❌ 找不到被测输入助手:$HELP"; exit 1; }
@@ -192,7 +192,7 @@ if [[ -f "$REAL" ]]; then
         _before=$(sed -n "$((_launch - 6)),${_launch}p" "$REAL")
         hasnt "开框前不做 tty_drain_responses(会吞预输入)" "$_before" "tty_drain_responses"
     else
-        bad "定位输入助手启动行" "wchat.sh 里找不到 python3 \"\$PTK_HELPER\""
+        bad "定位输入助手启动行" "wchat_ref 里找不到 python3 \"\$PTK_HELPER\""
     fi
     # 命令窗口退出时那一次 drain 必须还在(它清的是窗口期内已到达的应答)
     has "命令窗口收尾仍排一次队" "$(sed -n '/窗口模式运行命令/,/^}/p' "$REAL")" "tty_drain_responses"

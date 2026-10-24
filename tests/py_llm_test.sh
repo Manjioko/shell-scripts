@@ -3,7 +3,7 @@
 #
 # 不联网(桩网关在 127.0.0.1)。openai 须已装;未装时**明示跳过**(不假绿)。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 # 依赖可能装在 user-site(随真实 HOME);py_prelude 覆写了 HOME → 显式补进 PYTHONPATH
 USERSITE="$(HOME="${REAL_HOME:-$HOME}" python3 -c 'import site;print(site.getusersitepackages())' 2>/dev/null)"
@@ -111,11 +111,11 @@ ck "llm.py 用官方 SDK"         "$(grep -c 'from openai import OpenAI' "$RLDIR
 ck "requirements 登记 openai"  "$(grep -c '^openai' "$RLDIR/requirements.txt")" "1"
 # W12-4c 收口锁:ask_ai 的流式请求必须走 Python(唯一活实现),旧 curl 主请求块必须已删。
 # 只钉"调用点存在/旧路径不存在"这类结构事实;行为由 auto_test.sh 的 E5/E6(续发不被吞)覆盖。
-ck "ask_ai 主请求走 py_run llm stream" "$(grep -c 'py_run llm stream' "$RLDIR/wchat.sh")" "1"
-ck "ask_ai 旧 SSE curl 已删"           "$(grep -c -- '-sSN --connect-timeout' "$RLDIR/wchat.sh")" "0"
+ck "ask_ai 主请求走 py_run llm stream" "$(grep -c 'py_run llm stream' "$RLDIR/wchat_ref")" "1"
+ck "ask_ai 旧 SSE curl 已删"           "$(grep -c -- '-sSN --connect-timeout' "$RLDIR/wchat_ref")" "0"
 # 凭据接线锁:bash 侧 API_KEY 是普通 shell 变量(从不 export),子进程继承不到 ⇒
 # 启动行必须**显式**注入。删掉这行会立刻在生产路报 SDK "Missing credentials"。
-ck "ask_ai 显式注入凭据"               "$(grep -c 'WCHAT_API_KEY=\"\$API_KEY\"' "$RLDIR/wchat.sh")" "1"
+ck "ask_ai 显式注入凭据"               "$(grep -c 'WCHAT_API_KEY=\"\$API_KEY\"' "$RLDIR/wchat_ref")" "1"
 # URL 形状锁:本项目 BASE_URL 是**完整端点**(脚本注释里列的三家地址),curl 直接 POST 它;
 # 而 SDK 的 base_url 是**根**、会再拼 /chat/completions ⇒ 透传必得 404(用户实跑复现)。
 _NB='from wchat_py.llm import _normalize_base_url as n; import sys; print(n(sys.argv[1]))'

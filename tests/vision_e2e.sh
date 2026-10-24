@@ -5,12 +5,12 @@
 # 指定 / 换 mimo 端点(探针,验证"换家要不要改代码")/ 手工关闭(应零请求)。
 # 主循环在脚本顶层,无法 source 整个脚本 → 按函数抽取沙箱,与自测同一套提取逻辑。
 #
-# 2026-09-14 同步:detect_vision_provider 与 mimo/openai「形状家族」已从 wchat.sh 收掉,
+# 2026-09-14 同步:detect_vision_provider 与 mimo/openai「形状家族」已从 wchat_ref 收掉,
 # IMG_PROVIDER 现在只是 auto|none 开关(两家的图片请求形状实测完全一致),抽取也从按行号
 # 改成按模式(原 `sed -n '1,25p'` 会随配置集中区搬迁静默漏抽 flash_model)。
 # ⚠ 本脚本会**真实发请求并扣费**,只在手动排查时跑;日常回归用 vision_layer_test.sh。
 export LC_ALL=C
-# 与生产同解释器:wchat.sh 会在 bash<5 时 re-exec 到 bash 5+,而沙箱里的 describe_images
+# 与生产同解释器:wchat_ref 会在 bash<5 时 re-exec 到 bash 5+,而沙箱里的 describe_images
 # 带着 `case "${err,,}"`(bash4+ 语法)。在 macOS 的 /bin/bash 3.2 上跑这份 e2e,降级分支会
 # bad substitution、临时目录不清 —— 测出来的行为和线上不是一回事,所以这里镜像同一个判据。
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
@@ -23,7 +23,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     echo "❌ 需要 bash 5+(与生产一致)。brew install bash,或 WCHAT_BASH=/path/to/bash5 $0" >&2
     exit 1
 fi
-REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat.sh"}
+REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat_ref"}
 W=$(mktemp -d)
 
 {
@@ -53,7 +53,7 @@ source "$W/sandbox.sh"
 # 迁移通道:vision_build_body/parse_resp 已收口(旧 bash jq 回退已删)→ 必须走 Python 生产路。
 PY_HELPER_DIR="$(dirname "$REAL")"; WCHAT_PY=1
 for v in BASE_URL flash_model vision_model IMG_PROVIDER IMG_DESC_PROMPT; do
-    [[ -n "${!v}" ]] || { echo "❌ 沙箱抽取不完整:$v 为空 —— wchat.sh 排版漂了,先修抽取"; exit 1; }
+    [[ -n "${!v}" ]] || { echo "❌ 沙箱抽取不完整:$v 为空 —— wchat_ref 排版漂了,先修抽取"; exit 1; }
 done
 
 # 密钥与主程序同源:环境变量 WCHAT_API_KEY 优先,其次 ~/.ct/config(只 source,绝不打印)
@@ -90,7 +90,7 @@ run "默认端点(单形状)"
 )
 
 # 3) 换到 mimo 端点:网关/模型全换,链路其它部分不动。
-#    注意这段是**探针**,不代表主程序支持跨厂商挂图(wchat.sh「图片转述」节明确写了不做:
+#    注意这段是**探针**,不代表主程序支持跨厂商挂图(wchat_ref「图片转述」节明确写了不做:
 #    跨厂商要独立 URL + 独立密钥,会把单一 API_KEY 扩成密钥矩阵)。
 #    真正需要保留的是鉴权头 —— describe_images 里那条 `-H "api-key: $API_KEY"` 就是
 #    小米 MiMo LLM 要求的兼容头,qwen 侧忽略它。删了这段就会 401。

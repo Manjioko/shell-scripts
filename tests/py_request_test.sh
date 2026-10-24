@@ -4,7 +4,7 @@
 # jq 版 make_request_body 是**参考实现**(curl 时代的生产路径,已被真实流量验过)。
 #
 # 三个坑(全踩过,全是"静默空输出/假红"形状,写在这里免得下次重踩):
-#  1) 参考侧不能 `bash -c 'source …'`:wchat.sh 的 bash5 兜底**按 $0 判定"调用方是不是
+#  1) 参考侧不能 `bash -c 'source …'`:wchat_ref 的 bash5 兜底**按 $0 判定"调用方是不是
 #     脚本文件"**,不是就拒绝装载并**一字节输出都没有**(rc=0) —— 本装置被它骗了两次。
 #     正解:运行时生成一个**真正的脚本文件**再执行它。
 #  2) 那个脚本要用**真的 bash 5** 跑:`command -v bash` 在本机是 /bin/bash 3.2,指错目标
@@ -15,7 +15,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RLDIR="$(cd "$HERE/.." && pwd)"
-SRC="$RLDIR/wchat.sh"
+SRC="$RLDIR/wchat_ref"
 PY=python3
 B5="${WCHAT_BASH:-${BASH:-bash}}"
 [[ "${BASH_VERSINFO[0]:-0}" -ge 5 ]] || B5="/opt/homebrew/bin/bash"   # 见坑 2
@@ -64,10 +64,10 @@ check "带图/disabled"   "m1" "disabled" "$IMG" "none"
 check "带图/enabled"    "m1" "enabled"  "$IMG" "high"
 
 # ── 图片引用展开 parity（六族）：python 的 expand_refs 对照 jq 的 $_JQ_EXPAND_REFS ──
-# 参考片段从 wchat.sh 里取（lib-only 装载后打印变量）。注意两点坑：
+# 参考片段从 wchat_ref 里取（lib-only 装载后打印变量）。注意两点坑：
 #   1) 必须用**脚本文件**跑 bash5（守卫按 $0 判"调用方是不是脚本文件"）；
 #   2) 取回的片段尾部会带**终端转义**（退出时恢复光标/自动换行），不剥掉 jq 会报
-#      INVALID_CHARACTER —— 这个坑本轮已踩三次，凡"用 $( ) 从 wchat.sh 取文本"都要剥。
+#      INVALID_CHARACTER —— 这个坑本轮已踩三次，凡"用 $( ) 从 wchat_ref 取文本"都要剥。
 cat > "$W/frag.sh" <<'REF'
 _WCHAT_LIB_ONLY=1 API_KEY=sk-stub
 . "$1" < /dev/null > /dev/null

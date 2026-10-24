@@ -8,7 +8,7 @@
 export LC_ALL=C
 # 默认指向仓库里的被测脚本;搬目录不用改(主套件已随 ~/bin 纳管,~/.cache/wchat-tests
 # 现在是指向 ~/bin/tests 的符号链接,老路径与老命令都照旧可用)
-REAL=${REAL:-"$(cd "$(dirname "$0")/.." && pwd -P)"/wchat.sh}   # 必须 pwd -P:从 ~/.cache/wchat-tests(符号链接)进来时,逻辑 pwd 会把 .. 算成 ~/.cache,REAL 就指到不存在的地方
+REAL=${REAL:-"$(cd "$(dirname "$0")/.." && pwd -P)"/wchat_ref}   # 必须 pwd -P:从 ~/.cache/wchat-tests(符号链接)进来时,逻辑 pwd 会把 .. 算成 ~/.cache,REAL 就指到不存在的地方
 STUB_DIR=$(cd "$(dirname "$0")" && pwd)
 BASH5=$(command -v /opt/homebrew/bin/bash || command -v bash)
 # 让被测依赖(openai 常装在 user-site=$HOME/...)在测试**覆写 HOME 之后**仍可 import:
@@ -70,7 +70,7 @@ for _hn in $(grep -oE '^hd_[a-z0-9_]*\(\) \{' "$REAL" | sed 's/() {//'); do
     grep -q "^${_hn}() {" "$W/sandbox.sh" 2>/dev/null || \
         awk -v name="$_hn" 'index($0, name "() {")==1 {s=1} s {print} s && $0=="}" {exit}' "$REAL" >> "$W/sandbox.sh"
 done
-# §12-A(4): unit 沙箱里的 5 个 tool_* 也从冻结快照取(不依赖 live wchat.sh, 便于桩化收口)。
+# §12-A(4): unit 沙箱里的 5 个 tool_* 也从冻结快照取(不依赖 live wchat_ref, 便于桩化收口)。
 # 追加在区域复制之后 => bash 后定义覆盖先定义, 用快照版盖掉随区域抄进来的 live 版。
 _TOOL_ORACLE="${REAL%/*}/tests/fixtures/wchat_tools_oracle.sh"
 _HW_ORACLE="${REAL%/*}/tests/fixtures/wchat_hardwall_oracle.sh"
@@ -123,7 +123,7 @@ unset _fn _at_miss
 # 兜住,它的取值本身另有断言(见 policy 自检那条)。
 # shellcheck disable=SC1090
 source "$W/sandbox.sh" || { echo "沙箱 source 失败"; return 1; }
-# Python 迁移通道接线:sandbox.sh 是 wchat.sh 的**副本**,默认 PY_HELPER_DIR 会落在 $W
+# Python 迁移通道接线:sandbox.sh 是 wchat_ref 的**副本**,默认 PY_HELPER_DIR 会落在 $W
 # (副本目录),找不到 wchat_py/_run.py → 守卫把 WCHAT_PY 清零 → save_history 走"组件
 # 不可用"分支(旧 bash jq 回退已在收口时删除)。显式指回真实仓库根,并补上 pack 需要的
 # 注入标记(它们定义在区域外,没被抽进来)。
@@ -198,7 +198,7 @@ auto_mode=""
 # 会话历史/密钥配置在 shell 与文件工具两处的口径必须一致,否则"文件工具被拒 →
 # 换 shell cat 同一文件"就是现成绕过路径,所以两类判据都在上面表里各钉一条。
 NP=(
- 'ls -la' 'cat wchat.sh | head -50' 'grep -rn TODO . | head' 'git status --short'
+ 'ls -la' 'cat wchat_ref | head -50' 'grep -rn TODO . | head' 'git status --short'
  'git add -A && git commit -m x' 'git push' 'git push origin feature/x' 'npm test' 'npm ls lodash'
  'python3 -m http.server 8000' 'rm -rf ./node_modules' 'rm -rf sub/a.txt'
  'mkdir -p ./out && echo hi > ./out/x.txt' 'echo hi > /tmp/ct_test_out.log'
@@ -381,7 +381,7 @@ for pat in 'MAX_TOOL_ROUNDS:-25' 'timeout_hit=1' 'confirm_cmd' 'auto_final_judge
            '"reason"' '"purpose"' 'CMD_TIMEOUT' 'auto_estop=1' 'hd_approved' 'content=""' \
            'WCHAT_AUTO_ASSUME_YES' 'kill -TERM -- "-$win_pgid"'; do
     # 同时查源码与工具规格文件:W12-5 把工具 schema 迁到 tools_spec.json 后,
-    # '"reason"'/'"purpose"' 这类**schema 片段**不在 wchat.sh 里了 —— 但它们仍必须"存在",
+    # '"reason"'/'"purpose"' 这类**schema 片段**不在 wchat_ref 里了 —— 但它们仍必须"存在",
     # 所以查两处而不是删断言(删了就没人守'工具必须声明 reason/purpose'了)。
     { grep -qF "$pat" "$REAL" || grep -qF "$pat" "$(dirname "$REAL")/tests/fixtures/wchat_tools_oracle.sh" 2>/dev/null || grep -qF "$pat" "$(dirname "$REAL")/wchat_py/tools_spec.json" 2>/dev/null; } \
         && echo "  ✓ 存在 $pat" || { echo "  ✗ 缺失 $pat"; fail=$((fail+1)); }
@@ -470,7 +470,7 @@ run_case() {
     done
     # WORK_ROOT 由 wchat 按 pwd -P 锁定,所以要 cd 进 $BASE/proj 再跑
     # BASE_URL 用**生产形状**(完整端点,含 /chat/completions),不是根 —— 这是本项目
-    # 的历史约定(见 wchat.sh「切换模型需要改这里」列的三家地址)。夹具若图省事传根,
+    # 的历史约定(见 wchat_ref「切换模型需要改这里」列的三家地址)。夹具若图省事传根,
     # 就会掩盖"SDK 的 base_url 是根、会再拼一层"这整类接线错(2026-xx 已因此连挂两次:
     # 凭据没继承、URL 拼双 404)。curl 调用与 SDK 调用都必须落在同一路径上。
     ( cd "$BASE/proj" && BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \

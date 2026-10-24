@@ -10,7 +10,7 @@
 #      绝不静默成功。
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
-SRC="${1:-wchat.sh}"
+SRC="${1:-wchat_ref}"
 [[ -f "$SRC" ]] || { echo "找不到 $SRC"; exit 2; }
 SRC=$(cd "$(dirname "$SRC")" && pwd -P)/$(basename "$SRC")
 BASHX="${BASH:-bash}"

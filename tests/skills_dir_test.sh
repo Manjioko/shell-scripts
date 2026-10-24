@@ -3,7 +3,7 @@
 # / 退回默认目录 / 外置标记 / 链接守卫配对 / -skill 的 name 清洗 / 文档与行号范围回归。
 #
 # 用法: bash tests/skills_dir_test.sh
-#       bash tests/skills_dir_test.sh --source .orig/wchat.sh   # 打基线对照(负对照用)
+#       bash tests/skills_dir_test.sh --source .orig/wchat_ref   # 打基线对照(负对照用)
 #
 # 为什么单独一个闸门:技能目录的内容会进 **system prompt**(name+description 由
 # scan_skills 注入,正文由 read_skill 整篇读入)。这条链一旦配错,现象不是"报错",
@@ -23,10 +23,10 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
 fi
 export LC_ALL=C
 # 被测源文件默认取**本仓库那份**(脚本在 tests/ 下,根目录是其父目录)。
-# 原先写死 /Users/jwan/bin/wchat.sh:那个路径只在这台机器的原布局下成立,别人
+# 原先写死 /Users/jwan/bin/wchat_ref:那个路径只在这台机器的原布局下成立,别人
 # clone 下来副本就跑不动 —— 与 tty_e2e_check.sh 同一句注释所记的"换机即挂"同源。
 # 仍保留 REAL 覆盖点供负对照/异机使用。
-REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat.sh"}
+REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat_ref"}
 # 负对照开关:--source 指一份未打补丁的实现,除"实现已含 X"之外的行为断言会红
 if [[ "${1:-}" == "--source" && -n "${2:-}" ]]; then REAL="$2"; fi
 [[ -f "$REAL" ]] || { echo "❌ 找不到被测源文件:$REAL"; exit 1; }

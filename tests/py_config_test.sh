@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # W12-1 配置打包闸门:bash 侧 `py_cfg_dump` 导出的 JSON 必须与 schema 一致、值透传正确。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 RLDIR="$(dirname "$REAL")"
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
@@ -39,7 +39,7 @@ ck "空数组编码为 []"          "$(cfg 'hd_cred_subdirs=()' | jq -c '.hd_cre
 echo "=== 负例 / 结构锁 ==="
 ck "缺键 → validate rc=1"     "$(jq 'del(.WORK_ROOT)' "$W/cfg.json" | python3 "$RLDIR/wchat_py/_run.py" config validate >/dev/null 2>&1; echo $?)" "1"
 ck "多键 → validate rc=1"     "$(jq '.zzz="x"' "$W/cfg.json" | python3 "$RLDIR/wchat_py/_run.py" config validate >/dev/null 2>&1; echo $?)" "1"
-# schema 与 wchat.sh 实际的 hd_re_* 顶层赋值必须一一对应(新增正则忘了登记 = 假绿)
+# schema 与 wchat_ref 实际的 hd_re_* 顶层赋值必须一一对应(新增正则忘了登记 = 假绿)
 ck "hd_re_* schema 与脚本一致" "$(pkeys keys scalar | grep '^hd_re_' | sort | tr '\n' ' ')" \
                               "$(grep -oE '^hd_re_[a-z0-9_]+=' "$SRC" | sed 's/=$//' | sort | tr '\n' ' ')"
 ck "py_cfg_dump 定义 1 处"    "$(grep -c '^py_cfg_dump() {' "$SRC")" "1"

@@ -4,7 +4,7 @@
 # 收口(方案铁律 3)后 `compact_due` / `compact_apply` 已是**唯一活实现**。
 # (`summary_pin_count` 未收口——它与 `$_JQ_CONTENT_TEXT` 片段强耦合,另有压缩探针守着。)
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
 

@@ -9,7 +9,7 @@
 set -uo pipefail
 # 支持传入被测来源(与 test_hardwall.sh 同惯例):变异装置要靠它把断言跑到变异体上
 SRC=${1:-}
-[[ -n "$SRC" ]] || SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wchat.sh"
+[[ -n "$SRC" ]] || SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wchat_ref"
 [[ -f "$SRC" ]] || { printf '找不到被测脚本:%s\n' "$SRC"; exit 1; }
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/cpp.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
 

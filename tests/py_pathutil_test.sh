@@ -5,7 +5,7 @@
 # (旧 bash 回退已删)。本闸门钉:语义锚点 + 函数体内结构锁 + 不可用降级。
 # (parity 期已由本文件的上一形态证明 py 与 bash 逐向量一致,并经全表 569 向量验证。)
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 R="$W/root"; H="$W/home"
 mkdir -p "$R/d1/d2" "$H" "$W/outside"

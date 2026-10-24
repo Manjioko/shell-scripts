@@ -26,7 +26,7 @@ stream_buf=("甲行" "乙行" "丙行"); stream_line_buf="残行"; stream_box_pa
 stream_buf=(); stream_line_buf="只有残行"; stream_box_paint; printf '\036'
 stream_buf=("x"); stream_line_buf=""; stream_box_paint; printf '\036'
 REF
-/opt/homebrew/bin/bash "$W/ref.sh" "$RLDIR/wchat.sh" 2>/dev/null > "$W/b.out"
+/opt/homebrew/bin/bash "$W/ref.sh" "$RLDIR/wchat_ref" 2>/dev/null > "$W/b.out"
 
 python3 - > "$W/p.out" <<'PY'
 import sys

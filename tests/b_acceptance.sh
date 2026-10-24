@@ -2,7 +2,7 @@
 # B 阶段验收脚本（对应 docs/migration-to-python-B.md §3 的 7 条）。
 #
 # 定位：这**不是**"跑一下看看绿不绿"的脚本，而是**进度表 + 完成判据**。
-# 它在 B 阶段初期应当是**红的**（wchat.sh 还在）——红是正确状态，不是脚本坏了。
+# 它在 B 阶段初期应当是**红的**（wchat_ref 还在）——红是正确状态，不是脚本坏了。
 # 反过来说：如果现在就跑出全绿，说明**判据是假的**，必须去查。
 #
 # 用法：
@@ -120,7 +120,7 @@ REF
 _bad=0; _n=0
 for v in "-f -st hello world" "-st" "abc" "-t" "-p" "-dp" "-f -dp 问题文本"; do
     _n=$((_n+1))
-    b=$(CT_HOME="$RLDIR/.scratch/_noct" /opt/homebrew/bin/bash "$_po" "$RLDIR/wchat.sh" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
+    b=$(CT_HOME="$RLDIR/.scratch/_noct" /opt/homebrew/bin/bash "$_po" "$RLDIR/wchat_ref" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
     content=""; quick_mode=0; forget_history=0; model=""; thinking=disabled
     eval "$(CT_HOME="$RLDIR/.scratch/_noct" PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
     [[ "$b" == "$content|$quick_mode|$forget_history|$model|$thinking" ]] || {
@@ -197,5 +197,5 @@ if [[ $bad -gt 0 ]]; then
     echo "提示:B 阶段初期出现红是**预期**的——本脚本是进度表,不是回归闸门。"
     exit 1
 fi
-echo "✅ B 阶段验收全部满足：可以删 wchat.sh 了。"
+echo "✅ B 阶段验收全部满足：可以删 wchat_ref 了。"
 exit 0

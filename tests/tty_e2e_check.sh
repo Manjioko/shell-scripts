@@ -3,12 +3,12 @@
 # "终端应答剥离"两个方向都没坏:
 #   A) 不漏:终端对查询的应答(光标位置、终端属性、kitty 查询…)不能变成按键流/正文;
 #   B) 不吞:真按键(方向键、Ctrl-R、Esc)必须原样到达 —— 误吞比泄漏更难查。
-# 不联网、不调模型、不改任何文件。只读 wchat.sh 里的 tty_* 函数来测。
-# 用法:  bash tty_e2e_check.sh [wchat.sh 路径]
+# 不联网、不调模型、不改任何文件。只读 wchat_ref 里的 tty_* 函数来测。
+# 用法:  bash tty_e2e_check.sh [wchat_ref 路径]
 set -uo pipefail
 
-SRC="${1:-$(cd "$(dirname "$0")/.." && pwd)/wchat.sh}"   # 默认测本仓库那份(原先写死 $HOME/bin,换机即挂)
-[[ -f "$SRC" ]] || { echo "找不到被测脚本:$SRC(用法: bash $0 /path/to/wchat.sh)"; exit 2; }
+SRC="${1:-$(cd "$(dirname "$0")/.." && pwd)/wchat_ref}"   # 默认测本仓库那份(原先写死 $HOME/bin,换机即挂)
+[[ -f "$SRC" ]] || { echo "找不到被测脚本:$SRC(用法: bash $0 /path/to/wchat_ref)"; exit 2; }
 if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     # 必须 re-exec,不能只拒绝:本机 PATH 里第一个 bash 常是 /bin/bash 3.2,而脚本
     # 用了 ${var,,}、关联数组这类 5.x 语法。判据用 BASH_VERSINFO(幂等,不会 exec 循环)。

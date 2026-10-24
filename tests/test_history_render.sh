@@ -17,15 +17,15 @@
 #      Homebrew bash 5.x),所以不做整文件一刀切,改为额外校验那个 exec 守卫仍在
 #
 # 用法:
-#   bash test_history_render.sh                  # 测当前 wchat.sh(应全绿)
+#   bash test_history_render.sh                  # 测当前 wchat_ref(应全绿)
 #   # 负对照(证明测试真能捕获该 bug):把修复前的版本抽出来再跑,期望 FAIL
-#   mkdir -p .orig && git show HEAD:wchat.sh > .orig/wchat.sh \
+#   mkdir -p .orig && git show HEAD:wchat_ref > .orig/wchat_ref \
 #     && git show HEAD:render_helper.py > .orig/render_helper.py
-#   bash test_history_render.sh .orig/wchat.sh
+#   bash test_history_render.sh .orig/wchat_ref
 
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源与 *_helper.py 都在根目录
-SRC="${1:-$PWD/wchat.sh}"
+SRC="${1:-$PWD/wchat_ref}"
 [[ -f "$SRC" ]] || { echo "找不到被测脚本: $SRC"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
 HELP="$(dirname "$SRC_ABS")/render_helper.py"
@@ -187,7 +187,7 @@ else
 fi
 
 # ---------- T5 bash 3.2 兼容 ----------
-# 注意断言范围:wchat.sh 第 65-76 行会 exec 切到 Homebrew bash 5.x,所以脚本里
+# 注意断言范围:wchat_ref 第 65-76 行会 exec 切到 Homebrew bash 5.x,所以脚本里
 # 确有合法的 4+ 语法(如第 536 行注释说明的那处 declare -A)。整文件一刀切地禁
 # 4+ 语法是错的断言。真正必须守 3.2 的是"本测试直接 eval 出来跑"的那几个函数
 # —— 测试没有走启动器,跑在本机 3.2 上,函数里出现 4+ 语法就会当场炸。

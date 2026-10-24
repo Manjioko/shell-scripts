@@ -5,7 +5,7 @@
 # 回退已删),不再有 py-vs-bash parity。本闸门钉:
 #   ① 语义锚点(字节级);② **函数体内结构锁**;③ **不可用降级**(透传,不丢内容,不跑旧代码)。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
 

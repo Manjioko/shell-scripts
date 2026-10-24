@@ -5,7 +5,7 @@
 # 已是唯一活实现(bash 回退已删)。本闸门钉:语义锚点 + 函数体内结构锁 + 不可用降级。
 # 降级一律复刻"函数整体缺席"时的既有行为,保证**不新增放行面**。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 RLDIR="$(dirname "$REAL")"
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
@@ -24,7 +24,7 @@ ck "mask_readonly 非只读动词:原样"   "$(m mask_readonly 'rm -rf ~/x')" 'r
 ck "mask_readonly 只读动词:脱引号参数" "$(m mask_readonly "grep -n 'rm ' ~/.ct/auto/audit.log")" 'grep -n (xxx) ~/.ct/auto/audit.log'
 ck "mask_msg 只脱消息类动词"        "$(m mask_msg 'echo "rm -rf /"')" 'echo (xxxxxxxx)'
 ck "mask_msg 不脱 cat 的引号参数"    "$(m mask_msg 'cat "rm -rf /"')" 'cat "rm -rf /"'
-ck "mask_search_pat 脱模式位"        "$(m mask_search_pat 'grep -n "\.npmrc" wchat.sh')" 'grep -n (xxxxxxx" wchat.sh'
+ck "mask_search_pat 脱模式位"        "$(m mask_search_pat 'grep -n "\.npmrc" wchat_ref')" 'grep -n (xxxxxxx" wchat_ref'
 ck "mask_search_pat 不脱尾部操作数"  "$(m mask_search_pat "grep 'x' '.npmrc'")" "grep (x' '.npmrc'"
 ck "fold_lines 裸换行前补分号"       "$(m fold_lines $'echo x > /etc/hosts\nls')" $'echo x > /etc/hosts;\nls'
 ck "fold_lines 单行原样"             "$(m fold_lines 'hello world')" 'hello world'

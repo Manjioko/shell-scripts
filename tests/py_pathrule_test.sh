@@ -4,7 +4,7 @@
 # 收口后 `hard_deny_path` 已迁 `wchat_py/pathrule.py`(旧 bash 全量回退已删)。
 # 钉:语义锚点 + 结构锁 + 不可用降级(fail-closed 粗判据)。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 R="$W/root"; H="$W/home"
 mkdir -p "$R/dir" "$H/.ssh" "$H/.config" "$W/outside"

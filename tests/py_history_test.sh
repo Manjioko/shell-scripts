@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 # 本闸门钉:语义锚点 + 函数体内结构锁 + 不可用降级(明示 + 不落盘 / 原样保留)。
 # 收口后已无 bash jq 回退,故不再做 parity,改钉"降级行为本身"。
 echo "=== V history pack / drop_orphan_tools(已收口) ==="
 RLDIR="$(dirname "$REAL")"
 pyrun() { python3 "$RLDIR/wchat_py/_run.py" history "$@"; }
-# 装载子壳:PY_HELPER_DIR 默认取 wchat.sh 所在目录(=仓库根),故**不要**设 WCHAT_PY_DIR
+# 装载子壳:PY_HELPER_DIR 默认取 wchat_ref 所在目录(=仓库根),故**不要**设 WCHAT_PY_DIR
 # (设成 .../wchat_py 会让守卫找不到 wchat_py/_run.py 而把 WCHAT_PY 强制清零)。
 child() {  # <额外env> <片段>
     local extra="$1" body="$2"

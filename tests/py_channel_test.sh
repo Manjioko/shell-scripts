@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 echo "=== D 开关与回退 ==="
 mkdir -p "$W/fakepy/wchat_py"

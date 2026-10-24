@@ -7,7 +7,7 @@
 #
 # 口径(第十五轮的教训):输入不可用一律红着退出,绝不"0 条也全绿"。
 #   用法: bash tests/traffic_replay.sh [审计日志路径]
-#         可选 SRC=/path/to/wchat.sh 指定被测版本(默认 $PWD/wchat.sh)
+#         可选 SRC=/path/to/wchat_ref 指定被测版本(默认 $PWD/wchat_ref)
 # 退出码: 0 语料可用且无"放宽方向"的历史判定漂移;1 语料/装载不可用;2 出现放行漂移
 set -uo pipefail
 
@@ -17,7 +17,7 @@ cd "$(dirname "$0")/.." || exit 1
 # 成空串,基线路径变成 "/tests/traffic_baseline.txt",写入失败、整轮对账无从对照)。
 REPO_DIR="$PWD"
 LOG="${1:-$HOME/.ct/auto/audit.log}"
-SRC="${SRC:-$PWD/wchat.sh}"
+SRC="${SRC:-$PWD/wchat_ref}"
 
 fail_hard() { printf '  BAD  %s\n' "$1"; exit "${2:-1}"; }
 [[ -r "$LOG" ]] || fail_hard "语料不可读:$LOG(没有真实流量就不许报'回放全绿')" 1

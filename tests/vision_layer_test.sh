@@ -6,7 +6,7 @@
 # 说明:主循环是脚本顶层 while,无法整文件 source(会起 TUI),故按函数抽取被测单元。
 # 网络:curl 在本测试里是桩函数,任何真实请求都会立刻失败并被断言捕获。
 #
-# 解释器与生产对齐:wchat.sh 在第 130 行附近有「bash < 5 就 re-exec 到 bash5」的兜底,
+# 解释器与生产对齐:wchat_ref 在第 130 行附近有「bash < 5 就 re-exec 到 bash5」的兜底,
 # 所以生产实际跑在 bash 5+ 上。测试若停在 macOS 自带的 /bin/bash 3.2 上,就会去判那些
 # 生产里根本不会以 3.2 执行的分叉(第 6 节的 ${err,,} 判定在 3.2 下是 bad substitution,
 # 直接判错方向)。这里镜像同一个判据,保证「测试看到的实现行为 == 生产行为」。
@@ -21,7 +21,7 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     exit 1
 fi
 export LC_ALL=C
-REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat.sh"}
+REAL=${REAL:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/wchat_ref"}
 [[ -f "$REAL" ]] || { echo "❌ 找不到被测源文件:$REAL"; exit 1; }
 W=$(mktemp -d)
 

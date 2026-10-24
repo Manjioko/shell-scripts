@@ -15,9 +15,9 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 # 被测文件可由第一个参数指定(变异装置会把**副本**路径传进来)。
-# 写死 wchat.sh 的后果实测过:变异跑在副本上、断言却读工作原件,于是"未杀"是假的 ——
+# 写死 wchat_ref 的后果实测过:变异跑在副本上、断言却读工作原件,于是"未杀"是假的 ——
 # 本仓库 T23/T25 出过同一个病,闸门必须按传进来的那份跑。
-SRC="${1:-wchat.sh}"
+SRC="${1:-wchat_ref}"
 [[ -f "$SRC" ]] || { echo "找不到 $SRC"; exit 2; }
 SRC=$(cd "$(dirname "$SRC")" && pwd -P)/$(basename "$SRC")
 BASHX="${BASH:-bash}"

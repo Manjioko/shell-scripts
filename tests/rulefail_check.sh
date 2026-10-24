@@ -13,7 +13,7 @@
 # 来历与教训(留着别删,否则下一次又会踩):
 #  1) 原同名脚本用 heredoc 建在 tests/ 下、从未纳入版本控制,被清掉后无从恢复;这份是重建的,
 #     口径按当时的输出重写,条数与原 165 条不同 —— 不要拿旧数字来对。
-#  2) 曾经"source ./wchat.sh 装载":主脚本里根本没有 _WCHAT_LIB_ONLY 这个开关(HEAD 里也没有),
+#  2) 曾经"source ./wchat_ref 装载":主脚本里根本没有 _WCHAT_LIB_ONLY 这个开关(HEAD 里也没有),
 #     它能返回控制权纯属 REPL 靠 stdin EOF 退出;REPL 一走错误分支(配置目录不存在 exit 1),
 #     本脚本就在第一条断言之前消失,现象是"退出码 1、一字节输出都没有"。
 #  3) 只抽函数不装全局变量也不行:规则用的是顶层正则变量(hd_re_priv 等),没装上就是
@@ -223,17 +223,17 @@ if grep -q 'content="错误:命令被硬墙拒绝\[规则 ${hd_rule}\]:${hd_msg}
 else
     bad "回传文案没带 hd_msg" "模型看不到替代方案,只会换个写法再撞一次"
 fi
-if grep -q 'auto_audit shell "run_shell_command" "$cmd_one" "$hd_rule" auto_deny "$hd_msg"' wchat.sh; then
+if grep -q 'auto_audit shell "run_shell_command" "$cmd_one" "$hd_rule" auto_deny "$hd_msg"' wchat_ref; then
     ok "auto 档审计带 hd_msg(事后可复盘为什么拦)"
 else
     bad "auto 档审计没带 hd_msg" "只有规则号入账,复盘时看不出判据对不对"
 fi
-if grep -q 'confirm_cmd "$command" "⛔ 高危命令(规则 ${hd_rule}),任何模式都不自动执行" "$hd_msg"' wchat.sh; then
+if grep -q 'confirm_cmd "$command" "⛔ 高危命令(规则 ${hd_rule}),任何模式都不自动执行" "$hd_msg"' wchat_ref; then
     ok "非 auto 档的人工确认也带 hd_msg"
 else
     bad "人工确认没带 hd_msg" "人只看到编号,问就等于没问"
 fi
-if grep -q 'soft_${HD_SOFT}' wchat.sh; then
+if grep -q 'soft_${HD_SOFT}' wchat_ref; then
     ok "容器形状降级有审计留痕(判据放宽多少能量化)"
 else
     bad "降级没有留痕" "事后无法判断这条降级判据是不是放宽过头"
@@ -242,7 +242,7 @@ _seen_rules=$(grep -c 'hd_rule="H' "$WH")
 (( _seen_rules == 15 )) && ok "判据出口行共 15 条(H1–H11 + H13 + H14 的三个出口),与预期一致" || bad "判据分支数变了" "实到 ${_seen_rules} 条(预期 11)—— 加/删规则时请同步本表的覆盖清单与 EXPECT_TOTAL"
 
 echo "语法"
-bash -n wchat.sh && ok "主脚本语法通过" || bad "主脚本语法" "bash -n 报错"
+bash -n wchat_ref && ok "主脚本语法通过" || bad "主脚本语法" "bash -n 报错"
 bash -n tests/test_hardwall.sh && ok "硬墙回归表语法通过" || bad "硬墙回归表语法" "bash -n 报错"
 
 echo ""; echo "PASS=$pass FAIL=$fail"

@@ -1,14 +1,14 @@
 #!/bin/bash
 # 真实流量回放:把 ~/.ct/auto/audit.log 里跑过的真实命令,分别喂给两套判据,逐条对照结论。
 #   用法:tests/replay_audit.sh [旧版本来源] [新版本来源]
-#         默认 old=HEAD^:wchat.sh  new=wchat.sh(工作树)
+#         默认 old=HEAD^:wchat_ref  new=wchat_ref(工作树)
 #         来源可以是 git 参数(HEAD^ / HEAD~3 / v1.2.3),也可以是文件路径。
 # 目的:判据改动"回归表没红"只证明没自相矛盾,不证明没误伤真实命令。误伤与漏拦都只有
 #       在真实流量上量才看得见 —— 这一步是 C2(引号边界 + heredoc 数据脱敏)那轮补的。
 # 全程只做文本判据,**不执行任何被回放的命令**(被回放的东西里真有 rm -rf 和提权)。
 #
 # ── 这台测量装置自己的三条红线(都是一轮轮踩出来的,别再改回去)──
-#   1) 装载必须走真脚本文件 + eval,不许用 `bash -c 'source ./wchat.sh'`:那条路会撞上
+#   1) 装载必须走真脚本文件 + eval,不许用 `bash -c 'source ./wchat_ref'`:那条路会撞上
 #      主脚本模块级的 bash 5 re-exec,$0 不是脚本时 exec 到垃圾目标(实测 rc=126 的
 #      "cannot execute binary file" 与 rc=127 的 "_: No such file"),整段判据静默不跑。
 #      见 test_hardwall.sh 的 T25,那三条断言就是钉这个的。
@@ -34,8 +34,8 @@ fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 ROOT="$PWD"
 
-OLD_SRC="${1:-HEAD^:wchat.sh}"
-NEW_SRC="${2:-wchat.sh}"
+OLD_SRC="${1:-HEAD^:wchat_ref}"
+NEW_SRC="${2:-wchat_ref}"
 LOG="${WCHAT_AUDIT_LOG:-$HOME/.ct/auto/audit.log}"
 [[ -r "$LOG" ]] || { echo "读不到审计日志:$LOG(可用 WCHAT_AUDIT_LOG 指定)"; exit 1; }
 
@@ -87,7 +87,7 @@ fi
 R
 
 extract() {   # $1=来源 $2=输出文件 —— 抽出判据链(顶层 hd_*/auto_*/WCHAT_* 赋值 + hd_* 函数定义)
-    # 先按文件判,不是文件才当 git ref:布尔式里混 `&&`/`||` 的写法在 `HEAD:wchat.sh`、
+    # 先按文件判,不是文件才当 git ref:布尔式里混 `&&`/`||` 的写法在 `HEAD:wchat_ref`、
     # `~/x`、`a:b` 这类路径上会判错,而判错的后果是抽出空判据、交出一张全放行的表。
     # 换成"能不能 cp"这种事实判定。
     if [[ -f "$1" ]]; then
@@ -125,7 +125,7 @@ selfcheck() {   # $1=标签 $2=判据文件
     printf '  ✓ [%s] 自检 3 条已知向量全对\n' "$tag"
 }
 
-build_and_run() {   # $1=版本标签 $2=wchat.sh 来源(git 参数或文件)
+build_and_run() {   # $1=版本标签 $2=wchat_ref 来源(git 参数或文件)
     # 分两条 local:同一条里 `local tag="$1" f="$WORK/rc_${tag}.sh"` 会先把所有参数整体
     # 展开再赋值,那会儿 tag 还没值 → set -u 当场炸(与主脚本 hd_strip_noncode 注释同族)。
     local tag="$1" src="$2"

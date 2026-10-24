@@ -7,7 +7,7 @@
 #   ② **函数体内结构锁**(旧回退确已删、fail-closed 兜底在、只剩一次 py_run);
 #   ③ **不可用降级**:WCHAT_PY_AUTHPARSE=0 或组件不可用 → **fail-closed 判 N**,绝不静默放行。
 set -uo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat.sh}" || exit 2
+source "$(dirname "${BASH_SOURCE[0]}")/py_prelude.sh" "${1:-wchat_ref}" || exit 2
 
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
 

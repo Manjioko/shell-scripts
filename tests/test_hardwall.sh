@@ -14,9 +14,9 @@
 #      历史上真出过 `local s="$1" n=${#s}` 在 set -u 下让提取器恒返回空的事。
 #
 # 用法:
-#   bash tests/test_hardwall.sh           # 测当前 wchat.sh(应全绿)
+#   bash tests/test_hardwall.sh           # 测当前 wchat_ref(应全绿)
 #   # 负对照:证明这张表真能抓住被修的缺陷(旧版会 FAIL)
-#   mkdir -p /tmp/hw && git show HEAD:wchat.sh > /tmp/hw/wchat.sh && bash tests/test_hardwall.sh /tmp/hw/wchat.sh
+#   mkdir -p /tmp/hw && git show HEAD:wchat_ref > /tmp/hw/wchat_ref && bash tests/test_hardwall.sh /tmp/hw/wchat_ref
 
 set -uo pipefail
 
@@ -143,7 +143,7 @@ HAS_MASK=0; type hd_mask_readonly >/dev/null 2>&1 && HAS_MASK=1
 #   shell_note_grants   :$HOME 下一律"内部路径不记账"(第 2512 行)→ T7 四条假红
 #   hard_deny_path 的 P3:$HOME/** 全成"目录内可写" → T9b 的 ~ 下非隐藏写假红
 #   P1 的 "$HOME/.aws*" :$PWD/.aws 同时命中家目录锚点 → T15b 假红
-# 把 wchat.sh 和这张表一起丢到 /home/<user> 下跑是常态(用户就是这么测的),所以这里
+# 把 wchat_ref 和这张表一起丢到 /home/<user> 下跑是常态(用户就是这么测的),所以这里
 # 自动在家目录里挪一个沙箱子目录当工作根,让表在任何布局上都测同一份判据。
 # 只能挪在**家目录内**:公共临时目录是 P2 的豁免项,工作根一旦落在 /tmp 下,T9 的
 # "不放行 工作目录内(那条路归 resolve_path)"会拿到豁免 → 从假红变成更坏的假绿。
@@ -313,7 +313,7 @@ expect H5 "同串里既有 sink 又有真追加"          "cat ~/.bashrc > /dev/
 expect H5 "sed -i 写 dotfile 且带 2>/dev/null"  "sed -i.bak 's/a/b/' ~/.tmux.conf 2>/dev/null"
 expect H5 "cp 到 dotfile 全_output_丢_sink"     "cp /tmp/x ~/.zshrc >/dev/null 2>&1"
 # 这条曾经是"刻意保守"的代价(口径 = 命令里有写动作且串里出现 dotfile 就拦,不做目标
-# 关联),注释里写着预约:"修好(改走方案②)时这条会红"。本轮方案②落地(见 T27 与 wchat.sh
+# 关联),注释里写着预约:"修好(改走方案②)时这条会红"。本轮方案②落地(见 T27 与 wchat_ref
 # 的 hd_redir_targets_all_clean),它如期变红并按预约翻成放行 —— 只读 dotfile + 写到无关的
 # 绝对路径,不再构成 H5。**向量保留而不是删掉**:它是"预约被执行过"的物证,删了之后就没人
 # 知道这条判定为什么朝这个方向。凭据类的 cat ~/.config/gh/... 转由 H6 拦(T27 有对应断言)。
@@ -367,8 +367,8 @@ grep -q 'declare -f hd_split_words' "$SRC_ABS" \
 echo 'T5 resolve_path 包含判定'
 r=$(resolve_path "$WORK_ROOT" 2>/dev/null); [[ "$r" == "$WORK_ROOT" ]] && ok "目标等于 WORK_ROOT 本身" || bad "目标等于 WORK_ROOT 本身" "得到[$r]"
 r=$(resolve_path "$WORK_ROOT/" 2>/dev/null); [[ "$r" == "$WORK_ROOT" ]] && ok "尾斜杠不重复最后一段" || bad "尾斜杠不重复最后一段" "得到[$r]"
-r=$(resolve_path "$WORK_ROOT/wchat.sh" 2>/dev/null); [[ "$r" == "$WORK_ROOT/wchat.sh" ]] && ok "WORK_ROOT 内的文件" || bad "WORK_ROOT 内的文件" "得到[$r]"
-r=$(resolve_path "./wchat.sh" 2>/dev/null); [[ "$r" == "$WORK_ROOT/wchat.sh" ]] && ok "相对路径" || bad "相对路径" "得到[$r]"
+r=$(resolve_path "$WORK_ROOT/wchat_ref" 2>/dev/null); [[ "$r" == "$WORK_ROOT/wchat_ref" ]] && ok "WORK_ROOT 内的文件" || bad "WORK_ROOT 内的文件" "得到[$r]"
+r=$(resolve_path "./wchat_ref" 2>/dev/null); [[ "$r" == "$WORK_ROOT/wchat_ref" ]] && ok "相对路径" || bad "相对路径" "得到[$r]"
 r=$(resolve_path "$HOME/.ct/auto/audit.log" 2>/dev/null); [[ -z "$r" ]] && ok "工作目录外返回失败(交给授权流程)" || bad "工作目录外应返回失败" "得到[$r]"
 r=$(resolve_path "$WORK_ROOT/../jwan/x" 2>/dev/null); [[ -z "$r" || "$r" == "$WORK_ROOT/x" || "$r" != *"/x"* ]] && ok ".. 穿越不误放" || bad ".. 穿越判定异常" "得到[$r]"
 
@@ -430,7 +430,7 @@ else
     [[ "$(grant_count)" == "$n0" ]] && ok "重复放行不堆条目（幂等）" || bad "幂等" "${n0} → $(grant_count)"
 
     grant_reset
-    shell_note_grants "cat $PWD/wchat.sh && ls ."
+    shell_note_grants "cat $PWD/wchat_ref && ls ."
     [[ "$(grant_count)" == 0 ]] && ok "工作目录内路径不进外部名单" || bad "工作目录内被记账" "[$(printf '%s ' ${granted_files[@]+"${granted_files[@]}"})]"
 
     grant_reset
@@ -475,10 +475,10 @@ fi
 # 炸掉后续所有断言(本节测试自己就红过一次:「$want」)。新增代码一律 ${var} 形式。
 # 用「交替」而不是字符类 [「」，]:字符类里的多字节字符在 LC_ALL=C 下会被按字节拆开,
 # grep 直接报 "brackets not balanced" → 计数落成空 → 本守卫永远 0 命中假绿(实装时就这样
-# 放过了 wchat.sh 里一处真崩溃:$name。被 bash 判成变量名 name\xe3\x80\x82)。
+# 放过了 wchat_ref 里一处真崩溃:$name。被 bash 判成变量名 name\xe3\x80\x82)。
 cjk_adj() { grep -vE '^[[:space:]]*#' "$1" | grep -cE '\$[a-zA-Z_][a-zA-Z0-9_]*(「|」|，|、|（|）|：|；|！|？|。)' || true; }
 n=$(cjk_adj "$SRC_ABS")
-(( n == 0 )) && ok "wchat.sh 无 \$var 紧贴全角标点" || bad "wchat.sh 有 ${n} 处 \$var 紧贴全角标点" "set -u 下会 unbound variable"
+(( n == 0 )) && ok "wchat_ref 无 \$var 紧贴全角标点" || bad "wchat_ref 有 ${n} 处 \$var 紧贴全角标点" "set -u 下会 unbound variable"
 # 不加 -f 条件判断:这条断言以前按字面量文件名找自己,改名跑时被整个跳过 → 少一条判定
 # → 总数守卫在 Linux 上必红。用 HW_SELF 之后它恒可执行,条数也就不再依赖文件名。
 n=$(cjk_adj "$HW_SELF")
@@ -677,7 +677,7 @@ _tw_l="${_tw_atp}/hw-t9-link.$$"
 : > "${_tw_l}.real"
 ln -s "${_tw_l}.real" "${_tw_l}"
 ln -s "$HOME/.npmrc" "${_tw_l}-cred"
-ln -s "$WORK_ROOT/wchat.sh" "${_tw_l}-wr"
+ln -s "$WORK_ROOT/wchat_ref" "${_tw_l}-wr"
 tw 2 "$(norm_path "${_tw_l}")"         "拒 ${_tw_atp} 内的真符号链接"
 tw 2 "$(norm_path "${_tw_l}-cred")"    "拒 指向 P1 凭据的链接(依据是'是链接',与目标名无关)"
 tw 2 "$(norm_path "${_tw_l}-wr")"      "拒 指向工作目录内文件的链接(同 uid 意外链进来也拦)"
@@ -778,7 +778,7 @@ pdn P2 "写 ~/.zshrc 是 P2"                              "$HOME/.zshrc" rw
 # 但用户真的可以把 wchat 跑在 ~ 下(工作目录=家目录是常态,不是测试捏造),此时两链路的
 # 口径必须钉死成一句话:**dotfile 红线不让,非隐藏文件按目录内放行**。
 # 后半句看着像洞,其实是两链共同的口径:文件工具唯一的裁决入口 path_access 现在
-# 会在"工作根==HOME"时收特权、逐项过墙(见 wchat.sh 第 1.5 步),墙没点名的照旧按
+# 会在"工作根==HOME"时收特权、逐项过墙(见 wchat_ref 第 1.5 步),墙没点名的照旧按
 # 目录内放行 —— 与这里 pd allow 同结论。链路层那 2 条钉在表末尾 T16(判据与链路分开钉:
 # 上一轮的教训就是判据全绿而链路空转,只测一头等于没测)。
 _wr_probe="$WORK_ROOT"; WORK_ROOT="$HOME"
@@ -1225,7 +1225,7 @@ WORK_ROOT="$_wr_probe"; unset _wr_probe _t16f _t16d; auto_mode=0
 #   ^[]11;rgb:2828/2c2c/3434^[\
 # 那是终端(Ghostty)对 **OSC 11 背景色查询的应答**,25 字节 = ESC ] 11 ; rgb:… ESC \;
 # caret 形式说明它是被**回显**的,不是谁打印的。实测证据:
-#   · wchat.sh 全文不含任何会招应答的查询(grep \e]/[6n 零命中),prompt_toolkit 也没有;
+#   · wchat_ref 全文不含任何会招应答的查询(grep \e]/[6n 零命中),prompt_toolkit 也没有;
 #   · 本机 PATH 上 19 个可执行文件内嵌 `]11;?`(gh、vim 系、mdcat、codex、opencode、tmux…)
 #     —— 查询由**子进程**发起;
 #   · 子进程与我们在**同一个 tty** 上(实测 test -t 0 为真、tty=/dev/ttys003),应答落到我们
@@ -1463,8 +1463,8 @@ esac
 
 # ── T23 第二轮 B:测试装载口(不再靠 stdin EOF 的巧合)──────────────────
 echo "T23 装载口 _WCHAT_LIB_ONLY"
-# 一律按 $SRC_ABS 取被测文件:写死 ./wchat.sh 时，这张表对着副本跑(负对照、
-# `bash tests/test_hardwall.sh /tmp/hw/wchat.sh`)测的仍是工作副本 —— 改好了验不出、改坏了
+# 一律按 $SRC_ABS 取被测文件:写死 ./wchat_ref 时，这张表对着副本跑(负对照、
+# `bash tests/test_hardwall.sh /tmp/hw/wchat_ref`)测的仍是工作副本 —— 改好了验不出、改坏了
 # 红不出来，最后就变成"这两条红大概是环境问题"(本轮就是这么误判过一次)。
 if grep -q '_WCHAT_LIB_ONLY' "$SRC_ABS"; then
     ok "主脚本里实现了装载口(此前只有本表注释在声称它有)"
@@ -1696,10 +1696,10 @@ expect H6 '已知:注释里的凭据路径仍按 H6 拦(脱敏未覆盖 H5/H6)' 
 # $HOME 前缀,于是 cwd 在家目录时 `cat .aws/credentials` 这类相对路径从来不匹配。
 # ══════════════════════════════════════════════════════════════════
 echo 'T24 检索动词模式位不参与 H6'
-expect NP  "在源码里搜 .npmrc 这个词本身(模式位)"   "grep -n '\\.npmrc' wchat.sh"
+expect NP  "在源码里搜 .npmrc 这个词本身(模式位)"   "grep -n '\\.npmrc' wchat_ref"
 expect NP  "管道尾部 grep 凭据裸词(变异常量:关掉模式位必须打红)"  "bash test_hardwall.sh 2>&1 | grep -c '\\.pgpass'"
 expect NP  "双引号模式位同样按数据对待(M1 必须打红)"      'grep -E "~/.ssh/id_rsa" README.md'
-expect NP  "模式里带 | 交替也不误伤"                 "grep -n 'hd_re_credential|\\.npmrc' wchat.sh"
+expect NP  "模式里带 | 交替也不误伤"                 "grep -n 'hd_re_credential|\\.npmrc' wchat_ref"
 expect NP  "--include 的取值是通配不是文件"          "grep -rn --include='*.netrc' pat ."
 expect NP  "-e 的取值是模式位"                       "grep -e '~/.npmrc' pat"
 expect NP  "rg 的 -g 是通配"                         "rg -g '*.npmrc' pat ."
@@ -1711,13 +1711,13 @@ expect H6  "模式位脱过之后 -f 仍按操作数处理"        "grep -e 'x' 
 expect H6  "-- 之后全是操作数"                       "grep -- '~/.npmrc' pat"
 expect H6  "rg --pre 是外部程序,不脱"                "rg --pre='cat ~/.ssh/id_rsa' pat ."
 expect H6  "sed/awk 整段不参与本轮脱敏"              "sed -n '1,5p' '~/.npmrc'"
-expect H6  "多段里另一段真读凭据,照拦"               "grep 'x' wchat.sh; cat ~/.npmrc"
+expect H6  "多段里另一段真读凭据,照拦"               "grep 'x' wchat_ref; cat ~/.npmrc"
 expect H6  "模式位里有命令替换就不许脱"              'grep "$(cat ~/.npmrc)" x'
 EXPECT_TOTAL=$((EXPECT_TOTAL + 17))
 
 # ══════════════════════════════════════════════════════════════════
 # T25 re-exec 的 $0 前提:bash -c 装载必须响亮失败,不许静默空输出
-# 上一轮的实测事故 —— 用 `bash -c 'source ./wchat.sh …'` 跑 16 条判据向量,全部返回空串,
+# 上一轮的实测事故 —— 用 `bash -c 'source ./wchat_ref …'` 跑 16 条判据向量,全部返回空串,
 # 现象像"判据崩了",实际是主脚本第 190 行 `exec bash5 "$0" "$@"` 里 $0 不是脚本:
 # 没给 name 时 $0=$BASH(让 bash5 去跑二进制),给了占位 name 时 $0="_"(文件不存在)。
 # 这组断言两头都钉:坏装载必须响,好装载不许被误伤。
@@ -1804,7 +1804,7 @@ expect NP  "cd $PWD(还没 cd 过)等价工作根,不误伤"       'cd $PWD && c
 expect H6  "cd ~ 之后再 cd $PWD:$PWD 已是根外值"        'cd ~ ; cd $PWD && cat .npmrc'
 expect NP  "cd 根内一个还没建的名字:仍在边界内"          'cd src/build-tmp && cat .npmrc'
 expect NP  "cd 写在凭据词之后不追溯(必须同一趟按位置扫)" 'cat .npmrc && cd ~'
-expect NP  "cd 语境不许反过来吃掉 T24 的模式位豁免"      'cd ~ && grep -n "\.npmrc" wchat.sh'
+expect NP  "cd 语境不许反过来吃掉 T24 的模式位豁免"      'cd ~ && grep -n "\.npmrc" wchat_ref'
 expect NP  "ls .ssh 不带斜杠:按设计留给提示层,不在 H6"  'ls .ssh'
 expect NP  "域名里的 .aws 不被要求斜杠的那支误命中"      'curl -s https://s3.aws.amazonaws.com/b/x -o /tmp/y'
 expect NP  ".config/nginx/ 不在 gh/gcloud/azure 名单内"  'cat .config/nginx/app.conf'
@@ -1817,7 +1817,7 @@ expect NP  "无 cd 时 ./.ssh/id_rsa 属边界内文件,豁免照旧" 'cat ./.ss
 # ~、.. 穿越、双斜杠、引号不闭合、取不到目标)一律照旧拦 —— fail-closed 是这段的立场,
 # 收窄只发生在能证明的那一侧。写动词那一支完全没动(T2 的 8 条 H5 正例仍全绿)。
 # 为什么不用 hd_write_targets:它是给审批器"展示"用的 fail-open 组件,接到放行侧坏一次
-# 就是整条 H5 静默失效。见 wchat.sh 里 hd_redir_targets_all_clean 的注释。
+# 就是整条 H5 静默失效。见 wchat_ref 里 hd_redir_targets_all_clean 的注释。
 echo 'T27 H5 写目标关联:能证明无关才放行'
 # ── 收窄侧:只读 dotfile + 写到无关的绝对路径,不该再被 H5 打断
 expect NP "只读列目录 + 写 /tmp(本轮真实打断测量那条)" 'ls -la ~/.ct/ > /tmp/r9.txt'
@@ -1876,7 +1876,7 @@ EXPECT_TOTAL=$((EXPECT_TOTAL + 30))       # T27 的 30 条(数段内 ^expect 行
 # 起因:探"抽象目标证明器"该不该做时,顺手量了 H11 的现状,发现它不是我以为的"太严",
 # 而是有明确漏拦 —— `echo x >> /var/log/app.log` 整条放行(`>>` 在操作符分支里,漏的是
 # 前缀名单)。补的是名单,不是机制;机制侧的另外两类漏拦(`..` 穿越、mv/cp/truncate 的
-# **目标操作数**压根不进 H11 视野)本轮没动,原因写在 wchat.sh 的 H11 注释区。
+# **目标操作数**压根不进 H11 视野)本轮没动,原因写在 wchat_ref 的 H11 注释区。
 # 反锁那条同样重要:/var 不能整体加宽,否则 /var/tmp 与 TMPDIR 家族一起撞墙,而 H11 的
 # 拒绝话术正让人"改写到 /tmp"。
 # ══════════════════════════════════════════════════════════════════
@@ -2015,7 +2015,7 @@ expect H5 'T31 反向锁:dot 路径确实是重定向目标 → 照旧拦(放宽
 # 注:hd_t1= 这个"惰性操作数记号"只存在于会话上下文那份旧判定器副本里,盘上判定器不认
 # (实测被判 NP)。反向锁必须用盘上真实写形状,否则锁的是空气。
 expect H5 'T31 反向锁:写动词直接带 dot 配置路径 → 照旧拦' 'touch ~/.bashrc'
-expect H5 'T31 反向锁:mv 的落点是 dot 配置 → 照旧拦' 'mv wchat.sh ~/.bashrc'
+expect H5 'T31 反向锁:mv 的落点是 dot 配置 → 照旧拦' 'mv wchat_ref ~/.bashrc'
 
 # ── 第十八轮 H13:写目标在审批层不可解析的注册表式 / 全局配置动作 ─────────
 # 起因是实测:hd_write_targets 对下面这些命令**一律返回空目标**(plutil 那条明写着

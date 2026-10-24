@@ -15,7 +15,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$HERE/.." && pwd)"
 TAB="$HERE/test_hardwall.sh"
 [[ -r "$TAB" ]] || { echo "找不到 $TAB"; exit 2; }
-SRC_TARGET="$ROOT/wchat.sh"
+SRC_TARGET="$ROOT/wchat_ref"
 [[ -r "$SRC_TARGET" ]] || { echo "找不到 $SRC_TARGET"; exit 2; }
 
 SB="$(mktemp "${TMPDIR:-/tmp}/probe_h11_XXXXXX.sh")" || exit 2
