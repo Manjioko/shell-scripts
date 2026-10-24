@@ -220,6 +220,15 @@ def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
     """
     on_meta = on_meta or _default_meta
     while True:
+        if os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE"):
+            if os.environ.pop("WCHAT_AUTO_MARKER_ALREADY", "") != "1":
+                try:
+                    from wchat_py.auto_enable import marker_text
+                    _m = marker_text()
+                    if _m:
+                        sys.stdout.write(_m + "\n"); sys.stdout.flush()
+                except Exception:
+                    pass
         line = next_line()
         if line is None:
             return 0

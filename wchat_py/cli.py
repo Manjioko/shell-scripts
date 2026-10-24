@@ -800,6 +800,7 @@ def _run_tool(name, args_json):
             if _av != "Y":
                 _v, _rs = _auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
                 if _v == "Y":
+                    _bump_auto()
                     sys.stdout.write("auto 终审放行: %s\n" % cmd)
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_allow", cmd=cmd)
@@ -812,6 +813,8 @@ def _run_tool(name, args_json):
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_deny", reason="judge-unavailable", cmd=cmd)
                     return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
+            else:
+                _bump_auto()
         if not _auto:
             _av2, _ars2 = _auth_think(cmd)
             if _av2 != "Y":
@@ -942,6 +945,40 @@ def run_turn(content, model="", max_rounds=5):
     sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
     sys.stdout.write("已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\n" % max_rounds)
     return 0
+
+
+def _bump_auto():
+    try:
+        n = int(os.environ.get("WCHAT_AUTO_APPROVALS") or 0)
+    except ValueError:
+        n = 0
+    os.environ["WCHAT_AUTO_APPROVALS"] = str(n + 1)
+
+
+def _auto_summary():
+    """退出时的 auto 会话小结(与 master auto_report_exit 同形)。"""
+    tier = os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE") or ""
+    if not tier:
+        return
+    ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+    alog = os.environ.get("AUTO_AUDIT_LOG") or os.path.join(ct, "auto", "audit.log")
+    try:
+        n = int(os.environ.get("WCHAT_AUTO_APPROVALS") or 0)
+    except ValueError:
+        n = 0
+    try:
+        import subprocess as _sp
+        p = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=5)
+        rev = p.stdout.strip() if p.returncode == 0 else "(非 git 仓库)"
+    except Exception:
+        rev = "(非 git 仓库)"
+    w = sys.stdout.write
+    w("\n── auto 会话小结 ──\n")
+    w("  自动放行 %d 次 · 备份 0 份 · 档位 %s\n" % (n, tier))
+    w("  审计日志: %s\n" % alog)
+    w("  回滚: git diff %s 查看改动;git checkout %s -- . 复原\n" % (rev, rev))
+    sys.stdout.flush()
 
 
 def _load_ct_config():
@@ -1082,37 +1119,42 @@ def main(argv):
         from wchat_py.repl import run_interactive
 
         def _on_quit():
-            if _s.msg_count <= 1 or os.environ.get("WCHAT_FORGET") == "1":
-                return
-            _d = os.environ.get("WCHAT_HISTORY_DIR", "")
-            if not _d:
-                return
-            # 与 bash 一致:退出前问是否保存(默认保存,N/n 才不存);非交互不阻塞,按默认保存
-            if sys.stdin.isatty() and os.environ.get("WCHAT_FORGET") != "1":
-                sys.stdout.write("│ 退出前保存对话? [Y/n] "); sys.stdout.flush()
-                try:
-                    _ans = (sys.stdin.readline() or "").strip()
-                except Exception:
-                    _ans = ""
-                sys.stdout.write("\n"); sys.stdout.flush()
-                if _ans[:1] in ("N", "n"):
-                    sys.stdout.write("未保存对话\n"); sys.stdout.flush()
-                    return
-            import time as _t
-            from wchat_py.session import save_history as _sh
-            _title = os.environ.get("WCHAT_CHAT_TITLE", "")
-            if not _title:
-                try:
-                    _title = _gen_title(_s.messages_json)
-                except Exception:
-                    _title = ""
-            _name = os.environ.get("WCHAT_HISTORY_NAME") or (
-                (_title + ".json") if _title else ("chat-%d.json" % int(_t.time())))
             try:
-                _sh(_d, _s.messages_json, _name, _title)
-                sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
-            except Exception as _e:
-                sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
+                if _s.msg_count <= 1 or os.environ.get("WCHAT_FORGET") == "1":
+                    return
+                _d = os.environ.get("WCHAT_HISTORY_DIR", "")
+                if not _d:
+                    return
+                _do_save = True
+                if sys.stdin.isatty():
+                    sys.stdout.write("│ 退出前保存对话? [Y/n] "); sys.stdout.flush()
+                    try:
+                        _ans = (sys.stdin.readline() or "").strip()
+                    except Exception:
+                        _ans = ""
+                    sys.stdout.write("\n"); sys.stdout.flush()
+                    if _ans[:1] in ("N", "n"):
+                        sys.stdout.write("未保存对话\n"); sys.stdout.flush()
+                        _do_save = False
+                if not _do_save:
+                    return
+                import time as _t
+                from wchat_py.session import save_history as _sh
+                _title = os.environ.get("WCHAT_CHAT_TITLE", "")
+                if not _title:
+                    try:
+                        _title = _gen_title(_s.messages_json)
+                    except Exception:
+                        _title = ""
+                _name = os.environ.get("WCHAT_HISTORY_NAME") or (
+                    (_title + ".json") if _title else ("chat-%d.json" % int(_t.time())))
+                try:
+                    _sh(_d, _s.messages_json, _name, _title)
+                    sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
+                except Exception as _e:
+                    sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
+            finally:
+                _auto_summary()
 
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox, render_reason, render_markdown

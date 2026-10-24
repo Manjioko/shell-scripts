@@ -31,6 +31,20 @@ def _count_paths(v):
     return len([x for x in (v or "").replace(",", " ").split() if x])
 
 
+def marker_text():
+    tier = os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE") or ""
+    if not tier:
+        return ""
+    try:
+        n = int(os.environ.get("WCHAT_AUTO_APPROVALS") or 0)
+    except ValueError:
+        n = 0
+    ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+    alog = os.environ.get("AUTO_AUDIT_LOG") or os.path.join(ct, "auto", "audit.log")
+    return ("\033[2m⚡ auto=%s · 本次会话已自动放行 %d 次 · 审计 %s · -noauto 关闭 · "
+            "Ctrl+C 两次中止并急停\033[0m" % (tier, n, alog.replace(os.path.expanduser("~"), "~")))
+
+
 def enable(tier):
     if not tier:
         return True
@@ -92,7 +106,8 @@ def enable(tier):
     audit.record(alog, "session", verdict="started", tier=tier, work_root=root,
                  backup=bdir, rollback=_git_rev())
     w("\033[2m⚡ auto 已开启 审计: %s · 备份: %s · 急停: Ctrl+C 两次\033[0m\n\n" % (alog, bdir))
-    w("\033[2m⚡ auto=%s · 本次会话已自动放行 0 次 · 审计 %s · -noauto 关闭 · Ctrl+C 两次中止并急停\033[0m\n"
-      % (tier, alog.replace(os.path.expanduser("~"), "~")))
+    os.environ["WCHAT_AUTO_APPROVALS"] = "0"
+    w(marker_text() + "\n")
+    os.environ["WCHAT_AUTO_MARKER_ALREADY"] = "1"
     sys.stdout.flush()
     return True
