@@ -102,28 +102,14 @@ def _default_meta(action, arg, session=None):
             if not isinstance(_c, str):
                 _c = "[非文本内容]"
             _conv.append("%s: %s" % (_m.get("role"), _c))
-        _sys = ("你是技能提炼助手。根据对话记录提炼一个可复用技能,只输出严格 JSON:"
-                '{"name":"小写英文连字符名","description":"何时使用的1-2句检索词",'
-                '"body":"markdown 正文,步骤/命令/注意事项,<=800字"}。不要代码围栏,不要多余文字。')
-        _t, _tc, _err = _call_llm([{"role": "system", "content": _sys},
-                                   {"role": "user", "content": "\n".join(_conv)}],
-                                  os.environ.get("FLASH_MODEL", ""))
-        if _err or not _t:
-            inp_msg("⚠️ 技能提炼失败: %s" % (_err or "模型无输出"))
-            return True
-        _s = _t.strip()
-        _s = _re.sub(r"^```[a-zA-Z]*\n?|```$", "", _s).strip()
-        try:
-            _a, _b = _s.find("{"), _s.rfind("}")
-            _d = _json.loads(_s[_a:_b + 1]) if _a >= 0 and _b > _a else {}
-        except ValueError:
-            _d = {}
+        from wchat_py.cli import _skill_draft
+        _d = _skill_draft("\n".join(_conv)) or {}
         _name = str(_d.get("name", "")).strip().lower()
         _name = _re.sub(r"[^a-z0-9-]+", "-", _name).strip("-")[:30]
         _desc = str(_d.get("description", "")).strip()
         _body = str(_d.get("body", "")).strip()
         if not _name or not _desc or not _body:
-            inp_msg("⚠️ 技能提炼失败(模型未给出合法 JSON 草稿)")
+            inp_msg("⚠️ 技能提炼失败(模型未按 save_skill 工具提交草稿)")
             return True
         inp_msg("📝 技能草稿: %s — %s" % (_name, _desc))
         if sys.stdin.isatty():

@@ -339,6 +339,63 @@ def _nonstream(msgs, model):
     return resp.choices[0].message.content or ""
 
 
+def _nonstream_msg(msgs, model, tools=None):
+    """非流式单次调用,返回 message 对象(支持 tools/function calling)。"""
+    from wchat_py.llm import _make_client
+    cli = _make_client(os.environ.get("BASE_URL", ""),
+                       os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or "",
+                       os.environ.get("API_KEY_HEADER", "api-key"))
+    kw = dict(model=(model or "default"), messages=msgs, stream=False,
+              extra_body={"thinking": {"type": "disabled"}})
+    if tools:
+        kw["tools"] = tools
+    resp = cli.chat.completions.create(**kw)
+    return resp.choices[0].message
+
+
+SAVE_SKILL_TOOL = {"type": "function", "function": {
+    "name": "save_skill",
+    "description": "保存从对话中提炼出的技能草稿",
+    "parameters": {"type": "object", "properties": {
+        "name": {"type": "string", "description": "技能名:简短英文小写标识,连字符分隔,不超过 30 字符"},
+        "description": {"type": "string", "description": "1-2 句话说明什么场景下使用该技能(检索词,要具体)"},
+        "body": {"type": "string", "description": "技能正文,markdown 格式,包含操作步骤/常用命令/注意事项/用户偏好,不超过 800 字"}},
+        "required": ["name", "description", "body"]}}}
+
+
+def _skill_draft(conv):
+    """复刻 master skill_save:用 save_skill 工具拿结构化草稿(最多两次,带自纠)。"""
+    import json as _json
+    from wchat_py.prompts import SKILL_SYS, SKILL_RETRY_SYS
+    model = os.environ.get("FLASH_MODEL", "")
+    user = conv
+    prev = ""
+    for attempt in (1, 2):
+        if attempt == 1:
+            msgs = [{"role": "system", "content": SKILL_SYS},
+                    {"role": "user", "content": user}]
+        else:
+            msgs = [{"role": "system", "content": SKILL_RETRY_SYS},
+                    {"role": "user", "content": user + "\n\n(你上次的输出不符合要求,原文如下,"
+                     "请改为调用 save_skill 工具,把内容填进工具参数:)\n" + prev[:500]}]
+        try:
+            msg = _nonstream_msg(msgs, model, tools=[SAVE_SKILL_TOOL])
+        except Exception:
+            return None
+        tcs = getattr(msg, "tool_calls", None) or []
+        if tcs:
+            try:
+                args = _json.loads(getattr(tcs[0].function, "arguments", "") or "{}")
+            except (ValueError, AttributeError):
+                args = {}
+            if args.get("name") and args.get("description") and args.get("body"):
+                return args
+        prev = getattr(msg, "content", "") or ""
+        if not prev:
+            break
+    return None
+
+
 def _default_final_call(cmd, reason=""):
     model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
     msgs = [{"role": "system", "content": AUTO_FINAL_SYS},
