@@ -457,6 +457,12 @@ _IMG_SEQ = [0]
 _GRANTED_PATHS = set()
 
 
+def _reset_image_refs():
+    """-n 新会话:历史被清空,图片引用登记也必须清零(否则首次读图会被误判'已在上下文')。"""
+    _IMG_REFS.clear()
+    _IMG_SEQ[0] = 0
+
+
 def _path_guard(path, mode):
     """工作目录外访问闸(对应 bash path_access):返回 None=放行, 字符串=拒绝原因。"""
     if not path:
@@ -664,7 +670,7 @@ def _run_tool(name, args_json):
                             "(例如它被回收过),再调用一次本工具,我会收回旧引用并重新挂载。"
                             % (a.get("path") or _p, _rid))
                 _st["gone"] = True
-                sys.stdout.write(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)\n" % _st["id"])
+                print(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)" % _st["id"], flush=True)
                 sys.stdout.flush()
         else:
             _IMG_SEQ[0] += 1

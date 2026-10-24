@@ -185,6 +185,11 @@ def _default_meta(action, arg, session=None):
         sess.last_prompt_tokens = 0
         sess.last_cached_tokens = 0
         sess.input_images = []
+        try:
+            from wchat_py.cli import _reset_image_refs
+            _reset_image_refs()
+        except Exception:
+            pass
         os.environ.pop("WCHAT_CHAT_TITLE", None)
         sys.stdout.write("\033[H\033[2J"); sys.stdout.flush()
         inp_msg("✅ 已开始新会话")
