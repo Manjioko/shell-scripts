@@ -171,7 +171,7 @@ def run_single_turn(content, model=""):
     from wchat_py import msg as msgmod
     from wchat_py.render import StreamBox
 
-    msgs = msgmod.append_user(msgmod.init(), content)
+    msgs = msgmod.append_user(msgmod.init(_system_prompt_text()), content)
     env_req = {"model": model or os.environ.get("FLASH_MODEL", ""),
                "messages": msgs, "thinking": "disabled", "tools": []}
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
@@ -980,12 +980,33 @@ def _run_tool(name, args_json):
     return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
 
 
+def _system_prompt_text():
+    """单轮(-st)与 REPL 共用的 system:基础句 + 技能清单 + MCP 清单(与 master 一致)。"""
+    base = "You are a helpful assistant."
+    try:
+        from wchat_py import skill as _sk
+        _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+            os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct"), "skills")
+        _extra = _sk.scan_skills(_sd,
+                                 os.environ.get("SKILL_MAX_INJECT", "30"),
+                                 os.environ.get("SKILL_DESC_MAX", "200"),
+                                 os.environ.get("SKILLS_DIR_EXTERNAL", "0"))
+        if _extra:
+            base += "\n\n" + _extra
+    except Exception:
+        pass
+    _mcp = os.environ.get("MCP_MANIFEST", "")
+    if _mcp:
+        base += "\n\n" + _mcp
+    return base
+
+
 def run_turn(content, model="", max_rounds=5):
     """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。"""
     import json as _json
     from wchat_py import msg as msgmod
     from wchat_py.render import StreamBox, render_markdown, render_reason
-    msgs = msgmod.append_user(msgmod.init(), content)
+    msgs = msgmod.append_user(msgmod.init(_system_prompt_text()), content)
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     last_text = ""
     reason = []
@@ -1333,6 +1354,9 @@ def main(argv):
 
             _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
                                       write_final=False, on_final=_finish)
+            _first = os.environ.pop("WCHAT_FIRST_TURN", "")
+            if _first:
+                _h(_first)
             return run_interactive(_h, on_meta=_meta, on_quit=_on_quit)
         def _finish_plain(r):
             if r:
@@ -1341,6 +1365,9 @@ def main(argv):
 
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a),
                                   write_final=False, on_final=_finish_plain)
+        _first = os.environ.pop("WCHAT_FIRST_TURN", "")
+        if _first:
+            _h(_first)
         return run_repl(sys.stdin, _h, on_meta=_meta, on_quit=_on_quit)
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
@@ -1380,9 +1407,13 @@ def main(argv):
         from wchat_py import audit as _audit
         _alog = os.environ.get("AUTO_AUDIT_LOG", "")
         _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
-        _rc = run_turn(st["content"], st.get("model", ""), _mr)
-        _audit.record(_alog, "session", verdict="finished")
-        return _rc
+        if str(st.get("quick_mode")) == "1":
+            _rc = run_turn(st["content"], st.get("model", ""), _mr)
+            _audit.record(_alog, "session", verdict="finished")
+            return _rc
+        # 非 -st/-to:与 master 一致——先跑这一轮,然后进入交互循环(不退出)。
+        os.environ["WCHAT_FIRST_TURN"] = st["content"]
+        return main(["repl"])
     return main(["repl"])
 
 
