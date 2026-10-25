@@ -518,9 +518,19 @@ def _path_guard(path, mode):
               ".netrc", ".npmrc", ".mcporter")
     is_cred = home and any(under(p, os.path.join(home, x)) for x in _creds)
     auto = os.environ.get("AUTO_MODE") in ("full", "sandbox")
+    _act = "写" if mode == "rw" else "读"
+
+    def _deny_status(rule):
+        from wchat_py import audit as _au
+        _au.record(os.environ.get("AUTO_AUDIT_LOG", ""), "path", rule=rule,
+                   decision="auto_deny", path=path)
+        sys.stdout.write(" ⛔ 越界%s被硬墙拒绝(%s):%s\n" % (_act, rule, path))
+        sys.stdout.flush()
+
     if is_cred:
         if auto:
-            return "AI 拒绝:凭据/会话数据路径不可访问(auto 档): %s" % path
+            _deny_status("P1")
+            return "错误:%s被拒绝[硬墙 P1]:凭据/会话数据路径不可访问。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
         sys.stdout.write("\033[2K \033[1;31m⛔ 高危路径\033[0m \033[2m%s\033[0m\n\n" % path)
         sys.stdout.write(" \033[1;31m确需放行?必须输入 yes(n/回车 = 拒绝): \033[0m")
         sys.stdout.flush()
@@ -533,7 +543,8 @@ def _path_guard(path, mode):
     if auto:
         if mode == "r":
             return None
-        return "AI 拒绝:工作目录外写入(auto 档): %s" % path
+        _deny_status("P2")
+        return "错误:%s被拒绝[硬墙 P2]:工作目录外写入。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
     key = (mode, p)
     if key in _GRANTED_PATHS:
         return None
@@ -548,6 +559,7 @@ def _path_guard(path, mode):
     if ans in ("y", "yes"):
         _GRANTED_PATHS.add(key)
         return None
+    sys.stdout.write(" ⛔ 用户拒绝%s: %s\n" % (_act, path)); sys.stdout.flush()
     return "用户拒绝访问工作目录外文件: %s" % path
 
 
