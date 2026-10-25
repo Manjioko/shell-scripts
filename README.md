@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-python3 setup.py        # 检测平台并安装缺失依赖(prompt_toolkit/rich/jq/curl/可选 w3m/ffmpeg)
+python3 setup.py        # 安装 Python 依赖(prompt_toolkit / rich / pillow);git、npx 可选
 ```
 
 ## 运行
@@ -47,4 +47,3 @@ bash tests/auto_test.sh e2e       # 行为 e2e
 | `setup.py` | 依赖安装 |
 | `tests/` | 闸门与测试；`tests/legacy_wchat.sh` 仅为 **bash 基线 oracle**，产品不引用 |
 | `docs/` | 设计与迁移文档（`migration-to-python-B.md` 为 B 阶段结项） |
-
