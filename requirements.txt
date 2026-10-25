@@ -1,4 +1,6 @@
-# W12-4:HTTP/SSE 层改用官方 OpenAI SDK(见 docs/migration-to-python.md §8.5)。
-# 缺失 → 明确报错,不回退 curl。
+# Python 依赖(HTTP/SSE 走官方 OpenAI SDK,不回退 curl)
 openai>=1.0
+prompt_toolkit>=3
+rich>=13
+pillow>=9
 

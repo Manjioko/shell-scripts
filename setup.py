@@ -76,33 +76,29 @@ def main():
     if sys.version_info < (3, 9):
         fail("需要 Python 3.9+,当前 %s" % sys.version.split()[0]); return 1
 
-    # python 组件(输入框 + markdown)
-    if run([sys.executable, "-c", "import prompt_toolkit, rich"]) == 0:
-        ok("prompt_toolkit + rich 已就绪")
+    # Python 组件(输入框 / markdown / 图片缩放)
+    if run([sys.executable, "-c", "import prompt_toolkit, rich, PIL"]) == 0:
+        ok("prompt_toolkit + rich + pillow 已就绪")
     else:
-        step("pip install --user prompt_toolkit rich")
-        if pip_install("prompt_toolkit", "rich"):
-            ok("prompt_toolkit + rich 安装完成")
+        step("pip install --user prompt_toolkit rich pillow")
+        if pip_install("prompt_toolkit", "rich", "pillow"):
+            ok("Python 组件安装完成")
         else:
-            fail("安装失败:请手动执行 pip3 install --user prompt_toolkit rich"); rc = 1
+            fail("安装失败:请手动执行 pip3 install --user prompt_toolkit rich pillow"); rc = 1
 
-    # 外置命令
-    need = {"jq": "jq", "curl": "curl"}
-    rec = {"w3m": "w3m", "ffmpeg": "ffmpeg"}
-    for cmd, pkg in need.items():
+    # 外部命令:git 用于回滚点/版本信息;npx 仅 MCP 需要(可选)
+    for cmd, why in (("git", "回滚点/版本信息"), ("npx", "MCP(可选)")):
         if have(cmd):
-            ok("%s 已就绪" % cmd)
+            ok("%s 已就绪(%s)" % (cmd, why))
         else:
-            step("安装 %s" % pkg)
-            if install_bin([pkg], o):
-                ok("%s 安装完成" % cmd)
-            else:
-                fail("缺 %s,请手动安装" % cmd); rc = 1
-    for cmd, pkg in rec.items():
+            warn("未找到 %s(%s,缺它只影响对应功能)" % (cmd, why))
+
+    # 旧外部渲染/处理工具:Python 版已不依赖,仅在跑 tests/legacy 时需要
+    for cmd in ("jq", "curl", "w3m", "ffmpeg"):
         if have(cmd):
-            ok("%s 已就绪(可选)" % cmd)
+            ok("%s 存在(仅测试/兼容用,产品不再依赖)" % cmd)
         else:
-            warn("可选组件 %s 未安装(网页解析/图片转述会降级)" % cmd)
+            warn("%s 未安装(产品不需要;仅 tests/ 的旧基线可能用到)" % cmd)
 
     if rc == 0:
         ok("全部就绪。运行: ./wchat -h")
@@ -111,4 +107,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

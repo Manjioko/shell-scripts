@@ -822,21 +822,8 @@ def _run_tool(name, args_json):
             return _webs.fetch_error(str(_e.code), _url)
         except Exception:
             return _webs.fetch_error("000", _url)
-        # 优先 w3m 渲染;否则去标签兜底
-        _txt = None
-        if _raw:
-            try:
-                import subprocess as _sp
-                _p = _sp.run(["w3m", "-dump", "-T", "text/html"], input=_raw,
-                             capture_output=True, text=True, timeout=30)
-                if _p.returncode == 0 and _p.stdout:
-                    _txt = _p.stdout
-            except Exception:
-                _txt = None
-        if _txt is None:
-            _t = _re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", _raw)
-            _t = _re.sub(r"(?s)<[^>]+>", " ", _t)
-            _txt = _re.sub(r"\s+", " ", _t).strip()
+        # 纯 Python 渲染(替代 w3m):不再要求用户安装外部浏览器/渲染器
+        _txt = _webs.html_to_text(_raw)
         return _txt
     if name == "web_search":
         import json as _json

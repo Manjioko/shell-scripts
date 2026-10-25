@@ -52,6 +52,70 @@ def build_body(provider: str, query: str, model: str):
     return None
 
 
+def html_to_text(html: str) -> str:
+    """纯 Python HTML→可读文本(替代 w3m -dump 的默认路径)。
+
+    去 script/style、块级标签转换行、解码实体、压缩空白;不追求与 w3m 逐字节一致,
+    但保证正文可读、链接文字保留。
+    """
+    from html.parser import HTMLParser
+
+    class _P(HTMLParser):
+        BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "section", "article", "header", "footer", "pre", "blockquote", "table"}
+        SKIP = {"script", "style", "noscript", "svg"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.out = []
+            self.skip = 0
+            self.pre = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self.SKIP:
+                self.skip += 1
+            elif tag == "pre":
+                self.pre += 1
+                self.out.append("\n")
+            elif tag in self.BLOCK:
+                self.out.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in self.SKIP and self.skip:
+                self.skip -= 1
+            elif tag == "pre" and self.pre:
+                self.pre -= 1
+                self.out.append("\n")
+            elif tag in self.BLOCK:
+                self.out.append("\n")
+
+        def handle_data(self, data):
+            if self.skip:
+                return
+            self.out.append(data if self.pre else data)
+
+    p = _P()
+    try:
+        p.feed(html or "")
+        p.close()
+    except Exception:
+        return (html or "").strip()
+    text = "".join(p.out)
+    # 行内空白压缩 + 连续空行最多留一行
+    lines = [" ".join(ln.split()) for ln in text.splitlines()]
+    out = []
+    blank = False
+    for ln in lines:
+        if not ln:
+            if not blank:
+                out.append("")
+            blank = True
+        else:
+            out.append(ln)
+            blank = False
+    return "\n".join(out).strip()
+
+
 def fetch_error(code: str, url: str) -> str:
     """抓取失败时按 HTTP 状态码细分原因,让模型正确归因(网络/站点问题,换 shell 命令不会改善)。"""
     if code == "000":
