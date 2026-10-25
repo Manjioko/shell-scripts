@@ -42,8 +42,6 @@ def help_user():
     inp_msg("  -dp   启用思考模式并使用 deepseek-v4-pro 模型")
     inp_msg("  -l    查看历史记录并选择加载")
     inp_msg("  -f    忽略历史记录")
-    inp_msg("  -tr   翻译任务")
-    inp_msg("  -to   词源词根解释任务")
     inp_msg("  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)")
     inp_msg("  -auto  敏感权限全自动(免逐次确认)。可接档位: -auto / -auto=read|sandbox|full")
     inp_msg("         read=只自动放行越界读取 | sandbox(默认)=工作目录内全自动 | full=再加 --allow-write 名单")
@@ -142,7 +140,7 @@ def parse(argv):
             break
         elif a == "-auto" or a.startswith("-auto="):
             auto_mode = a.split("=", 1)[1] if "=" in a else "sandbox"
-        elif a == "-st" or a == "-to":
+        elif a == "-st":
             quick_mode = 1
             forget_history = 1
         else:
@@ -1401,7 +1399,7 @@ def main(argv):
             _rc = run_turn(st["content"], st.get("model", ""), _mr)
             _audit.record(_alog, "session", verdict="finished")
             return _rc
-        # 非 -st/-to:与 master 一致——先跑这一轮,然后进入交互循环(不退出)。
+        # 非 -st:与 master 一致——先跑这一轮,然后进入交互循环(不退出)。
         os.environ["WCHAT_FIRST_TURN"] = st["content"]
         return main(["repl"])
     return main(["repl"])
