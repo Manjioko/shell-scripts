@@ -15,6 +15,72 @@ import sys
 from wchat_py.cmdline import classify
 
 
+def _msg_content_text(c):
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        texts = [p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text"]
+        nimg = sum(1 for p in c if isinstance(p, dict) and p.get("type") == "image_url")
+        t = "\n".join(x for x in texts if x)
+        if nimg:
+            t += ("\n" if t else "") + "[含 %d 张图片]" % nimg
+        return t
+    return ""
+
+
+def _clip_line(s, n=200):
+    return s if len(s) <= n else s[:n] + "…"
+
+
+def _render_history(msgs):
+    """把加载的历史按 master get_history 的格式渲染成 markdown。"""
+    from wchat_py.render import render_markdown
+    tc_names = {}
+    for m in msgs:
+        for tc in (m.get("tool_calls") or []) if isinstance(m, dict) else []:
+            tc_names[tc.get("id") or ""] = (tc.get("function") or {}).get("name") or "?"
+    parts = []
+    for m in msgs[1:]:
+        role = m.get("role", "")
+        content = _msg_content_text(m.get("content"))
+        reasoning = m.get("reasoning_content") or ""
+        if reasoning:
+            parts.append("### 💭 思考\n" + reasoning + "\n")
+        if role == "tool":
+            name = tc_names.get(m.get("tool_call_id") or "")
+            parts.append("## tool → %s" % name if name else "## tool")
+            disp = content.replace("\\n", "\n").lstrip("\ufeff")
+            lines = [ln for ln in disp.splitlines() if ln.strip()]
+            if not lines:
+                parts.append("*内容为空*")
+            else:
+                shown = "\n".join(_clip_line(ln) for ln in lines[:5])
+                if len(lines) > 5:
+                    shown += "\n…(其余 %d 行已省略)" % (len(lines) - 5)
+                parts.append(shown)
+        else:
+            parts.append("## " + role)
+            if content:
+                parts.append(content)
+            if role == "assistant" and m.get("tool_calls"):
+                tc_lines = ["🔧 %s: %s" % ((tc.get("function") or {}).get("name") or "?",
+                                           ((tc.get("function") or {}).get("arguments") or "")
+                                           .replace("\n", " ").replace("\r", " "))
+                            for tc in m["tool_calls"]]
+                parts.append("\n".join(_clip_line(x) for x in tc_lines[:6]))
+            elif not content:
+                parts.append("*（本轮无文本内容）*")
+        parts.append("")
+    if parts:
+        try:
+            sys.stdout.write(render_markdown("\n".join(parts)))
+        except Exception:
+            sys.stdout.write("\n".join(parts))
+    else:
+        sys.stdout.write("⚠️ 历史记录为空\n")
+    sys.stdout.flush()
+
+
 def _default_meta(action, arg, session=None):
     from wchat_py.session import Session as _S
     sess = session if session is not None else _S.from_env()
@@ -67,10 +133,13 @@ def _default_meta(action, arg, session=None):
             sys.stdout.write("\033[1;31m❌ 历史文件格式错误或为空: %s\033[0m\n" % path)
             sys.stdout.flush()
             return True
-        # 缺 system(旧文件)时补当前 system(技能/MCP 清单)
-        if not (msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system"):
-            from wchat_py.cli import _system_prompt_text
-            msgs = [{"role": "system", "content": _system_prompt_text()}] + msgs
+        # 始终刷新 system(技能/MCP 清单可能是旧的)
+        from wchat_py.cli import _system_prompt_text
+        _sys = {"role": "system", "content": _system_prompt_text()}
+        if msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system":
+            msgs = [_sys] + msgs[1:]
+        else:
+            msgs = [_sys] + msgs
         sess.messages_json = _json.dumps(msgs, ensure_ascii=False)
         sess.msg_count = len(msgs)
         sess.chat_title = os.path.basename(path)
@@ -90,8 +159,9 @@ def _default_meta(action, arg, session=None):
         except Exception:
             pass
         sys.stdout.write("\033[H\033[2J")
-        sys.stdout.write("切换到 %s(共 %d 条消息)\n" % (path, len(msgs)))
+        sys.stdout.write("切换到 %s(共 %d 条消息)\n\n" % (path, len(msgs)))
         sys.stdout.flush()
+        _render_history(msgs)
         return True
     if action == "compact":
         from wchat_py.session import Session, compact_status
