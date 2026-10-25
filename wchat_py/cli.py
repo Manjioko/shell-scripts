@@ -876,7 +876,8 @@ def _run_tool(name, args_json):
             sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
             if _auto:
-                sys.stdout.write("硬墙拒绝(%s): %s\n" % (_r, _m or ""))
+                _one = (cmd or "").replace("\n", " ")
+                sys.stdout.write(" ⛔ 硬墙拒绝(%s):%s\n" % (_r, _one))
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                               rule=_r, verdict="auto_deny", cmd=cmd)
                 return ("[硬墙 %s] %s" % (_r, _m))
