@@ -77,12 +77,18 @@ def _default_meta(action, arg, session=None):
         from wchat_py.session import Session, set_pro, set_flash, thinking_on
         s = sess
         if action == "model_pro":
-            inp_msg("✅ 已切换到 pro 模型 (%s)" % set_pro(s))
+            _m = set_pro(s)
+            os.environ["WCHAT_MODEL"] = _m
+            inp_msg("✅ 已切换到 pro 模型 (%s)" % _m)
         elif action == "thinking_on":
             thinking_on(s)
+            os.environ["WCHAT_THINKING"] = "enabled"
             inp_msg("✅ 已开启思考模式")
         else:
-            inp_msg("✅ 已恢复默认 (model=%s, thinking=disabled)" % set_flash(s))
+            _m = set_flash(s)
+            os.environ["WCHAT_MODEL"] = _m
+            os.environ["WCHAT_THINKING"] = "disabled"
+            inp_msg("✅ 已恢复默认 (model=%s, thinking=disabled)" % _m)
         return True
     if action == "skill_save":
         import json as _json
