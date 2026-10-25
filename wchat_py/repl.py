@@ -330,20 +330,7 @@ def _is_text_file(p):
 
 
 def _pick_file():
-    """Ctrl-F 文件选择器:优先 tkinter(stdlib,无外部依赖),失败再退回系统原生对话框。"""
-    try:
-        import tkinter as _tk
-        from tkinter import filedialog as _fd
-        _r = _tk.Tk()
-        _r.withdraw()
-        _p = _fd.askopenfilename()
-        try:
-            _r.destroy()
-        except Exception:
-            pass
-        return _p or ""
-    except Exception:
-        pass
+    """Ctrl-F 文件选择器:用系统原生对话框(macOS AppleScript / Linux zenity|kdialog / WSL)。"""
     import shutil
     if sys.platform == "darwin":
         try:
