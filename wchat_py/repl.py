@@ -143,21 +143,31 @@ def _default_meta(action, arg, session=None):
         return True
     if action == "auto_on":
         from wchat_py.cli import inp_msg
-        from wchat_py.session import Session, enter_auto
+        from wchat_py.session import enter_auto
+        from wchat_py import auto_enable as _ae
         s = sess
         tier = arg or s.auto_mode or (s.auto_tiers[0] if s.auto_tiers else "")
-        if enter_auto(s, tier) is None:
+        if tier not in s.auto_tiers:
             inp_msg("未知档位: %s(可选: %s)" % (tier, " ".join(s.auto_tiers)))
-        else:
-            inp_msg("✅ 已开启 auto: %s 档(装配/回滚点由 auto_enable 负责，未迁)" % tier)
+            return True
+        os.environ["AUTO_MODE"] = tier
+        os.environ["WCHAT_AUTO_MODE"] = tier
+        if not _ae.enable(tier):
+            os.environ.pop("AUTO_MODE", None)
+            os.environ.pop("WCHAT_AUTO_MODE", None)
+            return True
+        enter_auto(s, tier)
         return True
     if action == "auto_off":
-        from wchat_py.cli import inp_msg
-        from wchat_py.session import Session, auto_off
+        from wchat_py.cli import inp_msg, _auto_summary
+        from wchat_py.session import auto_off
         s = sess
         if not s.auto_mode:
             inp_msg("当前未开启 auto")
         else:
+            _auto_summary()
+            os.environ.pop("AUTO_MODE", None)
+            os.environ.pop("WCHAT_AUTO_MODE", None)
             auto_off(s)
             inp_msg("✅ 已关闭 auto,恢复逐次人工确认")
         return True
