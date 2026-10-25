@@ -29,14 +29,69 @@ def _default_meta(action, arg, session=None):
             inp_msg(ln)
         return True
     if action == "list_history":
-        from wchat_py.session import history_list
+        import glob as _glob
+        import json as _json
         d = os.environ.get("WCHAT_HISTORY_DIR", "")
-        names = history_list(d)
-        if not names:
+        files = []
+        for f in _glob.glob(os.path.join(d, "*.json")):
+            try:
+                files.append((os.path.getmtime(f), f))
+            except OSError:
+                pass
+        files.sort(key=lambda x: (-x[0], x[1]))
+        if not files:
             sys.stdout.write("(无历史)\n")
-        else:
-            for n in names:
-                sys.stdout.write(n + "\n")
+            return True
+        sys.stdout.write("请从以下编号中选择你要加载的历史记录：\n")
+        for i, (_mt, f) in enumerate(files):
+            name = os.path.basename(f).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+            sys.stdout.write("%d. %s\n" % (i, name))
+        sys.stdout.write("_>"); sys.stdout.flush()
+        try:
+            num = (sys.stdin.readline() or "").strip()
+        except Exception:
+            num = ""
+        if not num:
+            num = "0"
+        if not num.isdigit() or not (0 <= int(num) < len(files)):
+            sys.stdout.write("请选择正确的编号\n"); sys.stdout.flush()
+            return True
+        path = files[int(num)][1]
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                data = _json.load(f)
+            msgs = data if isinstance(data, list) else data.get("messages") or []
+            if not isinstance(msgs, list) or not msgs:
+                raise ValueError("empty")
+        except Exception:
+            sys.stdout.write("\033[1;31m❌ 历史文件格式错误或为空: %s\033[0m\n" % path)
+            sys.stdout.flush()
+            return True
+        # 缺 system(旧文件)时补当前 system(技能/MCP 清单)
+        if not (msgs and isinstance(msgs[0], dict) and msgs[0].get("role") == "system"):
+            from wchat_py.cli import _system_prompt_text
+            msgs = [{"role": "system", "content": _system_prompt_text()}] + msgs
+        sess.messages_json = _json.dumps(msgs, ensure_ascii=False)
+        sess.msg_count = len(msgs)
+        sess.chat_title = os.path.basename(path)
+        os.environ["WCHAT_CHAT_TITLE"] = sess.chat_title
+        if isinstance(data, dict):
+            if data.get("model"):
+                sess.model = data["model"]; os.environ["WCHAT_MODEL"] = data["model"]
+            if data.get("thinking"):
+                th = data["thinking"]
+                if isinstance(th, dict):
+                    th = th.get("type")
+                if th in ("enabled", "disabled"):
+                    sess.thinking = th; os.environ["WCHAT_THINKING"] = th
+        try:
+            from wchat_py.cli import _reset_image_refs
+            _reset_image_refs()
+        except Exception:
+            pass
+        sys.stdout.write("\033[H\033[2J")
+        sys.stdout.write("切换到 %s(共 %d 条消息)\n" % (path, len(msgs)))
+        sys.stdout.flush()
         return True
     if action == "compact":
         from wchat_py.session import Session, compact_status
