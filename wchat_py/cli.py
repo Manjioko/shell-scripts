@@ -1016,14 +1016,17 @@ def run_turn(content, model="", max_rounds=5):
         box.append(d)
         sys.stdout.write(box.paint_full())
         sys.stdout.flush()
+    def _on_text(d):
+        box.append(d)
+        sys.stdout.write(box.paint_full())
+        sys.stdout.flush()
     for _ in range(max_rounds):
-        text, tcs, err = _call_llm(msgs, model, on_reason=_on_reason)
+        text, tcs, err = _call_llm(msgs, model, on_text=_on_text, on_reason=_on_reason)
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
         if text:
             last_text = text
-            box.append(text); sys.stdout.write(box.paint_full()); sys.stdout.flush()
         if err:
             sys.stdout.write(box.close()); sys.stdout.flush()
             sys.stderr.write("API 请求失败: %s\n" % err); return 1
