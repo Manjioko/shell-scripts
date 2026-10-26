@@ -110,6 +110,8 @@ def parse(argv):
     auto_mode = ""
     mcp_enable = 0
     mcp_only = ""
+    allow_ro = []
+    allow_rw = []
     unknown = []
     i = 0
     while i < len(argv):
@@ -147,13 +149,26 @@ def parse(argv):
         elif a == "-st":
             quick_mode = 1
             forget_history = 1
+        elif a == "--allow" or a == "--allow-write" or a.startswith("--allow=") \
+                or a.startswith("--allow-write="):
+            _is_w = a.startswith("--allow-write")
+            if "=" in a:
+                _raw = a.split("=", 1)[1]
+            else:
+                _raw = argv[i + 1] if i + 1 < len(argv) else ""
+                if _raw:
+                    i += 1
+            if _raw:
+                _np = os.path.realpath(os.path.expanduser(_raw))
+                (allow_rw if _is_w else allow_ro).append(_np)
         else:
             unknown.append(a)
         i += 1
     return {"content": content, "model": model, "thinking": thinking,
             "forget_history": str(forget_history),
             "quick_mode": str(quick_mode), "seen_help": str(seen_help), "action": action,
-            "auto_mode": auto_mode, "unknown": " ".join(unknown)}
+            "auto_mode": auto_mode, "unknown": " ".join(unknown),
+            "allow_ro": "\n".join(allow_ro), "allow_rw": "\n".join(allow_rw)}
 
 
 def cmd_parse(argv):
@@ -473,6 +488,7 @@ _IMG_REFS = {}
 _IMG_URLS = {}
 _IMG_SEQ = [0]
 _GRANTED_PATHS = set()
+_ALLOW_RW = []
 
 
 def _register_image_url(path, url, side=0):
@@ -550,6 +566,9 @@ def _path_guard(path, mode):
     if auto:
         if mode == "r":
             return None
+        for _a in _ALLOW_RW:
+            if under(p, _a):
+                return None
         _deny_status("P2")
         return "错误:%s被拒绝[硬墙 P2]:工作目录外写入。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
     key = (mode, p)
@@ -1411,6 +1430,17 @@ def main(argv):
         return 0
     # 参数路由：-u/usage、有正文走单轮、其余进 REPL(交互/标准输入)
     st = parse(argv)
+    for _p in (st.get("allow_ro") or "").splitlines():
+        _p = _p.strip()
+        if _p:
+            _GRANTED_PATHS.add(("r", _p))
+    for _p in (st.get("allow_rw") or "").splitlines():
+        _p = _p.strip()
+        if _p:
+            _GRANTED_PATHS.add(("rw", _p))
+            _ALLOW_RW.append(_p)
+    if _ALLOW_RW:
+        os.environ["WCHAT_ALLOW_WRITE"] = " ".join(_ALLOW_RW)
     if st.get("auto_mode"):
         os.environ["AUTO_MODE"] = st["auto_mode"]
         os.environ["WCHAT_AUTO_MODE"] = st["auto_mode"]
