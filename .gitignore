@@ -29,3 +29,8 @@ host.bak
 # 手写的临时探针与全表日志(回归资产一律进 tests/ 入库,这里只放跑完就可以丢的东西)。
 # 之前它一直挂在 git status 的 ?? 上,迟早会被 `git add .` 顺手带进版本库。
 .scratch/
+# 本地配置不进版本库(含明文 key);模板见 configs/config.example
+configs/config.sh
+configs/config
+.env
+*.key
