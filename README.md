@@ -41,7 +41,7 @@ bash tests/auto_test.sh e2e       # 行为 e2e
 bash tests/brew_dist_test.sh      # 发行包验收(35 条:可复现/无字节码/装后能跑/Formula 结构)
 ```
 
-## Homebrew（私有 tap）
+## Homebrew（tap 在仓库内）
 
 本仓库自带 tap：`Formula/wchat.rb`（安装期建 venv、依赖随包，运行期零联网）。
 
@@ -49,11 +49,9 @@ bash tests/brew_dist_test.sh      # 发行包验收(35 条:可复现/无字节�
 配模型、排障、发新版）。
 
 ```bash
-# 装(本仓库自带 tap,Formula 在 Formula/wchat.rb)
-brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
-brew install Manjioko/shell-scripts/wchat
-# 升级
-brew update && brew upgrade wchat && wchat --version
+brew install Manjioko/shell-scripts/wchat    # 一条命令,自动 tap
+brew update && brew upgrade wchat            # 以后升级
+wchat --version
 ```
 
 发新版只跑一条命令（打包 → 打 tag → 推 GitHub → 建 Release → 更新 Formula）:

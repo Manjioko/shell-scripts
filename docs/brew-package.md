@@ -22,18 +22,23 @@
 
 ## 2. 安装
 
-### 2.1 从仓库自带的 tap 装（正式方式）
-
-Formula 就在本仓库的 `Formula/wchat.rb`，直接拿仓库当 tap：
+### 2.1 从 GitHub 装（正式方式）
 
 ```bash
-brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
 brew install Manjioko/shell-scripts/wchat
 ```
 
-> 仓库名不是 `homebrew-*` 前缀，所以要显式给 URL，不能只写 `brew tap Manjioko/shell-scripts`。
+一条命令就够：Homebrew 会自动 tap `Manjioko/shell-scripts`（拉的是仓库默认分支
+`main` 上的 `Formula/wchat.rb`），然后装依赖、建 venv、装 wchat。
 
-升级：
+> 仓库名不是 `homebrew-*` 前缀，所以**不能**写 `brew install wchat` 或
+> `brew install Manjioko/shell-scripts`（前者要在 homebrew-core 里，后者少一层 formula 名）。
+> 完整写法必须是 `owner/repo/formula`。
+>
+> 想要裸名（`brew install wchat` / `brew upgrade wchat`）：自动 tap 之后裸名就能用了，
+> 或先手动 `brew tap Manjioko/shell-scripts` 一次。
+
+升级（发新版后）：
 
 ```bash
 brew update && brew upgrade wchat
@@ -271,38 +276,28 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 
 源码什么时候合进 `main` 是另一件事，由你自己决定。
 
-### 8.3 ⚠ 私有仓库装不了（实测结论）
+### 8.3 仓库必须是 public
 
-`Manjioko/shell-scripts` 目前是 **private**，这会让 `brew install` 以 404 失败，而且
-**不是 CDN 延迟**：
+历史上这个仓库是 private，实测结论：**私有仓库的 release 资产对匿名请求一律 404**，
+而 Homebrew 下载 `url` 用裸 curl（不带 Authorization），所以 `HOMEBREW_GITHUB_API_TOKEN`
+也不管用。现象是 `brew tap` 成功（走 git 凭据）但 `brew install` 报 404，极易误判成网络问题。
 
-- GitHub 私有仓库的 release 资产对匿名请求一律 404；
-- Homebrew 下载 Formula 的 `url` 用的是**裸 curl**（不带 Authorization），
-  所以设 `HOMEBREW_GITHUB_API_TOKEN` 也没用（已实测，仍 404）；
-- `brew tap` 反而能成功（走 git 凭据），所以现象是"tap 过了、install 报 404"，很容易误判。
+现已转为 public，匿名可下载（`curl -I` 返回 200），上面 2.1 的命令可用。
 
-三条可行路线：
-
-| 方案 | 做什么 | 代码可见性 | 用户体验 |
-|---|---|---|---|
-| **a. 仓库转 public** | `gh repo edit Manjioko/shell-scripts --visibility public` | 公开 | 最顺，`brew tap` + `brew install` 直接可用 |
-| **b. 公开 tap 仓库** | 建 `Manjioko/homebrew-wchat`（public），tarball 传到它的 release、Formula 放它里面 | 代码保持私有 | 顺，需多维护一个公开仓库 |
-| **c. 只自用** | 本机走 `file://` 或手动下载 tarball | 私有 | 别人装不了 |
-
-`release.sh` 的第 1 步会检测到 private 并打印同样的提示；第 8 步会分别报告
-"带认证能取到（资产确实传上去了）"和"匿名能不能取（brew 能不能用）"。
+如果以后又改回 private，`release.sh` 第 1 步会再次报警并给出三条绕行方案
+（转 public / 建公开 tap 仓库 / 仅手动安装）。
 
 ### 8.4 别人怎么装、怎么升级
 
-> 前提：仓库必须 **public**（见 8.3）。下面是转 public 之后的命令。
+> 前提：仓库是 **public**（见 8.3）。
 
 ```bash
-# 首次安装(仓库名不是 homebrew-* 前缀,所以要显式给 URL)
-brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
+# 首次安装(一条命令,自动 tap)
 brew install Manjioko/shell-scripts/wchat
 
 # 之后每次升级(你发完 release 后他们执行)
 brew update && brew upgrade wchat
+wchat --version
 ```
 
 `brew upgrade` 为什么能拿到新版：`brew update` 会把 tap 仓库（含 `Formula/wchat.rb`）
