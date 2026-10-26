@@ -242,9 +242,16 @@ def _default_meta(action, arg, session=None):
         if not _name or not _desc or not _body:
             inp_msg("⚠️ 技能提炼失败(模型未按 save_skill 工具提交草稿)")
             return True
-        inp_msg("📝 技能草稿: %s — %s" % (_name, _desc))
+        _desc = " ".join(_desc.split())
+        inp_msg('──────── 技能草稿 ────────')
+        inp_msg("name: %s" % _name)
+        inp_msg("description: %s" % _desc)
+        inp_msg('──────── 正文 ────────')
+        inp_msg(_body)
+        inp_msg('────────────────────────')
         if sys.stdin.isatty():
-            sys.stdout.write("保存为技能 %s? [y/N] " % _name); sys.stdout.flush()
+            sys.stdout.write("\033[2m│\033[0m 是否保存该技能?(y 或 yes,n/回车 = 取消): ")
+            sys.stdout.flush()
             try:
                 _ans = (sys.stdin.readline() or "").strip().lower()
             except Exception:

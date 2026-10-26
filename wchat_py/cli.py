@@ -18,8 +18,9 @@ MC_DIRNAME = ".mcporter"
 
 
 def inp_msg(msg=""):
-    """等价 bash 的 inp_msg：每行加暗色 `│ ` 前缀。"""
-    sys.stdout.write("\033[2m│\033[0m " + msg + "\n")
+    """等价 bash 的 inp_msg：每行加暗色 `│ ` 前缀(多行也逐行加)。"""
+    for ln in str(msg).split("\n"):
+        sys.stdout.write("\033[2m│\033[0m " + ln + "\n")
 
 
 def _skills_dir_default():
