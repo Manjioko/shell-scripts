@@ -138,6 +138,9 @@ def parse(argv):
         elif a == "-u":
             action = "usage"
             break
+        elif a == "-l":
+            action = "list_history"
+            break
         elif a == "-auto" or a.startswith("-auto="):
             auto_mode = a.split("=", 1)[1] if "=" in a else "sandbox"
         elif a == "-st":
@@ -1291,6 +1294,9 @@ def main(argv):
             finally:
                 _auto_summary()
 
+        _first_act = os.environ.pop("WCHAT_FIRST_ACTION", "")
+        if _first_act:
+            _meta(_first_act, "")
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox, render_reason, render_markdown
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
@@ -1386,6 +1392,8 @@ def main(argv):
         os.environ["WCHAT_MODEL"] = st["model"]
     if st.get("thinking"):
         os.environ["WCHAT_THINKING"] = st["thinking"]
+    if st["action"] == "list_history":
+        os.environ["WCHAT_FIRST_ACTION"] = "list_history"
     if st["action"] == "usage":
         from wchat_py.session import Session, usage_lines
         for ln in usage_lines(Session.from_env()):
