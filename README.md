@@ -49,7 +49,14 @@ python3 packaging/homebrew/make_release.py 0.1.0
 # 产物：dist/wchat-0.1.0.tar.gz、packaging/homebrew/Formula/wchat.rb
 ```
 
-- 本地试装：`brew install --formula packaging/homebrew/Formula/wchat.rb`（会装 `python@3.12`）；
+- 本地试装（Homebrew 7 要求 Formula 在 tap 内）：
+  ```bash
+  brew tap-new local/wchat
+  mkdir -p "$(brew --repository local/wchat)/Formula"
+  cp packaging/homebrew/Formula/wchat.rb "$(brew --repository local/wchat)/Formula/"
+  brew install local/wchat/wchat
+  ```
+  （会装 `python@3.12`；首次运行 `wchat` 在 `~/.ct/venv` 自举依赖）
 - 发布到 tap：把 tarball 做成 release 附件，用
   `python3 packaging/homebrew/make_release.py 0.1.0 --url <release-url>` 重新生成 Formula，
   放进 `homebrew-wchat/Formula/wchat.rb`；

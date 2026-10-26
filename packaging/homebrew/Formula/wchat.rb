@@ -2,7 +2,7 @@ class Wchat < Formula
   desc "Terminal AI assistant (Python, first-run venv bootstrap)"
   homepage "https://example.invalid/wchat"
   url "file:///Users/jwan/bin/dist/wchat-0.1.0.tar.gz"
-  sha256 "ef50ee6cbbddd8b8011dd7f5fbb8278e81d8d67571c4e098f8b917d5011f712b"
+  sha256 "71dc1d9872470edeea4ab5e1ef580ad76be7cef6ceba0b93c9b15d7d678134b6"
   version "0.1.0"
 
   depends_on "python@3.12"

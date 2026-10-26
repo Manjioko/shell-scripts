@@ -74,6 +74,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("version", nargs="?", default="0.1.0")
     ap.add_argument("--url", default="")
+    ap.add_argument("--tap", default="local/wchat", help="本地 tap 名(user/repo)")
     a = ap.parse_args()
     tar = build_tarball(a.version)
     h = sha256(tar)
@@ -88,7 +89,11 @@ def main():
     print("formula:", fp)
     print("url:", url)
     print()
-    print("本地试装: brew install --formula %s" % fp)
+    print("Homebrew 7 要求 Formula 位于 tap 内;本地试装:")
+    print("  brew tap-new %s" % a.tap)
+    print('  mkdir -p "$(brew --repository %s)/Formula"' % a.tap)
+    print('  cp "%s" "$(brew --repository %s)/Formula/"' % (fp, a.tap))
+    print("  brew install %s/wchat" % a.tap)
     print("发布到 tap: 把 tarball 作为 release 附件, 用 --url 重新生成本 Formula")
 
 
