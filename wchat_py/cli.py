@@ -1425,7 +1425,7 @@ def main(argv):
         from wchat_py import audit as _audit
         _alog = os.environ.get("AUTO_AUDIT_LOG", "")
         _audit.record(_alog, "session", verdict="started")
-        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
+        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 250)
         _rc = run_turn(st["content"], st.get("model", ""), _mr)
         _audit.record(_alog, "session", verdict="finished")
         return _rc
@@ -1472,7 +1472,7 @@ def main(argv):
     if st.get("content"):
         from wchat_py import audit as _audit
         _alog = os.environ.get("AUTO_AUDIT_LOG", "")
-        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 5)
+        _mr = int(os.environ.get("MAX_TOOL_ROUNDS") or 250)
         if str(st.get("quick_mode")) == "1":
             _rc = run_turn(st["content"], st.get("model", ""), _mr)
             _audit.record(_alog, "session", verdict="finished")

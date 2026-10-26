@@ -36,7 +36,7 @@ class Session:
     auto_approvals: int = 0
     auto_max: int = 200
     tool_round: int = 0
-    max_tool_rounds: int = 25
+    max_tool_rounds: int = 250
     auto_ck_note: str = ""
     backup_count: int = 0
     audit_log: str = ""
@@ -86,7 +86,7 @@ class Session:
             auto_approvals=i("WCHAT_AUTO_APPROVALS", 0),
             auto_max=i("AUTO_MAX_APPROVALS", 200),
             tool_round=i("WCHAT_TOOL_ROUND", 0),
-            max_tool_rounds=i("MAX_TOOL_ROUNDS", 25),
+            max_tool_rounds=i("MAX_TOOL_ROUNDS", 250),
             auto_ck_note=e.get("WCHAT_AUTO_CK_NOTE", ""),
             backup_count=i("WCHAT_BACKUP_COUNT", 0),
             audit_log=e.get("WCHAT_AUDIT_LOG", ""),
@@ -220,13 +220,19 @@ def _data_url(path):
         return path
 
 
-def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
+def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
     """带工具续发的一轮编排（llm/tool 可注入，便于离线自测配对）。
 
-    call_llm(msgs)->(text, tool_calls, err)；tool_calls 为 [{id,name,arguments},...]；
-    run_tool(name, arguments)->str。有 tool_calls → 追加 assistant(tool_calls) + 每个 tool 结果
-    → 续发；无则落 assistant(text) 结束。回写 Session 并返回最终 text（err 时返回 err）。
+    max_rounds 缺省读 MAX_TOOL_ROUNDS(缺省 250,与 master 一致)；跑满说明模型陷入
+    工具循环，会打印上限提示后结束本轮（而不是静默停下等人补“继续”）。
     """
+    if max_rounds is None:
+        try:
+            max_rounds = int(os.environ.get("MAX_TOOL_ROUNDS") or 250)
+        except ValueError:
+            max_rounds = 250
+    # 与 master 一致:轮次计数按"每次用户输入"复位(7894 行 tool_round=0)
+    session.tool_round = 0
     msgs = messages_list(session.messages_json)
     if session.input_images:
         from wchat_py import img as _img
@@ -256,6 +262,7 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
     else:
         msgs.append({"role": "user", "content": content})
     text = ""
+    hit_limit = True
     for _ in range(max_rounds):
         # 主动压缩:上一轮 usage 超阈值 -> 本轮请求前先摘要重写历史
         try:
@@ -277,6 +284,10 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                                                       "arguments": tc.get("arguments") or "{}"}}
                                         for i, tc in enumerate(tcs)]})
             for i, tc in enumerate(tcs):
+                try:
+                    session.tool_round = int(session.tool_round or 0) + 1
+                except (TypeError, ValueError):
+                    session.tool_round = 1
                 out = run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
                 if isinstance(out, str) and out.startswith("IMGJSON:"):
                     try:
@@ -294,8 +305,11 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
                 msgs.append({"role": "tool", "content": out,
                              "tool_call_id": tc.get("id") or ("call_%d" % i)})
             continue
+        hit_limit = False
         msgs.append({"role": "assistant", "content": text or ""})
         break
+    if hit_limit:
+        print("⚠️ 已达工具轮次上限 %d（MAX_TOOL_ROUNDS），本轮结束；可再发“继续”接着跑" % max_rounds)
     session.messages_json = json.dumps(msgs, ensure_ascii=False)
     session.msg_count = len(msgs)
     return text
