@@ -5,8 +5,11 @@
 ## 安装
 
 ```bash
-python3 setup.py        # 安装 Python 依赖(prompt_toolkit / rich / pillow);git、npx 可选
+python3 setup.py        # 可选:显式安装依赖(prompt_toolkit / rich / pillow)
+./wchat                 # 首次若缺依赖会自动建 ~/.ct/venv 并安装(一次),之后直接启动
 ```
+
+> 想跳过自举(CI/测试)：`WCHAT_NO_BOOTSTRAP=1 ./wchat`；想强制走 venv：`WCHAT_BOOTSTRAP_FORCE=1`。
 
 ## 运行
 
