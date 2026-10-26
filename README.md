@@ -38,7 +38,7 @@ python3 configs/ctmodel.py undo       # 回滚
 bash tests/b_acceptance.sh        # B 阶段验收(应为 11/11)
 bash tests/run_gates.sh --main    # 主闸门(应为 run=45 pass=45)
 bash tests/auto_test.sh e2e       # 行为 e2e
-bash tests/brew_dist_test.sh      # 发行包验收(21 条:可复现/无字节码/装后能跑)
+bash tests/brew_dist_test.sh      # 发行包验收(35 条:可复现/无字节码/装后能跑/Formula 结构)
 ```
 
 ## Homebrew（私有 tap）
