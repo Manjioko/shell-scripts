@@ -123,9 +123,35 @@ def messages_list(messages_json):
         return []
 
 
+def _sanitize_name(s):
+    """标题 → 合法文件名片段(复刻 master save_history 的清洗顺序)。
+
+    末尾 `.json` 必须剥掉,这是用户实测的 bug 来源:加载历史时
+    `chat_title = basename(path)`,本身就带着 `.json`;保存时再拼一个就成
+    `xxx.json.json`(反复加载→保存会一路叠下去)。
+    """
+    import re
+    name = (s or "").strip()
+    name = "".join("_" if c.isspace() else c for c in name)
+    name = re.sub(r'[\\/:*?"<>|]', "", name)
+    while name.lower().endswith(".json"):
+        name = name[:-5]
+    return name or "chat"
+
+
+def history_name(title):
+    """标题 → 历史文件名(带且仅带一个 .json)。"""
+    return _sanitize_name(title) + ".json"
+
+
 def save_history(history_dir, messages_json, name, title=""):
-    """把当前 messages 存成历史文档（原子写，经 msgstore.save_doc）。返回落盘路径。"""
+    """把当前 messages 存成历史文档（原子写，经 msgstore.save_doc）。返回落盘路径。
+
+    name/title 任给其一即可:name(WCHAT_HISTORY_NAME)优先,否则用 title;
+    无论哪来源都过 `_sanitize_name`,保证落盘名只有一个 `.json` 后缀。
+    """
     from wchat_py import msgstore
+    name = history_name(name or title)
     path = os.path.join(history_dir, name)
     msgstore.save_doc(path, {"messages": messages_list(messages_json), "title": title})
     return path
@@ -192,6 +218,14 @@ def auto_off(s):
 def add_image(s, path):
     s.input_images.append(path)
     return len(s.input_images)
+
+
+class Aborted(Exception):
+    """用户 Ctrl+C 打断本轮输出(与 master 的 ask_ai 返回 130 同义)。
+
+    与普通异常的区别在语义而不在类型:**本轮 assistant 输出整体丢弃**,但用户那句
+    已经写进 messages(用户能看到自己说过什么,便于补充后重发)。
+    """
 
 
 def orchestrate_turn(session, content, llm):
@@ -263,6 +297,10 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
         msgs.append({"role": "user", "content": content})
     text = ""
     hit_limit = True
+    # 中断回滚点:用户消息已写入(与 master 一致,中断后用户那句保留),本轮之后
+    # 追加的 assistant/tool 全部丢弃——否则半截正文配上半截 tool_calls 会污染下一轮
+    # (孤儿 tool_calls 让网关 400)。
+    _n_user = len(msgs)
     for _ in range(max_rounds):
         # 主动压缩:上一轮 usage 超阈值 -> 本轮请求前先摘要重写历史
         try:
@@ -270,9 +308,16 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
             if _cmp.due(session.last_prompt_tokens, session.token_threshold):
                 _cr.compact(session, auto=True)
                 msgs = messages_list(session.messages_json)
+                _n_user = len(msgs)
         except Exception:
             pass
-        text, tcs, err = call_llm(msgs)
+        try:
+            text, tcs, err = call_llm(msgs)
+        except Aborted:
+            del msgs[_n_user:]
+            session.messages_json = json.dumps(msgs, ensure_ascii=False)
+            session.msg_count = len(msgs)
+            raise
         if err:
             session.messages_json = json.dumps(msgs, ensure_ascii=False)
             session.msg_count = len(msgs)

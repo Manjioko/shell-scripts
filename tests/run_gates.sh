@@ -47,7 +47,7 @@ done
 
 # --- 闸门表:名字 | 命令 | 结论行的匹配正则(pass) | 说明 ---------------------------
 # pass 正则**必须**锚定到该闸门自己打印的结论行;匹配不到就判失败(见硬规矩 1)。
-GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件 内联图片 写熔断 py通道 硬墙双路 网络搜索 视觉转述 py工具 认证解析 硬墙谓词 技能解析 MCP客户端 图片逻辑 压缩py 消息构造 历史变换 文件格式 路径归一 配置打包 路径裁决 会话授权 LLM适配 请求建体 消息存储 权限状态 工具规格 工具运行 硬墙语料 硬墙接缝 终端地基 终端引擎 工具完整性 编排轮次审计)
+GATE_NAMES=(语法 全表断言 判据出口话术 压缩布局 审计字段 形状向量 技能目录 MCP通道 流量回放 主套件 内联图片 写熔断 py通道 硬墙双路 网络搜索 视觉转述 py工具 认证解析 硬墙谓词 技能解析 MCP客户端 图片逻辑 压缩py 消息构造 历史变换 文件格式 路径归一 配置打包 路径裁决 会话授权 LLM适配 请求建体 消息存储 权限状态 工具规格 工具运行 硬墙语料 硬墙接缝 终端地基 终端引擎 工具完整性 编排轮次审计 历史存档名 Ctrl-C中断)
 GATE_CMDS=("bash -n wchat_ref && bash -n tests/test_hardwall.sh && bash -n tests/run_gates.sh && echo SYNTAX-ok-3-files" "bash tests/hardwall_py_vectors.sh" "bash tests/rulefail_check.sh"
            "bash tests/compaction_pin_probe.sh" "bash tests/audit_field_probe.sh"
            "bash tests/probe_shapes.sh" "bash tests/skills_dir_test.sh"
@@ -58,8 +58,8 @@ GATE_CMDS=("bash -n wchat_ref && bash -n tests/test_hardwall.sh && bash -n tests
            "bash tests/py_textutil_test.sh" "bash tests/py_authparse_test.sh" "bash tests/py_hd_test.sh"
            "bash tests/py_skill_test.sh" "bash tests/py_mcp_client_test.sh" "bash tests/py_img_test.sh"
            "bash tests/py_compaction_test.sh" "bash tests/py_msg_test.sh" "bash tests/py_history_test.sh"
-           "bash tests/py_filefmt_test.sh" "bash tests/py_pathutil_test.sh" "bash tests/py_config_test.sh" "bash tests/py_pathrule_test.sh" "bash tests/py_authz_test.sh" "bash tests/py_llm_test.sh" "bash tests/py_request_test.sh" "bash tests/py_msgstore_test.sh" "bash tests/py_state_test.sh" "bash tests/py_tools_test.sh" "bash tests/py_tools_run_test.sh" "bash tests/hdcmd_corpus_test.sh" "bash tests/hardwall_seam_test.sh" "bash tests/term_test.sh" "bash tests/term_suite.sh" "bash tests/tools_complete_test.sh" "python3 tests/orchestrate_e2e.py")
-GATE_MODE=(c x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x c)
+           "bash tests/py_filefmt_test.sh" "bash tests/py_pathutil_test.sh" "bash tests/py_config_test.sh" "bash tests/py_pathrule_test.sh" "bash tests/py_authz_test.sh" "bash tests/py_llm_test.sh" "bash tests/py_request_test.sh" "bash tests/py_msgstore_test.sh" "bash tests/py_state_test.sh" "bash tests/py_tools_test.sh" "bash tests/py_tools_run_test.sh" "bash tests/hdcmd_corpus_test.sh" "bash tests/hardwall_seam_test.sh" "bash tests/term_test.sh" "bash tests/term_suite.sh" "bash tests/tools_complete_test.sh" "python3 tests/orchestrate_e2e.py" "python3 tests/history_list_test.py" "python3 tests/interrupt_e2e.py")
+GATE_MODE=(c x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x c c c)
 GATE_PAT=('^SYNTAX-ok-3-files$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^PASS=[0-9]+ FAIL=0$'
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^结论: 通过$' '不符 0$'
          '闸门全部通过' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^结论:无新增漂移' '^RESULT|全部通过|PASS=[0-9]+ FAIL=0$'
@@ -71,7 +71,7 @@ GATE_PAT=('^SYNTAX-ok-3-files$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0 ' '^PAS
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$'
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$'
          '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$'
-         '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '基线与当前一致' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+         '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '基线与当前一致' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$' '^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE=('两个脚本语法' '569 条判据向量 + 总数守卫(默认走 Python 生产路)' '规则覆盖 + 出口话术 + 分支数锁'
            'compact_due/布局/接线锁' 'trunc/tlen + root + pol 字段' '判据形状向量'
            'SKILLS_DIR 越界与软链防护'
@@ -93,7 +93,7 @@ GATE_NOTE=('两个脚本语法' '569 条判据向量 + 总数守卫(默认走 Py
            'compact_due/compact_apply(M 制拆分)'
            'add_message/auth_add_message(M 制拆分)'
            'history pack/drop_orphan_tools(M 制拆分)'
-           'filefmt.read(M 制拆分·已收口)' 'pathutil expand_tilde/norm_path/resolve_path/in_root_exempt(W3·已收口)' 'py_cfg_dump 配置导出 + schema 一致性(W12-1)' 'hard_deny_path 纯判定化(W12-2·已收口)' 'is_granted/auto_allow_hit 会话授权(W12-3·已收口)' 'llm.py Seam 编码/kwargs/依赖探测(W12-4a)' '请求建体 parity(Python 建体 vs jq 逐字节)' 'messages 文件 store(回滚=截断/原子写/损坏抛错)' '权限会话态形状(幂等/顺序/rw⊃r/空串)' '工具注册表(原样字节/两句独立变换/组合不丢 MCP)' 'tools_run 五工具 parity(content/状态行/落盘字节)' '硬墙差分语料 44 条(bash 基线稳定; Python 版 parity 的 oracle)' '硬墙接缝(前端 WCHAT_PY_HARDWALL=1 vs 0 判定等价)' '终端层地基: raw_mode 三路退出恢复 termios)' '终端引擎: raw/pty/信号/run_shell_command 四用例' '工具完整性:tools_spec 每个工具都有实现(行为断言)' '编排:轮次上限缺省 250/撞顶不静默/审计空路径落 CT_HOME')
+           'filefmt.read(M 制拆分·已收口)' 'pathutil expand_tilde/norm_path/resolve_path/in_root_exempt(W3·已收口)' 'py_cfg_dump 配置导出 + schema 一致性(W12-1)' 'hard_deny_path 纯判定化(W12-2·已收口)' 'is_granted/auto_allow_hit 会话授权(W12-3·已收口)' 'llm.py Seam 编码/kwargs/依赖探测(W12-4a)' '请求建体 parity(Python 建体 vs jq 逐字节)' 'messages 文件 store(回滚=截断/原子写/损坏抛错)' '权限会话态形状(幂等/顺序/rw⊃r/空串)' '工具注册表(原样字节/两句独立变换/组合不丢 MCP)' 'tools_run 五工具 parity(content/状态行/落盘字节)' '硬墙差分语料 44 条(bash 基线稳定; Python 版 parity 的 oracle)' '硬墙接缝(前端 WCHAT_PY_HARDWALL=1 vs 0 判定等价)' '终端层地基: raw_mode 三路退出恢复 termios)' '终端引擎: raw/pty/信号/run_shell_command 四用例' '工具完整性:tools_spec 每个工具都有实现(行为断言)' '编排:轮次上限缺省 250/撞顶不静默/审计空路径落 CT_HOME' '历史文件名只有一个 .json(-fs 不许出 xxx.json.json)' 'Ctrl+C 打断流式输出:回输入框/不刷栈/半截输出不入上下文')
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。

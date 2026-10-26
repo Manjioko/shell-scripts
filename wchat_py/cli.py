@@ -217,38 +217,13 @@ def run_single_turn(content, model=""):
     return 0 if rc == 0 else 1
 
 
-def _call_llm(msgs, model, on_text=None, on_reason=None):
-    """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。
+def _consume_stream(p, on_text, on_reason):
+    """读 llm 子进程的 JSON-lines 事件流,返回 (text, tcs, err)。
 
-    on_text(delta) 若给: 每个 text 增量实时回调(供流式渲染); text 仍被累积返回。
-    on_reason(delta) 若给: 思考增量回调(-dp/思考模式); 未给但有 on_text 时暗色直出。
+    抽成独立函数只为一件事:让 Ctrl+C 的 try/finally 包住整个读循环而不把循环体
+    再缩进一层(缩进走样过一次,整段语句块全错)。
     """
-    import json as _json, subprocess
-    from wchat_py import tools as _tools
-    try:
-        _tb = _tools.build(provider=os.environ.get("WEB_SEARCH_PROVIDER", ""),
-                           mcp_enable=(1 if os.environ.get("MCP_ENABLE") == "1" else 0),
-                           mcp_tools=None)
-        _tlist = _json.loads(_tb) if isinstance(_tb, str) else _tb
-    except Exception:
-        _tlist = []
-    _model = model or os.environ.get("WCHAT_MODEL") or os.environ.get("FLASH_MODEL", "")
-    _think = os.environ.get("WCHAT_THINKING", "disabled") or "disabled"
-    req = {"model": _model, "messages": msgs,
-           "thinking": _think, "tools": _tlist}
-    _ref_tmp = None
-    if _IMG_URLS:
-        import tempfile as _tf
-        _fd, _ref_tmp = _tf.mkstemp(prefix="ct_refmap_")
-        with os.fdopen(_fd, "w", encoding="utf-8") as _rf:
-            _json.dump({k: {"url": v} for k, v in _IMG_URLS.items()}, _rf)
-        req["ref_map_file"] = _ref_tmp
-    if os.environ.get("WCHAT_TRACE") == "1":
-        sys.stderr.write("TRACE llm model=%r thinking=%r\n" % (_model, _think)); sys.stderr.flush()
-    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
-    p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
+    import json as _json
     text, tcs, err = [], [], None
     for line in p.stdout:
         line = line.strip()
@@ -298,12 +273,87 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
                 pass
         elif t == "error":
             err = ev.get("v")
-    p.wait()
-    if _ref_tmp:
+    return "".join(text), tcs, err
+
+
+def _call_llm(msgs, model, on_text=None, on_reason=None):
+    """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。
+
+    on_text(delta) 若给: 每个 text 增量实时回调(供流式渲染); text 仍被累积返回。
+    on_reason(delta) 若给: 思考增量回调(-dp/思考模式); 未给但有 on_text 时暗色直出。
+    """
+    import json as _json, subprocess
+    from wchat_py import tools as _tools
+    try:
+        _tb = _tools.build(provider=os.environ.get("WEB_SEARCH_PROVIDER", ""),
+                           mcp_enable=(1 if os.environ.get("MCP_ENABLE") == "1" else 0),
+                           mcp_tools=None)
+        _tlist = _json.loads(_tb) if isinstance(_tb, str) else _tb
+    except Exception:
+        _tlist = []
+    _model = model or os.environ.get("WCHAT_MODEL") or os.environ.get("FLASH_MODEL", "")
+    _think = os.environ.get("WCHAT_THINKING", "disabled") or "disabled"
+    req = {"model": _model, "messages": msgs,
+           "thinking": _think, "tools": _tlist}
+    _ref_tmp = None
+    if _IMG_URLS:
+        import tempfile as _tf
+        _fd, _ref_tmp = _tf.mkstemp(prefix="ct_refmap_")
+        with os.fdopen(_fd, "w", encoding="utf-8") as _rf:
+            _json.dump({k: {"url": v} for k, v in _IMG_URLS.items()}, _rf)
+        req["ref_map_file"] = _ref_tmp
+    if os.environ.get("WCHAT_TRACE") == "1":
+        sys.stderr.write("TRACE llm model=%r thinking=%r\n" % (_model, _think)); sys.stderr.flush()
+    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
+
+    # Ctrl+C 打断流式输出(与 master handle_ctrl_c 同一套语义):
+    # 把 SIGINT 换成本处理器 → 只置标志 + kill 掉读流的子进程,让读循环立刻 EOF;
+    # **不抛 KeyboardInterrupt**,否则它会一路冒到 main 变成 traceback 退出
+    # (用户实测:master 是"取消本轮输出、回输入框",迁移版直接崩)。
+    # 必须显式 kill:终端 Ctrl+C 发给整个前台进程组,但子进程若正卡在 socket
+    # recv,只装处理器不杀它就还得等下一行(停滞场景会一直挂)。
+    global _LLM_ABORT
+    _LLM_ABORT = False
+
+    def _on_sigint(signum, frame):
+        global _LLM_ABORT
+        _LLM_ABORT = True
         try:
-            os.unlink(_ref_tmp)
-        except OSError:
+            p.kill()
+        except Exception:
             pass
+
+    _old_int = None
+    try:
+        import signal as _signal
+        _old_int = _signal.signal(_signal.SIGINT, _on_sigint)
+    except (ValueError, OSError):
+        _old_int = None          # 非主线程装不了处理器:退回默认行为
+    try:
+        text, tcs, err = _consume_stream(p, on_text, on_reason)
+    finally:
+        if _old_int is not None:
+            try:
+                import signal as _signal
+                _signal.signal(_signal.SIGINT, _old_int)
+            except (ValueError, OSError, TypeError):
+                pass
+        try:
+            p.wait()
+        except Exception:
+            pass
+        if _ref_tmp:
+            try:
+                os.unlink(_ref_tmp)
+            except OSError:
+                pass
+    if _LLM_ABORT:
+        # 本轮输出整体丢弃:由 orchestrate 回滚 messages 并让 REPL 打印"已中断"
+        from wchat_py.session import Aborted
+        raise Aborted()
     for _s in tcs:
         _s.pop("_i", None)
     return "".join(text), tcs, err
@@ -338,6 +388,7 @@ def _shell_approved(cmd, strict=True):
 
 
 from wchat_py.prompts import AUTO_FINAL_SYS as _AFS, AUTH_HEAD as _AH, AUTH_TAIL as _AT
+from wchat_py.session import Aborted          # Ctrl+C 打断本轮的信号(见 session.Aborted)
 AUTO_FINAL_SYS = _AFS
 AUTH_SYS = _AH + "{workdir}" + _AT
 
@@ -1027,8 +1078,17 @@ def _system_prompt_text():
     return base
 
 
-def run_turn(content, model="", max_rounds=5):
-    """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。"""
+def run_turn(content, model="", max_rounds=None):
+    """单轮内的工具链闭环: 请求 -> 有 tool_calls 就执行并续发 -> 无则结束。
+
+    max_rounds 缺省读 MAX_TOOL_ROUNDS(250,与 master 一致)。写死 5 会让 `-st` 一个
+    正经任务(读+改+测+迭代)在第 5 次工具调用处静默截断。
+    """
+    if max_rounds is None:
+        try:
+            max_rounds = int(os.environ.get("MAX_TOOL_ROUNDS") or 250)
+        except ValueError:
+            max_rounds = 250
     import json as _json
     from wchat_py import msg as msgmod
     from wchat_py.render import StreamBox, render_markdown, render_reason
@@ -1064,7 +1124,13 @@ def run_turn(content, model="", max_rounds=5):
                 msgs = _json.loads(_ss.messages_json)
         except Exception:
             pass
-        text, tcs, err = _call_llm(msgs, model, on_text=_on_text, on_reason=_on_reason)
+        try:
+            text, tcs, err = _call_llm(msgs, model, on_text=_on_text, on_reason=_on_reason)
+        except Aborted:
+            # -st 单轮模式被打断:关箱、丢弃本轮输出、退 130(脚本调用方按"被中断"处理)
+            sys.stdout.write(box.close()); sys.stdout.flush()
+            sys.stdout.write("\n⏹ 已中断,本轮输出已丢弃\n"); sys.stdout.flush()
+            return 130
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
                              % (len(tcs), [t.get("name") for t in tcs], err)); sys.stderr.flush()
@@ -1341,8 +1407,8 @@ def main(argv):
                         _title = _gen_title(_s.messages_json)
                     except Exception:
                         _title = ""
-                _name = os.environ.get("WCHAT_HISTORY_NAME") or (
-                    (_title + ".json") if _title else ("chat-%d.json" % int(_t.time())))
+                _name = os.environ.get("WCHAT_HISTORY_NAME") or _title or (
+                    "chat-%d" % int(_t.time()))
                 try:
                     _sh(_d, _s.messages_json, _name, _title)
                     sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
@@ -1403,8 +1469,17 @@ def main(argv):
                 sys.stdout.write("\n"); sys.stdout.flush()
                 return _run_tool(n, a)
 
+            def _abort():
+                # 关箱并丢弃半截正文/思考(本轮输出整体不渲染,与 master 一致)
+                sys.stdout.write(_box.close()); sys.stdout.flush()
+                _reason_acc.clear()
+                _text_acc.clear()
+                sys.stdout.write("\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n\n")
+                sys.stdout.flush()
+                _sync_runtime(_s)
+
             _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
-                                      write_final=False, on_final=_finish)
+                                      write_final=False, on_final=_finish, on_abort=_abort)
             _first = os.environ.pop("WCHAT_FIRST_TURN", "")
             if _first:
                 _h(_first)

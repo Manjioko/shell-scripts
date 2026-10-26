@@ -5,7 +5,7 @@
 单测覆盖不到"分支到底有没有被接上"。用桩网关把整条 SSE 链路跑通,才能证明
 硬墙命令真的没被执行、放行命令真的被执行了、审计真的落了盘。
 """
-import json, os, sys, threading
+import json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 LOG = os.environ["STUB_LOG"]          # 请求记录(每行一个 JSON)
@@ -23,6 +23,21 @@ def sse_tool_call(cid, name, args):
         {"index": 0, "function": {"arguments": payload[40:]}}]}}]}
     end = {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}
     return "".join("data: %s\n\n" % json.dumps(x) for x in (first, rest, end)) + "data: [DONE]\n\n"
+
+
+def sse_text_pieces(text, pieces=8):
+    """把正文切成多片下发(每片一个 SSE 事件),供"流式过程中被 Ctrl+C"的测试用。
+
+    原来的 sse_text 一次性把整段吐完,客户端还没来得及被中断就结束了 —— 那样测不出
+    中断行为(测出来的只是"正常收完")。
+    """
+    if pieces < 1:
+        pieces = 1
+    n = max(1, (len(text) + pieces - 1) // pieces)
+    parts = [text[i:i + n] for i in range(0, len(text), n)] or [""]
+    evs = [{"choices": [{"delta": {"content": p}}]} for p in parts]
+    evs.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    return evs
 
 
 def sse_text(text):
@@ -126,14 +141,33 @@ class H(BaseHTTPRequestHandler):
             _ctr["main"] += 1
         script = json.load(open(REPLY))
         step = script[i] if i < len(script) else {"type": "text", "text": "结束"}
+        slow = float(os.environ.get("STUB_SLOW_MS") or 0)
         if step["type"] == "tool":
             out = sse_tool_call(step.get("id", "call_%d" % i), step["name"], step["args"]).encode()
+        elif slow > 0:
+            out = None            # 慢速分支自己逐片写,不走下面的整块编码
         else:
             out = sse_text(step.get("text", "结束")).encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
+        if out is None:
+            evs = sse_text_pieces(step.get("text", "结束"), int(os.environ.get("STUB_SLOW_PIECES") or 8))
+            gap = slow / 1000.0 / max(1, len(evs))
+            for ev in evs:
+                piece = ("data: %s\n\n" % json.dumps(ev, ensure_ascii=False)).encode()
+                try:
+                    self.wfile.write(("%X\r\n" % len(piece)).encode() + piece + b"\r\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    return          # 客户端被 Ctrl+C 打断后断开:正常结束
+                time.sleep(gap)
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         # 分两块吐,顺带验证 ask_ai 的增量解析不粘包
         half = len(out) // 2
         for piece in (out[:half], out[half:]):

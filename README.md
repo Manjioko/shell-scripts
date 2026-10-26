@@ -36,7 +36,7 @@ python3 configs/ctmodel.py undo       # 回滚
 
 ```bash
 bash tests/b_acceptance.sh        # B 阶段验收(应为 11/11)
-bash tests/run_gates.sh --main    # 主闸门(应为 run=41 pass=41)
+bash tests/run_gates.sh --main    # 主闸门(应为 run=44 pass=44)
 bash tests/auto_test.sh e2e       # 行为 e2e
 ```
 

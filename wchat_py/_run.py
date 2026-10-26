@@ -32,5 +32,9 @@ def main(argv) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        # 终端 Ctrl+C 由调用方(父进程)负责"取消本轮";这里静默退 130 而不是
+        # 打一段 traceback —— 迁移版用户实测:父子两份栈同时刷屏,看不出发生了什么。
+        sys.exit(130)

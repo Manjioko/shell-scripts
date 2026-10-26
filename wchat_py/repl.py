@@ -187,8 +187,8 @@ def _default_meta(action, arg, session=None):
             return True
         from wchat_py.cli import _gen_title
         title = os.environ.get("WCHAT_CHAT_TITLE", "") or _gen_title(sess.messages_json)
-        name = os.environ.get("WCHAT_HISTORY_NAME") or (
-            (title + ".json") if title else "py-session.json")
+        # 名字交给 save_history 统一清洗(标题里的 .json 必须剥,否则 xxx.json.json)
+        name = os.environ.get("WCHAT_HISTORY_NAME") or title
         path = save_history(d, sess.messages_json, name, title)
         sys.stdout.write("✅ 已保存: %s\n" % path)
         return True
@@ -392,14 +392,18 @@ def _grant_read(path):
         pass
 
 
-def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None):
+def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None,
+                         on_abort=None):
     """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
 
     write_final=False 时不在末尾整段输出（正文已由 call_llm 的 on_text 流式画过）。
     on_final(r) 若给：编排结束后调用（用于关流箱 + markdown 渲染）。
+    on_abort() 若给：Ctrl+C 打断本轮时调用（关流箱 + 丢弃半截输出的提示）；不给则
+    直接打印与 master 同款提示。**打断不是错误**：本轮 assistant 输出整体丢弃，
+    用户那句已写入，回到输入框等用户补充后重发。
     Session 跨轮持久（messages 累积），这是 REPL 与 ask_ai 编排的接线点。
     """
-    from wchat_py.session import orchestrate
+    from wchat_py.session import orchestrate, Aborted
     out = out if out is not None else sys.stdout
 
     def handler(text):
@@ -409,7 +413,15 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
                 session.input_images.extend(_imgs)
             except Exception:
                 pass
-        r = orchestrate(session, text, call_llm, run_tool)
+        try:
+            r = orchestrate(session, text, call_llm, run_tool)
+        except Aborted:
+            if on_abort is not None:
+                on_abort()
+            else:
+                out.write("\n⏹ 已中断,本轮输出已丢弃(-q 可退出)\n\n")
+                out.flush()
+            return
         if on_final is not None:
             on_final(r)
         elif write_final:
@@ -434,7 +446,14 @@ def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
                         sys.stdout.write(_m + "\n"); sys.stdout.flush()
                 except Exception:
                     pass
-        line = next_line()
+        try:
+            line = next_line()
+        except KeyboardInterrupt:
+            # 输入行上按 Ctrl+C:取消这一行输入,回提示符(与 master 的 input_aborted 同一语义)。
+            # 不接住的话异常会一路冒到 main 变成 traceback 退出,而用户只是想清掉这行。
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            continue
         if line is None:
             return 0
         line = line.rstrip("\n")
@@ -446,7 +465,16 @@ def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
                 on_quit()
             return 0
         if action == "text":
-            on_text(arg)
+            # Ctrl+C 兜底:流式读循环自己会转成 Aborted(见 cli._call_llm),这里是
+            # 工具执行/渲染等其它路径上的中断。**绝不带着 traceback 退出**——master
+            # 的语义是"取消本轮,回输入框等下一句",用户按 Ctrl+C 只是想打断,不是想
+            # 关掉整个会话(用户实测:迁移版直接崩到 KeyboardInterrupt 栈)。
+            try:
+                on_text(arg)
+            except KeyboardInterrupt:
+                sys.stdout.write("\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n\n")
+                sys.stdout.flush()
+                continue
         else:
             if on_meta(action, arg) is False:
                 return 0

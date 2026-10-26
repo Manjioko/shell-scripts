@@ -239,6 +239,11 @@ def cmd_stream(argv) -> int:
         for chunk in stream:
             for ev in encode_chunk(chunk):
                 _emit(ev)
+    except KeyboardInterrupt:
+        # 终端 Ctrl+C 会同时打到本进程(与父进程同进程组)。**静默退 130**:
+        # 父进程那边已按"本轮输出丢弃"处理,这里再打一段 traceback 只会刷屏
+        # (用户实测的日志里就是双份栈:父一份、子一份)。
+        return 130
     except Exception as e:
         _emit({"t": "error", "v": str(e)})
         return _contract.EXIT_FAIL
