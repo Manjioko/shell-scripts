@@ -473,7 +473,11 @@ run_case() {
     # 的历史约定(见 wchat_ref「切换模型需要改这里」列的三家地址)。夹具若图省事传根,
     # 就会掩盖"SDK 的 base_url 是根、会再拼一层"这整类接线错(2026-xx 已因此连挂两次:
     # 凭据没继承、URL 拼双 404)。curl 调用与 SDK 调用都必须落在同一路径上。
-    ( cd "$BASE/proj" && BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \
+    ( cd "$BASE/proj" && env -u AUTO_MODE -u WCHAT_AUTO_MODE -u CT_HOME \
+      -u WCHAT_AUTO_APPROVALS -u WCHAT_AUTO_BACKUPS -u WCHAT_AUTO_BACKUP_DIR \
+      -u WORK_ROOT -u WCHAT_MODEL -u WCHAT_THINKING -u WCHAT_HISTORY_DIR \
+      -u WCHAT_CHAT_TITLE -u AUTO_AUDIT_LOG \
+      BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \
       PYTHONPATH="$(dirname "$REAL")${PYTHONPATH:+:$PYTHONPATH}" \
       E2E_FEED="$feed" MAX_TOOL_ROUNDS="$mtr" CMD_TIMEOUT="${CMD_TIMEOUT:-20}" \
       python3 "$BASE/pty_drive.py" "$BASE/out-$name.log" 60 -- \

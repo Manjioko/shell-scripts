@@ -15,7 +15,7 @@ ck("ALLOW -> Y", c._auto_judge("ls", call=lambda x: "ALLOW 安全只读") == ("Y
 ck("DENY -> N", c._auto_judge("rm", call=lambda x: "DENY 破坏性")[0] == "N")
 ck("Y 放行", c._auto_judge("ls", call=lambda x: "Y 安全")[0] == "Y")
 ck("N 拒绝", c._auto_judge("rm", call=lambda x: "N 危险")[0] == "N")
-ck("无 call -> None(fail-closed)", c._auto_judge("ls", call=None) == (None, None))
+ck("空判定 -> None(fail-closed)", c._auto_judge("ls", call=lambda x: "") == (None, None))
 def bad(x): raise RuntimeError("x")
 ck("异常 -> None(fail-closed)", c._auto_judge("ls", call=bad) == (None, None))
 os.environ["WCHAT_AUTO_ASSUME_YES"] = "1"

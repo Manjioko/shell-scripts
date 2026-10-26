@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("WORK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py import cli  # noqa: E402
 
+# 单测不联网: 初审器固定判 N(非 auto 走人工确认); auto/显式放行分支不受影响
+cli._auth_think = lambda cmd: ("N", "unit-test")
+
 p = f = 0
 
 
@@ -27,7 +30,8 @@ def run(cmd):
 
 
 # 1) 无交互、未确认 => fail-closed 拒（不执行）
-os.environ.pop("WCHAT_AUTO_ASSUME_YES", None)
+for _k in ("WCHAT_AUTO_ASSUME_YES", "AUTO_MODE", "WCHAT_AUTO_MODE"):
+    os.environ.pop(_k, None)
 out = run("printf 'hi\\n'")
 ck("无 tty 未确认 => 拒", out.startswith("用户未批准"), repr(out))
 
