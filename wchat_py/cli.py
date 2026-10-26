@@ -572,9 +572,10 @@ def _path_guard(path, mode):
                     return None
         _deny_status("P2")
         return "错误:%s被拒绝[硬墙 P2]:工作目录外写入。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
-    key = (mode, p)
-    if key in _GRANTED_PATHS:
-        return None
+    for _m, _base in _GRANTED_PATHS:
+        if _m == mode or (_m == "rw" and mode == "r"):
+            if under(p, _base):
+                return None
     sys.stdout.write("\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n\n" % path)
     sys.stdout.write(" \033[1;31m是否放行?(y 或 yes,n/回车 = 拒绝): \033[0m")
     sys.stdout.flush()
