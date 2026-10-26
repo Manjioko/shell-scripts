@@ -1,0 +1,254 @@
+# wchat 安装与使用（Homebrew 私有 tap）
+
+面向上手：装包 → 首次运行 → 配好模型 → 日常用法 → 出问题怎么查 → 怎么发新版。
+打包/发版的内部细节在文末「发新版」一节，日常使用可以不看。
+
+---
+
+## 1. 前置条件
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| 系统 | macOS（Apple Silicon / Intel） | Homebrew 私有 tap 走这条；Linux 见 §7 |
+| Homebrew | 已安装 | `brew --version` 有输出即可 |
+| Python | 由 Formula 自动装 `python@3.12` | **不需要**自己装 Python |
+| 网络 | 首次运行需要 | 首次会建 venv 并 `pip install` 依赖（约 20–60 秒） |
+| 模型服务 | 一个 OpenAI 兼容端点 + API key | 见 §3 |
+
+代码本身兼容 **Python 3.9+**，但 Formula 固定用 `python@3.12`，避免撞系统自带 Python
+的权限/包冲突问题。
+
+---
+
+## 2. 安装
+
+### 2.1 从私有 tap 装（正式方式）
+
+```bash
+brew tap <你的账号>/wchat
+brew install wchat
+```
+
+### 2.2 本地试装（还没建远端 tap 时）
+
+```bash
+cd /path/to/wchat
+python3 packaging/homebrew/make_release.py 0.2.0     # 生成 dist/*.tar.gz 与 Formula
+brew tap-new local/wchat
+mkdir -p "$(brew --repository local/wchat)/Formula"
+cp packaging/homebrew/Formula/wchat.rb "$(brew --repository local/wchat)/Formula/"
+brew install local/wchat/wchat
+```
+
+### 2.3 装完自检
+
+```bash
+wchat -h          # 应打印「使用方法」
+brew test wchat   # Formula 自带的冒烟测试
+```
+
+`wchat` 被装成三部分（Homebrew 的标准布局）：
+
+```
+$(brew --prefix)/bin/wchat           ← 3 行 wrapper,exec 下面那个 python 脚本
+$(brew --prefix)/opt/wchat/libexec/  ← 真正的代码:wchat + wchat_py/ + requirements.txt
+$(brew --prefix)/opt/wchat/libexec/doc/  ← 本文件与 README
+```
+
+---
+
+## 3. 第一次运行：配模型
+
+### 3.1 先看它要什么
+
+```bash
+wchat -h
+```
+
+跑起来之前必须有一组凭据。最省事的做法是写进 `~/.ct/config`（wchat 启动时会读它）：
+
+```bash
+mkdir -p ~/.ct
+cat > ~/.ct/config <<'EOF'
+BASE_URL="https://api.example.com/v1/chat/completions"   # 注意:要写到 /chat/completions
+WCHAT_API_KEY="sk-xxxx"
+FLASH_MODEL="example-flash"
+PRO_MODEL="example-pro"
+EOF
+chmod 600 ~/.ct/config        # ★ 必须 600(或 400),否则 wchat 拒绝加载
+```
+
+三条读取规则（照 master 的行为，踩过才写的）：
+
+1. **权限必须是 600/400**。文件里是明文 key，同机他人可读等于把 key 交出去；
+   权限不对时 wchat 会打印 `✗ ... 权限为 644(应为 600),已拒绝加载` 并**不读这个文件**；
+2. **已经拿到 key 就不读文件**：环境里已有 `API_KEY`/`WCHAT_API_KEY` 时，整个文件跳过。
+   想用文件里的凭据，就别在 shell 里 export 旧 key（也别写在 `.zshrc`）；
+3. **文件不覆盖已有环境变量**：临时试别的端点用
+   `BASE_URL=... wchat`，不需要改文件。
+
+模板见包内 `configs/config.example`（`$(brew --prefix)/opt/wchat/libexec/configs/`）。
+
+`BASE_URL` 必须写成**完整端点**（含 `/chat/completions`）。SDK 的 `base_url` 是根路径，
+wchat 内部会做转换；写成根会被再拼一层，表现为 404。
+
+### 3.2 首次运行的"自举"
+
+`wchat` 启动时先做一次依赖检查：
+
+1. 系统 Python 里 `openai`/`prompt_toolkit`/`rich` 都在 → 直接跑，**零安装**；
+2. 缺任何一个 → 在 `~/.ct/venv` 建虚拟环境、`pip install -r requirements.txt`，然后
+   re-exec 进这个 venv。多个终端并发启动由文件锁串行化，只有第一个真正装。
+3. `~/.ct/venv/.ready` 里记着 `requirements.txt` 的哈希 + Python 版本；匹配就跳过检查，
+   所以**只有依赖变了才会重装**。
+
+相关开关：
+
+| 变量 | 作用 |
+|---|---|
+| `WCHAT_NO_BOOTSTRAP=1` | 完全跳过自举（CI/测试用；缺依赖会直接报错） |
+| `WCHAT_BOOTSTRAP_FORCE=1` | 即使系统依赖齐全也强制走 venv |
+| `WCHAT_VENV=/some/path` | 换 venv 位置（默认 `$CT_HOME/venv`） |
+| `CT_HOME=/some/path` | 换整个配置根（默认 `~/.ct`） |
+
+Pillow 视为可选：缺它只影响图片缩放（会退回 macOS 自带 `sips`），不会因此触发建 venv。
+
+### 3.3 模型档案切换
+
+`~/.ct/config` 用 `# @model <名字>` 标记"哪组赋值生效"，配套的 `ctmodel` 负责改标记、不手改
+（它随包安装，装完就有这个命令）：
+
+```bash
+ctmodel              # 看当前生效的是哪家
+ctmodel qwen         # 切到某个档案(切换前自动备份 config.bak)
+ctmodel qwen -n      # 只看 diff,不落盘
+ctmodel -l           # 列出所有档案
+ctmodel check --fix  # 校验配置(顺手修权限 600)
+ctmodel undo         # 回滚
+```
+
+从源码仓库直接跑时用 `python3 configs/ctmodel.py`（同一个程序）。
+
+---
+
+## 4. 日常用法
+
+```bash
+wchat                  # 交互模式(REPL)
+wchat -st "解释这个报错"   # 单轮:答完即退
+wchat -t               # 开思考模式
+wchat -p               # 用 pro 档模型(-dp = 思考 + pro)
+wchat -l               # 列历史并选择加载;  -f = 忽略历史,开新会话
+wchat -f "问题"        # 新会话 + 首轮内容
+wchat -mcp             # 启用 MCP(需要本机 npx / mcporter)
+wchat -h               # 全部选项
+```
+
+### auto 模式（会自己执行命令，务必先读）
+
+```bash
+wchat -auto=full       # 启动时要求手输大写 AUTO 确认
+wchat -noauto          # 本次会话关闭 auto
+```
+
+auto 档下模型可以真的跑命令、改文件。安全边界是三层：
+
+1. **硬墙**（H1–H14 等）：任何档位都不允许 AI 自己批准，命中即拒并把规则号回传给模型；
+2. **审批器**：逐条判该不该执行；
+3. **终审器**：对高风险动作再判一次，放行/拒绝各写一条审计。
+
+审计与备份都在 `~/.ct/auto/`：
+
+```bash
+tail -f ~/.ct/auto/audit.log     # 每行一条 JSON:时间/规则/裁决/命令
+ls ~/.ct/auto/backup/            # 回滚点
+```
+
+`MAX_TOOL_ROUNDS`（默认 **250**）是单轮用户输入内的工具调用总闸；撞顶会打印提示并结束
+本轮，不会静默停下。`AUTO_MAX_APPROVALS`（默认 200）是自动放行配额。完整参数表见
+`docs/auto-mode.md`。
+
+---
+
+## 5. ~/.ct 目录里都有什么
+
+| 路径 | 内容 | 能删吗 |
+|---|---|---|
+| `~/.ct/config` | 凭据/模型配置 | 能（会丢配置） |
+| `~/.ct/ctmodel` | 模型档案（`@model` 标记） | 能（会丢档案） |
+| `~/.ct/history/` | 对话历史 | 能（会丢历史） |
+| `~/.ct/skills/` | 技能 | **别删**（会丢自己写的技能） |
+| `~/.ct/auto/audit.log` | auto 审计日志 | 能（但要留证就别删） |
+| `~/.ct/auto/backup/` | auto 回滚备份 | 能 |
+| `~/.ct/venv/` | 自举出来的虚拟环境 | 能（下次启动会重建，费一次安装时间） |
+
+---
+
+## 6. 排障
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `缺少 openai 依赖:请 pip3 install openai` | 用了 `WCHAT_NO_BOOTSTRAP=1` 但依赖不全 | 去掉该变量让它自举，或 `python3 setup.py` |
+| 首次启动卡在「📦 安装依赖」 | 正在下载（或网络不通） | 等；不通就检查代理，或先手动 `pip install -r .../requirements.txt` |
+| 请求 404 | `BASE_URL` 写成了根路径 | 补成 `.../v1/chat/completions` |
+| 请求 401/403 | key 没生效 | `~/.ct/config` 里键名是 `WCHAT_API_KEY`；环境变量优先于配置文件，检查是否有旧值残留 |
+| 回复一直不开始 | 服务端静默挂死 | 有停滞兜底（`WCHAT_LLM_STALL`，默认 120s）会断开报错；可调小 |
+| `wchat -h` 就报 import 错 | 包不完整 | `brew reinstall wchat` |
+| 命令行分页器卡住 | `git`/`less` 等分页器 | 工具已注入 `GIT_PAGER=cat PAGER=cat`；自写命令加 `--no-pager` |
+| 图片功能异常 | 缺 Pillow | 重跑自举，或 `pip install pillow` |
+
+自检顺序（出问题先跑这三条）：
+
+```bash
+wchat -h                                    # 包是否完整
+python3 -c "import openai, prompt_toolkit, rich; print('deps ok')"
+bash tests/brew_dist_test.sh                # 在源码仓库里:发行包端到端验收
+```
+
+---
+
+## 7. 升级、卸载、非 macOS
+
+```bash
+brew upgrade wchat                 # 升级
+brew uninstall wchat               # 卸载(代码)
+rm -rf ~/.ct                       # 卸载(配置/历史/技能/venv) —— 想留历史就别删
+```
+
+Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依赖，然后 `./wchat`。
+
+---
+
+## 8. 发新版（维护者）
+
+```bash
+# 1) 改完代码,先跑闸门
+bash tests/run_gates.sh --main          # 应全绿
+
+# 2) 打新版本包(同一份源码重复打 sha 不变,Formula 的 sha 才不会白抖)
+python3 packaging/homebrew/make_release.py 0.3.0
+
+# 3) 本地验证:装、跑、测
+bash tests/brew_dist_test.sh            # 21 条:可复现/无字节码/装后能跑/Formula 一致
+
+# 4) 发布:把 dist/wchat-0.3.0.tar.gz 传到 release,再用最终 URL 重新生成 Formula
+python3 packaging/homebrew/make_release.py 0.3.0 \
+    --url https://github.com/<you>/homebrew-wchat/releases/download/v0.3.0/wchat-0.3.0.tar.gz
+#    然后把 packaging/homebrew/Formula/wchat.rb 提交到 tap 仓库
+```
+
+打包规则（`packaging/homebrew/make_release.py`）：
+
+- **不含** `__pycache__` / `*.pyc` / `.DS_Store`；残留旧 `.pyc` 可能盖住新源码，装出来
+  和仓库不一致，这类问题极难查；
+- 文件 mtime 与 gzip 头固定为常量，**同内容 → 同 sha256**（可复现构建）；
+- 必装清单：`wchat`、`wchat_py/`、`input_helper.py`、`render_helper.py`、`requirements.txt`、
+  `configs/config.example`、`README.md`、本文件。
+
+发布前自查：
+
+```bash
+tar tzf dist/wchat-0.3.0.tar.gz | grep -cE '__pycache__|\.pyc'    # 必须是 0
+tar tzf dist/wchat-0.3.0.tar.gz | head                            # 顶层目录名应是 wchat-0.3.0/
+grep sha256 packaging/homebrew/Formula/wchat.rb                   # 与 shasum -a 256 一致性
+```

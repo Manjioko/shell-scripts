@@ -1241,10 +1241,28 @@ def _auto_summary():
 
 
 def _load_ct_config():
-    """源化 ~/.ct/config 到环境(与 bash `source` 同语义):只认 KEY=value 行,
-    跳过注释/空行;行尾 ` # ...` 注释剥掉;值去引号。已存在的环境变量不覆盖。"""
+    """源化 ~/.ct/config 到环境。
+
+    与 master 的三条语义对齐(每一条都曾经不同步,踩过):
+      1. **已经拿到 key 就不读文件**(master:`[[ -z "${API_KEY:-}" ]]` 才 source)——
+         否则配置文件会盖掉命令行/环境里显式给的凭据,表现为"改了 env 没用";
+      2. **权限不是 600/400 就拒绝加载并提示**——文件里有明文 key,同机他人可读
+         等于把 key 交出去(master 的 stat 校验);
+      3. 文件里的键**不覆盖**已存在的环境变量(环境变量优先级更高,便于临时试值)。
+    只认 KEY=value 行,跳过注释/空行;行尾 ` # ...` 注释剥掉;值去引号。
+    """
+    if os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY"):
+        return
     _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
     p = os.path.join(_ct, "config")
+    try:
+        mode = os.stat(p).st_mode & 0o777
+    except OSError:
+        return
+    if mode not in (0o600, 0o400):
+        sys.stderr.write("✗ %s 权限为 %o(应为 600),已拒绝加载: chmod 600 \"%s\"\n"
+                         % (p, mode, p))
+        return
     try:
         with open(p, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -1260,7 +1278,8 @@ def _load_ct_config():
                 v = v.strip()
                 if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
                     v = v[1:-1]
-                os.environ[k] = v
+                if k not in os.environ:
+                    os.environ[k] = v
     except OSError:
         pass
 

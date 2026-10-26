@@ -36,17 +36,22 @@ python3 configs/ctmodel.py undo       # 回滚
 
 ```bash
 bash tests/b_acceptance.sh        # B 阶段验收(应为 11/11)
-bash tests/run_gates.sh --main    # 主闸门(应为 run=44 pass=44)
+bash tests/run_gates.sh --main    # 主闸门(应为 run=45 pass=45)
 bash tests/auto_test.sh e2e       # 行为 e2e
+bash tests/brew_dist_test.sh      # 发行包验收(21 条:可复现/无字节码/装后能跑)
 ```
 
 ## Homebrew（私有 tap）
 
 本仓库自带一个私有 tap 的 Formula 生成器（方案 A：源码包 + 首次运行 venv 自举）：
 
+**安装方法与日常使用见 [`docs/brew-package.md`](docs/brew-package.md)**（装包、首次运行、
+配模型、排障、发新版）。
+
 ```bash
-python3 packaging/homebrew/make_release.py 0.1.0
-# 产物：dist/wchat-0.1.0.tar.gz、packaging/homebrew/Formula/wchat.rb
+python3 packaging/homebrew/make_release.py 0.2.0
+# 产物：dist/wchat-0.2.0.tar.gz、packaging/homebrew/Formula/wchat.rb
+#       （可复现：同源码重复打包 sha 不变；不含 __pycache__/*.pyc）
 ```
 
 - 本地试装（Homebrew 7 要求 Formula 在 tap 内）：
@@ -58,7 +63,7 @@ python3 packaging/homebrew/make_release.py 0.1.0
   ```
   （会装 `python@3.12`；首次运行 `wchat` 在 `~/.ct/venv` 自举依赖）
 - 发布到 tap：把 tarball 做成 release 附件，用
-  `python3 packaging/homebrew/make_release.py 0.1.0 --url <release-url>` 重新生成 Formula，
+  `python3 packaging/homebrew/make_release.py 0.2.0 --url <release-url>` 重新生成 Formula，
   放进 `homebrew-wchat/Formula/wchat.rb`；
 - Formula 安装后 `bin/wchat` 包装 `libexec/wchat`；首次运行缺依赖会在 `~/.ct/venv` 自举
   （见上文 `WCHAT_NO_BOOTSTRAP` / `WCHAT_BOOTSTRAP_FORCE`）。
