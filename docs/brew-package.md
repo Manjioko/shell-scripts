@@ -253,23 +253,23 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 | 5 | 生成 Formula，url 指向 Release 资产地址 | — |
 | 6 | commit(version+Formula) → 打 tag `v<ver>` → push 分支与 tag | push 失败 → 停，可重跑 |
 | 7 | `gh release create` 上传 tarball | 已有同名 release 则覆盖上传资产 |
+| 6.5 | 把 Formula **单独**推到 `main`（用 worktree，不打扰当前分支） | 被分支保护挡 → 警告，Release 仍发成 |
 | 8 | curl 校验资产 URL（HTTP 200/302） | 不 200 → 警告但不算失败（CDN 有延迟） |
+
+> 第 6.5 步是"别人 update 就能用"的关键。`brew tap` 拉的是仓库**默认分支**，
+> 而 Formula 只依赖 Release 资产、不依赖源码，所以可以单独推这一个文件——
+> 不必等整个开发分支合并进 main。要改推别的分支用 `--tap-branch <名字>`，
+> 不想推就 `--tap-branch ""`。
 
 发完会打印：版本、tag、资产 URL、sha256，以及别人怎么装/升级。
 
-### 8.2 ⚠ 一个必读前置：Formula 必须在默认分支上
+### 8.2 ⚠ 关于默认分支
 
-`brew tap <user>/<repo>` 拉的是仓库**默认分支**（通常是 `main`）。所以
-`Formula/wchat.rb` 必须在 `main` 上，否则别人 `brew tap` 过来找不到 formula。
+`brew tap <user>/<repo>` 拉的是仓库**默认分支**（通常是 `main`），所以 `Formula/wchat.rb`
+必须在 `main` 上。发版脚本的第 6.5 步会自动把 Formula 单独推到 `main`（只推这一个文件，
+不动源码），因此**不需要**为了发版去合并开发分支。
 
-发布前的检查清单：
-
-```bash
-git checkout main && git merge <你的开发分支>    # 让 Formula 与代码都进 main
-./release.sh 0.3.0                              # 再发
-```
-
-（脚本不会自动帮你合并分支——那属于会改变历史的操作，留给人决定。）
+源码什么时候合进 `main` 是另一件事，由你自己决定。
 
 ### 8.3 别人怎么装、怎么升级
 

@@ -39,8 +39,8 @@ VERFILE = os.path.join(ROOT, "wchat_py", "version.py")
 TAP_FORMULA = os.path.join(ROOT, "Formula", "wchat.rb")
 
 
-def sh(argv, check=True, capture=True):
-    r = subprocess.run(argv, cwd=ROOT, capture_output=capture, text=True)
+def sh(argv, check=True, capture=True, cwd=None):
+    r = subprocess.run(argv, cwd=cwd or ROOT, capture_output=capture, text=True)
     if check and r.returncode != 0:
         sys.stderr.write("✗ 命令失败: %s\n%s%s\n" % (" ".join(argv),
                                                     (r.stdout or ""), (r.stderr or "")))
@@ -210,6 +210,55 @@ def create_release(tag, tar, version, dry):
         ok("已创建 Release %s 并上传资产" % tag)
 
 
+def update_tap_branch(branch, formula_text, version, dry):
+    """把 Formula 单独推到 tap 分支(通常是 main)。
+
+    为什么需要:brew tap 拉的是仓库**默认分支**,而源码合并往往还没做/很久以后才做。
+    Formula 只依赖 release 资产(不依赖源码),所以可以单独推一个文件——这样别人
+    `brew tap` 立刻能装到新版,而不必等整个分支合并。
+    用 worktree 而不是 checkout:不打扰当前工作区,也不改你正在改的分支。
+    """
+    step("6.5 更新 tap 分支 %s 上的 Formula" % branch)
+    if dry:
+        warn("--dry-run:跳过 tap 分支更新")
+        return
+    import tempfile
+    r = sh(["git", "fetch", "origin", branch], check=False)
+    if r.returncode != 0:
+        warn("fetch origin %s 失败,跳过(可能分支不存在)" % branch)
+        return
+    tmp = tempfile.mkdtemp(prefix="wchat-tap-")
+    try:
+        r = sh(["git", "worktree", "add", "--detach", tmp, "origin/" + branch], check=False)
+        if r.returncode != 0:
+            warn("建 worktree 失败,跳过: %s" % (r.stderr or "").strip()[:120])
+            return
+        dest = os.path.join(tmp, "Formula", "wchat.rb")
+        old = ""
+        if os.path.exists(dest):
+            with open(dest, encoding="utf-8") as f:
+                old = f.read()
+        if old == formula_text:
+            ok("Formula 无变化,跳过提交")
+            return
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(formula_text)
+        sh(["git", "add", "Formula/wchat.rb"], cwd=tmp)
+        r = sh(["git", "commit", "-m", "tap: wchat %s" % version], check=False, cwd=tmp)
+        if r.returncode != 0:
+            warn("提交失败(可能没配 user.email),跳过: %s" % (r.stderr or "").strip()[:120])
+            return
+        r = sh(["git", "push", "origin", "HEAD:" + branch], check=False, cwd=tmp)
+        if r.returncode != 0:
+            warn("推送 %s 失败(分支保护?)。Formula 已生成,可手动提交: %s"
+                 % (branch, (r.stderr or "").strip()[:160]))
+            return
+        ok("已把 Formula 推到 %s" % branch)
+    finally:
+        sh(["git", "worktree", "remove", "--force", tmp], check=False)
+
+
 def verify_asset(url, dry):
     step("8/8 校验资产可下载")
     if dry:
@@ -230,6 +279,8 @@ def main():
     ap.add_argument("--skip-gates", action="store_true")
     ap.add_argument("--full-gates", action="store_true")
     ap.add_argument("--no-verify-url", action="store_true")
+    ap.add_argument("--tap-branch", default="main",
+                    help="把 Formula 单独推到哪个分支供 brew tap 使用(默认 main;写空则跳过)")
     a = ap.parse_args()
 
     cur = read_version()
@@ -245,6 +296,13 @@ def main():
     else:
         warn("已跳过发布前自检(--skip-gates)")
     tar, h, url = build(version, owner, repo, a.dry_run)
+    if a.tap_branch:
+        with open(os.path.join(mr.FORMULA_DIR, "wchat.rb"), encoding="utf-8") as f:
+            formula_text = f.read() if not a.dry_run else None
+        if a.dry_run:
+            formula_text = (mr.FORMULA.replace("__URL__", url).replace("__SHA__", h)
+                            .replace("__VER__", version).replace("__HOMEPAGE__", mr.GITHUB_URL))
+        update_tap_branch(a.tap_branch, formula_text, version, a.dry_run)
     tag = commit_and_push(version, owner, repo, a.dry_run)
     create_release(tag, tar, version, a.dry_run)
     if not a.no_verify_url:
