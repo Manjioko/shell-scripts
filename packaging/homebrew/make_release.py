@@ -28,6 +28,7 @@ DIST = os.path.join(ROOT, "dist")
 FORMULA_DIR = os.path.join(ROOT, "packaging", "homebrew", "Formula")
 INCLUDE = ["wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirements.txt",
            "README.md", "docs/brew-package.md"]
+GITHUB_URL = "https://github.com/Manjioko/shell-scripts"
 CONFIG = os.path.join("configs", "config.example")
 CONFIG_PY = os.path.join("configs", "ctmodel.py")   # 模型档案切换,随包安装为 bin/ctmodel
 
@@ -106,8 +107,8 @@ def build_tarball(version, out_dir=None):
 
 
 FORMULA = '''class Wchat < Formula
-  desc "Terminal AI assistant (Python, first-run venv bootstrap)"
-  homepage "https://example.invalid/wchat"
+  desc "Terminal AI assistant (Python, bundled venv)"
+  homepage "__HOMEPAGE__"
   url "__URL__"
   sha256 "__SHA__"
   version "__VER__"
@@ -121,21 +122,34 @@ FORMULA = '''class Wchat < Formula
     (libexec/"configs").install "configs/ctmodel.py"
     (libexec/"doc").install "README.md" if File.exist?("README.md")
     (libexec/"doc").install Dir["docs/*.md"] if Dir.exist?("docs")
-    py = Formula["python@3.12"].opt_bin/"python3"
+
+    # 安装期把依赖装进 libexec/venv:运行期零联网、零自举、启动快。
+    # 不这么做就得靠运行时 bootstrap,而 brew test(以及别人的 CI)是断网环境,
+    # 必然红;更糟的是首次运行要联网下载,对"装完就能用"是硬伤。
+    py = Formula["python@3.12"].opt_libexec/"bin/python"
+    venv = libexec/"venv"
+    system py, "-m", "venv", venv
+    system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
+           "--no-warn-script-location", "-r", libexec/"requirements.txt"
+    # 清掉 pip 缓存与 __pycache__,别让 Cellar 里塞一堆用不上的字节码
+    rm_rf Dir[venv/"**/__pycache__"]
+
     (bin/"wchat").write <<~EOS
       #!/bin/bash
-      exec "#{py}" "#{libexec}/wchat" "$@"
+      exec "#{venv}/bin/python" "#{libexec}/wchat" "$@"
     EOS
     chmod 0755, bin/"wchat"
     (bin/"ctmodel").write <<~EOS
       #!/bin/bash
-      exec "#{py}" "#{libexec}/configs/ctmodel.py" "$@"
+      exec "#{venv}/bin/python" "#{libexec}/configs/ctmodel.py" "$@"
     EOS
     chmod 0755, bin/"ctmodel"
   end
 
   test do
-    assert_match "使用方法", shell_output("WCHAT_NO_BOOTSTRAP=1 #{bin}/wchat -h 2>&1")
+    # 依赖已随包安装,这里必须能在**无网络**下直接跑通
+    assert_match "使用方法", shell_output("#{bin}/wchat -h 2>&1")
+    assert_match "当前模型", shell_output("#{bin}/ctmodel 2>&1")
   end
 end
 '''
@@ -156,6 +170,7 @@ def main():
     ap.add_argument("--tap", default="local/wchat", help="本地 tap 名(user/repo)")
     ap.add_argument("--out-dir", default="", help="tarball 输出目录(默认 <repo>/dist)")
     ap.add_argument("--formula-out", default="", help="Formula 输出路径(默认 packaging/homebrew/Formula/wchat.rb)")
+    ap.add_argument("--homepage", default=GITHUB_URL, help="Formula 的 homepage")
     a = ap.parse_args()
     tar = build_tarball(a.version, a.out_dir or None)
     h = sha256(tar)
@@ -164,7 +179,7 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(fp)), exist_ok=True)
     with open(fp, "w", encoding="utf-8") as f:
         f.write(FORMULA.replace("__URL__", url).replace("__SHA__", h)
-                .replace("__VER__", a.version))
+                .replace("__VER__", a.version).replace("__HOMEPAGE__", a.homepage))
     print("tarball:", tar)
     print("sha256:", h)
     print("formula:", fp)

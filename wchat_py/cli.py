@@ -1529,6 +1529,10 @@ def main(argv):
     if "-h" in argv or "--help" in argv:
         help_user()
         return 0
+    if "--version" in argv or "-V" in argv:
+        from wchat_py.version import __version__
+        print("wchat %s" % __version__)
+        return 0
     # 参数路由：-u/usage、有正文走单轮、其余进 REPL(交互/标准输入)
     st = parse(argv)
     for _p in (st.get("allow_ro") or "").splitlines():

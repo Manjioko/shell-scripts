@@ -144,8 +144,62 @@ ck "Formula sha256 == tarball 实测" \
 ck "Formula version 一致" "$(grep -c "version \"$V\"" "$FML")" 1
 ck "Formula url 指向该 tarball" "$(grep -c "wchat-$V.tar.gz" "$FML")" 1
 ck "Formula 安装清单含 wchat_py" "$(grep -c 'libexec.install "wchat", "wchat_py"' "$FML")" 1
+# 装期建 venv(依赖随包)→ 运行期零联网;brew test 才能在断网 CI 里跑通。
+# 反例(真踩过):用 opt_bin/"python3" 装完直接 exec,路径不存在 → 装出来根本起不来;
+# 且依赖没装,test 里的 WCHAT_NO_BOOTSTRAP=1 必然红。
+ck "Formula 装期建 venv" "$([ "$(grep -c 'venv' "$FML")" -ge 3 ] && echo y)" y
+ck "Formula 用 opt_libexec/bin/python(不用不存在的 opt_bin/python3)" \
+   "$([ "$(grep -c 'opt_libexec' "$FML")" -ge 1 ] && [ "$(grep -c 'opt_bin' "$FML")" -eq 0 ] && echo y)" y
+ck "Formula 装期 pip install requirements" "$(grep -c 'bin/pip' "$FML")" 1
+ck "Formula 的 test 不靠运行时自举" "$(grep -c 'WCHAT_NO_BOOTSTRAP' "$FML")" 0
+ck "bin/wchat 用 venv(2 处: wchat + ctmodel)" "$(grep -c 'venv}/bin/python' "$FML")" 2
 
-echo "=== 7. bootstrap 语义(不联网) ==="
+echo "=== 7. 依赖声明完整性 ==="
+# httpx 曾经漏写:openai 2.x 传递带上它所以本机没事,openai 3.x 不带 → brew 装出来
+# 一启动就 ModuleNotFoundError。这里对 requirements 里的每个包做真实 import。
+deps=$("$PY" - "$PFX/libexec" <<'PY'
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from wchat_py import llm
+# ① httpx 缺失时必须退化而不是崩(直接用假的 None 顶掉 sys.modules)
+real = sys.modules.get("httpx", "absent")
+sys.modules["httpx"] = None
+try:
+    t = llm._build_timeout({"stall": "120"})
+    ok_no_httpx = t is None
+except Exception as e:
+    ok_no_httpx = "raised:%s" % e
+if real == "absent":
+    sys.modules.pop("httpx", None)
+else:
+    sys.modules["httpx"] = real
+# ② requirements 里声明的包必须都能 import
+import importlib
+names = []
+for line in open(os.path.join(sys.argv[1], "requirements.txt")):
+    s = line.split("#")[0].strip()
+    if not s:
+        continue
+    pkg = s.split(">=")[0].split("==")[0].split("<")[0].strip()
+    # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips),
+    # 所以不强制本机 import;但必须仍写在 requirements 里,让 brew 装进 venv。
+    if pkg.lower() == "pillow":
+        continue
+    names.append(pkg.replace("-", "_"))
+missing = []
+for n in names:
+    try:
+        importlib.import_module(n)
+    except Exception:
+        missing.append(n)
+print(ok_no_httpx, ",".join(missing) or "-")
+PY
+)
+ck "httpx 缺失时不崩(退化为默认超时)" "$(cut -d' ' -f1 <<<"$deps")" True
+ck "requirements 必需包都能 import" "$(cut -d' ' -f2 <<<"$deps")" "-"
+ck "pillow 仍声明在 requirements(可选但随包装)" "$(grep -c '^pillow' "$PFX/libexec/requirements.txt")" 1
+
+echo "=== 8. bootstrap 语义(不联网) ==="
 b=$("$PY" - <<EOF
 import os, sys
 sys.path.insert(0, "$PFX/libexec")

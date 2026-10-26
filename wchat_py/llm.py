@@ -179,10 +179,17 @@ def _build_timeout(req):
     平均速率 <1B/s 持续该秒数即断开并报错),把"服务端静默挂死、读循环无限 pending"
     降级成可恢复的报错。**不能用总超时顶替**:总超时会把健康的长流一起砍掉。
     bash 侧由 `SSE_STALL_TIMEOUT` 派生 `export WCHAT_LLM_STALL`(单一出处仍在 bash)。
+
+    httpx 缺失时**不崩**:退化为 SDK 默认 timeout(只是失去停滞兜底语义)。
+    这条不是理论防御——openai 3.x 就不再传递依赖 httpx,而 requirements 里
+    只写了 openai 时,brew 装出来的 venv 会缺它,表现为一启动就 ModuleNotFoundError。
     """
-    import httpx
+    try:
+        import httpx
+    except ImportError:
+        httpx = None
     stall = req.get("stall") or os.environ.get("WCHAT_LLM_STALL", "")
-    if stall:
+    if stall and httpx is not None:
         try:
             return httpx.Timeout(connect=15.0, read=float(stall),
                                  write=15.0, pool=15.0)

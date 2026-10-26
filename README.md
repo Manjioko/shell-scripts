@@ -43,10 +43,24 @@ bash tests/brew_dist_test.sh      # 发行包验收(21 条:可复现/无字节�
 
 ## Homebrew（私有 tap）
 
-本仓库自带一个私有 tap 的 Formula 生成器（方案 A：源码包 + 首次运行 venv 自举）：
+本仓库自带 tap：`Formula/wchat.rb`（安装期建 venv、依赖随包，运行期零联网）。
 
 **安装方法与日常使用见 [`docs/brew-package.md`](docs/brew-package.md)**（装包、首次运行、
 配模型、排障、发新版）。
+
+```bash
+# 装(本仓库自带 tap,Formula 在 Formula/wchat.rb)
+brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
+brew install Manjioko/shell-scripts/wchat
+# 升级
+brew update && brew upgrade wchat && wchat --version
+```
+
+发新版只跑一条命令（打包 → 打 tag → 推 GitHub → 建 Release → 更新 Formula）:
+
+```bash
+./release.sh 0.3.0          # 或 ./release.sh patch;--dry-run 演练
+```
 
 ```bash
 python3 packaging/homebrew/make_release.py 0.2.0

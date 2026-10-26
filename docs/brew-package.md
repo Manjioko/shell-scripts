@@ -22,11 +22,22 @@
 
 ## 2. 安装
 
-### 2.1 从私有 tap 装（正式方式）
+### 2.1 从仓库自带的 tap 装（正式方式）
+
+Formula 就在本仓库的 `Formula/wchat.rb`，直接拿仓库当 tap：
 
 ```bash
-brew tap <你的账号>/wchat
-brew install wchat
+brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
+brew install Manjioko/shell-scripts/wchat
+```
+
+> 仓库名不是 `homebrew-*` 前缀，所以要显式给 URL，不能只写 `brew tap Manjioko/shell-scripts`。
+
+升级：
+
+```bash
+brew update && brew upgrade wchat
+wchat --version
 ```
 
 ### 2.2 本地试装（还没建远端 tap 时）
@@ -221,34 +232,97 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 
 ## 8. 发新版（维护者）
 
+### 8.1 一条命令发版
+
 ```bash
-# 1) 改完代码,先跑闸门
-bash tests/run_gates.sh --main          # 应全绿
-
-# 2) 打新版本包(同一份源码重复打 sha 不变,Formula 的 sha 才不会白抖)
-python3 packaging/homebrew/make_release.py 0.3.0
-
-# 3) 本地验证:装、跑、测
-bash tests/brew_dist_test.sh            # 21 条:可复现/无字节码/装后能跑/Formula 一致
-
-# 4) 发布:把 dist/wchat-0.3.0.tar.gz 传到 release,再用最终 URL 重新生成 Formula
-python3 packaging/homebrew/make_release.py 0.3.0 \
-    --url https://github.com/<you>/homebrew-wchat/releases/download/v0.3.0/wchat-0.3.0.tar.gz
-#    然后把 packaging/homebrew/Formula/wchat.rb 提交到 tap 仓库
+./release.sh 0.3.0            # 发 0.3.0
+./release.sh patch            # 补丁号 +1(当前 0.2.0 → 0.2.1)
+./release.sh minor            # 0.2.0 → 0.3.0
+./release.sh 0.3.0 --dry-run  # 演练:只打包和打印,不写 git、不推、不发布
+./release.sh 0.3.0 --full-gates   # 连主闸门(45 道)一起跑,最稳
 ```
 
-打包规则（`packaging/homebrew/make_release.py`）：
+脚本会按固定顺序做完 8 步，**任何一步失败就停**（不会留下"tag 推了但包没传"的中间态）：
+
+| 步 | 做什么 | 失败会怎样 |
+|---|---|---|
+| 1 | 检查 git 干净、gh 已登录、远程是 GitHub | 直接退出，不动仓库 |
+| 2 | 跑发行包闸门（35 条）；`--full-gates` 再加主闸门 | 闸门红 → 拒绝发布 |
+| 3 | 写 `wchat_py/version.py`（版本号唯一出处） | — |
+| 4 | 打包 `dist/wchat-<ver>.tar.gz`（可复现：同源码同 sha） | — |
+| 5 | 生成 Formula，url 指向 Release 资产地址 | — |
+| 6 | commit(version+Formula) → 打 tag `v<ver>` → push 分支与 tag | push 失败 → 停，可重跑 |
+| 7 | `gh release create` 上传 tarball | 已有同名 release 则覆盖上传资产 |
+| 8 | curl 校验资产 URL（HTTP 200/302） | 不 200 → 警告但不算失败（CDN 有延迟） |
+
+发完会打印：版本、tag、资产 URL、sha256，以及别人怎么装/升级。
+
+### 8.2 ⚠ 一个必读前置：Formula 必须在默认分支上
+
+`brew tap <user>/<repo>` 拉的是仓库**默认分支**（通常是 `main`）。所以
+`Formula/wchat.rb` 必须在 `main` 上，否则别人 `brew tap` 过来找不到 formula。
+
+发布前的检查清单：
+
+```bash
+git checkout main && git merge <你的开发分支>    # 让 Formula 与代码都进 main
+./release.sh 0.3.0                              # 再发
+```
+
+（脚本不会自动帮你合并分支——那属于会改变历史的操作，留给人决定。）
+
+### 8.3 别人怎么装、怎么升级
+
+```bash
+# 首次安装(仓库名不是 homebrew-* 前缀,所以要显式给 URL)
+brew tap Manjioko/shell-scripts https://github.com/Manjioko/shell-scripts
+brew install Manjioko/shell-scripts/wchat
+
+# 之后每次升级(你发完 release 后他们执行)
+brew update && brew upgrade wchat
+```
+
+`brew upgrade` 为什么能拿到新版：`brew update` 会把 tap 仓库（含 `Formula/wchat.rb`）
+拉到最新——新 Formula 的 `version`/`sha256`/`url` 都变了，于是判定"有新版本"并重装。
+所以**发版脚本第 6 步必须把 Formula 一起提交并推上去**，只传 tarball 是不够的。
+
+给用户看版本：
+
+```bash
+wchat --version     # wchat 0.3.0
+```
+
+### 8.4 手工发版（没有 gh 或想自己控制时）
+
+```bash
+python3 packaging/homebrew/make_release.py 0.3.0 --url https://github.com/<you>/<repo>/releases/download/v0.3.0/wchat-0.3.0.tar.gz
+# 把 dist/wchat-0.3.0.tar.gz 手动上传到该 release，再把 Formula/wchat.rb 提交
+```
+
+### 8.5 打包规则
 
 - **不含** `__pycache__` / `*.pyc` / `.DS_Store`；残留旧 `.pyc` 可能盖住新源码，装出来
   和仓库不一致，这类问题极难查；
 - 文件 mtime 与 gzip 头固定为常量，**同内容 → 同 sha256**（可复现构建）；
 - 必装清单：`wchat`、`wchat_py/`、`input_helper.py`、`render_helper.py`、`requirements.txt`、
-  `configs/config.example`、`README.md`、本文件。
+  `configs/config.example`、`configs/ctmodel.py`、`README.md`、本文件。
 
 发布前自查：
 
 ```bash
 tar tzf dist/wchat-0.3.0.tar.gz | grep -cE '__pycache__|\.pyc'    # 必须是 0
 tar tzf dist/wchat-0.3.0.tar.gz | head                            # 顶层目录名应是 wchat-0.3.0/
-grep sha256 packaging/homebrew/Formula/wchat.rb                   # 与 shasum -a 256 一致性
+grep sha256 Formula/wchat.rb                                      # 与 shasum -a 256 一致
+```
+
+### 8.6 关于 `brew test`
+
+`brew test wchat` 跑的是 Formula 里的 `test do` 块（断言 `wchat -h` 打印使用方法、
+`ctmodel` 能读出当前模型）。依赖随包安装，所以**测试本身不需要联网**；
+但 Homebrew 跑 test 前会先用 bundler 解析自己的 Ruby 依赖，这一步要访问 rubygems.org，
+内网/断网环境会卡住或失败——那是 Homebrew 自身的问题，不是包的问题。
+断网时改用：
+
+```bash
+wchat -h && wchat --version && (cd /tmp && ctmodel)
 ```
