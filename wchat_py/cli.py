@@ -540,6 +540,83 @@ _IMG_URLS = {}
 _IMG_SEQ = [0]
 _GRANTED_PATHS = set()
 _ALLOW_RW = []
+# 本会话内"人已经批过的命令"(折叠空白后比对)。
+# 为什么需要:master 在人工确认后会把影响的外部路径记账(shell_note_grants),
+# 于是同一类操作不再反复问人;迁移时只搬了判定没搬记账,现象是**同一条命令**
+# 每执行一次就弹一次确认(实测同一晚被问 4 次)。这里补上"命令级"的记账,
+# 与路径级(_GRANTED_PATHS)互补。
+_APPROVED_CMDS = set()
+
+
+def _cmd_key(cmd):
+    """命令的会话内身份:折叠空白。**不做**语义归一(不改 argv/不忽略参数),
+    改一个字符就是另一条命令 —— 缓存必须保守。"""
+    import re as _re
+    return _re.sub(r"\s+", " ", (cmd or "").strip())
+
+
+def _grant_path(p, mode):
+    """把一条已获人工放行的路径记进会话名单(带墙判据过滤,对齐 master shell_note_grants)。
+
+    三条约束(每条都来自实测):
+      · 只记绝对路径;`/`、`$HOME`、`/dev/*` 这类过宽目标不记;
+      · 墙判据能拦的**不记**(记了也白记,而且会让名单看起来比实际宽);
+      · 已覆盖的不重复堆条目。
+    """
+    from wchat_py import pathrule as _pr
+    home = os.path.realpath(os.environ.get("HOME") or "")
+    root = os.path.realpath(os.environ.get("WORK_ROOT") or os.getcwd())
+    p = (p or "").strip().strip("'\"")
+    p = p.replace("${HOME}", home).replace("$HOME", home)
+    if p.startswith("~"):
+        p = os.path.expanduser(p)
+    if not p.startswith("/"):
+        return
+    p = os.path.realpath(p)
+    if p in ("/", home) or p.startswith("/dev/"):
+        return
+    if root and (p == root or p.startswith(root + "/")):
+        return
+    try:
+        _res = _pr.hard_deny_path(p, "rw" if mode == "rw" else "r", "full",
+                                  home, root, [], [], [])
+        if (_res or {}).get("rule"):
+            return
+    except Exception:
+        return          # 墙判据不可用就不记账(fail-closed:绝不把没验过的路径发出去)
+    for _m, _b in _GRANTED_PATHS:
+        if _m == mode or (_m == "rw" and mode == "r"):
+            if p == _b or p.startswith(_b + "/"):
+                return
+    _GRANTED_PATHS.add((mode, p))
+
+
+def _note_path_grants(cmd, mode="rw"):
+    """人工放行一条 shell 命令后,把它碰到的**外部**路径记账(对齐 master shell_note_grants)。
+
+    只看两类目标:命令里出现的绝对路径词(读)、以及写动词的写目标(读写)。
+    相对路径/URL/选项/命令替换一律跳过 —— 猜错方向等于自己给自己发授权。
+    """
+    try:
+        from wchat_py import hd as _hd, hd_re as _R
+        words = _hd.split_words(cmd or "").get("words") or []
+    except Exception:
+        words, _hd, _R = [], None, None
+    for w in words:
+        w = (w or "").strip()
+        if not w or w.startswith("-") or "=" in w:
+            continue
+        if "://" in w or "$(" in w or "`" in w:
+            continue
+        if w.startswith("/") or w.startswith("~") or w.startswith("$HOME") or w.startswith("${HOME}"):
+            _grant_path(w, "r")
+    if _hd is not None:
+        try:
+            wt = _hd.write_targets(cmd or "", _R.hd_re_write_verb)
+        except Exception:
+            wt = ""
+        for line in (wt or "").splitlines():
+            _grant_path(line, "rw")
 
 
 def _register_image_url(path, url, side=0):
@@ -638,7 +715,10 @@ def _path_guard(path, mode):
         ans = ""
     sys.stdout.write("\n"); sys.stdout.flush()
     if ans in ("y", "yes"):
-        _GRANTED_PATHS.add(key)
+        # 记账要在**拿到许可之后**,而且记的是实际被问的那条路径(不是 key:
+        # 旧实现这里写的是未定义变量 `key`,NameError 一抛,授权永远记不上,
+        # 于是同一个目录每次访问都要再问人 —— 这就是"多次授权"的来源之一)。
+        _grant_path(p, "rw" if mode == "rw" else "r")
         return None
     sys.stdout.write(" ⛔ 用户拒绝%s: %s\n" % (_act, path)); sys.stdout.flush()
     return "用户拒绝访问工作目录外文件: %s" % path
@@ -940,6 +1020,7 @@ def _run_tool(name, args_json):
             sys.stderr.write("TRACE shell auto=%r mode=%r cmd=%.20s\n"
                              % (_auto, os.environ.get("AUTO_MODE"), cmd)); sys.stderr.flush()
         _r, _s, _m = _hd_detail(cmd, _auto)
+        _hd_approved = False
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
@@ -969,7 +1050,14 @@ def _run_tool(name, args_json):
                               rule=_r, verdict="human_no", cmd=cmd)
                 return ("用户拒绝执行高危命令(规则 %s): %s\n请换方案,或把命令告知用户请他手动执行。"
                         % (_r, cmd))
-            # 用户已逐字 yes:放行,继续后面的执行流程
+            # 人已逐字 yes → 直接执行。**绝不能再走审批器**:
+            # 下面若残留一个 N 判定,会紧接着再弹一次"是否执行?"把刚批的命令又问一遍
+            # (实测:每次都变成"硬墙 yes" + "人工确认 y" 两道)。master 用 hd_approved=1 挡住。
+            _hd_approved = True
+            _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                          rule=_r, verdict="human_yes", cmd=cmd)
+            # 人工批过的命令同样要把外部路径落账,否则随后对同一目录的读还要再问
+            _note_path_grants(cmd, "rw")
         if _auto:
             _av, _ars = _auth_think(cmd)
             if _av != "Y":
@@ -990,8 +1078,18 @@ def _run_tool(name, args_json):
                     return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
             else:
                 _bump_auto()
-        if not _auto:
-            _av2, _ars2 = _auth_think(cmd)
+        if not _auto and not _hd_approved:
+            # 本会话已批过同一条命令 → 不再问、也不再花一次审批请求。
+            # (硬墙走不到这里:_hd_approved 为真时上面已跳开;硬墙永远每次都要人 yes)
+            _ck = _cmd_key(cmd)
+            if _ck and _ck in _APPROVED_CMDS:
+                sys.stdout.write("\033[2m↺ 本会话已批准过同一命令,直接执行\033[0m\n")
+                sys.stdout.flush()
+                _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
+                              decision="allow", reason="session-approved", cmd=cmd)
+                _av2 = "Y"
+            else:
+                _av2, _ars2 = _auth_think(cmd)
             if _av2 != "Y":
                 if os.environ.get("AUTO_MODE") == "read":
                     sys.stdout.write("该命令需人工确认: %s [y/N] " % cmd); sys.stdout.flush()
@@ -1005,11 +1103,17 @@ def _run_tool(name, args_json):
                         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                                       decision="deny", reason="human-n", cmd=cmd)
                         return "用户未批准(转人工): %s" % cmd
+                    _APPROVED_CMDS.add(_ck)
+                    _note_path_grants(cmd, "rw")
                 elif not _shell_approved(cmd, strict=False):
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                                   decision="deny", reason="no-approval", cmd=cmd)
                     return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;"
                             "当前无交互 tty 或未确认,已拒)" % cmd)
+                else:
+                    # 人批了 → 记账:同一条命令本会话不再问;它碰到的外部路径也记账
+                    _APPROVED_CMDS.add(_ck)
+                    _note_path_grants(cmd, "rw")
         from wchat_py import audit as _audit
         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell", decision="allow", cmd=cmd)
         _bg = a.get("run_in_background")

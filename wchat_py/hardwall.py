@@ -155,15 +155,124 @@ def _creds_all_exempt(c, work_root, home):
     return found
 
 
+_SEP_RE = re.compile(r"&&|\|\||[;|\n]")
+# 包管理器(段首词)。与 master hd_install_tail 的 state=0 名单对齐,另加 dpkg
+# (master 名单里没有它,但 `dpkg -i` 就是装包,少拦一条是覆盖缺口)。
+_MGR_RE = re.compile(r"^(?:brew|pip|pip[0-9.]*|python[0-9.]*|npm|pnpm|yarn|gem|cargo|go|"
+                     r"uv|apt|apt-get|dnf|yum|apk|composer|dpkg)$")
+
+
+def _mask_quoted(c):
+    """把引号内文本按**等长**抹成空格，返回同长度字符串（索引可直接用于原串）。
+
+    为什么要抹：`git commit -m "… brew tap …"` 里的安装词只是**叙述文本**，不是命令。
+    不抹的话 H14 会把提交说明当成装包（实测：一条带 "brew tap" 的 commit 被拦，
+    而且因为"不可逆"话术每次都要人逐字 yes —— 连我自己的提交都被拦了两次）。
+    处理三种真实形态：多行引号（折行后仍是一段）、`\\"` 转义引号、未闭合引号（抹到底）。
+    例外：`-c` / `--command` 之后的引号内容是**要执行的代码**（`bash -c "npm install x"`），
+    原样保留 —— 抹掉它等于给出一条绕过路径。
+    """
+    out = list(c)
+    i, n = 0, len(c)
+    q, start = "", -1
+    while i < n:
+        ch = c[i]
+        if not q:
+            if ch in "\"'":
+                q, start = ch, i
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2                      # 转义对:里面的引号不结束本段
+            continue
+        if ch == q:
+            if not re.search(r"(?:^|\s)(?:-c|--command)\s*$", c[:start]):
+                for k in range(start + 1, i):
+                    out[k] = " "
+            q = ""
+        i += 1
+    if q and start >= 0:                # 未闭合:按叙述文本抹到底
+        if not re.search(r"(?:^|\s)(?:-c|--command)\s*$", c[:start]):
+            for k in range(start + 1, n):
+                out[k] = " "
+    return "".join(out)
+
+
+def _segments(c):
+    """按命令分隔符切段，返回 [(start, end)]（end 不含分隔符）。"""
+    spans, pos = [], 0
+    for m in _SEP_RE.finditer(c):
+        spans.append((pos, m.start()))
+        pos = m.end()
+    spans.append((pos, len(c)))
+    return spans
+
+
+def _install_scan(c, _depth=0):
+    """"这是安装类动作"判定 + 包名收集。返回 (hit, names)。
+
+    对齐 master `hd_install_tail` 的两条核心约束:
+      ① **段首必须是包管理器**。旧实现用 `(^|[\\s;&|(])(brew install…)`,任何位置出现
+         就算 —— 于是 `git commit -m "…brew tap…"`、`echo "npm install x"` 都被判装包
+         (实测误拦两条,且因为"不可逆"话术每次都要人逐字 yes)。
+      ② 找到管理器后,**动词可以在段内任意位置**(`npm --prefix /x --cache /y install z`
+         的 flag 值也是普通词,给动词加位数上限会变成漏放);裸 `i` 只认紧跟管理器的
+         第一个实参位(否则 `git commit -i` 之类会被误当装包)。
+    引号内叙述文本先抹掉(见 _mask_quoted):折行会把 `\\n` 变成 `;`,让一段提交说明
+    "切"出看似独立的命令段。`bash -c "npm install x"` 的引号是要执行的代码,递归判。
+    """
+    if not c:
+        return False, []
+    cm = _mask_quoted(c)
+    names, found = [], False
+    for start, end in _segments(cm):
+        seg = cm[start:end].lstrip()
+        if not seg:
+            continue
+        mh = re.search(r"<<(?!<)", seg)      # heredoc 之后是载荷,不是本段参数
+        if mh:
+            seg = seg[:mh.start()]
+        if _depth < 3:
+            msh = re.search(r"^(?:sudo\s+)?(?:env\s+)?(?:/[^\s]+/)?(?:sh|bash|zsh|dash|ksh)"
+                            r"\s+(?:-[a-zA-Z]*c[a-zA-Z]*|--command)\s+(['\"])(.*)\1\s*$",
+                            seg, re.S)
+            if msh:
+                h, n = _install_scan(msh.group(2), _depth + 1)
+                if h:
+                    found = True
+                    names.extend(n)
+                continue
+        state, adj, mgr = 0, 0, ""
+        for w in seg.split():
+            if state == 0:
+                if w == "sudo":
+                    continue
+                if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):   # FOO=1 npm install
+                    continue
+                if _MGR_RE.match(w):
+                    state, adj, mgr = 1, 1, w
+                else:
+                    break                                      # 段首不是包管理器 → 本段不算
+            elif state == 1:
+                if w in ("install", "add", "tap") or (w == "i" and adj == 1) \
+                        or (mgr == "dpkg" and w == "-i"):
+                    state, found = 2, True
+                elif not w.startswith("-"):
+                    adj = 0
+            else:
+                if w.startswith("-") or ">" in w or "$(" in w:
+                    continue
+                if w.startswith(("/", "./", "../", "~")):
+                    continue                                   # 路径不是包名
+                names.append(w)
+    return found, names
+
+
 def _install_hit(c):
-    """近似 hd_install_tail 的"这是安装类动作"判定（非 auto 即拒；源替换也归 H14）。"""
-    return re.search(
-        r"(^|[\s;&|(])("
-        r"pip[0-9.]*\s+install|python[0-9.]*\s+-m\s+pip\s+install|"
-        r"python[0-9.]*\s+setup\.py\s+install|"
-        r"npm\b[^;&|]*\b(install|add|i)\b|yarn\s+(add|install)|pnpm\s+(add|install)|"
-        r"brew\s+(install|tap)|gem\s+install|cargo\s+install|go\s+install|"
-        r"apt-get\s+install|apt\s+install|dpkg\s+-i|pipx\s+install)", c)
+    """兼容旧调用点:只回答"是不是安装动作"。"""
+    return _install_scan(c)[0]
+
+
 
 
 def rule(cmd, auto=False, work_root=None, home=None):
@@ -214,7 +323,8 @@ def rule(cmd, auto=False, work_root=None, home=None):
                  r"(\s|$)", c):
         return "H13", ""
     # H14 安装类动作（非自动放行即拒；源替换同归 H14）。点名白名单经 WCHAT_INSTALL_ALLOW 传入。
-    if _install_hit(c):
+    _ih_hit, _ih_names = _install_scan(c)
+    if _ih_hit:
         # 换源(registry/index-url/tap URL)一律 H14，白名单也不放
         if re.search(r"--index-url|--extra-index-url|--registry|--find-links|"
                      r"(^|\s)-i\s+https?:|PIP_INDEX_URL=|NPM_CONFIG_REGISTRY=|YARN_REGISTRY=|"
@@ -222,17 +332,16 @@ def rule(cmd, auto=False, work_root=None, home=None):
             return "H14", ""
         _allow = os.environ.get("WCHAT_INSTALL_ALLOW", "")
         if _allow:
-            _mm = _install_hit(c)
-            _tail = c[_mm.end():] if _mm else ""
+            # 包名由状态机在**本命令段**内收集(`brew install a && echo b` 的 b 不是包);
+            # 归一化与 master auto_install_allowed 一致:小写、去 @版本/@scope 后缀与版本约束。
             _pkgs = []
-            for _w in re.split(r"\s+", _tail):
-                _w = _w.strip(";,)]")
-                if not _w or _w.startswith("-"):
-                    continue
-                if re.search(r"[^A-Za-z0-9./_@~<>=+-]", _w):
-                    continue
-                _pkgs.append(_w)
-            _al = set(_allow.split())
+            for _w in _ih_names:
+                _w = _w.strip(";,)]").lower()
+                _w = _w.split("@")[0] if not _w.startswith("@") else _w
+                _w = re.split(r"[<>=!~]", _w)[0]
+                if _w:
+                    _pkgs.append(_w)
+            _al = set(x.strip().lower() for x in _allow.split() if x.strip())
             if _pkgs and all(_pk in _al for _pk in _pkgs):
                 return "", ""
         return "H14", ""
@@ -324,11 +433,14 @@ def _safe(fn, c):
 
 
 def _h14_hint(c):
-    """复刻 bash _iht_hint：从安装动词后取"像包名"的词(纯 [A-Za-z0-9./_@~<>=+-]，跳过 -flag)，≤60。"""
-    m = _install_hit(c)
-    tail = c[m.end():] if m else c
+    """复刻 bash _iht_hint：从安装动词后取"像包名"的词(纯 [A-Za-z0-9./_@~<>=+-]，跳过 -flag)，≤60。
+
+    包名只取**本命令段**（原来一路扫到整条命令结尾，会把 `&& git log` 之类的词也当
+    包名印进审批话术 —— 实测屏幕上出现过 "命中: <user>/<repo> git log"）。
+    """
+    _hit, _names = _install_scan(c)
     out = []
-    for w in re.split(r"\s+", tail):
+    for w in _names:
         w = w.strip(";,)]")
         if not w or w.startswith("-"):
             continue
