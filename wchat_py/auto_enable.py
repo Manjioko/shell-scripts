@@ -85,6 +85,8 @@ def enable(tier):
         sys.stdout.flush()
         try:
             ans = (sys.stdin.readline() or "").strip()
+        except KeyboardInterrupt:
+            ans = ""
         except Exception:
             ans = ""
         w("\n")

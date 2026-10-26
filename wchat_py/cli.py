@@ -314,7 +314,10 @@ def _shell_approved(cmd, strict=True):
     else:
         sys.stdout.write(" \033[1;31m是否执行?(y 或 yes,n/回车 = 拒绝): \033[0m")
     sys.stdout.flush()
-    ans = (sys.stdin.readline() or "").strip()
+    try:
+        ans = (sys.stdin.readline() or "").strip()
+    except (KeyboardInterrupt, EOFError):
+        ans = ""
     sys.stdout.write("\n"); sys.stdout.flush()
     return ans == "yes" if strict else (ans.lower() in ("y", "yes"))
 
@@ -538,6 +541,8 @@ def _path_guard(path, mode):
         sys.stdout.flush()
         try:
             ans = (sys.stdin.readline() or "").strip()
+        except KeyboardInterrupt:
+            ans = ""
         except Exception:
             ans = ""
         sys.stdout.write("\n"); sys.stdout.flush()
@@ -555,6 +560,8 @@ def _path_guard(path, mode):
     sys.stdout.flush()
     try:
         ans = (sys.stdin.readline() or "").strip().lower()
+    except KeyboardInterrupt:
+        ans = ""
     except Exception:
         ans = ""
     sys.stdout.write("\n"); sys.stdout.flush()
@@ -880,6 +887,8 @@ def _run_tool(name, args_json):
             sys.stdout.flush()
             try:
                 _ans = (sys.stdin.readline() or "").strip()
+            except KeyboardInterrupt:
+                _ans = ""
             except Exception:
                 _ans = ""
             sys.stdout.write("\n"); sys.stdout.flush()
@@ -916,6 +925,8 @@ def _run_tool(name, args_json):
                     sys.stdout.write("该命令需人工确认: %s [y/N] " % cmd); sys.stdout.flush()
                     try:
                         _ans = (sys.stdin.readline() or "").strip().lower()
+                    except KeyboardInterrupt:
+                        _ans = ""
                     except Exception:
                         _ans = ""
                     if _ans not in ("y", "yes"):
@@ -1269,6 +1280,8 @@ def main(argv):
                     sys.stdout.write("│ 退出前保存对话? [Y/n] "); sys.stdout.flush()
                     try:
                         _ans = (sys.stdin.readline() or "").strip()
+                    except KeyboardInterrupt:
+                        _ans = "N"
                     except Exception:
                         _ans = ""
                     sys.stdout.write("\n"); sys.stdout.flush()

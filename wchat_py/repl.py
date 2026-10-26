@@ -115,6 +115,9 @@ def _default_meta(action, arg, session=None):
         sys.stdout.write("_>"); sys.stdout.flush()
         try:
             num = (sys.stdin.readline() or "").strip()
+        except KeyboardInterrupt:
+            sys.stdout.write("\n"); sys.stdout.flush()
+            return True
         except Exception:
             num = ""
         if not num:
@@ -254,6 +257,8 @@ def _default_meta(action, arg, session=None):
             sys.stdout.flush()
             try:
                 _ans = (sys.stdin.readline() or "").strip().lower()
+            except KeyboardInterrupt:
+                _ans = ""
             except Exception:
                 _ans = ""
             sys.stdout.write("\n"); sys.stdout.flush()
