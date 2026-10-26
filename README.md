@@ -40,6 +40,22 @@ bash tests/run_gates.sh --main    # 主闸门(应为 run=41 pass=41)
 bash tests/auto_test.sh e2e       # 行为 e2e
 ```
 
+## Homebrew（私有 tap）
+
+本仓库自带一个私有 tap 的 Formula 生成器（方案 A：源码包 + 首次运行 venv 自举）：
+
+```bash
+python3 packaging/homebrew/make_release.py 0.1.0
+# 产物：dist/wchat-0.1.0.tar.gz、packaging/homebrew/Formula/wchat.rb
+```
+
+- 本地试装：`brew install --formula packaging/homebrew/Formula/wchat.rb`（会装 `python@3.12`）；
+- 发布到 tap：把 tarball 做成 release 附件，用
+  `python3 packaging/homebrew/make_release.py 0.1.0 --url <release-url>` 重新生成 Formula，
+  放进 `homebrew-wchat/Formula/wchat.rb`；
+- Formula 安装后 `bin/wchat` 包装 `libexec/wchat`；首次运行缺依赖会在 `~/.ct/venv` 自举
+  （见上文 `WCHAT_NO_BOOTSTRAP` / `WCHAT_BOOTSTRAP_FORCE`）。
+
 ## 目录
 
 | 路径 | 说明 |
