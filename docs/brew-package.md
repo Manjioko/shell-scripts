@@ -271,7 +271,30 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 
 源码什么时候合进 `main` 是另一件事，由你自己决定。
 
-### 8.3 别人怎么装、怎么升级
+### 8.3 ⚠ 私有仓库装不了（实测结论）
+
+`Manjioko/shell-scripts` 目前是 **private**，这会让 `brew install` 以 404 失败，而且
+**不是 CDN 延迟**：
+
+- GitHub 私有仓库的 release 资产对匿名请求一律 404；
+- Homebrew 下载 Formula 的 `url` 用的是**裸 curl**（不带 Authorization），
+  所以设 `HOMEBREW_GITHUB_API_TOKEN` 也没用（已实测，仍 404）；
+- `brew tap` 反而能成功（走 git 凭据），所以现象是"tap 过了、install 报 404"，很容易误判。
+
+三条可行路线：
+
+| 方案 | 做什么 | 代码可见性 | 用户体验 |
+|---|---|---|---|
+| **a. 仓库转 public** | `gh repo edit Manjioko/shell-scripts --visibility public` | 公开 | 最顺，`brew tap` + `brew install` 直接可用 |
+| **b. 公开 tap 仓库** | 建 `Manjioko/homebrew-wchat`（public），tarball 传到它的 release、Formula 放它里面 | 代码保持私有 | 顺，需多维护一个公开仓库 |
+| **c. 只自用** | 本机走 `file://` 或手动下载 tarball | 私有 | 别人装不了 |
+
+`release.sh` 的第 1 步会检测到 private 并打印同样的提示；第 8 步会分别报告
+"带认证能取到（资产确实传上去了）"和"匿名能不能取（brew 能不能用）"。
+
+### 8.4 别人怎么装、怎么升级
+
+> 前提：仓库必须 **public**（见 8.3）。下面是转 public 之后的命令。
 
 ```bash
 # 首次安装(仓库名不是 homebrew-* 前缀,所以要显式给 URL)
@@ -292,14 +315,14 @@ brew update && brew upgrade wchat
 wchat --version     # wchat 0.3.0
 ```
 
-### 8.4 手工发版（没有 gh 或想自己控制时）
+### 8.5 手工发版（没有 gh 或想自己控制时）
 
 ```bash
 python3 packaging/homebrew/make_release.py 0.3.0 --url https://github.com/<you>/<repo>/releases/download/v0.3.0/wchat-0.3.0.tar.gz
 # 把 dist/wchat-0.3.0.tar.gz 手动上传到该 release，再把 Formula/wchat.rb 提交
 ```
 
-### 8.5 打包规则
+### 8.6 打包规则
 
 - **不含** `__pycache__` / `*.pyc` / `.DS_Store`；残留旧 `.pyc` 可能盖住新源码，装出来
   和仓库不一致，这类问题极难查；
@@ -315,7 +338,7 @@ tar tzf dist/wchat-0.3.0.tar.gz | head                            # 顶层目录
 grep sha256 Formula/wchat.rb                                      # 与 shasum -a 256 一致
 ```
 
-### 8.6 关于 `brew test`
+### 8.7 关于 `brew test`
 
 `brew test wchat` 跑的是 Formula 里的 `test do` 块（断言 `wchat -h` 打印使用方法、
 `ctmodel` 能读出当前模型）。依赖随包安装，所以**测试本身不需要联网**；

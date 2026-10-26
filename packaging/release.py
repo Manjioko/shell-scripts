@@ -101,6 +101,13 @@ def remote_repo():
     return m.group(1), m.group(2)
 
 
+def is_private(owner, repo):
+    """仓库是否私有。私有仓库的 release 资产**匿名不可下载** → brew install 必然 404,
+    这不是"CDN 延迟",而是权限;必须提前说清楚,否则发完版才发现别人装不上。"""
+    r = sh(["gh", "api", "repos/%s/%s" % (owner, repo), "--jq", ".private"], check=False)
+    return (r.stdout or "").strip() == "true"
+
+
 def preflight(dry):
     step("1/8 前置检查")
     if sh(["git", "status", "--porcelain"]).stdout.strip() and not dry:
@@ -112,7 +119,22 @@ def preflight(dry):
     ok("gh 已登录")
     owner, repo = remote_repo()
     ok("远程仓库 %s/%s" % (owner, repo))
-    return owner, repo
+    private = is_private(owner, repo)
+    if private:
+        print()
+        print("  \033[1;33m⚠ 这个仓库是 private —— brew 安装会失败,原因不是 CDN:\033[0m")
+        print("    · GitHub 私有仓库的 release 资产对**匿名请求**一律 404;")
+        print("    · Homebrew 下载 url 用的是裸 curl(不带 Authorization),")
+        print("      所以即使设了 HOMEBREW_GITHUB_API_TOKEN 也拿不到(已实测)。")
+        print("    可行的三条路:")
+        print("      a) 仓库转 public: gh repo edit %s/%s --visibility public" % (owner, repo))
+        print("         → brew tap/install 立刻可用(代码会公开)")
+        print("      b) 建一个**公开**的 tap 仓库(如 %s/homebrew-wchat)," % owner)
+        print("         把 tarball 传到它的 release、Formula 也放它里面 → 代码保持私有")
+        print("      c) 只给自己/内网用: 走本地 file:// 或手动下载 tarball 安装")
+        print("    本次仍会完成发布(Release 已建、tag 已打),但请按上面选一条路。")
+        print()
+    return owner, repo, private
 
 
 def gates(full):
@@ -259,17 +281,34 @@ def update_tap_branch(branch, formula_text, version, dry):
         sh(["git", "worktree", "remove", "--force", tmp], check=False)
 
 
-def verify_asset(url, dry):
+def verify_asset(url, dry, private=False):
     step("8/8 校验资产可下载")
     if dry:
         warn("--dry-run:跳过 URL 校验")
         return
+    # 先带认证确认"资产真的传上去了"(私有仓库匿名取不到,不能只看匿名结果)
+    r = sh(["curl", "-sSL", "-o", "/dev/null", "-w", "%{http_code}",
+            "-H", "Authorization: Bearer %s" % (os.environ.get("GH_TOKEN") or _gh_token()), url],
+           check=False)
+    auth_code = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
     r = sh(["curl", "-sSIL", "-o", "/dev/null", "-w", "%{http_code}", url], check=False)
-    code = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
-    if code.startswith("2") or code.startswith("3"):
-        ok("资产 URL 返回 %s" % code)
+    anon = (r.stdout or "").strip().splitlines()[-1] if r.stdout else ""
+    if auth_code.startswith("2") or auth_code.startswith("3"):
+        ok("资产存在(带认证 GET %s)" % auth_code)
     else:
-        warn("资产 URL 返回 %s(刚发布可能需要几秒生效;持续失败请检查 Release)" % code)
+        warn("带认证也取不到(%s),请到 Release 页面确认资产是否上传成功" % auth_code)
+    if anon.startswith("2") or anon.startswith("3"):
+        ok("匿名可下载(%s)→ brew install 可用" % anon)
+    elif private:
+        warn("匿名访问 %s —— 因为仓库是 private。发布本身成功,但 **brew install 拿不到资产**;"
+             "见上面第 1 步给出的三条路(a 转 public / b 公开 tap 仓库 / c 手动安装)" % anon)
+    else:
+        warn("匿名访问返回 %s(刚发布可能需几秒生效;持续失败请检查 Release)" % anon)
+
+
+def _gh_token():
+    r = sh(["gh", "auth", "token"], check=False)
+    return (r.stdout or "").strip()
 
 
 def main():
@@ -290,7 +329,7 @@ def main():
     print("\033[1mwchat 发布\033[0m  当前 %s → 新版本 %s%s"
           % (cur, version, "  \033[33m[dry-run]\033[0m" if a.dry_run else ""))
 
-    owner, repo = preflight(a.dry_run)
+    owner, repo, private = preflight(a.dry_run)
     if not a.skip_gates:
         gates(a.full_gates)
     else:
@@ -306,7 +345,7 @@ def main():
     tag = commit_and_push(version, owner, repo, a.dry_run)
     create_release(tag, tar, version, a.dry_run)
     if not a.no_verify_url:
-        verify_asset(url, a.dry_run)
+        verify_asset(url, a.dry_run, private=private)
 
     print("\n\033[1m完成\033[0m")
     print("  版本     %s (tag %s)" % (version, tag))
