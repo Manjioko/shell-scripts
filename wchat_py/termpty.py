@@ -17,7 +17,8 @@ import time
 from wchat_py.termwin import clean_line, window_output
 
 
-def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1, handle_sigint=True):
+def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1,
+            handle_sigint=True, env=None):
     state = {"int": 0}
     proc = {"p": None}
     old_handler = None
@@ -42,7 +43,7 @@ def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1, handl
     try:
         master, slave = pty.openpty()
         p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
-                             start_new_session=True, close_fds=True)
+                             start_new_session=True, close_fds=True, env=env)
         proc["p"] = p
     except Exception:
         for fd in (master, slave):
@@ -104,4 +105,3 @@ def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1, handl
     lines = [clean_line(ln) for ln in text.splitlines()]
     display = lines[-win:] if len(lines) > win else lines
     return display, window_output(lines, head_n, buf_size), p.returncode, timed_out, state["int"]
-

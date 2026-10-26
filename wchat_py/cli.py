@@ -982,8 +982,13 @@ def _run_tool(name, args_json):
             _timeout = float(os.environ.get("CMD_TIMEOUT", "120"))
         except ValueError:
             _timeout = 120.0
+        _run_env = dict(os.environ,
+                        GIT_PAGER="cat", PAGER="cat",
+                        GIT_EDITOR="true", GIT_SEQUENCE_EDITOR="true",
+                        GIT_TERMINAL_PROMPT="0")
         _disp, _full, _rc, _to, _intr = pty_run(
-            ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")))
+            ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")),
+            env=_run_env)
         # 与 master run_with_window 一致:输出逐行 dim │ 前缀上屏,底部一行 dim 汇总。
         _n = len(_full.splitlines())
         for _ln in _disp:
