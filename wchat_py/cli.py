@@ -566,9 +566,10 @@ def _path_guard(path, mode):
     if auto:
         if mode == "r":
             return None
-        for _a in _ALLOW_RW:
-            if under(p, _a):
-                return None
+        if os.environ.get("AUTO_MODE") == "full":
+            for _a in _ALLOW_RW:
+                if under(p, _a):
+                    return None
         _deny_status("P2")
         return "错误:%s被拒绝[硬墙 P2]:工作目录外写入。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
     key = (mode, p)
@@ -1437,8 +1438,10 @@ def main(argv):
     for _p in (st.get("allow_rw") or "").splitlines():
         _p = _p.strip()
         if _p:
-            _GRANTED_PATHS.add(("rw", _p))
             _ALLOW_RW.append(_p)
+            # master: --allow-write 只在 -auto=full 生效;非 auto 仍逐次确认
+            if st.get("auto_mode") == "full":
+                _GRANTED_PATHS.add(("rw", _p))
     if _ALLOW_RW:
         os.environ["WCHAT_ALLOW_WRITE"] = " ".join(_ALLOW_RW)
     if st.get("auto_mode"):
