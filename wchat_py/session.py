@@ -257,6 +257,14 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=5):
         msgs.append({"role": "user", "content": content})
     text = ""
     for _ in range(max_rounds):
+        # 主动压缩:上一轮 usage 超阈值 -> 本轮请求前先摘要重写历史
+        try:
+            from wchat_py import compaction as _cmp, compact_run as _cr
+            if _cmp.due(session.last_prompt_tokens, session.token_threshold):
+                _cr.compact(session, auto=True)
+                msgs = messages_list(session.messages_json)
+        except Exception:
+            pass
         text, tcs, err = call_llm(msgs)
         if err:
             session.messages_json = json.dumps(msgs, ensure_ascii=False)

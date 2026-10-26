@@ -167,14 +167,12 @@ def _default_meta(action, arg, session=None):
         _render_history(msgs)
         return True
     if action == "compact":
-        from wchat_py.session import Session, compact_status
-        cur, th, due = compact_status(sess)
-        if th <= 0:
-            sys.stdout.write("压缩阈值未设置,不动\n")
-        elif due:
-            sys.stdout.write("上下文已达压缩点(%d/%d)，需压缩(apply 需 ask_ai，暂未自动执行)\n" % (cur, th))
-        else:
-            sys.stdout.write("无需压缩(%d/%d)\n" % (cur, th))
+        try:
+            from wchat_py import compact_run
+            compact_run.compact(sess, auto=False)
+        except Exception as e:
+            sys.stdout.write("压缩失败: %s\n" % e)
+            sys.stdout.flush()
         return True
     if action == "show_msgs":
         from wchat_py.cli import inp_msg

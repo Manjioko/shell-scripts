@@ -1021,6 +1021,23 @@ def run_turn(content, model="", max_rounds=5):
         sys.stdout.write(box.paint_full())
         sys.stdout.flush()
     for _ in range(max_rounds):
+        try:
+            from wchat_py import compaction as _cmp, compact_run as _cr
+            try:
+                _ls = int(os.environ.get("WCHAT_LAST_PROMPT_TOKENS") or 0)
+                _th = int(os.environ.get("TOKEN_THRESHOLD") or 0)
+            except ValueError:
+                _ls = _th = 0
+            if _cmp.due(_ls, _th):
+                import types as _types
+                _ss = _types.SimpleNamespace(messages_json=_json.dumps(msgs),
+                                             msg_count=len(msgs),
+                                             last_prompt_tokens=_ls,
+                                             token_threshold=_th)
+                _cr.compact(_ss, auto=True)
+                msgs = _json.loads(_ss.messages_json)
+        except Exception:
+            pass
         text, tcs, err = _call_llm(msgs, model, on_text=_on_text, on_reason=_on_reason)
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
