@@ -1477,7 +1477,7 @@ def main(argv):
         _rc = _setup.ensure_ready(argv)
         if _rc is not None:
             return _rc
-        if argv and argv[0] == "setup":
+        if argv and argv[0] in ("setup", "--setup"):
             argv = argv[1:]
             if not argv:
                 from wchat_py.version import __version__

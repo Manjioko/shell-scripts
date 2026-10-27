@@ -247,5 +247,20 @@ ck("原来的 644 被改成 600",
 ck("原有键仍在", "BASE_URL" in open(setup.config_path()).read(),
    open(setup.config_path()).read())
 
+# ---------- 10) --setup 两种写法都认 ----------
+print("=== 10. --setup 入口 ===")
+home = fresh_home()
+os.environ["WCHAT_SETUP_NO_VERIFY"] = "1"
+_old_out, _buf = sys.stdout, io.StringIO()
+try:
+    sys.stdout = _buf
+    r1 = setup.ensure_ready(["setup"])
+    r2b = setup.ensure_ready(["--setup"])
+finally:
+    sys.stdout = _old_out
+    os.environ.pop("WCHAT_SETUP_NO_VERIFY", None)
+ck("setup 子命令生效(缺配置时给 2 而不是放行)", r1 == 2, repr(r1))
+ck("--setup 也认", r2b == 2, repr(r2b))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

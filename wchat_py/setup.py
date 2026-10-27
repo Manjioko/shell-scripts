@@ -416,8 +416,9 @@ def ensure_ready(argv):
         return None
     if argv and argv[0] in ("repl", "run-st", "parse", "usage", "hardwall", "help"):
         return None
-    force = bool(argv and argv[0] == "setup") or os.environ.get("WCHAT_SETUP") == "1"
-    if force and argv and argv[0] == "setup":
+    force = (bool(argv and argv[0] in ("setup", "--setup"))
+             or os.environ.get("WCHAT_SETUP") == "1")
+    if argv and argv[0] in ("setup", "--setup"):
         argv = argv[1:]
     if not force and not missing():
         return None
