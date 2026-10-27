@@ -214,7 +214,12 @@ def main():
         "全支持(Ghostty)": dict(),
         "不认 CSI s/u": dict(csi_su=False),
         "不认 ESC[?7l": dict(decawm=False),
-        "两样都不认(Terminal.app 形状)": dict(csi_su=False, decawm=False),
+        "两样都不认(老终端形状)": dict(csi_su=False, decawm=False),
+        # LF 只下移不回列(等价 xterm 的 LNM 关着)。今天这段路径不会落到这个状态:
+        # tty 的 OPOST/ONLCR 是开的(term.py 的 raw_mode 目前无人调用)。这一档是**前瞻守卫**:
+        # 谁要是把 OPOST 关了、或在箱内写了带列的裸 \n,右移会立刻在这里红。
+        # ⚠ 它不承重(预留行前面已有 \r,回列不依赖 LF 语义),承重的是上两档。
+        "LF 不回列(前瞻守卫)": dict(onlcr=False),
     }
     shots = {}
     for name, kw in profiles.items():

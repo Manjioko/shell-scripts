@@ -31,7 +31,7 @@ def ck(name, ok, detail=""):
         fail_n += 1; print("  FAIL %s%s" % (name, ("  ← " + detail) if detail else ""))
 
 # --- 期望字节(cols 写死 80,避免闸门随本地窗口宽度漂移)---------------------
-EXP_RESERVE = "\033[?25l\033[?7l\r" + "\n" * 10 + "\033[9A"
+EXP_RESERVE = "\033[?25l\033[?7l" + "\r\n" * 10 + "\033[9A"
 EXP_PAINT = [
     "\r" + "\033[2K" + BAR + "甲行"
          + "\r\033[1B" + "\033[2K" + BAR + "乙行"

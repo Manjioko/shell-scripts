@@ -6,11 +6,13 @@ Terminal.app 里看到阶梯式重复、在 Ghostty 里正常,但**光看字节�
 这里不猜:直接发 DSR(`ESC[6n`)让终端回报光标行列,再用它验证"存/取光标"是否真的
 回到了原处。
 
-用法(在**目标终端**里跑,一次一个):
-    python3 tests/termcap_probe.py
+用法(在**目标终端**里跑):
+    python3 tests/termcap_probe.py --out /tmp/termcap.txt
+结果同时画在屏幕上并写进 --out 文件(便于把事实贴回给人,不用手抄屏幕)。
 
 判读:每行 PASS/FAIL;末尾一行 `VERDICT ...` 直接复制给人看即可。
 """
+import argparse
 import fcntl
 import os
 import struct
@@ -122,16 +124,39 @@ def main():
         res["autowrap"] = (r == 13)
         t.write(CSI + "2K")
 
-        # 汇总:画在屏幕底部,方便截图
-        t.write(CSI + "15;1H")
+        # 6) 裸 LF 之后光标是否回到第 0 列(某些终端 LF 只下移不回列 -> 阶梯)
+        t.write("\r\n测试 E: 裸 LF 是否隐含回车\r\n")
+        t.write(CSI + "13;1H" + "abc")
+        p_after_text = t.pos()
+        t.write("\n")                        # 只发 LF,不发 CR
+        p_after_lf = t.pos()
+        res["LF=CRLF"] = bool(p_after_text and p_after_lf
+                              and p_after_text[0] == 13 and p_after_text[1] == 4
+                              and p_after_lf[0] == 14 and p_after_lf[1] == 1)
+        t.write(CSI + "2K")
+
+        # 汇总:画在屏幕底部(给人看),同时写进 --out(给机器/我回读)
+        bad = [k for k, v in res.items() if not v]
+        verdict = ("VERDICT term=%s term_program=%s rows=%d cols=%d %s"
+                   % (os.environ.get("TERM", "?"), os.environ.get("TERM_PROGRAM", "?"),
+                      rows, cols,
+                      " ".join("%s=%s" % (k.replace(" ", "_"), "P" if v else "F")
+                               for k, v in res.items())))
+        t.write(CSI + "17;1H")
         t.write("──── 结果 ────\r\n")
         for k, v in res.items():
             t.write("  %-12s %s\r\n" % (k, "PASS" if v else "FAIL"))
-        bad = [k for k, v in res.items() if not v]
-        t.write("\r\nVERDICT rows=%d cols=%d %s\r\n"
-                % (rows, cols, " ".join("%s=%s" % (k.replace(" ", "_"), "P" if v else "F")
-                                        for k, v in res.items())))
-        t.write("（缺哪项就是这项不认）\r\n" if bad else "全部支持。\r\n")
+        t.write("\r\n" + verdict + "\r\n")
+        t.write("（FAIL 的那几项就是这个终端不认的能力）\r\n" if bad else "全部支持。\r\n")
+        out = _usage_out()
+        if out:
+            try:
+                with open(out, "w", encoding="utf-8") as fh:
+                    fh.write(verdict + "\n")
+                    for k, v in res.items():
+                        fh.write("%s\t%s\n" % (k, "PASS" if v else "FAIL"))
+            except OSError as e:
+                t.write("写 %s 失败: %s\r\n" % (out, e))
         t.write("\r\n按回车结束…")
         end = time.time() + 60
         while time.time() < end:
@@ -148,6 +173,12 @@ def main():
         t.restore()
         t.write(CSI + "2J" + CSI + "H")
         os.close(t.fd)
+
+
+def _usage_out():
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--out", default=None)
+    return ap.parse_known_args()[0].out
 
 
 if __name__ == "__main__":

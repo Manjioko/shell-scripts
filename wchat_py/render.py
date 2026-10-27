@@ -110,7 +110,9 @@ class StreamBox:
             return ""
         self.anchor = True
         self.drawn = 0
-        return ("\033[?25l\033[?7l" + "\r" + ("\n" * self.win)
+        # 预留行一律写 `\r\n`:有终端的 LF 只下移不回列(xterm 的 LNM 关着时就是),
+        # 只发 `\n` 会让后续内容逐行右移 —— 正是"阶梯"的形状。多写一个 CR 零成本。
+        return ("\033[?25l\033[?7l" + "\r\n" * self.win
                 + ("\033[%dA" % (self.win - 1) if self.win > 1 else ""))
 
     def paint_full(self):
