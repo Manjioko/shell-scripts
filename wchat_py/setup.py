@@ -44,7 +44,8 @@ R_ABORT = "已取消,未修改"
 FIELD_HELP = {
     "BASE_URL": "服务商给的接口地址。要写到 /v1/chat/completions 结尾;"
                 "只写 https://<域名>/v1 也行,会自动补齐",
-    "WCHAT_API_KEY": "服务商控制台建的一串(通常 sk- 开头)。输入不回显,粘上回车即可",
+    "WCHAT_API_KEY": "服务商控制台建的一串(通常 sk- 开头)。输入不回显,粘上回车即可"
+                     ",回车后会告诉你收到多少字符",
     "FLASH_MODEL": "服务商文档里的对话模型名,如 deepseek-chat / qwen-plus",
 }
 
@@ -387,20 +388,42 @@ def show_header(existing=None):
 # ---------------------------------------------------------------- 交互填写
 
 def _read_secret():
-    """读 key:不回显(传统做法)。拿不到真 stdin 时退回普通读,绝不挂在 /dev/tty 上。"""
+    """读 key:不回显。**从 stdin 读**,不经 /dev/tty。
+
+    为什么不用 getpass:getpass 会自己打开 `/dev/tty`。如果进程的 stdin 与它
+    不是同一个终端(嵌套 pty、被包装器启动、tmux/IDE 终端等),键就**读到另一个
+    设备上去了** —— 表现正是"输入框像被锁住:敲字没反应,但回车能走下去"(实测)。
+    这里只操作**当前 stdin 这个 fd** 的 ECHO 位,读完在 finally 里恢复,
+    不碰 /dev/tty,也就不存在"两个终端"的分裂。
+    """
     try:
-        sys.stdin.fileno()          # 假 stdin(测试)在这一步就抛 → 直接普通读
+        fd = sys.stdin.fileno()
     except Exception:
         return (sys.stdin.readline() or "").strip()
     if os.environ.get("WCHAT_SETUP_PLAIN_INPUT") == "1":
         return (sys.stdin.readline() or "").strip()
     try:
-        return getpass.getpass("")
-    except (EOFError, KeyboardInterrupt):
-        return ""
+        import termios
+        if not os.isatty(fd):
+            return (sys.stdin.readline() or "").strip()
+        old = termios.tcgetattr(fd)
     except Exception:
-        # getpass 在没有控制终端时会抛;退回普通读,不要因此让人卡住
+        # 拿不到 termios(非 tty/平台不支持):退回普通读,绝不因此卡住
         return (sys.stdin.readline() or "").strip()
+    new = list(old)
+    new[3] = new[3] & ~termios.ECHO          # lflags:关回显
+    try:
+        termios.tcsetattr(fd, termios.TCSADRAIN, new)
+        try:
+            line = sys.stdin.readline()
+        except (EOFError, KeyboardInterrupt):
+            line = ""
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)   # 无论怎么退出都恢复
+        except Exception:
+            pass
+    return (line or "").strip()
 
 
 def _ask(field, current=""):
@@ -416,6 +439,11 @@ def _ask(field, current=""):
     sys.stdout.flush()
     if field == "WCHAT_API_KEY":
         ans = _read_secret()
+        # 不回显时用户没有任何反馈,容易以为"输入框卡住了"。给个计数证明它活着,
+        # 同时不泄露内容。
+        n = len(ans or "")
+        _w("\033[2m    已收到 %d 个字符%s\033[0m"
+           % (n, "" if n else "(直接回车 = 跳过)"))
     else:
         try:
             ans = (sys.stdin.readline() or "").strip()
