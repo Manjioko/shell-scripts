@@ -1,75 +1,134 @@
 #!/usr/bin/env python3
-"""B 阶段 1c：流式渲染（**精确复刻** bash 的 stream_box_* 三件套）。
+"""B 阶段 1c：流式渲染（流箱：环形缓冲 / 残行 / 整窗重绘）。
 
-为什么单独成模块：1c 里其余部分都是把已有 Python 件串起来，**只有渲染需要逐字节复刻**，
-而且它有三段（环形缓冲 / 残行 / 整窗重绘），出错点密集。
+**与 bash 版的有意分歧（2026-10 修）**：bash 的 `stream_box_*` 用
+`ESC[s` 存锚点、每次 paint 用 `ESC[u` 跳回箱顶，并靠 `ESC[?7l` 关自动换行让行数可数。
+这两样都**不是所有终端都认**：macOS 自带 Terminal.app 上表现为"同一句话每行一遍、
+每行缩进递增"的阶梯（同一份字节流在 Ghostty 里正常）。存光标一旦不认，paint 就从
+上一次的落点继续写字、close 也擦不回箱顶，整块内容在屏幕上越走越偏。
 
-bash 原文（`wchat.sh` 3087–3139）：
-```bash
-stream_box_push()  { stream_buf+=("$1"); (( ${#stream_buf[@]} > STREAM_WIN )) && stream_buf=("${stream_buf[@]:1}"); }
-stream_box_paint() {
-    (( stream_open )) || return 0
-    (( stream_anchor )) || stream_box_reserve
-    printf '\\033[u'
-    for i in "${stream_buf[@]}"; do printf '\\033[2K\\033[2m│\\033[0m %s\\r\\033[1B' "$i"; done
-    stream_drawn=${#stream_buf[@]}
-    if [[ -n "$stream_line_buf" ]]; then
-        printf '\\033[2K\\033[2m│\\033[0m %s' "$stream_line_buf"
-    fi
-}
-stream_box_append() {
-    stream_line_buf+="$1"
-    while [[ "$stream_line_buf" == *$'\\n'* ]]; do 切行 -> push; done
-    节流: now - last_paint > STREAM_THROTTLE => paint
-}
-```
+所以这里改成**只依赖最古老的三个动作**：
+  * `\\r`（回车）、`\\n`（换行）、`ESC[nA`（光标上移）—— 三者任何 VT 终端都支持；
+  * 位置由**我们自己记账**：`drawn` = 上一帧画了几行，回箱顶 = `\\r` + `ESC[drawn-1A`。
+    相对移动天然跟着滚动走，不会像"保存的绝对行号"那样在屏幕上滚之后失效。
+  * 每行再按终端宽度**硬截断**（`_fit`）：即便终端不认 `?7l`、长行照旧自动折行，
+    折行也不会发生，`drawn` 就始终等于真实占用行数。
+  * `?7l/?25l` 仍然照发（锦上添花），但**不再是正确性的前提**。
 
-**节流**（`STREAM_THROTTLE` + `EPOCHREALTIME`）**不在本模块**：重绘次数依赖墙钟，属调用方的策略；
-本模块只负责"给定缓冲状态，paint 应该吐出什么字节"——这样它才能被确定性地单测与比对。
+节流（`STREAM_THROTTLE` + 墙钟）不在这里：重绘次数属调用方策略，本模块只回答
+"给定缓冲状态，应该吐出什么字节"——这样它才能被确定性地单测与比对。
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
+import unicodedata
 
 BAR = "\033[2m│\033[0m "
+BAR_W = 2                      # "│ " 的显示宽度，算可用列宽时要扣掉
+
+# 一次性吞掉一个转义序列（SGR / 光标移动 / 私有模式），用来算"显示宽度"
+_ESC = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()#][0-9A-Za-z]|\x1b[78]")
+
+
+def _ch_width(ch):
+    if unicodedata.combining(ch):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def display_width(s):
+    """不算转义序列的显示宽度（CJK 记 2）。"""
+    return sum(_ch_width(c) for c in _ESC.sub("", s))
+
+
+def _fit(s, limit):
+    """把一行截到 limit 列以内：转义序列整段保留、绝不在序列中间下刀。"""
+    if limit <= 0:
+        return ""
+    out = []
+    w = 0
+    i = 0
+    while i < len(s):
+        m = _ESC.match(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        cw = _ch_width(s[i])
+        if w + cw > limit:
+            break
+        out.append(s[i])
+        w += cw
+        i += 1
+    return "".join(out)
+
+
+def term_cols(default=80):
+    try:
+        return shutil.get_terminal_size((default, 24)).columns or default
+    except Exception:
+        return default
 
 
 class StreamBox:
-    """环形缓冲 + 残行 + 整窗重绘。`paint()` 是**纯函数**（无 IO、不看时钟）。"""
+    """环形缓冲 + 残行 + 整窗重绘。`paint()` 是**纯函数**（无 IO、不看时钟）。
 
-    def __init__(self, win=10):
+    位置记账：
+      * `reserve()` 在内容下方留 win 行，光标停在**箱顶**（第 0 行）；
+      * `paint()` 先回到箱顶（`\\r` + 上移 drawn-1 行），再逐行重画，结束时停在**最后一行**；
+      * `close()` 同样先回箱顶，逐行擦干净，再回到箱顶，让后续 markdown 从箱顶接续。
+    """
+
+    def __init__(self, win=10, cols=None):
         self.win = int(win)
+        self.cols = cols                  # None = 每次现取终端宽度
         self.buf = []
-        self.line = ""          # 残行（未遇到换行的部分）
-        self.anchor = False
+        self.line = ""                    # 残行（未遇到换行的部分）
+        self.anchor = False               # 已预留箱区（保留旧属性名，语义=已 reserve）
         self.drawn = 0
 
+    # --- 内部 ---
+    def _cols(self):
+        return self.cols or term_cols()
+
+    def _up(self, n):
+        """从当前行回到箱顶所需的上移字节（n = 上一帧画的行数）。"""
+        return "\033[%dA" % (n - 1) if n > 1 else ""
+
+    def _room(self):
+        """一行正文可用列宽。末尾留 1 列：某些终端在最末列写字符就折行。"""
+        return max(8, self._cols() - BAR_W - 1)
+
+    # --- 对外 ---
     def reserve(self):
-        """首次真正上屏前预留箱区(等价 stream_box_reserve):在内容下方留 win 行,
-        光标上移回箱顶并保存锚点 \\033[s。缺了它 paint 的 \\033[u 会跳到未知位置,
-        表现为"回复把屏幕上原有内容清空/覆盖"(历史现象)。"""
+        """首次真正上屏前预留箱区：内容下方留 win 行，光标上移回箱顶。
+
+        不再保存光标位置（`ESC[s` 有终端不认），paint/close 靠 `drawn` 相对回位。"""
         if self.anchor:
             return ""
         self.anchor = True
-        # 关自动换行 + 隐光标(等价 stream_box_open):长行不折行,行数才可数;
-        # 否则终端自动折行 -> drawn 计错 -> 重画重复、close 擦不净(用户实测)。
-        return ("\033[?25l\033[?7l" + ("\n" * self.win)
-                + ("\033[%dA" % (self.win - 1)) + "\033[s")
+        self.drawn = 0
+        return ("\033[?25l\033[?7l" + "\r" + ("\n" * self.win)
+                + ("\033[%dA" % (self.win - 1) if self.win > 1 else ""))
 
     def paint_full(self):
-        """reserve + paint:调用方想"真的画到终端"时用它(单测仍用纯 paint)。"""
+        """reserve + paint：调用方想"真的画到终端"时用它（单测仍用纯 paint）。"""
         return self.reserve() + self.paint()
 
     def close(self):
-        """关箱(等价 stream_box_close):回锚点,逐行 2K 擦除,再回锚点,
-        让后续 markdown 从箱顶接续;恢复光标。返回应写出的字节。"""
+        """关箱：回箱顶，逐行整行擦除，再回箱顶，恢复光标与自动换行。"""
         if not self.anchor:
             return ""
-        out = ["\033[u"]
-        for _ in range(self.drawn):
-            out.append("\033[2K\033[1B")
-        out.append("\033[u\033[?25h\033[?7h")
+        n = self.drawn
+        out = ["\r" + self._up(n)]
+        for i in range(n):
+            if i:
+                out.append("\r\033[1B")
+            out.append("\033[2K")
+        out.append("\r" + self._up(n))
+        out.append("\033[?25h\033[?7h")
         self.buf = []
         self.line = ""
         self.drawn = 0
@@ -77,7 +136,7 @@ class StreamBox:
         return "".join(out)
 
     def push(self, line):
-        """等价 stream_box_push：入队，超窗口丢最旧。"""
+        """入队，超窗口丢最旧。"""
         self.buf.append(line)
         if len(self.buf) > self.win:
             self.buf = self.buf[1:]
@@ -96,15 +155,16 @@ class StreamBox:
         return n
 
     def paint(self):
-        """等价 stream_box_paint：整窗重绘，末尾带残行（若有）。返回应写出的字节。"""
-        out = ["\033[u"]
-        for ln in self.buf:
-            out.append("\033[2K" + BAR + ln + "\r\033[1B")
-        if self.line:
-            out.append("\033[2K" + BAR + self.line)
-        self.drawn = len(self.buf) + (1 if self.line else 0)
+        """整窗重绘，末尾带残行（若有）。返回应写出的字节。"""
+        lines = list(self.buf) + ([self.line] if self.line else [])
+        room = self._room()
+        out = ["\r" + self._up(self.drawn)]
+        for i, ln in enumerate(lines):
+            if i:
+                out.append("\r\033[1B")
+            out.append("\033[2K" + BAR + _fit(ln, room))
+        self.drawn = len(lines)
         return "".join(out)
-
 
 
 def render_markdown(text):
@@ -158,3 +218,4 @@ def args_preview(args_json):
     if len(s) > 160:
         s = s[:160] + "…"
     return s
+

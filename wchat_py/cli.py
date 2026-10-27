@@ -1338,7 +1338,7 @@ def run_turn(content, model="", max_rounds=None):
             sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
             return 0
         # 工具执行前先关流箱并 flush 思考:否则权限提示/工具横幅会打在箱内光标处,
-        # 下一帧 paint 的 \033[u 会把提示擦掉(用户实测:提示在箱上方且被滚掉)。
+        # 下一帧 paint 会回箱顶重画,把提示擦掉(用户实测:提示打在箱上方且被滚掉)。
         sys.stdout.write(box.close()); sys.stdout.flush()
         if reason:
             sys.stdout.write(render_reason("".join(reason)))
