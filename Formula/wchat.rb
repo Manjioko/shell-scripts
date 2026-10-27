@@ -1,9 +1,9 @@
 class Wchat < Formula
   desc "Terminal AI assistant (Python, bundled venv)"
   homepage "https://github.com/Manjioko/shell-scripts"
-  url "https://github.com/Manjioko/shell-scripts/releases/download/v0.2.1/wchat-0.2.1.tar.gz"
-  sha256 "44ceb1cee6308059559719b6292a99f76a632802de83e99c5caccef08b5733cb"
-  version "0.2.1"
+  url "https://github.com/Manjioko/shell-scripts/releases/download/v0.2.2/wchat-0.2.2.tar.gz"
+  sha256 "0ede2d4ce5f17fc1261f4e4dffb3eca1e77a490f8e8c5749ee52b9f271dd1c35"
+  version "0.2.2"
   license "MIT"
 
   depends_on "python@3.12"
