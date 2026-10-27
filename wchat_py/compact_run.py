@@ -40,7 +40,16 @@ def summarize(text):
 def compact(sess, auto=False):
     """压缩 sess.messages_json。返回 (changed, total, pin, keep)。"""
     from wchat_py import compaction
-    from wchat_py import msg as msgmod
+    try:
+        from wchat_py import msg as msgmod
+    except ImportError as _e:
+        # 打包缺陷的真实形状:0.2.1 的 tarball 里少了 wchat_py/msg.py
+        # (Homebrew 装的目录同样没有),于是 /compact 只会得到一句
+        # "压缩失败: cannot import name 'msg'",看不出缺文件。
+        # 安装损坏不该伪装成压缩失败:说清楚缺什么、怎么修,并且不改动 messages。
+        print("❌ 压缩不可用:安装缺少 wchat_py/msg.py(%s)。"
+              "这是安装包不完整,不是上下文问题。修:brew reinstall wchat" % _e, flush=True)
+        return False, 0, 0, 0
     try:
         msgs = json.loads(sess.messages_json or "[]")
     except ValueError:

@@ -380,11 +380,11 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 ### 8.1 一条命令发版
 
 ```bash
-./release.sh 0.3.0            # 发 0.3.0
-./release.sh patch            # 补丁号 +1(当前 0.2.0 → 0.2.1)
-./release.sh minor            # 0.2.0 → 0.3.0
-./release.sh 0.3.0 --dry-run  # 演练:只打包和打印,不写 git、不推、不发布
-./release.sh 0.3.0 --full-gates   # 连主闸门(45 道)一起跑,最稳
+python3 packaging/release.py 0.3.0            # 发 0.3.0
+python3 packaging/release.py patch            # 补丁号 +1
+python3 packaging/release.py minor            # 0.2.0 → 0.3.0
+python3 packaging/release.py 0.3.0 --dry-run  # 演练:只打包和打印,不写 git、不推、不发布
+python3 packaging/release.py 0.3.0 --full-gates   # 连主闸门一起跑,最稳
 ```
 
 脚本会按固定顺序做完 8 步，**任何一步失败就停**（不会留下"tag 推了但包没传"的中间态）：
@@ -424,7 +424,7 @@ Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依
 
 现已转为 public，匿名可下载（`curl -I` 返回 200），上面 2.1 的命令可用。
 
-如果以后又改回 private，`release.sh` 第 1 步会再次报警并给出三条绕行方案
+如果以后又改回 private，`packaging/release.py` 第 1 步会再次报警并给出三条绕行方案
 （转 public / 建公开 tap 仓库 / 仅手动安装）。
 
 ### 8.4 别人怎么装、怎么升级

@@ -193,9 +193,16 @@ def run_single_turn(content, model=""):
                "messages": msgs, "thinking": "disabled", "tools": []}
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     text_all = []
-    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    _runtime = _runtime_fallback()
+    try:
+        p = subprocess.Popen([_runtime, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    except OSError as _e:
+        sys.stderr.write("无法启动模型子进程(%s): %s\n"
+                         "多半是 wchat 被升级而当前进程仍指向旧目录,"
+                         "跑一次 `brew reinstall wchat` 后重开。\n" % (_runtime, _e))
+        return 1
     p.stdin.write(_json.dumps(env_req, ensure_ascii=False))
     p.stdin.close()
     for line in p.stdout:
@@ -304,9 +311,17 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         req["ref_map_file"] = _ref_tmp
     if os.environ.get("WCHAT_TRACE") == "1":
         sys.stderr.write("TRACE llm model=%r thinking=%r\n" % (_model, _think)); sys.stderr.flush()
-    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    _runtime = _runtime_fallback()
+    try:
+        p = subprocess.Popen([_runtime, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "wchat_py", "_run.py"), "llm", "stream"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, bufsize=1)
+    except OSError as _e:
+        # 解释器路径失效时不要抛栈:回一句能据此行动的话。
+        # (真实故障:brew 升级删了旧 Cellar,而本进程 sys.executable 还指着它)
+        return "", None, ("无法启动模型子进程(%s): %s\n"
+                          "多半是 wchat 被升级而当前进程仍指向旧目录,"
+                          "跑一次 `brew reinstall wchat` 后重开。" % (_runtime, _e))
     p.stdin.write(_json.dumps(req, ensure_ascii=False)); p.stdin.close()
 
     # Ctrl+C 打断流式输出(与 master handle_ctrl_c 同一套语义):
@@ -1544,10 +1559,50 @@ def _sync_runtime(s):
             os.environ["WCHAT_CHAT_TITLE"] = _t
 
 
+def _runtime_fallback():
+    """`sys.executable` 若已消失(Homebrew 升级删掉旧 Cellar),换一个能用的解释器。
+
+    真实故障:升级到新版时旧版本目录被清掉,而**正在运行**的进程 `sys.executable`
+    还指着 `<旧 Cellar>/libexec/venv/bin/python`;调用方用它 spawn 子进程
+    (`_run.py llm stream`、`render_helper.py`、repl 的 history helper)就会
+    FileNotFoundError 直接崩栈,而不是给出一句能看懂的话。
+    兜底顺序:环境里显式给的 → 当前 Cellar 里的 venv(按路径推断) → 系统 python3。
+    """
+    exe = sys.executable or ""
+    if exe and os.path.exists(exe):
+        return exe
+    _cand = []
+    _fixed = os.environ.get("WCHAT_PYTHON", "")
+    if _fixed:
+        _cand.append(_fixed)
+    # <Cellar>/wchat/<ver>/libexec/wchat_py/cli.py → 同级的 venv/bin/python
+    _here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _cand.append(os.path.join(_here, "venv", "bin", "python"))
+    # brewed opt 链接(版本无关;`brew reinstall` 后自然指向新版本)
+    _cand.append("/opt/homebrew/opt/wchat/libexec/venv/bin/python")
+    _cand.append("/usr/local/opt/wchat/libexec/venv/bin/python")
+    # 升级后"新 Cellar 已装好、但本进程仍指着旧版本" —— 挑一个存在的版本目录用
+    import glob as _glob
+    _cand.extend(sorted(_glob.glob("/opt/homebrew/Cellar/wchat/*/libexec/venv/bin/python"),
+                        reverse=True))
+    _cand.extend(sorted(_glob.glob("/usr/local/Cellar/wchat/*/libexec/venv/bin/python"),
+                        reverse=True))
+    _cand.append("/usr/bin/python3")
+    for c in _cand:
+        if c and os.path.exists(c):
+            return c
+    return exe or "python3"
+
+
 def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
+    _exe = _runtime_fallback()
+    if _exe != sys.executable:
+        sys.stderr.write("⚠ 当前解释器已不存在(多半是 brew 升级删了旧目录),"
+                         "临时改用 %s;跑一次 `brew reinstall wchat` 可彻底修好\n" % _exe)
+        sys.executable = _exe
     _load_ct_config()
     _apply_runtime_defaults()
     # 配置:检测(只提示不接管)与填写(逐项问)分开。

@@ -58,7 +58,7 @@ wchat                                        # 开始用
 发新版只跑一条命令（打包 → 打 tag → 推 GitHub → 建 Release → 更新 Formula）:
 
 ```bash
-./release.sh 0.3.0          # 或 ./release.sh patch;--dry-run 演练
+python3 packaging/release.py 0.3.0    # 或 patch/minor;--dry-run 演练
 ```
 
 ```bash

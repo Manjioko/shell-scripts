@@ -567,7 +567,8 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
         if os.path.isfile(_helper):
             default = ""
             while True:
-                argv = [sys.executable, _helper, "--history", _hist,
+                from wchat_py import cli as _cli
+                argv = [_cli._runtime_fallback(), _helper, "--history", _hist,
                         "--clip-dir", _clip, "--no-commands"]
                 if default:
                     argv += ["--default", default]

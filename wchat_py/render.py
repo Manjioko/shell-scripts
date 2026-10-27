@@ -113,12 +113,17 @@ def render_markdown(text):
     helper = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                           "render_helper.py")
     try:
-        p = subprocess.run([sys.executable, helper], input=(text or ""),
+        from wchat_py.cli import _runtime_fallback
+        _py = _runtime_fallback()
+    except Exception:
+        _py = sys.executable
+    try:
+        p = subprocess.run([_py, helper], input=(text or ""),
                            capture_output=True, text=True)
         if p.returncode == 0 and p.stdout:
             return p.stdout
     except OSError:
-        pass
+        pass          # helper 起不来就回退原文(渲染是装饰,不阻断输出)
     return text or ""
 
 
