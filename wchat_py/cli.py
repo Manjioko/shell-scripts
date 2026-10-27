@@ -1469,24 +1469,22 @@ def main(argv):
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
     _load_ct_config()
     _apply_runtime_defaults()
-    # 首次运行引导:没配 BASE_URL/key/模型时,先让人一次粘贴配好再进会话。
-    # 放在这里而不是等第一次请求失败:旧行为只显示 `API 请求失败: Connection error.`,
-    # 既没说缺什么也没说怎么补(实测就是这句话)。
+    # 配置:检测(只提示不接管)与填写(逐项问)分开。
+    #   · `wchat -config …`  → 交给 setup.configure(),它负责校验/写盘/验连通
+    #   · 其余入口           → setup.ensure_ready():缺配置就打印"哪里不对 + 下一步"
+    #                          并退出(退出码 2),**不进 REPL** —— 半配置状态进循环
+    #                          只会让用户下一步撞 `API 请求失败: Connection error.`
     try:
         from wchat_py import setup as _setup
+        if argv and argv[0] in ("-config", "--config", "config", "-setup", "--setup", "setup"):
+            return _setup.configure(argv[1:])
         _rc = _setup.ensure_ready(argv)
         if _rc is not None:
             return _rc
-        if argv and argv[0] in ("setup", "--setup"):
-            argv = argv[1:]
-            if not argv:
-                from wchat_py.version import __version__
-                print("wchat %s · 配置已就绪" % __version__)
-                return 0
     except SystemExit:
         raise
     except Exception:
-        pass            # 引导本身出错不该挡住正常使用
+        pass            # 配置检测本身出错不该挡住正常使用
     if not os.environ.get("AUTO_AUDIT_LOG"):
         _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
         os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")
