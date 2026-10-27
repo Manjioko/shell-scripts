@@ -127,4 +127,22 @@ ck "h11_scan off → 粗判据仍拦重定向" "$(hcall 'WCHAT_PY_HD=0' 'hd_h11_
 ck "h11_scan off → HD_CODE 置原文"   "$(hcall 'WCHAT_PY_HD=0' 'hd_h11_scan "echo hi" >/dev/null 2>&1; printf "%s" "$HD_CODE"')" "echo hi"
 ck "h11_scan off → 未命中 rc1"        "$(hcall 'WCHAT_PY_HD=0' 'hd_h11_scan "echo hi" >/dev/null 2>&1; echo rc=$?')" "rc=1"
 
+echo "=== 凭据豁免的边界:WORK_ROOT==HOME 时不许白读全局凭据 ==="
+# 语义:`_creds_all_exempt` 在"整台机器都是工作区"时必须失效,否则从家目录启动
+# wchat 就等于放行 `cat ~/<cred>`。这条曾被 hdcmd 语料闸门的 WORK_ROOT 继承问题
+# 遮挡过(两侧喂了不同的工作根),所以在这里按显式工作根单独钉一次。
+pyr() { python3 - "$@" <<'EOP'
+import sys
+sys.path.insert(0, "%s")
+from wchat_py import hardwall
+cmd, wr, home = sys.argv[1], sys.argv[2], sys.argv[3]
+r, _s = hardwall.rule(cmd, False, work_root=wr, home=home)
+print(r or "-")
+EOP
+}
+ck "WORK_ROOT==HOME:拒绝读全局 npmrc" "$(pyr 'cat .npmrc' "$HOME" "$HOME")" "H6"
+ck "WORK_ROOT==HOME:拒绝读全局 pypirc" "$(pyr 'cat .pypirc' "$HOME" "$HOME")" "H6"
+ck "普通子目录工作根:本项目的 npmrc 不算洞" "$(pyr 'cat .npmrc' "$HOME/proj" "$HOME")" "-"
+ck "WORK_ROOT==HOME 也不误伤普通文件" "$(pyr 'cat notes.md' "$HOME" "$HOME")" "-"
+
 finish

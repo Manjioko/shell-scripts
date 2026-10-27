@@ -61,9 +61,28 @@ TOOL_SPECS = [
 ]
 
 
+def _child_env():
+    """给 mcporter 子进程的环境:钉死 MCPORTER_CONFIG。
+
+    ⚠ 这一行在 Python 移植时丢过一次(bash 版 wchat_ref:500 有)。后果不是报错,
+    而是**语义漂移**:不钉的话 mcporter 会按自己的规则把 `<cwd>/config/mcporter.json`
+    也合并进来,于是 `-mcp chrome` 能不能用取决于你在哪个目录启动 wchat ——
+    在 A 目录能用、在 B 目录报"server 不存在",且报错不会指向这个真因。
+
+    只在清单文件**确实存在**时才钉:上游对"指向不存在的文件"是直接 ENOENT 报错、
+    不做回落,钉一个不存在的路径会把"没配"变成"报错"。
+    """
+    env = dict(os.environ)
+    p = config_path()
+    if os.path.isfile(p):
+        env["MCPORTER_CONFIG"] = p
+    return env
+
+
 def _run(argv, timeout=60):
     try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                           env=_child_env())
     except FileNotFoundError:
         return None, "找不到启动器 %s" % argv[0]
     except subprocess.TimeoutExpired:
@@ -74,9 +93,24 @@ def _run(argv, timeout=60):
 LAST_COUNTS = {}
 
 
+def config_path():
+    """清单路径:**统一收在 ~/.ct/ 下**(与 config/history/skills 同处)。
+
+    为什么不再沿用上游的默认位:那个目录里还有 daemon 的 socket、连接密钥与 OAuth
+    vault,全是**运行时状态**。把"我们的清单"和它们混在一起,既不好审计(一个是配置、
+    几个是凭据),也说不清"哪些该备份"。`~/.ct/` 是 wchat 自己的家,清单放这里。
+
+    优先级:环境变量 MCP_CONFIG > ~/.ct/mcporter.json(CT_HOME 优先)。
+    """
+    if os.environ.get("MCP_CONFIG"):
+        return os.environ["MCP_CONFIG"]
+    ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME") or "", ".ct")
+    return os.path.join(ct, "mcporter.json")
+
+
 def config_servers():
     """按配置声明顺序返回 server 名(只读 keys,不读值/凭据)。"""
-    p = os.environ.get("MCP_CONFIG") or os.path.expanduser("~/.mcporter/mcporter.json")
+    p = config_path()
     try:
         with open(p, encoding="utf-8", errors="replace") as f:
             d = json.load(f)
@@ -125,7 +159,7 @@ ROUTE_HINT = (
 
 def config_map():
     """配置里的 mcpServers 字典(只用结构,如 allowedTools;不输出凭据值)。"""
-    p = os.environ.get("MCP_CONFIG") or os.path.expanduser("~/.mcporter/mcporter.json")
+    p = config_path()
     try:
         with open(p, encoding="utf-8", errors="replace") as f:
             d = json.load(f)

@@ -35,6 +35,9 @@ _SYS_PREFIXES = [
 _HOME_CRED_SUBS = [
     ".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".config/azure",
     ".azure", ".docker", ".kube", ".subversion", ".ct/history", ".ct/config",
+    # MCP 清单:里面有 env/headers 的**占位与真实值**两种可能,按凭据级对待。
+    # 清单本身不搬走模型就看不到 server 名单 —— 名单由程序启动时注入(L0),不经文件读取。
+    ".ct/mcporter.json",
 ]
 # 工作目录外的凭据**文件名**(P1)
 _CRED_FILENAMES = frozenset((

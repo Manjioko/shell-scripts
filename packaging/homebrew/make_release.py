@@ -27,10 +27,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 DIST = os.path.join(ROOT, "dist")
 FORMULA_DIR = os.path.join(ROOT, "packaging", "homebrew", "Formula")
 INCLUDE = ["wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirements.txt",
-           "README.md", "docs/brew-package.md"]
+           "README.md", "docs/brew-package.md", "skills"]
 GITHUB_URL = "https://github.com/Manjioko/shell-scripts"
 CONFIG = os.path.join("configs", "config.example")
 CONFIG_PY = os.path.join("configs", "ctmodel.py")   # 模型档案切换,随包安装为 bin/ctmodel
+MCP_EXAMPLE = os.path.join("configs", "mcporter.example.json")  # MCP 清单模板(wchat mcp init)
 
 # 打包时剔除:字节码缓存/编辑器/系统垃圾。匹配的是**路径任一组件或文件名**。
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".git", "build", "dist"}
@@ -99,7 +100,7 @@ def build_tarball(version, out_dir=None):
                                    filter=_filter, recursive=False)
                     else:
                         tf.add(path, arcname=os.path.join(top, name), filter=_filter)
-                for rel in (CONFIG, CONFIG_PY):
+                for rel in (CONFIG, CONFIG_PY, MCP_EXAMPLE):
                     f = os.path.join(ROOT, rel)
                     if os.path.exists(f):
                         tf.add(f, arcname=os.path.join(top, rel), filter=_filter)
@@ -141,7 +142,8 @@ FORMULA = '''class Wchat < Formula
     chmod 0755, bin/"wchat"
     (bin/"ctmodel").write <<~EOS
       #!/bin/bash
-      exec "#{venv}/bin/python" "#{libexec}/configs/ctmodel.py" "$@"
+      # 兼容壳:实现只有一个(wchat_py/setup.cmd_model),这里直接转过去。
+      exec "#{venv}/bin/python" "#{libexec}/wchat" model "$@"
     EOS
     chmod 0755, bin/"ctmodel"
   end
@@ -149,6 +151,8 @@ FORMULA = '''class Wchat < Formula
   test do
     # 依赖已随包安装,这里必须能在**无网络**下直接跑通
     assert_match "使用方法", shell_output("#{bin}/wchat -h 2>&1")
+    # 模型切换的两个入口必须是同一个实现:直接入口 + 兼容壳
+    assert_match "当前模型", shell_output("#{bin}/wchat model 2>&1")
     assert_match "当前模型", shell_output("#{bin}/ctmodel 2>&1")
   end
 end

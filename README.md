@@ -87,7 +87,8 @@ python3 packaging/homebrew/make_release.py 0.2.0
 |---|---|
 | `wchat` | Python 入口 shim（`wchat_py.cli`） |
 | `wchat_py/` | 业务实现（入口/工具/硬墙/终端/渲染/MCP 等） |
-| `configs/` | 配置模板、`ctmodel.py`、mcporter 清单 |
+| `configs/` | 配置模板、`ctmodel.py`(兼容壳,实现在 `wchat_py/setup.py`)、`mcporter.example.json`(MCP 清单模板) |
+| `skills/` | 随包技能。首次运行补进 `~/.ct/skills/`(**只补缺、不覆盖**) |
 | `setup.py` | 依赖安装 |
 | `tests/` | 闸门与测试；`tests/legacy_wchat.sh` 仅为 **bash 基线 oracle**，产品不引用 |
 | `docs/` | 设计与迁移文档（`migration-to-python-B.md` 为 B 阶段结项） |

@@ -68,8 +68,15 @@ def main(argv):
             print("无法导入 hardwall: %s" % e)
             return 1
         bad = 0
+        # ⚠ 两侧的**工作根必须显式对齐**:bash 夹具是 `cd /tmp` 后判的,所以 Python 侧
+        #   也必须按 /tmp 判。不显式给的话 `rule()` 会读 WORK_ROOT 环境变量,而它是
+        #   **进程继承**来的 —— 从家目录启动 wchat 时 WORK_ROOT == HOME,`_creds_all_exempt`
+        #   会按设计让豁免失效(不许因为"整台机器都是工作区"就白读全局 .npmrc/.pypirc),
+        #   于是 Python 判 H6、bash 判放行。那**不是判据错**,是这道闸门没钉住输入条件:
+        #   "同一个命令串"必须配"同一个工作根"才谈得上 parity。
+        _wr, _hm = "/tmp", os.path.expanduser("~")
         for (i, cat, rl, sf, cmd, _auto) in rows:
-            pr, ps = hardwall.rule(cmd, _auto)
+            pr, ps = hardwall.rule(cmd, _auto, work_root=_wr, home=_hm)
             pr = pr or "-"
             if (pr, ps or "-") != (rl, sf):
                 bad += 1

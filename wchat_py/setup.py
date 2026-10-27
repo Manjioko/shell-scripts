@@ -855,6 +855,162 @@ def configure(argv):
     return configure_interactive(verify_conn=verify_conn, group=group or None)
 
 
+# ---------------------------------------------------------------- 模型档案切换
+#
+# 这一节是原 `ctmodel`(configs/ctmodel.py)的**唯一实现**。`wchat model` 直接调它;
+# `bin/ctmodel` 只是三行壳(exec wchat model),所以逻辑只有一份,不会漂。
+# 语义没变:文件里每条"跟着模型走"的赋值行行尾带 `# @model <组名>`;
+# 切到 X = 标记为 X 的行去注释、其它模型的行加注释;不改任何值、不动顺序。
+
+def _set_active_line(ln, active):
+    """活动行原样;非活动行整体注释(或去掉一个前导 '# ')。"""
+    lead = len(ln) - len(ln.lstrip())
+    pad, body = ln[:lead], ln[lead:]
+    if active:
+        if body.startswith("# ") and MARK.search(body[2:]):
+            return pad + body[2:]
+        return ln
+    if body.startswith("#"):
+        return ln
+    return pad + "# " + body
+
+
+def model_groups():
+    """文件里出现过的所有组名(按出现顺序,含被注释的)。"""
+    out = []
+    for line in _read_lines():
+        m = MARK.search(line)
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
+
+
+def cmd_model(argv):
+    """`wchat model …` —— 与原 ctmodel 参数完全兼容。"""
+    argv = list(argv or [])
+    if argv and argv[0] in ("-h", "--help"):
+        sys.stdout.write(
+            "用法: wchat model [名字|-l|check|undo] [-n]\n"
+            "  (无参数)        看当前生效的模型组\n"
+            "  <名字>          切到该组(切换前自动备份 config.bak)\n"
+            "  <名字> -n       只预览 diff,不落盘\n"
+            "  -l, --list      列出所有模型组\n"
+            "  check [--fix]   校验配置(--fix 顺手修权限 600)\n"
+            "  undo            回滚到上一次切换前\n")
+        return RC_OK
+    p = config_path()
+    if not argv:
+        if not os.path.isfile(p):
+            sys.stderr.write("配置不存在: %s(可先跑 wchat -config)\n" % p)
+            return RC_ERR
+        sys.stdout.write("当前模型: %s\n" % (active_group() or "(无生效行)"))
+        return RC_OK
+    a = argv[0]
+    if a in ("-l", "--list"):
+        if not os.path.isfile(p):
+            sys.stderr.write("配置不存在: %s\n" % p)
+            return RC_ERR
+        sys.stdout.write("\n".join(model_groups()) + "\n")
+        return RC_OK
+    if a == "check":
+        return _model_check("--fix" in argv[1:])
+    if a == "undo":
+        bak = p + ".bak"
+        if not os.path.isfile(bak):
+            sys.stderr.write("没有备份: %s\n" % bak)
+            return RC_ERR
+        try:
+            import shutil
+            shutil.copyfile(bak, p)
+            os.chmod(p, 0o600)          # 回滚同样要保住 600
+        except OSError as e:
+            sys.stderr.write("回滚失败: %s\n" % e)
+            return RC_ERR
+        sys.stdout.write("已回滚: %s <- %s\n" % (p, bak))
+        return RC_OK
+    if a.startswith("-"):
+        sys.stderr.write("未知选项: %s(试试 wchat model -h)\n" % a)
+        return RC_NEED_USER
+    if not os.path.isfile(p):
+        sys.stderr.write("配置不存在: %s(可先跑 wchat -config)\n" % p)
+        return RC_ERR
+    return _model_switch(a, "-n" in argv[1:])
+
+
+def _model_switch(name, dry):
+    lines = _read_lines()
+    groups = model_groups()
+    if name not in groups:
+        sys.stderr.write("未知模型组: %s(可用: %s)\n" % (name, " ".join(groups) or "(无)"))
+        return RC_NEED_USER
+    new, changed = [], []
+    for ln in lines:
+        if not MARK.search(ln):
+            new.append(ln)
+            continue
+        upd = _set_active_line(ln, MARK.search(ln).group(1) == name)
+        if upd != ln:
+            changed.append((ln, upd))
+        new.append(upd)
+    if not changed:
+        sys.stdout.write("已经是 %s,无需切换\n" % name)
+        return RC_OK
+    if dry:
+        for old, upd in changed:
+            sys.stdout.write("- %s\n+ %s\n" % (old, upd))
+        return RC_OK
+    p = config_path()
+    try:
+        import shutil
+        shutil.copyfile(p, p + ".bak")
+        os.chmod(p + ".bak", 0o600)     # 备份里是明文凭据,copyfile 不继承权限
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(new) + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, p)
+        os.chmod(p, 0o600)
+    except OSError as e:
+        sys.stderr.write("写入失败: %s\n" % e)
+        return RC_ERR
+    sys.stdout.write("已切换到 %s(备份: %s.bak)\n" % (name, p))
+    return RC_OK
+
+
+def _model_check(fix):
+    """校验:同一变量只许有一条**生效**行(重复生效行是最常见的手改后果)。"""
+    try:
+        lines = _read_lines()
+    except OSError as e:
+        sys.stderr.write("读不到配置: %s\n" % e)
+        return RC_ERR
+    bad = 0
+    seen = {}
+    for i, ln in enumerate(lines, 1):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        p = _parse_line(ln)
+        if not p:
+            sys.stdout.write("第 %d 行不是 KEY=value: %s\n" % (i, ln))
+            bad += 1
+            continue
+        _i, _c, key, _v, _g = p
+        if key in seen:
+            sys.stdout.write("变量 %s 有多条生效行(第 %d 与第 %d 行)\n" % (key, seen[key], i))
+            bad += 1
+        seen[key] = i
+    if fix:
+        try:
+            os.chmod(config_path(), 0o600)
+            sys.stdout.write("已修权限: 600\n")
+        except OSError as e:
+            sys.stdout.write("修权限失败: %s\n" % e)
+            bad += 1
+    sys.stdout.write("校验通过\n" if not bad else "发现 %d 个问题\n" % bad)
+    return RC_OK if not bad else RC_ERR
+
+
 def _verify_pairs(merged):
     """--check 时验证"给定值"(而不是进程里现有的),验完把环境恢复原样。"""
     saved = {k: os.environ.get(k) for k in merged}

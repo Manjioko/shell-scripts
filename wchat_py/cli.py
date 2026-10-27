@@ -14,7 +14,9 @@
 import os
 import sys
 
-MC_DIRNAME = ".mcporter"
+# MCP 清单默认位:**在 ~/.ct/ 下**,与 config/history/skills 同源。
+# (上游默认位留给 mcporter 自己的 daemon socket / vault —— 那是运行态,不是配置。)
+MC_CONFIG_DEFAULT = os.path.join(".ct", "mcporter.json")
 
 
 def inp_msg(msg=""):
@@ -29,10 +31,10 @@ def _skills_dir_default():
 
 
 def help_user():
-    # 实测: bash 侧 MCP_CONFIG 默认指向用户目录下的 mcporter 配置(不是 .ct/mcp.json);
-    # 猜错会让 help 基线的 bytes 比对立刻红 —— 这正是 bytes 级判据的价值。
+    # 默认位与 mcp_bridge.config_path() 必须同源 —— 猜错会让 help 基线的 bytes 比对
+    # 立刻红,这正是 bytes 级判据的价值。
     mcp_cfg = os.environ.get("MCP_CONFIG") or os.path.join(
-        os.environ.get("HOME", ""), MC_DIRNAME, "mcporter.json")
+        os.environ.get("HOME", ""), MC_CONFIG_DEFAULT)
     skills_dir = os.environ.get("SKILLS_DIR") or _skills_dir_default()
     sd_default = _skills_dir_default()
 
@@ -64,6 +66,12 @@ def help_user():
     inp_msg("  -u    查看当前上下文 token 用量")
     inp_msg("  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)")
     inp_msg("  -h    显示帮助信息")
+    inp_msg()
+    inp_msg("不开对话、只做配置类动作:")
+    inp_msg("  wchat -config        逐项填写配置(接口地址/key/模型),写 ~/.ct/config")
+    inp_msg("  wchat model [名字]   看/切换模型组(等价原来的 ctmodel);-l 列组,check 校验,undo 回滚")
+    inp_msg("  wchat mcp [status|init]  看 MCP 清单位置与 server;init 从模板生成 ~/.ct/mcporter.json")
+    inp_msg("  wchat skills [--seed]    看技能来源;--seed 把随包技能补进 ~/.ct/skills(只补缺,不覆盖)")
     inp_msg()
     inp_msg("内容交互时，也可使用以下选项:")
     inp_msg("  -msgs 显示当前消息记录")
@@ -678,7 +686,7 @@ def _path_guard(path, mode):
 
     if under(p, root) or any(under(p, t) for t in _tmps if t):
         return None
-    _creds = (".ct/config", ".ct/history", ".ssh", ".aws", ".kube", ".docker",
+    _creds = (".ct/config", ".ct/history", ".ct/mcporter.json", ".ssh", ".aws", ".kube", ".docker",
               ".netrc", ".npmrc", ".mcporter")
     is_cred = home and any(under(p, os.path.join(home, x)) for x in _creds)
     auto = os.environ.get("AUTO_MODE") in ("full", "sandbox")
@@ -1236,6 +1244,13 @@ def _trunc_for_context(text):
 def _system_prompt_text():
     """单轮(-st)与 REPL 共用的 system:基础句 + 技能清单 + MCP 清单(与 master 一致)。"""
     base = "You are a helpful assistant."
+    # 首次运行把随包技能补进 ~/.ct/skills(只补缺、不覆盖;失败也不阻止启动)。
+    # 放在这里而不是 main():扫描与注入之间不该有任何东西改目录内容。
+    try:
+        from wchat_py import seed as _seed
+        _seed.seed_skills()
+    except Exception:
+        pass
     try:
         from wchat_py import skill as _sk
         _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
@@ -1605,6 +1620,14 @@ def main(argv):
         sys.executable = _exe
     _load_ct_config()
     _apply_runtime_defaults()
+    # MCP 清单换位置后的老用户迁移(只在 ~/.ct/mcporter.json 不存在时复制一份)。
+    # 必须早于任何 MCP 相关读取;失败不阻止启动。
+    try:
+        from wchat_py import seed as _seed0
+        if os.environ.get("MCP_ENABLE") == "1":
+            _seed0.migrate_from_legacy()
+    except Exception:
+        pass
     # 配置:检测(只提示不接管)与填写(逐项问)分开。
     #   · `wchat -config …`  → 交给 setup.configure(),它负责校验/写盘/验连通
     #   · 其余入口           → setup.ensure_ready():缺配置就打印"哪里不对 + 下一步"
@@ -1614,6 +1637,16 @@ def main(argv):
         from wchat_py import setup as _setup
         if argv and argv[0] in ("-config", "--config", "config", "-setup", "--setup", "setup"):
             return _setup.configure(argv[1:])
+        # 子命令:必须排在 parse(argv) 之前 —— 否则 "model"/"mcp"/"skills" 会被
+        # 当成一次对话的正文发给模型(词面完全合法,不报错,只是行为诡异)。
+        if argv and argv[0] in ("model", "ctmodel"):
+            return _setup.cmd_model(argv[1:])
+        if argv and argv[0] == "mcp":
+            from wchat_py import seed as _seed
+            return _seed.cmd_mcp(argv[1:])
+        if argv and argv[0] == "skills":
+            from wchat_py import seed as _seed
+            return _seed.cmd_skills(argv[1:])
         _rc = _setup.ensure_ready(argv)
         if _rc is not None:
             return _rc
