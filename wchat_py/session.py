@@ -20,7 +20,7 @@ class Session:
     last_image_tokens: int = 0
     ctx_window: int = 0
     token_threshold: int = 0
-    ctx_overflow_gate: int = 80
+    ctx_overflow_gate: int = 0
     img_prune_events: int = 0
     img_obs_unexpected: int = 0
     img_obs_tokens: int = 0
@@ -70,7 +70,7 @@ class Session:
             last_image_tokens=i("WCHAT_LAST_IMAGE_TOKENS", 0),
             ctx_window=i("CTX_WINDOW", 0),
             token_threshold=i("TOKEN_THRESHOLD", 0),
-            ctx_overflow_gate=i("CTX_OVERFLOW_GATE", 80),
+            ctx_overflow_gate=i("CTX_OVERFLOW_GATE", 0),
             img_prune_events=i("IMG_PRUNE_EVENTS", 0),
             img_obs_unexpected=i("WCHAT_IMG_OBS_UNEXPECTED", 0),
             img_obs_tokens=i("WCHAT_IMG_OBS_TOKENS", 0),
@@ -267,6 +267,8 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
             max_rounds = 250
     # 与 master 一致:轮次计数按"每次用户输入"复位(7894 行 tool_round=0)
     session.tool_round = 0
+    session._retry_done = False   # 每轮最多自愈(压缩重发)一次
+    _tried = -1          # 已经试过压缩的用量值(同一个值不重复试,见下面的注释)
     msgs = messages_list(session.messages_json)
     if session.input_images:
         from wchat_py import img as _img
@@ -302,13 +304,30 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
     # (孤儿 tool_calls 让网关 400)。
     _n_user = len(msgs)
     for _ in range(max_rounds):
-        # 主动压缩:上一轮 usage 超阈值 -> 本轮请求前先摘要重写历史
+        # 主动压缩:最近一次请求带回的 usage 超阈值 → 本次请求前先摘要重写历史。
+        #
+        # ⚠ 必须读**最新**用量,不能只读 session.last_prompt_tokens:
+        # 那个字段只在"一轮结束"时由 _sync_runtime 回填,一轮内部的工具循环里
+        # 它一直是本轮开始时的旧值 —— 实测 6 次续发、每次 usage 都报 999999
+        # (阈值 1000),压缩一次都不触发。master 在**每次续发前**都查一次
+        # (wchat.sh tool_run_and_parse),这里对齐:env 里的值由 _consume_stream
+        # 每次收到 usage 事件就写,是新鲜的。
+        # `_tried` 记住"这个用量已经试过压缩了":压不动(消息还不够多/工具链过长)
+        # 时不要每轮重试,等下一个 usage 事件带来新数值再说。
         try:
             from wchat_py import compaction as _cmp, compact_run as _cr
-            if _cmp.due(session.last_prompt_tokens, session.token_threshold):
-                _cr.compact(session, auto=True)
-                msgs = messages_list(session.messages_json)
-                _n_user = len(msgs)
+            try:
+                _live = int(os.environ.get("WCHAT_LAST_PROMPT_TOKENS") or 0)
+            except (TypeError, ValueError):
+                _live = 0
+            _cur = max(_live, int(session.last_prompt_tokens or 0))
+            if _cur > 0 and _cur != _tried:
+                session.last_prompt_tokens = _cur     # 让 compact 的提示语也看到真值
+                if _cmp.due(_cur, session.token_threshold):
+                    _tried = _cur
+                    _cr.compact(session, auto=True)
+                    msgs = messages_list(session.messages_json)
+                    _n_user = len(msgs)
         except Exception:
             pass
         try:
@@ -319,6 +338,16 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
             session.msg_count = len(msgs)
             raise
         if err:
+            # 请求失败自愈(对齐 master retry_after_compact):判定是上下文越界就
+            # 压缩后重发一次。没有它,越界 = 直接失败,用户手动重发又付一次全量输入。
+            try:
+                from wchat_py import cli as _cli
+                if _cli._retry_after_compact(session, msgs, err):
+                    msgs = messages_list(session.messages_json)
+                    _n_user = len(msgs)
+                    continue
+            except Exception:
+                pass
             session.messages_json = json.dumps(msgs, ensure_ascii=False)
             session.msg_count = len(msgs)
             return err

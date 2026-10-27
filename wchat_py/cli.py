@@ -1157,8 +1157,65 @@ def _run_tool(name, args_json):
         else:
             sys.stdout.write("\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n" % _n)
         sys.stdout.flush()
-        return _full
+        # 进上下文前必须截断(master run_with_window → truncate_output)。
+        # 两道闸:① 单行列宽(2000)② 行数(头尾各留)。
+        # 少了第①道,`cat` 一个 minified 文件就等于把几十万字符塞进上下文,
+        # 而且之后每次请求都重发一遍 —— 实测这一条就是 token 飞涨的主因。
+        return _trunc_for_context(_full)
     return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
+
+
+def _retry_after_compact(session, msgs, err):
+    """失败自愈:判定是上下文越界 → 压缩历史,返回 True(调用方重发一次)。
+
+    只在**真的判成越界**时动手:纯网络抖动压一次历史是白烧一次摘要请求。
+    判据与 master 同源(compaction.overflow_kind):接口错误文本优先,字节粗算兜底。
+    每轮最多自愈一次(标记挂在 session 上),避免"压缩→仍越界→再压缩"的死循环。
+    """
+    if getattr(session, "_retry_done", False):
+        return False
+    try:
+        from wchat_py import compaction as _cmp
+        from wchat_py import compact_run as _cr
+        try:
+            _est = len(json.dumps(msgs, ensure_ascii=False).encode("utf-8")) * 2 // 5
+        except Exception:
+            _est = 0
+        gate = int(getattr(session, "ctx_overflow_gate", 0) or 0)
+        kind = _cmp.overflow_kind(err, _est, gate)
+        if kind == "none":
+            return False
+        session._retry_done = True
+        sys.stdout.write("\033[2m📦 上下文越界(%s),压缩历史后重发一次…\033[0m\n" % kind)
+        sys.stdout.flush()
+        _cr.compact(session, auto=True)
+        return True
+    except Exception:
+        return False
+
+
+def _trunc_int(key, default):
+    try:
+        return int(os.environ.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _trunc_for_context(text):
+    """工具输出 → 进上下文的文本(唯一截断出口)。
+
+    参数与 master 同源:`TOOL_OUTPUT_MAX_COL`(2000) / `TOOL_OUTPUT_MAX_LINES`(400)。
+    组件不可用时**原样返回**(降级为不截断,不丢内容,也不炸调用链)。
+    """
+    if not text:
+        return text
+    try:
+        from wchat_py.textutil import truncate_output
+        return truncate_output(text,
+                               _trunc_int("TOOL_OUTPUT_MAX_COL", 2000),
+                               _trunc_int("TOOL_OUTPUT_MAX_LINES", 400))
+    except Exception:
+        return text
 
 
 def _system_prompt_text():
@@ -1197,6 +1254,7 @@ def run_turn(content, model="", max_rounds=None):
     from wchat_py import msg as msgmod
     from wchat_py.render import StreamBox, render_markdown, render_reason
     msgs = msgmod.append_user(msgmod.init(_system_prompt_text()), content)
+    _retry_state = {"done": False}      # 本轮最多自愈(压缩重发)一次
     box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
     last_text = ""
     reason = []
@@ -1241,6 +1299,21 @@ def run_turn(content, model="", max_rounds=None):
         if text:
             last_text = text
         if err:
+            # 请求失败自愈(对齐 master retry_after_compact):
+            # 若判定是**上下文越界**,先压缩再重发一次。没有这一步的话,越界 =
+            # 直接报错,用户手动重发 → 又付一次全量输入,而且拿不到 usage →
+            # last_prompt_tokens 不更新 → 压缩永不触发(死循环)。
+            if not _retry_state["done"]:
+                import types as _types
+                _ss = _types.SimpleNamespace(
+                    messages_json=_json.dumps(msgs), msg_count=len(msgs),
+                    last_prompt_tokens=_trunc_int("WCHAT_LAST_PROMPT_TOKENS", 0),
+                    token_threshold=_trunc_int("TOKEN_THRESHOLD", 0),
+                    ctx_overflow_gate=_trunc_int("CTX_OVERFLOW_GATE", 0))
+                if _retry_after_compact(_ss, msgs, err):
+                    _retry_state["done"] = True
+                    msgs = _json.loads(_ss.messages_json)
+                    continue
             sys.stdout.write(box.close()); sys.stdout.flush()
             sys.stderr.write("API 请求失败: %s\n" % err); return 1
         if not tcs:
@@ -1408,6 +1481,9 @@ def _apply_runtime_defaults():
     except ValueError:
         _ctx = 1000000
     os.environ.setdefault("TOKEN_THRESHOLD", str(_ctx * 3 // 4))
+    # 越界判据与压缩点**必须是两个数**(master 亦然):压缩点抬到窗口 75% 时,
+    # 若判据跟着抬,真越界就会被误判成"网络抖动"而反复重试。这里取 5/8。
+    os.environ.setdefault("CTX_OVERFLOW_GATE", str(_ctx * 5 // 8))
     os.environ.setdefault("WEB_SEARCH_TIMEOUT", "90")
     _wp = os.environ.get("WEB_SEARCH_PROVIDER", "")
     if _wp in ("", "auto"):
@@ -1423,7 +1499,12 @@ TITLE_TOOL = {"type": "function", "function": {
 
 
 def _gen_title(msgs_json):
-    """根据对话生成短标题(与 master 一致:调用 set_title 工具)。失败回退内容/空。"""
+    """根据对话生成短标题(与 master overview 一致:调用 set_title 工具)。
+
+    **失败必须给兜底名**(master: `[[ -z "$title" ]] && title="未命名对话"`)。
+    不给兜底的后果实测过:chat_title 一直是空 → 每轮结束都重新发一次
+    "全量历史 + set_title" 的请求去要标题 → 4 轮对话白烧 4 次全量输入。
+    """
     import json as _json
     try:
         msgs = _json.loads(msgs_json)
@@ -1444,9 +1525,9 @@ def _gen_title(msgs_json):
             t = t.strip().splitlines()[0] if t.strip() else ""
         bad = ' /\\:*?"<>|\n\r\t'
         out = "".join("_" if ch in bad else ch for ch in t).strip("_")
-        return out[:40]
+        return out[:40] or "未命名对话"
     except Exception:
-        return ""
+        return "未命名对话"
 
 
 def _sync_runtime(s):

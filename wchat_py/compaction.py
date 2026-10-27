@@ -41,6 +41,31 @@ def due(t, g) -> bool:
     return gg > 0 and tt > gg
 
 
+# 上下文越界的错误签名(与 master HD_OVF_SIG 逐字一致)。
+# 命中 = 服务端明确说"超长",可以放心压缩后重发;不命中才看字节粗算兜底。
+OVF_SIG = re.compile(
+    r"(context (length|window|tokens)|maximum context|too many tokens"
+    r"|token (limit|count).{0,20}(exceed|large)|prompt is too long"
+    r"|input.{0,10}token.{0,20}exceed|reduce your (prompt|input)"
+    r"|上下文(长度|窗口|过(长|大))|超出.{0,8}(长度|窗口|上限)|长度超限)",
+    re.I)
+
+
+def overflow_kind(err_text, est_tokens=0, gate=0) -> str:
+    """这次失败是不是"上下文越界"。返回 'sig'（接口自己说的，最可信）/ 'est'（字节粗算兜底）/
+    'none'。
+
+    为什么分成两种：字节粗算(bytes*2/5)**两个方向都会错** —— 对英文/代码偏高，
+    又完全漏算每次请求都要发的 tools schema 与技能清单。所以优先信服务端的错误文本，
+    粗算只做兜底。master 拆出 CTX_OVERFLOW_GATE 就是为了不必把粗算口径跟着压缩点一起抬。
+    """
+    if err_text and OVF_SIG.search(str(err_text)):
+        return "sig"
+    if _u(est_tokens, 0) > _u(gate, 0) > 0:
+        return "est"
+    return "none"
+
+
 def apply(messages_json: str, pin, summary: str, cut, prefix: str) -> str:
     """压缩后的历史布局:`[system] + [锁定旧摘要] + [新摘要?] + [tail]`。
 
@@ -100,4 +125,3 @@ def main(argv) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

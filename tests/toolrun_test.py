@@ -48,7 +48,9 @@ os.environ["WCHAT_AUTO_ASSUME_YES"] = "1"
 _alogy = os.path.join(tempfile.mkdtemp(), "a.log")
 os.environ["AUTO_AUDIT_LOG"] = _alogy
 out = run("printf 'hi\\n'")
-ck("显式放行执行", "hi\n" in out, repr(out))
+# 结尾换行会被截断链吃掉 —— 与 master 一致:`content=$(truncate_output ...)`
+# 的 `$( )` 本来就剥结尾换行。所以这里只断言内容,不断言行尾。
+ck("显式放行执行", out.strip() == "hi", repr(out))
 ck("审计记放行 allow", os.path.exists(_alogy) and '"allow"' in open(_alogy).read(), open(_alogy).read() if os.path.exists(_alogy) else "")
 os.environ.pop("AUTO_AUDIT_LOG", None)
 

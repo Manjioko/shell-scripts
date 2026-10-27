@@ -84,6 +84,30 @@ def clip_bytes(data: bytes, maxb: int, mark: bytes) -> bytes:
     return _clip_stream(data, maxb, mark)
 
 
+def truncate_output(text: str, max_col: int, max_lines: int, mark: str = None) -> str:
+    """工具输出进上下文前的**唯一**截断入口(等价 bash 的 truncate_output)。
+
+    为什么必须有列宽那一层:命令输出是上下文里最占 token 的东西,而 minified
+    JS/CSS、单行 JSON、`cat` 一个压缩文件都能是**一行几十万字符** —— 只按行数截
+    (头 50 + 尾 300)对这种输出完全无效,那 20 万字符会原样进上下文,而且**之后
+    每一次请求都要重发一遍**(上下文是累积的)。
+    头 = 摘要/表头,尾 = 报错/最终结果,中间多是重复日志。
+    """
+    try:
+        max_col = int(max_col or 0)
+    except (TypeError, ValueError):
+        max_col = 0
+    try:
+        max_lines = int(max_lines or 0)
+    except (TypeError, ValueError):
+        max_lines = 0
+    if not text:
+        return text
+    out = _truncate_stream(text.encode("utf-8"), max_col, max_lines,
+                           (mark or TRUNCATE_MARK).encode("utf-8"))
+    return out.decode("utf-8", "replace")
+
+
 def _parse_max(raw: str) -> int:
     """与 `awk -v max=` 等价:非数值按 0 处理(即不截断)。"""
     try:

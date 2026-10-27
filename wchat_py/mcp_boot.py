@@ -132,6 +132,20 @@ def _dispatch(name, args_json):
             os.environ["MCP_GRANTED"] = (os.environ.get("MCP_GRANTED", "") + " " + server).strip()
         _CALLS[0] += 1
         out = mb.call(server, tool, a.get("args") or {})
+        # 结果字节帽(与 master MCP_RESULT_MAX_BYTES 同源,默认 16384):
+        # MCP 返回值常是**单行 JSON**,按行/按列截都骗得过去(一行就是全部),
+        # 必须单独按字节封顶,否则一次调用就能把上下文顶到几万字符。
+        try:
+            _cap = int(os.environ.get("MCP_RESULT_MAX_BYTES")
+                       or os.environ.get("MCP_RESULT_MAX") or 16384)
+        except ValueError:
+            _cap = 16384
+        if _cap > 0 and isinstance(out, str) and len(out.encode("utf-8")) > _cap:
+            _raw = out.encode("utf-8")
+            _head = _raw[:_cap // 2].decode("utf-8", "replace")
+            _tail = _raw[-_cap // 2:].decode("utf-8", "replace")
+            out = ("%s\n...(MCP 结果过长已截断:原 %d 字节,保留头尾各 %d)...\n%s"
+                   % (_head, len(_raw), _cap // 2, _tail))
         audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "mcp",
                      server=server, tool=tool,
                      decision=("deny" if out.startswith("错误") else "allow"))
