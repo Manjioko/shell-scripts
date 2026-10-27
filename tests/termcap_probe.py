@@ -11,6 +11,11 @@ Terminal.app 里看到阶梯式重复、在 Ghostty 里正常,但**光看字节�
 结果同时画在屏幕上并写进 --out 文件(便于把事实贴回给人,不用手抄屏幕)。
 
 判读:每行 PASS/FAIL;末尾一行 `VERDICT ...` 直接复制给人看即可。
+
+**已实测的参考值**（2026-10）:
+    Ghostty       TERM=xterm-ghostty     CSI_s/u(P) ESC_7/8(P) ?7l(P) autowrap(P) LF=CRLF(P)
+    Terminal.app  TERM=xterm-256color    CSI_s/u(F) ESC_7/8(P) ?7l(P) autowrap(P) LF=CRLF(P) ← 只这一项不认
+Terminal.app 那行的 `F` 就是"流箱曾在这里画成阶梯"的根因;修法因此不再依赖 CSI s/u。
 """
 import argparse
 import fcntl

@@ -212,8 +212,10 @@ def main():
 
     profiles = {
         "全支持(Ghostty)": dict(),
-        "不认 CSI s/u": dict(csi_su=False),
-        "不认 ESC[?7l": dict(decawm=False),
+        # ↓ 这一档是**实测画像**,不是假想:在 Terminal.app(TERM=xterm-256color)里跑
+        #   tests/termcap_probe.py 得到 CSI_s/u=F ESC_7/8=P ?7l=P LF=CRLF=P
+        "Terminal.app 实测(只不认 CSI s/u)": dict(csi_su=False),
+        "不认 ESC[?7l": dict(decawm=False),   # 假想档:守"长行折行致行数错位"这条
         "两样都不认(老终端形状)": dict(csi_su=False, decawm=False),
         # LF 只下移不回列(等价 xterm 的 LNM 关着)。今天这段路径不会落到这个状态:
         # tty 的 OPOST/ONLCR 是开的(term.py 的 raw_mode 目前无人调用)。这一档是**前瞻守卫**:
