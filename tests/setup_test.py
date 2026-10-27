@@ -222,6 +222,7 @@ finally:
     os.environ.pop("WCHAT_SETUP_NO_VERIFY", None)
 cfg = setup.read_config()
 ck("只改了 key", cfg.get("WCHAT_API_KEY") == "sk-new222222", repr(cfg))
+ck("跳过验证时 rc=0(WCHAT_SETUP_NO_VERIFY)", rc == 0, repr(rc))
 ck("URL 保留原值", cfg.get("BASE_URL") == "https://keep.example/v1/chat/completions", repr(cfg))
 ck("模型保留原值", cfg.get("FLASH_MODEL") == "old-model", repr(cfg))
 ck("其它键没被动", cfg.get("CTX_WINDOW") == "1234", repr(cfg))

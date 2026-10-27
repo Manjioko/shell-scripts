@@ -514,7 +514,7 @@ def configure(argv):
         _w(USAGE.rstrip())
         return RC_OK
     check_only = False
-    verify_conn = True
+    verify_conn = os.environ.get("WCHAT_SETUP_NO_VERIFY") != "1"
     rest = []
     for a in argv:
         if a in ("--check", "-c"):
