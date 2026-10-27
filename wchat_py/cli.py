@@ -1469,6 +1469,24 @@ def main(argv):
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
     _load_ct_config()
     _apply_runtime_defaults()
+    # 首次运行引导:没配 BASE_URL/key/模型时,先让人一次粘贴配好再进会话。
+    # 放在这里而不是等第一次请求失败:旧行为只显示 `API 请求失败: Connection error.`,
+    # 既没说缺什么也没说怎么补(实测就是这句话)。
+    try:
+        from wchat_py import setup as _setup
+        _rc = _setup.ensure_ready(argv)
+        if _rc is not None:
+            return _rc
+        if argv and argv[0] == "setup":
+            argv = argv[1:]
+            if not argv:
+                from wchat_py.version import __version__
+                print("wchat %s · 配置已就绪" % __version__)
+                return 0
+    except SystemExit:
+        raise
+    except Exception:
+        pass            # 引导本身出错不该挡住正常使用
     if not os.environ.get("AUTO_AUDIT_LOG"):
         _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
         os.environ["AUTO_AUDIT_LOG"] = os.path.join(_ct, "auto", "audit.log")

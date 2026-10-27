@@ -77,11 +77,57 @@ $(brew --prefix)/opt/wchat/libexec/doc/  ← 本文件与 README
 
 ### 3.1 先看它要什么
 
+最省事的路径:**第一次运行 `wchat` 时它自己会问你要**。
+
 ```bash
-wchat -h
+wchat
 ```
 
-跑起来之前必须有一组凭据。最省事的做法是写进 `~/.ct/config`（wchat 启动时会读它）：
+没配凭据时屏幕上是这样(改个 key 与模型名就行):
+
+```
+╭──────────────────────────────────────────────────────────────╮
+│ 还差一步:填一个 API key 就能开始用了                         │
+╰──────────────────────────────────────────────────────────────╯
+
+  当前缺:BASE_URL、WCHAT_API_KEY、FLASH_MODEL
+  wchat 支持任何 OpenAI 兼容接口,填一次就存起来。
+
+  复制下面这行,把 sk-xxxx 和模型名换成你自己的,粘回来回车:
+
+  BASE_URL=https://api.example.com/v1/chat/completions
+  WCHAT_API_KEY=sk-xxxx
+  FLASH_MODEL=example-chat
+
+  · API key    服务商控制台建一个(形如 sk-...)
+  · 模型名     服务商文档里的对话模型名,如 deepseek-chat / qwen-plus
+  · BASE_URL   写到 /chat/completions 结尾;只写 /v1 也行,会自动补齐
+  · 保存到     ~/.ct/config(权限 600),下次启动直接用
+粘贴后回车 ›
+```
+
+粘贴回车之后它会:
+
+1. 认出 `KEY=值`(一行或多行都行,`export`、引号、反引号、JSON 片段都认);
+2. 把 `BASE_URL` 补成完整端点(只写 `https://x/v1` 也能用);
+3. 写入 `~/.ct/config` 并 `chmod 600`;
+4. **当场发一次最小请求验证**,把 401 / 404 / 模型名错 / 连不上分别翻成人话;
+5. 成功就直接进会话,不用再敲第二次命令。
+
+失败时(比如 key 无效)配置**不会丢**,改好后重跑 `wchat` 或 `wchat --setup` 即可。
+
+其他入口:
+
+| 场景 | 怎么做 |
+|---|---|
+| 想重新配一次 | `wchat --setup` |
+| 非交互(CI/管道/`< /dev/null`) | 会打印可直接 `cat >` 的整段并退出码 2,不阻塞 |
+| 临时用环境变量 | `BASE_URL=... WCHAT_API_KEY=... FLASH_MODEL=... wchat`(优先级高于文件) |
+| 不想被引导打扰 | `WCHAT_NO_SETUP=1` |
+
+### 3.2 手工配置(等价)
+
+跑起来之前必须有一组凭据。也可以直接写进 `~/.ct/config`（wchat 启动时会读它）：
 
 ```bash
 mkdir -p ~/.ct
@@ -108,7 +154,7 @@ chmod 600 ~/.ct/config        # ★ 必须 600(或 400),否则 wchat 拒绝加�
 `BASE_URL` 必须写成**完整端点**（含 `/chat/completions`）。SDK 的 `base_url` 是根路径，
 wchat 内部会做转换；写成根会被再拼一层，表现为 404。
 
-### 3.2 首次运行的"自举"
+### 3.3 首次运行的"自举"(依赖,不是凭据)
 
 `wchat` 启动时先做一次依赖检查：
 
@@ -129,7 +175,7 @@ wchat 内部会做转换；写成根会被再拼一层，表现为 404。
 
 Pillow 视为可选：缺它只影响图片缩放（会退回 macOS 自带 `sips`），不会因此触发建 venv。
 
-### 3.3 模型档案切换
+### 3.4 模型档案切换
 
 `~/.ct/config` 用 `# @model <名字>` 标记"哪组赋值生效"，配套的 `ctmodel` 负责改标记、不手改
 （它随包安装，装完就有这个命令）：

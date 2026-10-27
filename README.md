@@ -51,7 +51,7 @@ bash tests/brew_dist_test.sh      # 发行包验收(35 条:可复现/无字节�
 ```bash
 brew install Manjioko/shell-scripts/wchat    # 一条命令,自动 tap
 brew update && brew upgrade wchat            # 以后升级
-wchat --version
+wchat                                        # 首次运行会引导你粘一次 API key
 ```
 
 发新版只跑一条命令（打包 → 打 tag → 推 GitHub → 建 Release → 更新 Formula）:
