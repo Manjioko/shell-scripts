@@ -380,5 +380,74 @@ ck("另一组没被带坏(deepseek 的 key 没变)",
    setup.read_groups().get("deepseek", {}).get("WCHAT_API_KEY") == "sk-ds111",
    repr(setup.read_groups().get("deepseek")))
 
+# ---------- 16) 重复键:老格式/脏文件都不许再长出第二份 ----------
+# 现场:用户反复跑 `wchat -config`,文件里出现两个 PRO_MODEL。根因是无 `@model`
+# 标记的老行在"覆盖本组已有键"那步永远匹配不上,于是整组被追加到末尾。
+print("=== 16. 重复键 ===")
+
+
+def _count_active(key):
+    n = 0
+    for ln in open(setup.config_path(), encoding="utf-8"):
+        p = setup._parse_line(ln)
+        if p and not p[1] and p[2] == key:
+            n += 1
+    return n
+
+
+d = fresh()
+os.makedirs(os.environ["CT_HOME"], exist_ok=True)
+with open(setup.config_path(), "w", encoding="utf-8") as f:
+    f.write('BASE_URL="https://a.example/v1/chat/completions"\n'
+            'WCHAT_API_KEY="sk-aaaaaaaaaaaa"\n'
+            'FLASH_MODEL="m1"\nPRO_MODEL="m1"\n')
+os.chmod(setup.config_path(), 0o600)
+
+setup.write_group("main", {"PRO_MODEL": "m2"})
+ck("老格式跑 -config:不产生第二个 PRO_MODEL", _count_active("PRO_MODEL") == 1,
+   "生效行数=%d" % _count_active("PRO_MODEL"))
+ck("老格式跑 -config:老值被就地改掉(不是另起一份)", setup.read_config().get("PRO_MODEL") == "m2",
+   repr(setup.read_config()))
+ck("老格式跑 -config:落盘带上 @model 标记",
+   "PRO_MODEL=" in open(setup.config_path(), encoding="utf-8").read()
+   and "# @model main" in open(setup.config_path(), encoding="utf-8").read())
+
+# 连跑多次:行数必须恒定(这正是用户报的"跑几次就几个")
+for _ in range(3):
+    setup.write_group("main", {"PRO_MODEL": "m2"})
+ck("连跑三次行数恒定", _count_active("PRO_MODEL") == 1,
+   "生效行数=%d" % _count_active("PRO_MODEL"))
+
+# 已经脏了的文件(老行 + 重复的标记行):写一次就收拾干净,且有效值不变
+d = fresh()
+os.makedirs(os.environ["CT_HOME"], exist_ok=True)
+with open(setup.config_path(), "w", encoding="utf-8") as f:
+    f.write('BASE_URL="https://old.example/v1/chat/completions"\n'
+            'PRO_MODEL="old"\n\n'
+            'BASE_URL="https://a.example/v1/chat/completions" # @model main\n'
+            'PRO_MODEL="dup1" # @model main\n'
+            'PRO_MODEL="dup2" # @model main\n')
+os.chmod(setup.config_path(), 0o600)
+setup.write_group("main", {"BASE_URL": "https://a.example/v1/chat/completions"})
+ck("脏文件写一次:每个键只剩一条生效行",
+   _count_active("PRO_MODEL") == 1 and _count_active("BASE_URL") == 1,
+   "PRO_MODEL=%d BASE_URL=%d" % (_count_active("PRO_MODEL"), _count_active("BASE_URL")))
+ck("脏文件写一次:被忽略的行留痕(不静默删除)",
+   "[重复已忽略]" in open(setup.config_path(), encoding="utf-8").read())
+ck("脏文件写一次:另一项的值按'后写覆盖'语义保留(与运行期等价)",
+   setup.read_config().get("BASE_URL") == "https://a.example/v1/chat/completions",
+   repr(setup.read_config()))
+
+# 留痕行里不许带 @model 标记 —— 否则 ctmodel 切换会把它解注释,重复复活
+_body = open(setup.config_path(), encoding="utf-8").read()
+_dup_lines = [ln for ln in _body.split("\n") if "[重复已忽略]" in ln]
+ck("留痕行不带 @model 标记", all("@model" not in ln for ln in _dup_lines), repr(_dup_lines))
+
+# 覆盖前留备份(里面是明文凭据,改写要可回退)
+ck("改写过 -> 有 config.bak", os.path.isfile(setup.config_path() + ".bak"))
+ck("config.bak 权限 600",
+   stat.S_IMODE(os.stat(setup.config_path() + ".bak").st_mode) == 0o600,
+   oct(stat.S_IMODE(os.stat(setup.config_path() + ".bak").st_mode)))
+
 print("RESULT total=%d pass=%d fail=%d" % (PASSES[0] + len(FAILS), PASSES[0], len(FAILS)))
 sys.exit(0 if not FAILS else 1)

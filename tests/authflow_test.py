@@ -14,7 +14,12 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-os.environ.setdefault("WORK_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ⚠ 必须**无条件**钉住,不能用 setdefault:本测试第 4 节在 `$HOME` 下建目录来测"越界
+# 授权记账",而父进程若已带 WORK_ROOT=$HOME(从家目录启动 wchat 时就是这样),setdefault
+# 会保留它 → 那个目录变成"工作根内" → 直接免审放行、不记账 → 断言红。
+# 实测:干净 HEAD 上只要 WORK_ROOT=$HOME 就必红,和业务代码无关。
+os.environ["WORK_ROOT"] = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.environ.pop("AUTO_MODE", None)      # auto 档会自动放行,同样测不到"记账"
 from wchat_py import cli          # noqa: E402
 from wchat_py import hardwall     # noqa: E402
 

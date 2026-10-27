@@ -38,7 +38,7 @@
             "command": "npx",
             "args": [ "-y", "figma-developer-mcp", "--stdio" ],
             "env": {
-                "FIGMA_API_KEY": "figd_bnZq4uHFW-QMr0EDKyZOuNEweL1mNPjVPtZZ_ntf"
+                "FIGMA_API_KEY": "${FIGMA_API_KEY}"
             },
             "description": "Figma 开发者接口操作",
             "lifecycle": {

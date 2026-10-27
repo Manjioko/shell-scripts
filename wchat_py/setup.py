@@ -213,11 +213,76 @@ def _render(key, val, group, commented=False):
     return '%s%s="%s" # @model %s' % ("# " if commented else "", key, val, group)
 
 
+def _adopt_legacy(lines, name):
+    """把**无 `@model` 标记的赋值行**归到 `name` 组,而不是另起一组。
+
+    为什么必须有这一步:老版本的 config(以及手写的 `KEY="v"` 行)没有行尾标记。
+    旧实现在"覆盖本组已有键"里只认 `group == name`,于是这些行永远匹配不上,
+    缺键补齐那一步就把整组配置**追加**到文件末尾 —— 同一个 PRO_MODEL 出现两次,
+    而且每多跑一次就多一份(用户实测就是这个)。值看起来还对(README 的
+    `read_config` 是后写覆盖先写),所以它不会报错,只会慢慢把文件搞脏。
+
+    口径:接管**所有模型组键**(GROUP_KEYS)的无标记行 —— 不是只接管本次要写的那些。
+    只接管 pairs 会在"这次没改 PRO_MODEL、文件里那条 PRO_MODEL 还是无标记"时留下
+    一条无标记生效行,它与组内那条并存 = `ctmodel check` 会报"有多条生效行"。
+    非模型组键(如 CTX_WINDOW)一律不动 —— 那是另一类配置,不该被 -config 吞掉。
+    """
+    n = 0
+    for i, line in enumerate(lines):
+        p = _parse_line(line)
+        if not p:
+            continue
+        _ind, commented, key, val, group = p
+        if group or key not in GROUP_KEYS:
+            continue
+        lines[i] = _render(key, val, name, commented=commented)
+        n += 1
+    return n
+
+
+def _dedupe(lines):
+    """同一 (键, 组) 出现多行时只保留**最后一行**,其余注释掉。
+
+    "保留最后一行"不是随手选的:运行期 `read_config()` 是 `out[key] = val` 逐行覆盖,
+    也就是**后写的赢**。所以按"留最后一行"清理,配置的有效值与本清理之前**逐字节等价**,
+    清理只是让文件不再自相矛盾。
+
+    被清理的行保留原文并加 `# [重复已忽略]` 前缀,但**不带 `@model` 标记** ——
+    否则 `ctmodel <组>` 切换时会把它重新取消注释,重复又长回来。
+    """
+    last = {}
+    for i, line in enumerate(lines):
+        p = _parse_line(line)
+        if not p:
+            continue
+        _ind, commented, key, _val, group = p
+        if not group or commented:
+            continue          # 只看"生效中的带标记行"
+        last[(group, key)] = i
+    dropped = []
+    for i, line in enumerate(lines):
+        p = _parse_line(line)
+        if not p:
+            continue
+        _ind, commented, key, _val, group = p
+        if not group or commented:
+            continue
+        if last.get((group, key)) != i:
+            # 必须**抹掉标记**:留着 `# @model X` 的话,`ctmodel X` 切换时
+            # `_set_active` 会把它当"本组的一行"重新解注释,重复立刻长回来。
+            body = MARK.sub("", line).rstrip()
+            lines[i] = "# [重复已忽略] " + body.lstrip()
+            dropped.append(key)
+    return dropped
+
+
 def write_group(name, pairs, activate=True):
     """把一组配置写进 ~/.ct/config(ctmodel 格式)。返回路径。
 
     · 已存在的组:只改这几个键的值,保留其它行与其它组;
     · 新组:在文件末尾追加;
+    · 无标记的老行:就地归入本组(不另起重复的一份);
+    · 同一键出现多行:只留最后一行(与运行期"后写覆盖"同义),其余注释留痕;
     · `activate=True` 时把这组设为生效组(去注释本组、注释其它组);
     · 权限强制 600 —— 里面是明文 key,而且运行期对非 600 会拒绝加载。
     """
@@ -229,6 +294,11 @@ def write_group(name, pairs, activate=True):
         # 新文件 / 老格式(无 @model):先写说明头,便于用户理解这文件怎么被维护
         if not lines:
             lines = HEADER.rstrip("\n").split("\n")
+
+    # ①a 老行归位(否则下面会追加出一份重复的)
+    _adopt_legacy(lines, name)
+    # ①b 清重复(留最后一行 = 与 read_config 的后写覆盖同义)
+    _dedupe(lines)
 
     # ① 覆盖本组已有键
     seen = set()
@@ -292,9 +362,21 @@ def write_group(name, pairs, activate=True):
 
     p = config_path()
     os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    # 覆盖前留一份 .bak:这个文件是明文凭据,且我们刚做了"归位/去重"这类改写。
+    # 只在文件确实存在、且内容会变时备份(避免把 .bak 写成空文件/无谓刷时间戳)。
+    body = "\n".join(lines).rstrip() + "\n"
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            old = f.read()
+        if old != body:
+            with open(p + ".bak", "w", encoding="utf-8") as f:
+                f.write(old)
+            os.chmod(p + ".bak", 0o600)
+    except OSError:
+        pass
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines).rstrip() + "\n")
+        f.write(body)
     os.chmod(tmp, 0o600)
     os.replace(tmp, p)
     os.chmod(p, 0o600)
