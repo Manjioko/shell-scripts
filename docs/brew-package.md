@@ -88,6 +88,12 @@ wchat -config
 ```
   配置 wchat  → ~/.ct/config(权限 600)
   逐项填写;只想改某一项时,其余项直接回车保留原值。
+  这一组叫 deepseek,以后可用 `ctmodel deepseek` 切回来。
+
+  这组配置叫什么名字?
+    就是一个短名字,用来说明这组是给哪家用的。以后可以用 `ctmodel <名字>` 在几组之间切换(如 deepseek / qwen / mimo)
+    现在: main(回车就用它)
+    › deepseek
 
   BASE_URL
     服务商给的接口地址。要写到 /v1/chat/completions 结尾;只写 https://<域名>/v1 也行,会自动补齐
@@ -95,17 +101,23 @@ wchat -config
     › https://api.deepseek.com/v1
 
   WCHAT_API_KEY
-    服务商控制台建的一串(通常 sk- 开头)。输入不回显,粘上回车即可,回车后会告诉你收到多少字符
+    服务商控制台建的一串(通常 sk- 开头)。会显示出来,方便你核对自己粘对了没有
     现在: (未设置)
-    ›
-    已收到 32 个字符
+    › sk-visiblekey12345
+    已收到 16 个字符 → sk-vi…345
 
   FLASH_MODEL
     服务商文档里的对话模型名,如 deepseek-chat / qwen-plus
     现在: (未设置)
     › deepseek-chat
 
-  已写入 ~/.ct/config(600)
+  PRO_MODEL(可选)
+    加强档的模型名。直接回车 = 与上面那个相同
+    现在: (未设置)
+    ›
+
+  已写入 ~/.ct/config(权限 600),这组叫 deepseek
+  以后切回这一组: ctmodel deepseek(加 -l 可列出全部组)
   验证中…  ✅ 配置成功 连通了(deepseek-chat)
 
   现在直接运行 wchat 开始用。
@@ -115,12 +127,32 @@ wchat -config
 
 1. **不需要你排版**。一项就是一个值,值里带 `/`、`=`、空格都行 —— 不用自己拼
    `KEY=值`、不用管换行;
-2. **key 不回显**(传统做法),回车后会显示"已收到 N 个字符"——这样你能确认它没卡住,
-   也不会泄露内容;完整 key 永远不会出现在屏幕、日志或报错里;
+2. **key 会回显**——你一眼就能确认自己粘对了(实测:不回显时不少人以为没填上)。
+   另外补一行打码摘要 `已收到 16 个字符 → sk-vi…345`,终端不回显也不影响确认;
+   `--check` 与日志里只用打码形式;
 3. **写盘前逐项校验**，报错会指到具体哪处不对(含空格、两键粘一起、引号不配对、
    模型名带空格、URL 不是 http…);
 4. **写完当场验证能不能连通**（真实请求）。不通就告诉你 401 / 404 / 模型名错 /
    连不上，并说明怎么改 —— 已填的值不会丢，重跑不用重敲。
+
+**写法与 `ctmodel` 一致**，方便以后在几组（不同厂商）之间切换：
+
+```bash
+# 文件里长这样(同一家的几行用行尾 # @model <组名> 归组;活动组不加注释)
+BASE_URL="https://api.deepseek.com/chat/completions" # @model deepseek
+WCHAT_API_KEY="sk-xxx" # @model deepseek
+FLASH_MODEL="deepseek-flash" # @model deepseek
+PRO_MODEL="deepseek-flash" # @model deepseek
+# BASE_URL="https://qwen.example/v1/chat/completions" # @model qwen
+...
+
+ctmodel -l          # 列出所有组
+ctmodel qwen        # 切到另一组(切换前自动备份 config.bak)
+ctmodel             # 看当前生效的是哪组
+```
+
+`wchat -config` 再次运行时**默认改当前生效的那一组**（不会平白多出一组）；
+要新增一家就 `wchat -config --name mimo`。
 
 其它写法：
 
@@ -128,6 +160,7 @@ wchat -config
 wchat -config "BASE_URL=https://api.deepseek.com/v1 WCHAT_API_KEY=sk-xxx FLASH_MODEL=deepseek-chat"
 wchat -config --check "..."        # 只校验,不写盘
 wchat -config --no-verify "..."    # 先不验连通(离线/内网)
+wchat -config --name mimo "..."    # 这组叫 mimo(不影响当前生效组之外的东西)
 wchat -config -h                   # 帮助
 ```
 

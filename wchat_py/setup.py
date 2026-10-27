@@ -6,19 +6,27 @@
   · `diagnose()`  —— 只**看**不写。给 `wchat` 用:缺什么/坏在哪/下一步该敲什么。
   · `configure()` —— 逐项问或一次给完 → 校验 → 写盘(600) → 验连通。给 `wchat -config` 用。
 
-为什么不做"一次粘一整行"(上一版的做法)
-----------------------------------------
-让人把 `BASE_URL=... WCHAT_API_KEY=... FLASH_MODEL=...` 写成一行,等于让他做排版:
-少个空格、多个换行、多敲个引号就"没认出来"。实测这是最容易掉用户的一步。
-所以现在默认是**一项一问**,值里带空格/斜杠/等号都无所谓 —— 用户只需要"粘一个值"。
-
 退出码(调用方据此决定是否继续)
 ------------------------------
   0 = 配置齐了,可以用
   1 = 内部错误(依赖缺失等)
   2 = 需要用户动作(缺项/格式错/权限/连不通),并打印 "退出码 2:原因"
+
+写盘格式 = ctmodel 的格式
+-------------------------
+`~/.ct/config` 里同一家厂商的几行用行尾 `# @model <组名>` 标记成一组;
+活动组不加注释,其余组整行注释。这样 `ctmodel qwen` / `ctmodel deepseek`
+可以原样切换 —— 本模块只负责**写对格式**,不重复实现切换逻辑。
+
+  # BASE_URL="https://qwen.example/v1/chat/completions" # @model qwen
+  BASE_URL="https://api.deepseek.com/chat/completions" # @model deepseek
+  ...
+  WCHAT_API_KEY="sk-xxx" # @model deepseek
+  ...
+  FLASH_MODEL="deepseek-flash" # @model deepseek
+  PRO_MODEL="deepseek-flash" # @model deepseek
+  # FLASH_MODEL="qwen3.8-flash" # @model qwen
 """
-import getpass
 import os
 import re
 import sys
@@ -26,7 +34,9 @@ import sys
 # 必须齐的最小集合:没有 BASE_URL 不知道发给谁,没有 key 发不出去,
 # 没有模型名服务端会拒。PRO_MODEL 缺省跟随 FLASH_MODEL(少让用户想一件事)。
 REQUIRED = ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL")
-FILE_KEYS = ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL", "PRO_MODEL")
+# 一组里按这个顺序写(与 ctmodel 示例一致:地址 → 密钥 → 两个模型名)
+GROUP_KEYS = ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL", "PRO_MODEL")
+FILE_KEYS = GROUP_KEYS
 KEY_ALIASES = {"API_KEY": "WCHAT_API_KEY"}
 
 RC_OK = 0
@@ -40,13 +50,23 @@ R_BADFMT = "配置格式不正确"
 R_NOCONN = "无法连通配置"
 R_ABORT = "已取消,未修改"
 
+MARK = re.compile(r"#\s*@model\s+(\S+)\s*$")
+ASSIGN = re.compile(r"^(\s*)(#\s*)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+GROUP_NAME_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+HEADER = """# 模型切换用 ~/.ct/ctmodel.py(终端敲 `ctmodel qwen` / `ctmodel deepseek`)
+# 行尾的 "@model <名字>" 标记是给脚本看的:哪行生效、哪行注释由脚本维护,不要手改;
+# 想加第四家(如 mimo)= 照抄一组赋值行并打上 "@model mimo" 标记,脚本无需改动。
+# (本段说明刻意不写成 "# @model" 那种形式 —— 那会被脚本当成一条真标记。)
+"""
+
 # 每一项的说明:长什么样、从哪拿。不要把变量名当说明书。
 FIELD_HELP = {
     "BASE_URL": "服务商给的接口地址。要写到 /v1/chat/completions 结尾;"
                 "只写 https://<域名>/v1 也行,会自动补齐",
-    "WCHAT_API_KEY": "服务商控制台建的一串(通常 sk- 开头)。输入不回显,粘上回车即可"
-                     ",回车后会告诉你收到多少字符",
+    "WCHAT_API_KEY": "服务商控制台建的一串(通常 sk- 开头)。会显示出来,方便你核对自己粘对了没有",
     "FLASH_MODEL": "服务商文档里的对话模型名,如 deepseek-chat / qwen-plus",
+    "PRO_MODEL": "加强档的模型名。直接回车 = 与上面那个相同",
 }
 
 
@@ -69,7 +89,7 @@ def _unquote(v):
 
 
 def mask(key):
-    """给屏幕看的脱敏形式:sk-ab…wxyz。不打印完整 key(投屏/录屏/日志)。"""
+    """给屏幕/日志看的脱敏形式:sk-ab…wxyz。汇总行一律用它。"""
     k = key or ""
     if not k:
         return "(未设置)"
@@ -99,66 +119,179 @@ def file_mode_ok(path=None):
     """配置文件权限是否安全(600/400)。文件不存在返回 True(还没写过)。"""
     p = path or config_path()
     try:
-        import stat as _st
         m = os.stat(p).st_mode & 0o777
     except OSError:
         return True
     return m in (0o600, 0o400)
 
 
-def read_config():
-    """读 ~/.ct/config(不落环境变量),返回 {KEY: value}。"""
-    p = config_path()
-    out = {}
+# ---------------------------------------------------------------- 读
+
+def _read_lines():
     try:
-        with open(p, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                s = line.strip()
-                if not s or s.startswith("#") or "=" not in s:
-                    continue
-                k, v = s.split("=", 1)
-                k = k.strip()
-                if k.startswith("export "):
-                    k = k[len("export "):].strip()
-                k = KEY_ALIASES.get(k, k)
-                if " #" in v:
-                    v = v.split(" #", 1)[0]
-                out[k] = _unquote(v)
+        with open(config_path(), "r", encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
     except OSError:
-        pass
+        return []
+
+
+def _parse_line(line):
+    """拆一行 → (缩进, 是否注释, 键, 值, 组名)。不是赋值行返回 None。"""
+    m = ASSIGN.match(line or "")
+    if not m:
+        return None
+    indent, hashmark, key, rest = m.group(1), m.group(2) or "", m.group(3), m.group(4)
+    mk = MARK.search(rest)
+    group = mk.group(1) if mk else ""
+    if mk:
+        rest = rest[:mk.start()]
+    if " #" in rest:
+        rest = rest.split(" #", 1)[0]
+    return indent, bool(hashmark), KEY_ALIASES.get(key, key), _unquote(rest), group
+
+
+def read_config():
+    """读**活动**配置(不加注释的行),返回 {KEY: value}。"""
+    out = {}
+    for line in _read_lines():
+        p = _parse_line(line)
+        if not p:
+            continue
+        _i, commented, key, val, _g = p
+        if commented:
+            continue
+        out[key] = val
     return out
 
 
-def write_config(pairs):
-    """把 pairs 合并进 ~/.ct/config(保留文件里其它键与注释)。返回路径。
+def read_groups():
+    """读文件中**所有**组(含被注释的),返回 {组名: {KEY: value}}。"""
+    groups = {}
+    for line in _read_lines():
+        p = _parse_line(line)
+        if not p:
+            continue
+        _i, _c, key, val, group = p
+        if not group:
+            continue
+        groups.setdefault(group, {})[key] = val
+    return groups
 
-    权限一律 600:文件里是明文 key,而且运行期 `_load_ct_config` 对非 600 会**拒绝加载** ——
-    写宽了等于下次启动又报"没配"。
+
+def active_group():
+    """当前生效的组名(第一条未注释的 @model 行),没有返回空串。"""
+    for line in _read_lines():
+        p = _parse_line(line)
+        if not p:
+            continue
+        _i, commented, _k, _v, group = p
+        if group and not commented:
+            return group
+    return ""
+
+
+def _effective():
+    """当前进程能看到的有效配置(环境变量 + 活动配置)。环境变量优先(与运行期一致)。"""
+    d = {}
+    for k in FILE_KEYS:
+        v = (_env(k) or "").strip()
+        if v:
+            d[k] = v
+    for k, v in read_config().items():
+        if v and k not in d:
+            d[k] = v
+    if not d.get("PRO_MODEL") and d.get("FLASH_MODEL"):
+        d["PRO_MODEL"] = d["FLASH_MODEL"]
+    if not d.get("FLASH_MODEL") and d.get("PRO_MODEL"):
+        d["FLASH_MODEL"] = d["PRO_MODEL"]
+    return d
+
+
+# ---------------------------------------------------------------- 写
+
+def _render(key, val, group, commented=False):
+    return '%s%s="%s" # @model %s' % ("# " if commented else "", key, val, group)
+
+
+def write_group(name, pairs, activate=True):
+    """把一组配置写进 ~/.ct/config(ctmodel 格式)。返回路径。
+
+    · 已存在的组:只改这几个键的值,保留其它行与其它组;
+    · 新组:在文件末尾追加;
+    · `activate=True` 时把这组设为生效组(去注释本组、注释其它组);
+    · 权限强制 600 —— 里面是明文 key,而且运行期对非 600 会拒绝加载。
     """
-    p = config_path()
-    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
-    old = ""
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            old = f.read()
-    except OSError:
-        old = ""
-    lines = old.splitlines()
+    name = (name or "").strip()
+    if not GROUP_NAME_OK.match(name):
+        raise ValueError("组名只能用字母、数字、点、下划线、短横: %r" % name)
+    lines = _read_lines()
+    if not lines or not any(MARK.search(x) for x in lines):
+        # 新文件 / 老格式(无 @model):先写说明头,便于用户理解这文件怎么被维护
+        if not lines:
+            lines = HEADER.rstrip("\n").split("\n")
+
+    # ① 覆盖本组已有键
     seen = set()
     for i, line in enumerate(lines):
-        s = line.strip()
-        if not s or s.startswith("#") or "=" not in s:
+        p = _parse_line(line)
+        if not p:
             continue
-        k = s.split("=", 1)[0].strip()
-        if k.startswith("export "):
-            k = k[len("export "):].strip()
-        k = KEY_ALIASES.get(k, k)
-        if k in pairs:
-            lines[i] = '%s="%s"' % (k, pairs[k])
-            seen.add(k)
-    for k, v in pairs.items():
-        if k not in seen:
-            lines.append('%s="%s"' % (k, v))
+        _ind, _c, key, _v, group = p
+        if group != name or key not in pairs:
+            continue
+        lines[i] = _render(key, pairs[key], name, commented=not activate)
+        seen.add(key)
+
+    # ② 补齐本组缺的键:插在该组最后一行之后,保持成组
+    missing = [k for k in GROUP_KEYS if k in pairs and k not in seen]
+    if missing:
+        last = -1
+        for i, line in enumerate(lines):
+            p = _parse_line(line)
+            if p and p[4] == name:
+                last = i
+        new_lines = [_render(k, pairs[k], name, commented=not activate) for k in missing]
+        if last >= 0:
+            lines[last + 1:last + 1] = new_lines
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.extend(new_lines)
+
+    # ②b 不属于本组的其它键(如 CTX_WINDOW):原样写成普通行,**不能丢**
+    #     (老调用方 write_config 会塞进非模型组的配置项;丢掉等于静默改用户配置)
+    extras = {k: v for k, v in pairs.items() if k not in GROUP_KEYS}
+    if extras:
+        seen_x = set()
+        for i, line in enumerate(lines):
+            p = _parse_line(line)
+            if not p:
+                continue
+            _i, commented, key, _v, group = p
+            if key in extras and not group:
+                lines[i] = '%s="%s"' % (key, extras[key])
+                seen_x.add(key)
+        for k, v in extras.items():
+            if k not in seen_x:
+                lines.append('%s="%s"' % (k, v))
+
+    # ③ 切换生效组:本组去注释,其它组加注释(与 ctmodel 的 _set_active 同语义)
+    if activate:
+        for i, line in enumerate(lines):
+            p = _parse_line(line)
+            if not p:
+                continue
+            ind, commented, key, val, group = p
+            if not group:
+                continue
+            if group == name:
+                if commented:
+                    lines[i] = _render(key, val, group, commented=False)
+            elif not commented:
+                lines[i] = _render(key, val, group, commented=True)
+
+    p = config_path()
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
@@ -168,15 +301,24 @@ def write_config(pairs):
     return p
 
 
-def apply(pairs):
+def write_config(pairs):
+    """兼容入口:写进**当前生效组**(没有则新建 main 组)。"""
+    name = active_group() or "main"
+    return write_group(name, pairs, activate=True)
+
+
+def apply(pairs, group=None):
     """写文件 + 同步进当前进程环境(否则本次会话仍按"没配"走)。"""
-    p = write_config(pairs)
+    name = group or active_group() or "main"
+    p = write_group(name, pairs, activate=True)
     for k, v in pairs.items():
         os.environ[k] = v
         if k == "WCHAT_API_KEY":
             os.environ.setdefault("API_KEY", v)
     return p
 
+
+# ---------------------------------------------------------------- 解析/校验
 
 def parse_pasted(text):
     """从一段文本里抠出配置项(命令行一次给完时用)。
@@ -246,36 +388,39 @@ def validate(pairs):
     return issues
 
 
-def _effective():
-    """当前进程能看到的配置(环境变量 + 文件)。环境变量优先(与运行期一致)。"""
-    d = {}
-    for k in FILE_KEYS:
-        v = (_env(k) or "").strip()
-        if v:
-            d[k] = v
-    for k, v in read_config().items():
-        if v and k not in d:
-            d[k] = v
-    if not d.get("PRO_MODEL") and d.get("FLASH_MODEL"):
-        d["PRO_MODEL"] = d["FLASH_MODEL"]
-    if not d.get("FLASH_MODEL") and d.get("PRO_MODEL"):
-        d["FLASH_MODEL"] = d["PRO_MODEL"]
-    return d
+def validate_group(name):
+    """组名校验(ctmodel 要用它做切换命令,不能有花样的字符)。"""
+    n = (name or "").strip()
+    if not n:
+        return ["组名不能为空 —— 就是一个短名字,比如 deepseek / qwen / mimo"]
+    if not GROUP_NAME_OK.match(n):
+        return ["组名只能用字母、数字、点、下划线、短横(不能有空格/中文):[%s]" % n]
+    return []
 
+
+def guess_group(pairs=None, fallback="main"):
+    """猜该写进哪一组:已有生效组就用它(重跑 = 改这组),否则按域名猜一个短名。"""
+    cur = active_group()
+    if cur:
+        return cur
+    bu = ((pairs or {}).get("BASE_URL") or _effective().get("BASE_URL") or "").lower()
+    for token in ("deepseek", "qwen", "mimo", "openai", "moonshot", "zhipu", "glm",
+                  "anthropic", "gemini", "ollama", "localhost", "127.0.0.1"):
+        if token in bu:
+            return {"127.0.0.1": "local", "localhost": "local"}.get(token, token)
+    return fallback
+
+
+# ---------------------------------------------------------------- 诊断
 
 def diagnose():
-    """只检查不修改。返回 (ok, [(label, 说明)])。
-
-    label 是退出码 2 的那句原因(如"缺少必要配置"),说明写清到底哪儿不对 ——
-    用户照着就能改。
-    """
+    """只检查不修改。返回 (ok, [(原因标签, 说明)])。"""
     d = _effective()
 
     # ① 权限:文件里有明文 key,同机他人可读等于把 key 交出去。
     #    只在"确实要靠这个文件"时才拦 —— 环境变量已给全的话,运行期根本不读文件。
     need_file = any(not (d.get(k) or "").strip() for k in REQUIRED)
     if need_file and os.path.exists(config_path()) and not file_mode_ok():
-        import stat as _st
         m = os.stat(config_path()).st_mode & 0o777
         # 具体的一行由 _load_ct_config 在拒绝加载时已经打了(那里是真正的动作点),
         # 这里只补"怎么改",不重复复述一遍路径与数字。
@@ -378,97 +523,85 @@ def show_problems(issues, non_interactive=False):
         _w("")
 
 
-def show_header(existing=None):
+def show_header(existing=None, group=""):
     _w("")
     _w("  \033[1m配置 wchat\033[0m  \033[2m→ %s(权限 600)\033[0m" % config_path())
     _w("  \033[2m逐项填写;只想改某一项时,其余项直接回车保留原值。\033[0m")
+    if group:
+        _w("  \033[2m这一组叫 \033[0m\033[1m%s\033[0m\033[2m,以后可用 `ctmodel %s` 切回来。\033[0m"
+           % (group, group))
     _w("")
 
 
 # ---------------------------------------------------------------- 交互填写
 
-def _read_secret():
-    """读 key:不回显。**从 stdin 读**,不经 /dev/tty。
-
-    为什么不用 getpass:getpass 会自己打开 `/dev/tty`。如果进程的 stdin 与它
-    不是同一个终端(嵌套 pty、被包装器启动、tmux/IDE 终端等),键就**读到另一个
-    设备上去了** —— 表现正是"输入框像被锁住:敲字没反应,但回车能走下去"(实测)。
-    这里只操作**当前 stdin 这个 fd** 的 ECHO 位,读完在 finally 里恢复,
-    不碰 /dev/tty,也就不存在"两个终端"的分裂。
-    """
+def _read_line():
     try:
-        fd = sys.stdin.fileno()
-    except Exception:
         return (sys.stdin.readline() or "").strip()
-    if os.environ.get("WCHAT_SETUP_PLAIN_INPUT") == "1":
-        return (sys.stdin.readline() or "").strip()
-    try:
-        import termios
-        if not os.isatty(fd):
-            return (sys.stdin.readline() or "").strip()
-        old = termios.tcgetattr(fd)
-    except Exception:
-        # 拿不到 termios(非 tty/平台不支持):退回普通读,绝不因此卡住
-        return (sys.stdin.readline() or "").strip()
-    new = list(old)
-    new[3] = new[3] & ~termios.ECHO          # lflags:关回显
-    try:
-        termios.tcsetattr(fd, termios.TCSADRAIN, new)
-        try:
-            line = sys.stdin.readline()
-        except (EOFError, KeyboardInterrupt):
-            line = ""
-    finally:
-        try:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)   # 无论怎么退出都恢复
-        except Exception:
-            pass
-    return (line or "").strip()
+    except (EOFError, KeyboardInterrupt):
+        return ""
 
 
-def _ask(field, current=""):
-    """问一项。返回 (值, 是否用户主动改了)。key 不回显。"""
-    _w("  \033[1;36m%s\033[0m" % field)
+def _ask(field, current="", label=None):
+    """问一项。返回 (值, 是否用户主动改了)。key 也回显(用户要能确认自己粘对了)。"""
+    _w("  \033[1;36m%s\033[0m" % (label or field))
     _w("    \033[2m%s\033[0m" % FIELD_HELP.get(field, ""))
     if current:
-        shown = mask(current) if field == "WCHAT_API_KEY" else current
-        _w("    \033[2m现在: %s(回车保留)\033[0m" % shown)
+        _w("    \033[2m现在: %s(回车保留)\033[0m" % current)
     else:
         _w("    \033[2m现在: (未设置)\033[0m")
     sys.stdout.write("    \033[1;32m›\033[0m ")
     sys.stdout.flush()
+    ans = _unquote(_read_line())
     if field == "WCHAT_API_KEY":
-        ans = _read_secret()
-        # 不回显时用户没有任何反馈,容易以为"输入框卡住了"。给个计数证明它活着,
-        # 同时不泄露内容。
+        # 双重确认:终端会把输入回显出来(用户能核对);这里再补一行打码摘要,
+        # 万一终端不回显/用管道喂值,用户也能确认"确实收到了",不用靠猜。
         n = len(ans or "")
-        _w("\033[2m    已收到 %d 个字符%s\033[0m"
-           % (n, "" if n else "(直接回车 = 跳过)"))
-    else:
-        try:
-            ans = (sys.stdin.readline() or "").strip()
-        except (EOFError, KeyboardInterrupt):
-            ans = ""
-    ans = _unquote(ans)
+        _w("    \033[2m已收到 %d 个字符%s\033[0m"
+           % (n, (" → " + mask(ans)) if n else "(直接回车 = 跳过)"))
     if not ans:
         return current, False
     return ans, True
 
 
-def configure_interactive(existing=None, verify_conn=True):
-    """逐项问答 → 校验 → 写盘 → 验连通。返回退出码。"""
+def _ask_group(suggest):
+    while True:
+        _w("  \033[1;36m这组配置叫什么名字?\033[0m")
+        _w("    \033[2m就是一个短名字,用来说明这组是给哪家用的。"
+           "以后可以用 `ctmodel <名字>` 在几组之间切换(如 deepseek / qwen / mimo)\033[0m")
+        _w("    \033[2m现在: %s(回车就用它)\033[0m" % (suggest or "main"))
+        sys.stdout.write("    \033[1;32m›\033[0m ")
+        sys.stdout.flush()
+        ans = _unquote(_read_line())
+        name = ans or suggest or "main"
+        bad = validate_group(name)
+        if not bad:
+            _w("")
+            return name
+        _w("    \033[1;31m%s\033[0m" % bad[0])
+        _w("")
+
+
+def configure_interactive(existing=None, verify_conn=True, group=None):
+    """逐项问答 → 校验 → 写盘(ctmodel 格式) → 验连通。返回退出码。"""
     existing = dict(existing or _effective())
-    show_header(existing)
+    g = group or guess_group(existing)
+    show_header(existing, g)
+    g = _ask_group(g)
     vals = {}
-    for f in REQUIRED:
+    for f in ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL"):
         v, changed = _ask(f, existing.get(f, ""))
         if changed:
             vals[f] = v
         elif not (existing.get(f) or "").strip():
-            # 该项本来就缺,又留空了 → 记下来,后面统一报
             vals[f] = ""
         _w("")
-    # 合并后整体校验(允许"只改一项")
+    # PRO_MODEL:回车跟随 FLASH_MODEL(少问一个不必要的问题)
+    pm, pm_changed = _ask("PRO_MODEL", existing.get("PRO_MODEL", ""), label="PRO_MODEL(可选)")
+    if pm_changed:
+        vals["PRO_MODEL"] = pm
+    _w("")
+
     merged = dict(existing)
     merged.update({k: v for k, v in vals.items() if v})
     if merged.get("BASE_URL"):
@@ -494,8 +627,10 @@ def configure_interactive(existing=None, verify_conn=True):
         _w("")
         return RC_NEED_USER
 
-    p = apply(vals)
-    _w("  \033[2m已写入 %s(600)\033[0m" % p)
+    p = apply(vals, group=g)
+    _w("  \033[2m已写入 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, g))
+    _w("  \033[2m以后切回这一组:\033[0m \033[1mctmodel %s\033[0m\033[2m"
+       "(加 -l 可列出全部组)\033[0m" % g)
     return _after_write(verify_conn)
 
 
@@ -532,8 +667,10 @@ USAGE = """用法:
   wchat -config "BASE_URL=... WCHAT_API_KEY=... FLASH_MODEL=..."    一次给完
   wchat -config --check "..."       只校验,不写盘
   wchat -config --no-verify "..."   先不验连通(离线/内网)
+  wchat -config --name deepseek     指定这组配置的名字(默认沿用当前生效组/按域名猜)
 
-配置写在 ~/.ct/config(权限 600)。已有的其它配置项不会被改动。"""
+配置写在 ~/.ct/config(权限 600),格式与 ctmodel 一致(行尾 # @model <组名>),
+因此可以用 `ctmodel <组名>` 在几组(不同厂商)之间切换。"""
 
 
 def configure(argv):
@@ -543,18 +680,38 @@ def configure(argv):
         return RC_OK
     check_only = False
     verify_conn = os.environ.get("WCHAT_SETUP_NO_VERIFY") != "1"
+    group = ""
     rest = []
-    for a in argv:
+    i = 0
+    while i < len(argv):
+        a = argv[i]
         if a in ("--check", "-c"):
             check_only = True
         elif a in ("--no-verify", "-n"):
             verify_conn = False
+        elif a in ("--name", "-N"):
+            if i + 1 >= len(argv):
+                _w("  --name 后面要跟组名")
+                return RC_ERR
+            group = argv[i + 1]
+            i += 1
+        elif a.startswith("--name="):
+            group = a.split("=", 1)[1]
         elif a.startswith("-") and "=" not in a:
             _w("  未知选项:%s" % a)
             _w(USAGE.rstrip())
             return RC_ERR
         else:
             rest.append(a)
+        i += 1
+
+    if group:
+        bad = validate_group(group)
+        if bad:
+            _w("")
+            _w("  \033[1;31m✗ %s\033[0m" % bad[0])
+            _w("")
+            return RC_NEED_USER
 
     if rest:
         # 一次给完:解析 → 校验 → (验) → 写
@@ -576,10 +733,13 @@ def configure(argv):
                 _w("    · %s" % m)
             _w("")
             _w("  \033[2m提示:也可以不带参数跑 `wchat -config`,一项一项填,不用自己排版。\033[0m")
+            _w("")
             return RC_NEED_USER
+        g = group or guess_group(merged)
         if check_only:
             _w("")
             _w("  \033[1;32m✅ 格式检查通过\033[0m")
+            _w("    组名           %s" % g)
             for k in FILE_KEYS:
                 if merged.get(k):
                     _w("    %-14s %s" % (k, mask(merged[k]) if k == "WCHAT_API_KEY" else merged[k]))
@@ -595,9 +755,10 @@ def configure(argv):
             _w("  \033[2m(--check:只看不写)\033[0m")
             _w("")
             return RC_OK
-        p = apply(pairs)
+        p = apply(pairs, group=g)
         _w("")
-        _w("  \033[2m已写入 %s(600)\033[0m" % p)
+        _w("  \033[2m已写入 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, g))
+        _w("  \033[2m以后切回这一组:\033[0m \033[1mctmodel %s\033[0m" % g)
         return _after_write(verify_conn)
 
     # 无参数:交互逐项
@@ -609,7 +770,7 @@ def configure(argv):
            "WCHAT_API_KEY=sk-xxxx FLASH_MODEL=<模型名>\"\033[0m")
         _w("")
         return RC_NEED_USER
-    return configure_interactive(verify_conn=verify_conn)
+    return configure_interactive(verify_conn=verify_conn, group=group or None)
 
 
 def _verify_pairs(merged):

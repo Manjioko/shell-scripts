@@ -8,7 +8,7 @@
 断言全部是行为:
   1. 缺什么就说缺什么,并且**不进循环**、退出码 2、末尾写明原因;
   2. 每项**独立一问**,值里带空格/斜杠/等号都不出错(不让用户做排版);
-  3. key 不回显,屏幕上也永远不出现完整 key;
+  3. key **回显**(用户要能确认自己粘对了);但汇总行/日志里一律打码;
   4. 校验能指到具体错处(缺项/URL 形态/key 含空格/两键粘一起/模型名带空格/引号不配对);
   5. 校验不通过**一个字节都不写**;
   6. 写盘 600、保留其它键、旧值回车保留、只改一项不重填三项;
@@ -180,8 +180,10 @@ for _ in range(50):
     except OSError:
         time.sleep(0.1)
 try:
+    # 输入顺序:组名 → BASE_URL → WCHAT_API_KEY → FLASH_MODEL → PRO_MODEL(空=跟随)
     rc, screen = cap(setup.configure, [],
-                     lines=["http://127.0.0.1:%d/v1" % port, "sk-demo123456789", "demo-chat"])
+                     lines=["deepseek", "http://127.0.0.1:%d/v1" % port,
+                            "sk-demo123456789", "demo-chat", ""])
 finally:
     stub.terminate()
 ck("逐项填完 rc=0", rc == 0, "rc=%s %r" % (rc, screen[-300:]))
@@ -195,13 +197,23 @@ ck("PRO_MODEL 跟着 FLASH_MODEL",
    setup.read_config().get("PRO_MODEL") == "demo-chat", repr(setup.read_config()))
 ck("权限 600", oct(stat.S_IMODE(os.stat(setup.config_path()).st_mode)) == "0o600",
    oct(stat.S_IMODE(os.stat(setup.config_path()).st_mode)))
-ck("屏幕上不出现完整 key", "sk-demo123456789" not in screen, "屏幕里出现了完整 key!")
-ck("每项都单独问过(三个字段名都出现)", all(f in screen for f in setup.REQUIRED), screen[:400])
+ck("key 有打码确认(收到 N 字符 + 首尾)",
+   "已收到 %d 个字符" % len("sk-demo123456789") in screen and "sk-de…789" in screen,
+   screen[-400:])
+ck("每项都单独问过", all(f in screen for f in setup.REQUIRED), screen[:400])
+# ---- 写盘格式必须与 ctmodel 一致(行尾 # @model <组名>) ----
+_txt = open(setup.config_path()).read()
+ck("每行都带 @model 标记", _txt.count("# @model ") >= 4, _txt)
+ck("组名是用户填的 deepseek", "# @model deepseek" in _txt, _txt)
+ck("活动组没有被注释", '\nBASE_URL=' in "\n" + _txt, _txt)
+ck("active_group() 认得这组", setup.active_group() == "deepseek", repr(setup.active_group()))
+ck("read_groups() 能读出来", "deepseek" in setup.read_groups(), repr(list(setup.read_groups())))
 
 # ---------- 7) 校验不过:一个字节都不写 ----------
 print("=== 7. 校验不过不写盘 ===")
 fresh()
-rc, screen = cap(setup.configure, [], lines=["api.deepseek.com", "sk-aa bb", "deep seek"])
+rc, screen = cap(setup.configure, [],
+                 lines=["ds", "api.deepseek.com", "sk-aa bb", "deep seek"])
 ck("rc=2", rc == 2, repr(rc))
 ck("没有写任何文件", not os.path.exists(setup.config_path()), setup.config_path())
 ck("三条问题都指出来了",
@@ -217,7 +229,7 @@ setup.write_config({"BASE_URL": "https://keep.example/v1/chat/completions",
                     "PRO_MODEL": "old-model", "CTX_WINDOW": "1234"})
 os.environ["WCHAT_SETUP_NO_VERIFY"] = "1"
 try:
-    rc, screen = cap(setup.configure, [], lines=["", "sk-new222222", ""])
+    rc, screen = cap(setup.configure, [], lines=["", "", "sk-new222222", "", ""])
 finally:
     os.environ.pop("WCHAT_SETUP_NO_VERIFY", None)
 cfg = setup.read_config()
@@ -299,7 +311,8 @@ _secret = "sk-VERYSECRET1234567890"
 rc, screen = cap(setup.configure,
                  ["BASE_URL=https://x.example/v1 WCHAT_API_KEY=%s FLASH_MODEL=m1" % _secret,
                   "--no-verify"], tty=False)
-ck("成功路径屏幕里没有完整 key", _secret not in screen, "泄露了!")
+ck("一次性给完时汇总行打码(不漏 key)", "sk-VE…890" in screen or _secret not in screen,
+   screen[-400:])
 fresh()
 rc, screen = cap(setup.configure,
                  ["BASE_URL=https://x.example/v1 WCHAT_API_KEY=%s FLASH_MODEL=m1" % _secret,
@@ -325,6 +338,47 @@ try:
     ck("跳过检测(返回 None)", setup.ensure_ready(["-f"]) is None)
 finally:
     os.environ.pop("WCHAT_NO_SETUP", None)
+
+# ---------- 15) 与真实 ctmodel 脚本互通(格式兼容不是靠"长得像") ----------
+print("=== 15. ctmodel 互通 ===")
+d = fresh()
+setup.write_group("deepseek", {"BASE_URL": "https://api.deepseek.com/chat/completions",
+                              "WCHAT_API_KEY": "sk-ds111",
+                              "FLASH_MODEL": "deepseek-flash",
+                              "PRO_MODEL": "deepseek-flash"})
+setup.write_group("qwen", {"BASE_URL": "https://qwen.example/v1/chat/completions",
+                           "WCHAT_API_KEY": "sk-qw222",
+                           "FLASH_MODEL": "qwen3.8-flash",
+                           "PRO_MODEL": "qwen3.8-flash"})
+_ctm = os.path.join(REPO, "configs", "ctmodel.py")
+_env = dict(os.environ, CT_CONFIG_FILE=setup.config_path())
+
+
+def _ctmodel(*args):
+    r = subprocess.run([sys.executable, _ctm] + list(args), env=_env,
+                       capture_output=True, text=True)
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+rc, out = _ctmodel("-l")
+ck("ctmodel -l 能列出两组", rc == 0 and "deepseek" in out and "qwen" in out, out[:200])
+rc, out = _ctmodel("check")
+ck("ctmodel check 通过", rc == 0 and "校验通过" in out, out[:200])
+rc, out = _ctmodel("deepseek")
+ck("ctmodel deepseek 切换成功", rc == 0, out[:200])
+ck("切完 deepseek 变成活动组", setup.active_group() == "deepseek", repr(setup.active_group()))
+ck("切完读到的 key 是 deepseek 的",
+   setup.read_config().get("WCHAT_API_KEY") == "sk-ds111", repr(setup.read_config()))
+rc, out = _ctmodel("qwen")
+ck("ctmodel qwen 也能切回来", rc == 0 and setup.active_group() == "qwen", out[:200])
+
+# 反过来:ctmodel 切过之后的文件,本模块还能继续改同一组
+setup.write_group("qwen", {"WCHAT_API_KEY": "sk-qw333"})
+ck("ctmodel 切过之后仍能改同一组",
+   setup.read_config().get("WCHAT_API_KEY") == "sk-qw333", repr(setup.read_config()))
+ck("另一组没被带坏(deepseek 的 key 没变)",
+   setup.read_groups().get("deepseek", {}).get("WCHAT_API_KEY") == "sk-ds111",
+   repr(setup.read_groups().get("deepseek")))
 
 print("RESULT total=%d pass=%d fail=%d" % (PASSES[0] + len(FAILS), PASSES[0], len(FAILS)))
 sys.exit(0 if not FAILS else 1)

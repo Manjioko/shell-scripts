@@ -5,9 +5,9 @@
 敲字没有反应、只有回车能过 —— 用户看到的就是"输入框被锁住"。
 所以这里必须:
   1. 逐字符慢速输入后,key **真的**进了配置文件(不是空串);
-  2. 输入期间 ECHO 是关的(不回显);
-  3. 读完之后 ECHO **恢复**(否则后续输入/回车行为全乱);
-  4. 屏幕上有"已收到 N 个字符"的反馈(证明它活着,不用靠盲猜);
+  2. key 输入**回显**(用户要能核对自己有没有粘对;实测反馈:不回显就以为没填上);
+  3. ECHO 状态始终是开着的(我们不再去改它);
+  4. 屏幕上有"已收到 N 个字符 → sk-ab…xyz"的反馈(即使终端不回显也能确认);
   5. 整条链走完 rc=0 并能落盘 600。
 """
 import os
@@ -126,7 +126,7 @@ def run_burst(home, payload):
 
 def main():
     home = tempfile.mkdtemp(prefix="tty_cfg_")
-    screen, rc = run_pty(home, ["https://tty.example/v1", "sk-typed-by-hand-123", "m-tty"],
+    screen, rc = run_pty(home, ["tty", "https://tty.example/v1", "sk-typed-by-hand-123", "m-tty", ""],
                          extra_env={"WCHAT_SETUP_NO_VERIFY": "1"})
     plain = screen.replace("\r", "")
     cfg = setup.read_config() if os.path.exists(os.path.join(home, ".ct", "config")) else {}
@@ -140,11 +140,13 @@ def main():
     ck("key 真的被收进去了(不是空串)", 'sk-typed-by-hand-123' in txt, txt or "(无文件)")
     ck("逐字符输入没有丢字符", 'sk-typed-by-hand-123' in txt,
        "文件里:%r" % (txt.splitlines()[:3]))
-    ck("输入期间不回显(屏幕上没有完整 key)", 'sk-typed-by-hand-123' not in plain,
-       "屏幕泄露了 key")
+    # 现在**要求回显**:不然用户不知道自己填成功没有(实测反馈)。
+    ck("key 输入时回显(用户能核对自己粘对了)", 'sk-typed-by-hand-123' in plain,
+       plain[-500:])
     ck("有'已收到 N 个字符'反馈", "已收到" in plain, plain[-400:])
     ck("计数与实际长度一致", "已收到 %d 个字符" % len("sk-typed-by-hand-123") in plain,
        plain[-400:])
+    ck("打码摘要也给了", "sk-ty…123" in plain, plain[-400:])
     ck("落盘 600",
        os.path.exists(p) and oct(stat.S_IMODE(os.stat(p).st_mode)) == "0o600",
        oct(stat.S_IMODE(os.stat(p).st_mode)) if os.path.exists(p) else "(无文件)")
@@ -154,9 +156,9 @@ def main():
 
     # ECHO 必须在读完之后恢复:再跑一次,若 echo 没恢复,第二遍的 BASE_URL 就不会回显
     home2 = tempfile.mkdtemp(prefix="tty_cfg2_")
-    screen2, rc2 = run_pty(home2, ["https://echo.example/v1", "sk-x123456", "m2"],
+    screen2, rc2 = run_pty(home2, ["echo", "https://echo.example/v1", "sk-x123456", "m2", ""],
                            extra_env={"WCHAT_SETUP_NO_VERIFY": "1"})
-    ck("ECHO 已恢复(非密字段正常回显)", "echo.example" in screen2.replace("\r", ""),
+    ck("ECHO 始终正常(非密字段回显)", "echo.example" in screen2.replace("\r", ""),
        screen2[-300:])
     ck("第二遍也成功", rc2 == 0, repr(rc2))
 
@@ -165,7 +167,7 @@ def main():
     # URL 读走第一行,key 却去另一个设备读 → 屏幕上停在 KEY> 一动不动,
     # 而回车(缓冲里剩的行)看着像"还能往下走"。这条断言锁住它。
     home3 = tempfile.mkdtemp(prefix="tty_cfg3_")
-    screen3, rc3 = run_burst(home3, "https://burst.example/v1\nsk-burst-key-987\nm-burst\n")
+    screen3, rc3 = run_burst(home3, "burst\nhttps://burst.example/v1\nsk-burst-key-987\nm-burst\n\n")
     p3 = os.path.join(home3, ".ct", "config")
     txt3 = open(p3).read() if os.path.exists(p3) else ""
     ck("整段粘贴三行:key 没丢", "sk-burst-key-987" in txt3, txt3 or "(无文件)")
