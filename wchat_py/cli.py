@@ -821,6 +821,9 @@ def _banner_text(name, args_json):
             cmd = (_j.loads(args_json or "{}") or {}).get("command") or ""
         except ValueError:
             cmd = args_json or ""
+        # 空命令不许静默留白:界面上留白会被当成"命令很短",实际是参数没送到。
+        if not str(cmd).strip():
+            cmd = "\033[1;31m(命令为空 —— 本次调用未带 command 参数)\033[0m"
         return tool_banner("shell", cmd)
     return tool_banner(name or "", args_preview(args_json or ""))
 
@@ -852,6 +855,46 @@ def _auto_backup(path):
         return False
 
 
+_REQUIRED_CACHE = {}
+
+
+def _required_of(name):
+    """从 tools_spec.json 取该工具的必填参数名(唯一真源,不在这里抄第二份)。
+
+    为什么必须落到这里:幂等工具收到空参数时**不会报错**,只会做一件看似合理的事 ——
+    `run_shell_command` 执行 `bash -c ""` 拿到 0 行输出、`read_file` 读到工作目录本身。
+    用户看到的是"命令输出为空很奇怪",而真因是**参数根本没送到**。
+    实测:一次工具调用只带了 `{"command": ""}`,界面显示 `⏺ shell · `(空白)、
+    结果"完成 · 共 0 行",模型于是以为工具坏了、白烧一轮去排查。
+    """
+    if name in _REQUIRED_CACHE:
+        return _REQUIRED_CACHE[name]
+    req = []
+    try:
+        import json as _j
+        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools_spec.json")
+        with open(spec_path, encoding="utf-8") as f:
+            for t in _j.load(f) or []:
+                fn = (t or {}).get("function") or {}
+                if fn.get("name") == name:
+                    req = list((fn.get("parameters") or {}).get("required") or [])
+                    break
+    except (OSError, ValueError):
+        req = []
+    _REQUIRED_CACHE[name] = req
+    return req
+
+
+def _missing_required(name, a):
+    """返回缺失或为空的必填参数名列表。空串/纯空白算缺失。"""
+    miss = []
+    for k in _required_of(name):
+        v = a.get(k)
+        if v is None or (isinstance(v, str) and not v.strip()):
+            miss.append(k)
+    return miss
+
+
 def _run_tool(name, args_json):
     """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
     import json as _json
@@ -859,7 +902,20 @@ def _run_tool(name, args_json):
     try:
         a = _json.loads(args_json or "{}")
     except Exception:
-        return "错误:工具参数不是合法 JSON"
+        return ("错误:工具参数不是合法 JSON(收到的原始参数:%r)。"
+                "请重新发起这次工具调用,并给出完整合法的 JSON 参数。"
+                % ((args_json or "")[:200],))
+    if not isinstance(a, dict):
+        return "错误:工具参数必须是 JSON 对象,收到 %r" % (type(a).__name__,)
+    # 必填参数校验:缺了就**立刻说清楚**,不要拿空值去执行。
+    # 这是"静默失败"的典型入口 —— 空命令会成功返回 0 行、空路径会读到当前目录,
+    # 两者都不报错,却让调用方以为"工具出了问题"。
+    _miss = _missing_required(name, a)
+    if _miss:
+        return ("错误:%s 缺少必填参数 %s(收到的参数:%r)。"
+                "请重新发起这次调用并补上这些参数;不要假设它们有默认值。"
+                % (name, "/".join(_miss),
+                   _json.dumps(a, ensure_ascii=False)[:200]))
     if name == "list_dir":
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径
