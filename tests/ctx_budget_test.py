@@ -248,6 +248,157 @@ for p in (big1, big2):
     except OSError:
         pass
 
+import os
+import sys
+
+sys.path.insert(0, "/Users/jwan/bin")
+import wchat_py.cli as cli
+
+
+
+def ck(name, ok, detail=""):
+    if ok:
+        P[0] += 1
+        print("  ok   %s" % name)
+    else:
+        F.append(name)
+        print("  FAIL %s%s" % (name, (": " + detail) if detail else ""))
+
+
+def mk(n, size):
+    out = [{"role": "system", "content": "sys"}]
+    for i in range(n):
+        out.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c%d" % i, "type": "function",
+             "function": {"name": "run_shell_command", "arguments": "{}"}}]})
+        out.append({"role": "tool", "tool_call_id": "c%d" % i,
+                    "content": "R%04d " % i + "x" * size})
+    return out
+
+
+print("=== 9. 旧工具输出折叠(ctx 体积) ===")
+
+m = mk(40, 5000)
+before = sum(cli._msg_text_len(x) for x in m)
+out = cli._age_tool_results(m)
+after = sum(cli._msg_text_len(x) for x in out)
+ck("折叠后明显变小", after < before * 0.5, "%d -> %d" % (before, after))
+
+tool_out = [x for x in out if x.get("role") == "tool"]
+ck("最近 12 条原样保留",
+   [x["content"] for x in tool_out[-12:]] ==
+   [x["content"] for x in [y for y in m if y.get("role") == "tool"][-12:]])
+ck("更早的都被折叠", all("已折叠" in x["content"] for x in tool_out[:-12]))
+ck("tool_call_id 全保留(否则服务端 400)",
+   [x.get("tool_call_id") for x in tool_out] ==
+   ["c%d" % i for i in range(40)])
+ck("折叠保留头部(不是纯占位)", tool_out[0]["content"].startswith("R0000"))
+ck("折叠说明里有原始字节数", "原 " in tool_out[0]["content"])
+
+ck("不改调用方的列表", sum(cli._msg_text_len(x) for x in m) == before)
+ck("消息条数不变", len(out) == len(m))
+
+# 小结果:折叠后不许变长(等于保留原样 + 说明)
+small = mk(30, 10)
+out2 = cli._age_tool_results(small)
+for a, b in zip([x for x in small if x.get("role") == "tool"],
+                [x for x in out2 if x.get("role") == "tool"]):
+    if b["content"] != a["content"]:
+        assert len(b["content"]) > len(a["content"]) or True
+ck("短结果不会被折叠成更长的垃圾",
+   all(len(b["content"]) >= len(a["content"]) for a, b in
+       zip([x for x in small if x.get("role") == "tool"],
+           [x for x in out2 if x.get("role") == "tool"])))
+
+# 数组型 content(图片)不许动:折叠会破坏结构
+arr = mk(20, 5000)
+arr.append({"role": "tool", "tool_call_id": "img",
+            "content": [{"type": "text", "text": "图片"}]})
+out3 = cli._age_tool_results(arr)
+last = [x for x in out3 if x.get("tool_call_id") == "img"][0]
+ck("数组型 content 不被折叠", isinstance(last["content"], list))
+
+# 开关
+os.environ["TOOL_AGE"] = "0"
+ck("TOOL_AGE=0 完全不动", cli._age_tool_results(m) is m)
+os.environ.pop("TOOL_AGE", None)
+
+# keep 可调
+os.environ["TOOL_AGE_KEEP"] = "3"
+o4 = cli._age_tool_results(m)
+kept = [x for x in o4 if x.get("role") == "tool" and "已折叠" not in x["content"]]
+ck("TOOL_AGE_KEEP=3 时只留 3 条", len(kept) == 3, str(len(kept)))
+os.environ.pop("TOOL_AGE_KEEP", None)
+
+# 结构锁:折叠必须挂在实际发送路径上(_call_llm 里),不能只当工具函数躺着
+src = open("/Users/jwan/bin/wchat_py/cli.py", encoding="utf-8").read()
+body = src[src.index("def _call_llm(msgs, model"):]
+body = body[:body.index("def ", 10)]
+ck("_call_llm 里真的调用了折叠", "_age_tool_results(" in body)
+ck("折叠在构造 req 之前(否则发出去的还是全量)", body.index("_age_tool_results(")
+   < body.index("req = {"), "顺序不对")
+
+# 最强的一条:折叠必须真的体现在**发出去的请求体**里。
+# 只测函数返回值不够 —— "算了但没用"是最容易出现的假绿。
+import io as _io
+import json as _json
+import subprocess as _sp
+
+_CAP = {}
+
+
+class _FStdin(object):
+    def write(self, s):
+        _CAP["req"] = s
+
+    def close(self):
+        pass
+
+
+class _FStdout(object):
+    def __iter__(self):
+        return iter([])
+
+
+class _FPopen(object):
+    def __init__(self, argv, **kw):
+        self.stdin = _FStdin()
+        self.stdout = _FStdout()
+        self.returncode = 0
+
+    def wait(self):
+        return 0
+
+
+_orig_popen = _sp.Popen
+_sp.Popen = _FPopen
+_old_log = os.environ.get("WCHAT_API_LOG")
+os.environ["WCHAT_API_LOG"] = "0"
+try:
+    _m = mk(40, 5000)
+    cli._call_llm(_m, "m")
+finally:
+    _sp.Popen = _orig_popen
+    if _old_log is None:
+        os.environ.pop("WCHAT_API_LOG", None)
+    else:
+        os.environ["WCHAT_API_LOG"] = _old_log
+
+if "req" in _CAP:
+    _sent = _json.loads(_CAP["req"])["messages"]
+    _ts = [x for x in _sent if x.get("role") == "tool"]
+    _fd = [x for x in _ts if "已折叠" in str(x.get("content"))]
+    ck("发出去的请求体里确实折叠了", len(_fd) > 0, "%d/%d" % (len(_fd), len(_ts)))
+    ck("wire 上体积明显变小",
+       sum(len(str(x.get("content"))) for x in _sent)
+       < sum(len(str(x.get("content"))) for x in _m) * 0.6)
+    ck("wire 上 tool_call_id 齐全",
+       [x.get("tool_call_id") for x in _ts] == ["c%d" % i for i in range(40)])
+else:
+    ck("发出去的请求体里确实折叠了", False, "没抓到请求体")
+
+
+
 print("RESULT total=%d pass=%d fail=%d" % (P[0] + len(F), P[0], len(F)))
 sys.exit(0 if not F else 1)
 

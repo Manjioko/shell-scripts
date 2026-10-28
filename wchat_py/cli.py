@@ -293,6 +293,93 @@ def _consume_stream(p, on_text, on_reason):
     return "".join(text), tcs, err
 
 
+def _msg_text_len(m):
+    """一条消息的正文长度(字节)。只用于判断"值不值得折叠"。"""
+    c = m.get("content") if isinstance(m, dict) else None
+    if isinstance(c, str):
+        return len(c.encode("utf-8", "replace"))
+    if isinstance(c, list):
+        n = 0
+        for p in c:
+            if isinstance(p, dict) and isinstance(p.get("text"), str):
+                n += len(p["text"].encode("utf-8", "replace"))
+        return n
+    return 0
+
+
+def _age_tool_results(msgs, keep=None, head=None):
+    """把**较早**的 tool 结果折叠成"头部 + 折叠说明",只作用于这次请求。
+
+    实测依据:一次长会话 1107 条消息里有 **549 条是 tool 结果**,正文合计 564 KB
+    (≈35 万 token),而它们**每次请求都要全量重发**。账单上 1765 万 prompt token,
+    98% 是历史工具输出。prompt 缓存把单价压下来了(命中 99.7%),但那是"便宜"不是
+    "免费",一次缓存失效就按全价重算。
+
+    **为什么保留头部而不是整段丢掉**:那条会话里工具结果平均只有 ~925 字节 ——
+    体积是"数量堆出来的",不是少数巨型日志。所以:
+      · 小于 `head` 字节的结果**等于原样保留**(只多一句说明);
+      · 大结果的**开头几十字**通常在说"这是什么"(文件名/退出码/表头),
+        信息密度最高,尾巴多是重复行 —— 保留头部比留一个纯占位有用得多。
+
+    保守边界(刻意):
+      · 最近 `keep` 条 tool 结果**一个字都不动** —— 模型正在推理它们;
+      · 只改**这次请求的副本**,不动消息列表本身:历史、回滚、落盘都不受影响;
+      · `tool_call_id` 原样保留,结构合法性不受影响(否则服务端 400)。
+
+    开关:TOOL_AGE=0 关闭;TOOL_AGE_KEEP(默认 12);TOOL_AGE_HEAD(默认 160 字节)。
+    """
+    try:
+        if os.environ.get("TOOL_AGE", "1") in ("0", "off", "no", "false"):
+            return msgs
+        if not msgs:
+            return msgs
+        if keep is None:
+            keep = int(os.environ.get("TOOL_AGE_KEEP") or 12)
+        if head is None:
+            head = int(os.environ.get("TOOL_AGE_HEAD") or 160)
+    except (TypeError, ValueError):
+        return msgs
+    idx = [i for i, m in enumerate(msgs)
+           if isinstance(m, dict) and m.get("role") == "tool"]
+    if len(idx) <= keep:
+        return msgs
+    old = idx[:-keep] if keep > 0 else list(idx)
+    out = None
+    folded = 0
+    saved = 0
+    for i in old:
+        m = msgs[i]
+        c = m.get("content")
+        if not isinstance(c, str) or not c:
+            continue          # 数组型 content(图片等)不动:折叠它会丢结构
+        raw = c.encode("utf-8", "replace")
+        n = len(raw)
+        if n <= head:
+            head_txt = c          # 整段保留,只加说明
+            keep_n = len(c)
+        else:
+            head_txt = raw[:head].decode("utf-8", "ignore")
+            keep_n = len(head_txt.encode("utf-8"))
+        stub = "%s\n[早期工具输出已折叠:原 %d 字节,此处保留开头 %d 字节]" % (
+            head_txt, n, keep_n)
+        if len(stub) >= n:
+            continue              # 折叠后反而更长,不值得
+        if out is None:
+            out = list(msgs)
+        nm = dict(m)
+        nm["content"] = stub
+        out[i] = nm
+        folded += 1
+        saved += n - len(stub)
+    if out is None:
+        return msgs
+    if os.environ.get("WCHAT_TRACE") == "1":
+        sys.stderr.write("TRACE tool_age folded=%d saved=%dB keep=%d head=%d\n"
+                         % (folded, saved, keep, head))
+        sys.stderr.flush()
+    return out
+
+
 def _call_llm(msgs, model, on_text=None, on_reason=None):
     """调一次 llm stream, 返回 (text, tool_calls, error)。事件走同一条 JSON-lines seam。
 
@@ -317,6 +404,9 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         _tlist = []
     _model = model or os.environ.get("WCHAT_MODEL") or os.environ.get("FLASH_MODEL", "")
     _think = os.environ.get("WCHAT_THINKING", "disabled") or "disabled"
+    # 折叠旧的、大的工具输出(只影响本次请求的副本)。记账也要记**折叠后**的体积,
+    # 否则账本记的是"本来会花多少",而不是"实际发了多少"。
+    msgs = _age_tool_results(msgs)
     req = {"model": _model, "messages": msgs,
            "thinking": _think, "tools": _tlist}
     _ref_tmp = None

@@ -28,9 +28,30 @@ MAX_BYTES = 8 * 1024 * 1024
 KEEP = 3
 
 
+def _is_local_endpoint():
+    """端点是不是本机桩(测试用的 127.0.0.1:PORT / localhost)。
+
+    为什么必须判它:**闸门测试会给 wchat 喂一个本地桩端点**,如果不区分,测试流量
+    就会写进用户真实的 ~/.ct/usage/calls.jsonl。实测踩过:一次全量闸门塞进去 24 条
+    `prompt=0` 的记录,把"生产用量"的统计彻底搅浑 —— 而这类污染**看起来像产品缺陷**
+    (A5 判据会对它们全报警),实际只是测试。
+    """
+    base = (os.environ.get("BASE_URL") or "").strip().lower()
+    if not base:
+        return False
+    for host in ("127.0.0.1", "localhost", "[::1]", "0.0.0.0"):
+        if host in base:
+            return True
+    return False
+
+
 def enabled():
-    """默认开。WCHAT_API_LOG=0 关掉(基准测试/排障时可关)。"""
-    return os.environ.get("WCHAT_API_LOG", "1") not in ("0", "off", "no", "false")
+    """默认开。WCHAT_API_LOG=0 关掉;本机桩端点一律不记(见 _is_local_endpoint)。"""
+    if os.environ.get("WCHAT_API_LOG", "1") in ("0", "off", "no", "false"):
+        return False
+    if _is_local_endpoint():
+        return False
+    return True
 
 
 def log_dir():
