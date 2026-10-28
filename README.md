@@ -2,6 +2,26 @@
 
 终端 AI 助手。B 阶段迁移后，**入口与业务逻辑全部是 Python**（bash 仅保留在 `tests/` 作测试基线）。
 
+## Python 版本
+
+`#!` 那行只是 `#!/usr/bin/env python3` —— 它只能表达"要个 python3"，**表达不了版本下限**。
+所以版本要求写成了数据并**在启动时强制校验**：
+
+| 入口 | 解释器从哪来 | shebang 参与吗 |
+|---|---|---|
+| `brew install` 后的 `wchat` | Formula 生成的 wrapper：`exec <venv>/bin/python <libexec>/wchat` | **不参与**（已由实验钉住） |
+| 仓库直跑 `./wchat` | 内核读 shebang → PATH 上第一个 `python3`（本机可能是 CommandLineTools 的 3.9） | 参与 |
+| 自举建 `~/.ct/venv` | `bootstrap._base_python()` 挑选，**每个候选都要过 `_suitable()`** | 不参与 |
+
+- **下限** `MIN_PYTHON = (3, 9)`，唯一出处 `wchat_py/version.py`。用 3.10+ 语法（`match`、
+  `isinstance` 里的 `X | Y`）之前必须抬这个数。
+- 低于下限时 `ensure_runtime()` **自动换一个合规解释器 re-exec**（不会硬着头皮跑），
+  找不到就明说装哪个，不静默降级。
+- brew 那条路固定用 Formula 依赖的 `python@3.12`；`_runtime_fallback()` 在旧 Cellar 被删
+  时优先回 venv 的那份，**不会退到没有 openai 的 `/usr/bin/python3`**。
+
+闸门：`tests/pythonver_test.py`（`run_gates.sh` 的 `Python版本` 道）。
+
 ## 安装
 
 ```bash

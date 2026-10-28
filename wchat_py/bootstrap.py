@@ -26,6 +26,8 @@ import shutil
 import subprocess
 import sys
 
+from .version import MIN_PYTHON as MIN_PY   # 最低版本只有一处(version.py),这里不抄第二份
+
 # requirements.txt 是唯一的依赖真源;这里不再抄一份名字列表。
 _OPTIONAL = ("pillow",)          # 可选:缺了不建 venv(图片缩放会退回 sips)
 _MARK = ".ready"
@@ -178,19 +180,75 @@ def _ready(venv):
 
 
 def _base_python():
-    """造 venv 用的基础解释器。
+    """造 venv 用的基础解释器 —— 必须**满足 MIN_PYTHON**,不能"手里有谁用谁"。
 
-    sys.executable 可能指向已被删除的文件(brew 升级删旧 Cellar 后的真实形状),
-    这时 `python -m venv` 必然失败,所以要另找一个能用的。
+    旧实现只在 `sys.executable` 失效时退到 `which("python3")` / `/usr/bin/python3`。
+    在本机实测:`which python3` = `/usr/bin/python3` = **3.9.6**(CommandLineTools),
+    而 brew 装的是 3.12 —— 于是"brew 升级删了旧 Cellar"这个场景会**静默**造出一个
+    3.9 的 venv,与发布/测试用的解释器不同版本。它不报错,只在很久以后以某个
+    "在我机器上明明能跑"的形状出现。
+
+    判据:当前解释器**合规就用它**(用户显式选的版本,不越俎代庖);不合规才按
+    "越新越先试"的顺序找,每个候选都要过 `_suitable()`(存在 + 可执行 + 版本达标)。
     """
-    exe = sys.executable
-    if exe and os.path.isfile(exe) and os.access(exe, os.X_OK):
-        return exe
-    for cand in (shutil.which("python3"), shutil.which("python"),
-                 "/usr/bin/python3", "/opt/homebrew/bin/python3"):
-        if cand and os.path.isfile(cand):
-            return cand
-    return exe or "python3"
+    if _suitable(sys.executable):
+        return sys.executable
+    cands = [os.environ.get("WCHAT_PYTHON", "")]
+    # brew 的 python@3.x(Formula 依赖的那个版本优先 —— 与发布形态一致)
+    import glob as _glob
+    for pat in ("/opt/homebrew/opt/python@3.*/bin/python3.*",
+                "/usr/local/opt/python@3.*/bin/python3.*"):
+        cands.extend(sorted(_glob.glob(pat), reverse=True))
+    for ver in ("3.13", "3.12", "3.11", "3.10", "3.9"):
+        cands.append(shutil.which("python" + ver))
+    cands.extend([shutil.which("python3"), shutil.which("python"),
+                  "/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"])
+    for c in cands:
+        if _suitable(c):
+            return c
+    _fail("找不到 Python >= %d.%d(当前 %s 是 %s)。\n"
+          "   装一个:`brew install python@3.12`,或用 WCHAT_PYTHON=/path/to/python3 指定。"
+          % (MIN_PY[0], MIN_PY[1], sys.executable or "(未知)",
+             ".".join(str(x) for x in sys.version_info[:3])),
+          None)
+    return sys.executable or "python3"
+
+
+def _suitable(exe):
+    """解释器可用吗:存在 + 可执行 + **版本 >= MIN_PYTHON**。
+
+    三个条件缺一不可。只判 `os.path.isfile` 会把 brew 升级留下的**断链**当可用
+    (那是 exists 唯一漏掉的情形,也是本项目上一次事故的形状);只判可执行会把
+    3.9 当成合格,于是"要求 3.12、实际跑 3.9"静默成立。
+    """
+    if not exe or not os.path.isfile(exe) or not os.access(exe, os.X_OK):
+        return False
+    # 当前解释器不必 spawn 一次去问版本：它自己的 sys.version_info 就是答案。
+    if sys.executable and os.path.abspath(exe) == os.path.abspath(sys.executable):
+        return _py_ok(sys.version_info[:2])
+    return _py_ok(_py_ver(exe))
+
+
+def _py_ok(ver):
+    """版本元组满足 MIN_PYTHON 吗(纯函数,便于闸门直接喂假版本)。空元组 = 测不出,判不合格。"""
+    return bool(ver) and tuple(ver[:2]) >= MIN_PY
+
+
+def _py_ver(exe):
+    """跑一次 `<exe> -c ...` 取 (major, minor);失败返回 ()。
+
+    只有走兜底路径时才会调用(正常启动不会 spawn 子进程) —— 代价可以接受,
+    换来的是"绝不把一个跑不起来的解释器写进 venv"。
+    """
+    try:
+        r = subprocess.run([exe, "-c", "import sys;print('%d %d' % sys.version_info[:2])"],
+                           timeout=10, capture_output=True, text=True)
+        if r.returncode == 0:
+            a, b = (r.stdout or "").split()[:2]
+            return (int(a), int(b))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    return ()
 
 
 def _log(msg):
@@ -319,6 +377,22 @@ def ensure_runtime():
         return
     if os.environ.get("WCHAT_BOOTSTRAPPED") == "1":
         return
+    # ① 版本先行:当前解释器低于 MIN_PYTHON 就不用它跑任何一个字节的业务代码,
+    #    直接换一个合规的解释器 re-exec。这一步必须在依赖检查之前 —— 3.9 上
+    #    "依赖齐全"和"能不能跑"是两件事,先按依赖判定会得到错误的结论。
+    if not _py_ok(sys.version_info[:2]):
+        _py = _base_python()
+        if _py and os.path.abspath(_py) != os.path.abspath(sys.executable or ""):
+            os.environ["WCHAT_BOOTSTRAPPED"] = "1"
+            _log("🔁 当前 Python %d.%d 低于要求(%d.%d),改用 %s"
+                 % (sys.version_info[0], sys.version_info[1], MIN_PY[0], MIN_PY[1], _py))
+            try:
+                os.execv(_py, [_py, os.path.abspath(sys.argv[0])] + sys.argv[1:])
+            except OSError as e:
+                _fail("切换到 %s 失败(%s)" % (_py, e), None)
+        else:
+            _fail("需要 Python >= %d.%d,当前是 %d.%d"
+                  % (MIN_PY[0], MIN_PY[1], sys.version_info[0], sys.version_info[1]), None)
     # 已在 venv 中 / 系统依赖齐全 -> 直跑
     if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
         return
@@ -343,4 +417,3 @@ def ensure_runtime():
 
 if __name__ == "__main__":
     ensure_runtime()
-

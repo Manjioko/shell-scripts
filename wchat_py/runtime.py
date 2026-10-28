@@ -103,6 +103,13 @@ def _runtime_fallback():
     (`_run.py llm stream`、`wchat_py/mdrender.py`、repl 的 history helper)就会
     FileNotFoundError 直接崩栈,而不是给出一句能看懂的话。
     兜底顺序:环境里显式给的 → 当前 Cellar 里的 venv(按路径推断) → 系统 python3。
+
+    ⚠ **每个候选都要过 `bootstrap._suitable()`**(存在 + 可执行 + 版本达标),不是
+    "路径存在就用"。原因:这里的解释器是拿去 spawn 子进程(`_run.py llm stream`)的,
+    子进程必须能 import openai/httpx —— 那几个包装在 venv 里,不在 `/usr/bin/python3`。
+    旧实现只看 `os.path.exists`,于是在"brew 升级删了旧 Cellar、opt 链接也还没重建"
+    的窗口里会退到系统 3.9:子进程 `ImportError: No module named openai`,
+    而主进程一切正常 —— 报错位置离真因很远。
     """
     exe = sys.executable or ""
     if exe and os.path.exists(exe):
@@ -124,8 +131,17 @@ def _runtime_fallback():
     _cand.extend(sorted(_glob.glob("/usr/local/Cellar/wchat/*/libexec/venv/bin/python"),
                         reverse=True))
     _cand.append("/usr/bin/python3")
+    try:
+        from wchat_py.bootstrap import _suitable
+    except Exception:
+        _suitable = None
     for c in _cand:
-        if c and os.path.exists(c):
+        if not c:
+            continue
+        if _suitable is not None:
+            if _suitable(c):
+                return c
+        elif os.path.exists(c):
             return c
     return exe or "python3"
 
