@@ -264,7 +264,15 @@ def _consume_stream(p, on_text, on_reason):
             for _d in (ev.get("v") or []):
                 _idx = _d.get("index")
                 if _idx is None:
-                    _idx = len(tcs)
+                    # 缺 index 时**必须归到 0**,与 master 的 `jq '.index // 0'` 一致。
+                    # 原来写的是 `len(tcs)`(每片新开一个 slot),后果是:
+                    #   首片 {name, args:"{\"command\":"} → slot0(有 name、args 半截)
+                    #   次片 {args:"\"ls\"}"}          → slot1(name 空、args 半截)
+                    # 于是产生**一个空名工具调用 + 一个参数残缺的调用** ——
+                    # 用户看到的那两次"shell · 空命令"就是这么来的。
+                    # 实测:`{"command": ""}` 不可能是模型自己发的,它是分片被拆散后
+                    # 落到空 name slot 上的必然结果。
+                    _idx = 0
                 _slot = None
                 for _s in tcs:
                     if _s.get("_i") == _idx:
@@ -1502,7 +1510,31 @@ def run_turn(content, model="", max_rounds=None):
                                     for i, tc in enumerate(tcs)]})
         # 每个调用都必须有配对的 tool 结果, 否则下一轮 400(孤儿 tool_calls)
         for tc in tcs:
-            sys.stdout.write(_banner_text(tc.get("name") or "", tc.get("arguments") or ""))
+            _tcn = tc.get("name") or ""
+            _tci = tc.get("id") or ""
+            # master: `[[ -z "$fn_name" || -z "$fn_id" ]] && continue`
+            # (legacy_wchat.sh:7297)。**空的工具名不该被执行** —— Python 版原来会
+            # 拿空名去查表,得到"工具  尚未迁移"这种既不是成功也不是真错误的回传。
+            # 但 continue 会让这条 assistant(tool_calls) 变成孤儿 → 下一轮 400,
+            # 所以不能简单跳过:必须**补一条说明性的 tool 结果**把配对补上,
+            # 同时明确告诉模型"这条调用没有名字,请重新发起"。
+            if not _tcn.strip() or not _tci.strip():
+                _bad = ("错误:这条工具调用缺少 %s(name=%r, id=%r),无法执行。"
+                        "请重新发起这次调用并带上完整的工具名与 id。"
+                        % ("工具名" if not _tcn.strip() else "调用 id", _tcn, _tci))
+                sys.stdout.write("\033[2m⚠ 跳过一条无名工具调用(name=%r id=%r)\033[0m\n"
+                                 % (_tcn, _tci))
+                if _tci.strip():
+                    msgs.append({"role": "tool", "content": _bad, "tool_call_id": _tci})
+                else:
+                    # 连 id 都没有:无法构造合法的 tool 结果,只能整轮放弃,
+                    # 否则下一轮必 400(孤儿 tool_calls 没有配对)。
+                    sys.stdout.flush()
+                    return ("", None,
+                            "模型返回了缺少工具名与调用 id 的调用,无法继续"
+                            "(参数分片可能被网关拆坏了)。请重试一次。")
+                continue
+            sys.stdout.write(_banner_text(_tcn, tc.get("arguments") or ""))
             sys.stdout.write("\n"); sys.stdout.flush()
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
             if isinstance(out, str) and out.startswith("IMGJSON:"):

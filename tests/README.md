@@ -360,3 +360,58 @@
 > master 源码里那句兜底没被删)。变异各自被杀:去掉校验(退回原 bug)→**9 红**;
 > 横幅退回留白→2 红;校验挪到工具分支之后→1 红(结构锁);去掉 master 原话→1 红。
 > 正向反锁:正常命令仍能执行、`list_dir` 无必填所以空参仍放行、非 shell 横幅不受影响。
+
+> **tool_calls 流式解析(2026-10,用户一句反问定位到的根因)**
+>
+> 用户看到两次 `⏺ shell ·` + `完成 · 共 0 行`,问了一句关键的话:
+> **"一般来说 AI 不会用空参数来调用方法,问题应该还出在参数解析 / tools 结构"**。
+> 顺这条线查 master,发现**两处都没对齐**,而且是同一个 bug 的两半:
+>
+> ### 1. index 缺省值(这才是"凭空出现空参数"的真因)
+>
+> ```bash
+> # master: legacy_wchat.sh:7720
+> t_idx=$(printf '%s' "$tpiece" | jq -r '.index // 0' 2>/dev/null)
+> ```
+> ```python
+> # Python(改前):缺了就用当前 slot 数 —— 每片新开一个 slot
+> _idx = _d.get("index")
+> if _idx is None:
+>     _idx = len(tcs)
+> ```
+>
+> 一旦网关/代理下发的分片不带 `index`,一次调用会被拆成两个 slot:
+> ```
+> slot0: name=run_shell_command  args='{"command":'    ← 半截
+> slot1: name=''                 args='"ls -la"}'       ← 无名
+> ```
+> 于是产生**一个空名调用 + 一个参数残缺的调用**。`{"command": ""}` 不是模型发的,
+> 是分片被拆散后的必然产物。**这也解释了"为什么会出现两次"** —— 两个 slot 各一次。
+>
+> ### 2. 空 name/id 的处理
+>
+> ```bash
+> # master: legacy_wchat.sh:7297
+> [[ -z "$fn_name" || -z "$fn_id" ]] && continue
+> ```
+> Python 没有这道守卫,会拿空名去查表,返回"工具  尚未迁移到 Python 入口" ——
+> 既不是成功也不是真错误的回传,又一条静默失败。
+>
+> 修的时候有个细节不能照抄:master `continue` 会留下**孤儿 tool_calls**(下一轮 400)。
+> Python 版改成"补一条说明性的 tool 结果把配对补上 + 明确要求重新发起";
+> 连 id 都没有时无法构造合法 tool 结果,才整轮放弃并返回可读错误。
+>
+> ### tools 结构:查过,是**同源**的
+> master 的 `tools()` 调 `py_run tools build`,Python 的 `tools.build()` 读同一份
+> `tools_spec.json`(`spec_text()` 原样字节)。所以 schema 不是分歧点 ——
+> 分歧只在**解析侧**,即上面两条。
+>
+> 闸门 `工具流解析` **19/19**(用假 Popen 喂真实事件流走 `_call_llm`,不测内部函数,
+> 因为要测的正是分片怎么合并):
+> - 分片带 index → 正常合并(基线不许退化)
+> - **分片缺 index → 必须归同一 slot,name/args 都不许丢**
+> - 并行 0/1 → 不许被并成一个
+> - 空名守卫必须在 if 条件里(**用 AST 判**,`if False:` 骗不过它)
+> - 空名分支里不许调 `_run_tool`
+>
+> 变异:index 退回 `len(tcs)` → 1 红(直接打出两个 slot);守卫置 `if False:` → 1 红。
