@@ -820,19 +820,45 @@ def _path_guard(path, mode):
     return "用户拒绝访问工作目录外文件: %s" % path
 
 
+_RED = "\033[1;31m"
+_ZERO = "\033[0m"
+
+
+def _args_obj(args_json):
+    """参数解析成 dict;不是合法 JSON 对象时返回 None(原文由 _run_tool 负责回显)。"""
+    import json as _j
+    try:
+        a = _j.loads(args_json or "{}")
+    except Exception:
+        return None
+    return a if isinstance(a, dict) else None
+
+
 def _banner_text(name, args_json):
-    """master 的工具横幅:shell 显示 'shell · 命令原文',其余 'name · args 预览'。"""
+    """master 的工具横幅:shell 显示 'shell · 命令原文',其余 'name · args 预览'。
+
+    空命令不许静默留白(界面留白会被当成"命令很短"),但**也不能瞎猜原因**:
+    原来这里一律写"(命令为空 —— 本次调用未带 command 参数)",而真实事故里
+    模型发的是 `{"cmd": "..."}` / `{"path":..., "pattern":...}` —— 参数一个字
+    没少,只是**键名不对**。那句假归因把"模型写错键"说成"wchat 丢了参数",
+    人和模型都被它带偏(用户据此认为工具调用被解析坏了)。所以分四种说清:
+    带空 command / 缺 command 但有别的键 / 根本不是 JSON / 一个参数都没有。
+    """
     from wchat_py.render import tool_banner, args_preview
     if name == "run_shell_command":
-        try:
-            import json as _j
-            cmd = (_j.loads(args_json or "{}") or {}).get("command") or ""
-        except ValueError:
-            cmd = args_json or ""
-        # 空命令不许静默留白:界面上留白会被当成"命令很短",实际是参数没送到。
-        if not str(cmd).strip():
-            cmd = "\033[1;31m(命令为空 —— 本次调用未带 command 参数)\033[0m"
-        return tool_banner("shell", cmd)
+        a = _args_obj(args_json)
+        cmd = (a or {}).get("command") if a is not None else (args_json or "")
+        if str(cmd or "").strip():
+            return tool_banner("shell", cmd)
+        if a is None:
+            why = "(参数不是合法 JSON,未执行)"
+        elif "command" in a:
+            why = "(命令为空:command 是空串/纯空白,未执行)"
+        elif a:
+            why = "(缺 command —— 本次收到的是 %s,键名不对,未执行)" % "/".join(a)
+        else:
+            why = "(本次调用没带任何参数,未执行)"
+        return tool_banner("shell", _RED + why + _ZERO)
     return tool_banner(name or "", args_preview(args_json or ""))
 
 
@@ -930,9 +956,19 @@ def _run_tool(name, args_json):
         # 措辞:shell 保持 master 原话("命令参数为空"),其它工具说"参数为空"。
         # 不为了一致性把 master 那句改掉 —— 那句是排障时的搜索锚点。
         _what = "命令参数为空" if name == "run_shell_command" else "参数为空"
+        # 把"收到了什么键"直接说出来:真实事故里模型发的是 {"cmd": ...},
+        # 光说"缺少 command"它还会照原样再发一遍(实测多烧 1 轮)。
+        _got = (";本次收到的参数键:%s" % "/".join(a)) if a else ""
+        _hint = ""
+        for _wrong, _right in (("cmd", "command"), ("cmdline", "command"),
+                               ("command_line", "command"), ("shell", "command")):
+            if _wrong in a and _right in _miss:
+                _hint = ";键名疑似写错:%s 应为 %s" % (_wrong, _right)
+                break
         return ("错误:%s,工具调用参数解析失败: %s"
-                "(缺少必填参数:%s;工具:%s。请重新发起这次调用并补上这些参数,"
-                "不要假设它们有默认值。)" % (_what, _raw, "/".join(_miss), name))
+                "(缺少必填参数:%s;工具:%s%s%s。请重新发起这次调用并补上这些参数,"
+                "不要假设它们有默认值。)"
+                % (_what, _raw, "/".join(_miss), name, _got, _hint))
     if name == "list_dir":
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径

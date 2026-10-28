@@ -16,6 +16,11 @@
 
 所以判据是:**必填参数缺失/为空时,必须返回以"错误:"开头的明确说明**,
 不透传去执行;并且横幅上不许留一片空白。必填清单以 `tools_spec.json` 为唯一真源。
+
+后来用户又报"AI 调了一条空命令"(`⏺ shell · (命令为空 —— 本次调用未带 command 参数)`),
+查历史发现参数**一个字没少**,是模型把键名写成了 `cmd`(见 §7b/7c/10)。这说明
+"参数为空"这条判据还不够:归因必须区分**没带参数**和**键名不对**,否则横幅会把
+"模型写错键"报成"wchat 丢了参数" —— 人和模型都会照着错的线索排查。
 """
 import json
 import os
@@ -124,7 +129,39 @@ ck("正常命令横幅原样", "echo hi" in b2 and "命令为空" not in b2, rep
 b3 = cli._banner_text("read_file", '{"path": "x"}')
 ck("非 shell 工具横幅不受影响", "read_file" in b3, repr(b3))
 
-print("=== 8. 正常参数必须仍然放行(别把功能拦死) ===")
+print("=== 7b. 参数不是空、而是键名不对:横幅不许瞎归因 ===")
+# 真实事故(用户报"AI 调了一条空命令"):历史里那条调用是
+#   run_shell_command {"cmd": "cd ... && grep ...", "reason": "..."}
+# 参数一个字没少,只是键名写成 cmd。老横幅一律打
+#   "(命令为空 —— 本次调用未带 command 参数)"
+# 把"模型写错键"说成"wchat 丢了参数",人和模型都被带偏。分档说清原因:
+b = cli._banner_text("run_shell_command", '{"cmd": "ls -la", "reason": "看目录"}')
+ck("不再谎称'未带 command 参数'", "未带 command 参数" not in b, repr(b))
+ck("点名实际收到的键", "cmd" in b, repr(b))
+ck("明确标'未执行'", "未执行" in b, repr(b))
+b = cli._banner_text("run_shell_command", '{"path": "/x", "pattern": "y"}')
+ck("另一种错名形状也点名", "path" in b and "pattern" in b, repr(b))
+ck("带空 command 时说'命令为空'(区分于缺键)",
+   "命令为空" in cli._banner_text("run_shell_command", '{"command": "  "}'),
+   repr(cli._banner_text("run_shell_command", '{"command": "  "}')))
+ck("一个参数都没有时明说",
+   "没带任何参数" in cli._banner_text("run_shell_command", "{}"),
+   repr(cli._banner_text("run_shell_command", "{}")))
+
+print("=== 7c. 报错要把'收到了哪些键'告诉模型(否则它会原样再发一遍) ===")
+out = cli._run_tool("run_shell_command", '{"cmd": "ls"}')
+ck("回显收到的参数键", "本次收到的参数键:cmd" in out, repr(out)[:200])
+ck("点出键名疑似写错", "cmd 应为 command" in out, repr(out)[:200])
+ck("master 原话仍在(搜索锚点)", out.startswith("错误:命令参数为空"), repr(out)[:120])
+_marker = os.path.join(REPO, ".scratch", "toolargs_should_not_exist")
+try:
+    os.unlink(_marker)
+except OSError:
+    pass
+cli._run_tool("run_shell_command", json.dumps({"cmd": "touch %s" % _marker}))
+ck("键名不对时绝不执行(命令里的副作用没有发生)", not os.path.exists(_marker))
+
+
 out = cli._run_tool("run_shell_command", '{"command": "echo OK-123"}')
 ck("正常命令能执行", "OK-123" in out and not out.startswith("错误:"), repr(out)[:120])
 out = cli._run_tool("list_dir", '{"path": "."}')
@@ -139,6 +176,44 @@ ck("校验发生在任何工具分支之前",
    body.index("_missing_required(") < body.index('if name == "list_dir"'),
    "顺序不对:校验在分支之后等于漏掉一部分")
 
+print("=== 10. 端到端:这条错参数在真实工具循环里也不执行、且屏幕上说真话 ===")
+# 单测只证明 _banner_text/_run_tool;这里走真正的 run_turn 循环(打桩 _call_llm),
+# 钉住"用户看到的那一行"——事故里用户看到的就是这一行。
+import io as _io
+import re as _re
+
+_marker2 = os.path.join(REPO, ".scratch", "toolargs_loop_should_not_exist")
+try:
+    os.unlink(_marker2)
+except OSError:
+    pass
+_rounds = {"n": 0}
+_orig_call = cli._call_llm
+
+
+def _fake_call(msgs, model, on_text=None, on_reason=None):
+    _rounds["n"] += 1
+    if _rounds["n"] == 1:
+        return ("", [{"_i": 0, "id": "c1", "name": "run_shell_command",
+                      "arguments": json.dumps({"cmd": "touch %s" % _marker2,
+                                               "reason": "看代码"}, ensure_ascii=False)}], None)
+    return ("收到,改用 command。", [], None)
+
+
+_buf = _io.StringIO()
+_old_out = sys.stdout
+cli._call_llm = _fake_call
+sys.stdout = _buf
+try:
+    cli.run_turn("测试", model="x", max_rounds=3)
+finally:
+    sys.stdout = _old_out
+    cli._call_llm = _orig_call
+_screen = _re.sub(r"\x1b\[[0-9;]*m", "", _buf.getvalue())
+ck("屏幕上不再出现'未带 command 参数'", "未带 command 参数" not in _screen, _screen[:200])
+ck("屏幕上点名收到的键", "cmd" in _screen, _screen[:200])
+ck("循环把错误回传给模型(有第二轮)", _rounds["n"] >= 2, repr(_rounds))
+ck("错参数的副作用没有发生", not os.path.exists(_marker2))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-
