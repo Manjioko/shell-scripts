@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-python3 setup.py        # 可选:显式安装依赖(prompt_toolkit / rich / pillow)
+python3 wchat_py/installdeps.py        # 可选:显式安装依赖(prompt_toolkit / rich / pillow)
 ./wchat                 # 首次若缺依赖会自动建 ~/.ct/venv 并安装(一次),之后直接启动
 ```
 
@@ -83,12 +83,38 @@ python3 packaging/homebrew/make_release.py 0.2.0
 
 ## 目录
 
+顶层只有三类东西:**一个入口**(`wchat`)、**一个实现包**(`wchat_py/`)、**非代码资产**
+(`configs/ skills/ docs/ tests/ packaging/ Formula/`)。bash 时代散落在仓库根的
+`input_helper.py` / `render_helper.py` / `setup.py` 已收进包内,顶层不再有可执行脚本。
+
 | 路径 | 说明 |
 |---|---|
-| `wchat` | Python 入口 shim（`wchat_py.cli`） |
-| `wchat_py/` | 业务实现（入口/工具/硬墙/终端/渲染/MCP 等） |
-| `configs/` | 配置模板、`ctmodel.py`(兼容壳,实现在 `wchat_py/setup.py`)、`mcporter.example.json`(MCP 清单模板) |
+| `wchat` | 唯一入口 shim(9 行):自举 → 装配 → `wchat_py.cli.main` |
+| `wchat_py/` | 全部实现。分层见下表 |
+| `configs/` | 配置模板、`ctmodel.py`(兼容壳,实现在 `wchat_py/setup.py:cmd_model`)、`mcporter.example.json` |
 | `skills/` | 随包技能。首次运行补进 `~/.ct/skills/`(**只补缺、不覆盖**) |
-| `setup.py` | 依赖安装 |
-| `tests/` | 闸门与测试；`tests/legacy_wchat.sh` 仅为 **bash 基线 oracle**，产品不引用 |
-| `docs/` | 设计与迁移文档（`migration-to-python-B.md` 为 B 阶段结项） |
+| `tests/` | 闸门与测试;`tests/legacy_wchat.sh` 仅为 **bash 基线 oracle**,产品不引用 |
+| `docs/` | 设计与迁移文档(`migration-to-python-B.md` 为 B 阶段结项) |
+
+### `wchat_py/` 分层
+
+改动前先认清自己在哪一层 —— **下层不许反向依赖上层**(`tests/layout_test.py` 会拦)。
+
+| 层 | 模块 | 职责边界 |
+|---|---|---|
+| 入口 | `cli.py` | 命令行 → 一次会话:参数解析、`-h`、`main`、`run_turn`/`_call_llm` |
+| 会话 | `session.py` `repl.py` `msg.py` `msgstore.py` `compaction.py` `compact_run.py` `history.py` `state.py` `cmdline.py` | 消息历史、轮次闭环、压缩、交互循环 |
+| 工具 | `tools.py` `tools_spec.json` `toolrun.py` `tools_run.py` `filefmt.py` `toolcall.py` | 工具注册表 → 参数校验/横幅/分发 → 具体实现 |
+| 安全 | `hardwall.py` `hd.py` `hd_re.py` `pathrule.py` `pathutil.py` `authz.py` `authparse.py` `approve.py` `auto_enable.py` | 硬墙判据、路径裁决、**授权账本** |
+| 模型 I/O | `llm.py` `request.py` `prompts.py` `webs.py` `vision.py` `img.py` `imgstate.py` | 请求建体、SEAM 事件流、图片引用账本 |
+| 终端 | `render.py` `term.py` `termpty.py` `termwin.py` `shellio.py` `textutil.py` `mdrender.py` `inputbox.py` | raw/pty/流箱/宽字符截断/markdown/输入框 |
+| 运行期 | `runtime.py` `config.py` `bootstrap.py` `installdeps.py` `setup.py`(子命令:setup/model/mcp/skills) `audit.py` `apilog.py` `version.py` `mcp_boot.py` `mcp_bridge.py` `mcp_client.py` `skill.py` `seed.py` `_contract.py` `_run.py` | 配置装配、解释器兜底、依赖安装、记账、MCP、技能 |
+
+三条硬约束(都有闸门钉住):
+
+1. **`cli.py` 有行数上限**,已经切出去的函数(`_run_tool`/`_path_guard`/`_runtime_fallback`…)
+   不许回流 —— 它曾经是 2078 行的上帝模块。
+2. **`toolrun/approve/runtime/imgstate` 顶层不许 import `cli`**。跨层调审批要经
+   `toolrun._seam()` **在调用时**取,否则测试的 `cli._auth_think = fake` 打桩会静默失效。
+3. **共享账本只能原地修改**(`_GRANTED_PATHS`/`_IMG_REFS`/`_APPROVED_CMDS`)。写成
+   `global X; X = {}` 会让两个模块各自持有一份,而且不报错 —— 现象是"授权记了却查不到"。

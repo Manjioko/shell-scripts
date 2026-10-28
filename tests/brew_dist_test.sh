@@ -53,7 +53,7 @@ echo "=== 3. 按 Formula 布局安装 ==="
 tar xzf "$T1" -C "$BASE" || echo "!! 解包失败"
 SRC=$BASE/wchat-$V; PFX=$BASE/prefix
 mkdir -p "$PFX/bin" "$PFX/libexec/configs"
-cp -R "$SRC/wchat" "$SRC/wchat_py" "$SRC/input_helper.py" "$SRC/render_helper.py" \
+cp -R "$SRC/wchat" "$SRC/wchat_py" \
       "$SRC/requirements.txt" "$PFX/libexec/"
 cp "$SRC/configs/config.example" "$PFX/libexec/configs/"
 cp "$SRC/configs/ctmodel.py" "$PFX/libexec/configs/"

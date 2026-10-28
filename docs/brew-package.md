@@ -344,7 +344,7 @@ ls ~/.ct/auto/backup/            # 回滚点
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| `缺少 openai 依赖:请 pip3 install openai` | 用了 `WCHAT_NO_BOOTSTRAP=1` 但依赖不全 | 去掉该变量让它自举，或 `python3 setup.py` |
+| `缺少 openai 依赖:请 pip3 install openai` | 用了 `WCHAT_NO_BOOTSTRAP=1` 但依赖不全 | 去掉该变量让它自举，或 `python3 wchat_py/installdeps.py` |
 | 首次启动卡在「📦 安装依赖」 | 正在下载（或网络不通） | 等；不通就检查代理，或先手动 `pip install -r .../requirements.txt` |
 | 请求 404 | `BASE_URL` 写成了根路径 | 补成 `.../v1/chat/completions` |
 | 请求 401/403 | key 没生效 | `~/.ct/config` 里键名是 `WCHAT_API_KEY`；环境变量优先于配置文件，检查是否有旧值残留 |
@@ -371,7 +371,7 @@ brew uninstall wchat               # 卸载(代码)
 rm -rf ~/.ct                       # 卸载(配置/历史/技能/venv) —— 想留历史就别删
 ```
 
-Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 setup.py` 装依赖，然后 `./wchat`。
+Linux / WSL2 目前不走 brew：直接用仓库里的 `python3 wchat_py/installdeps.py` 装依赖，然后 `./wchat`。
 
 ---
 
@@ -462,7 +462,7 @@ python3 packaging/homebrew/make_release.py 0.3.0 --url https://github.com/<you>/
 - **不含** `__pycache__` / `*.pyc` / `.DS_Store`；残留旧 `.pyc` 可能盖住新源码，装出来
   和仓库不一致，这类问题极难查；
 - 文件 mtime 与 gzip 头固定为常量，**同内容 → 同 sha256**（可复现构建）；
-- 必装清单：`wchat`、`wchat_py/`、`input_helper.py`、`render_helper.py`、`requirements.txt`、
+- 必装清单：`wchat`、`wchat_py/`、`requirements.txt`、
   `configs/config.example`、`configs/ctmodel.py`、`README.md`、本文件。
 
 发布前自查：

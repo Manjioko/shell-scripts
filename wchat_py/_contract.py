@@ -4,7 +4,7 @@
 任何模块不得自己另立退出码或 stdout 格式;要加东西,改这里并升
 `wchat_py.CONTRACT_VERSION`。
 
-退出码(与既有 input_helper.py 的语义一致,不另立):
+退出码(与既有 wchat_py/inputbox.py 的语义一致,不另立):
 
   0  EXIT_OK     成功,数据在 stdout
   1  EXIT_FAIL   业务性失败(入参非法 / 对象不存在);调用方读 stdout 里的说明,**不回退**

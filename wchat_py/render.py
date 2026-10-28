@@ -181,12 +181,12 @@ class StreamBox:
 
 
 def render_markdown(text):
-    """整篇 markdown -> rich(ANSI)：调用项目既有 render_helper.py(与 bash 同一组件)。
+    """整篇 markdown -> rich(ANSI)：调用包内的 mdrender(与 bash 同一组件)。
     缺 rich/文件时回退原文，不阻断输出。"""
     helper = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "render_helper.py")
+                          "wchat_py", "mdrender.py")
     try:
-        from wchat_py.cli import _runtime_fallback
+        from wchat_py.runtime import _runtime_fallback
         _py = _runtime_fallback()
     except Exception:
         _py = sys.executable

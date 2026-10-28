@@ -286,7 +286,8 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
                 sys.stdout.write(" ⤷ %s 已缩到 %dpx(精度随之下调)\n"
                                  % (os.path.basename(_p), _actual))
                 _shrunk += 1
-            _ref = _cli._register_image_url(_p, _url, _actual)
+            from wchat_py.imgstate import register_image_url
+            _ref = register_image_url(_p, _url, _actual)
             _markers.append("[[IMGREF:%s]]" % _ref)
         sys.stdout.write(" 🖼 %d/%d 张原图已随本轮消息交给主模型"
                          "(其中 %d 张已缩过,逐张档位见上面各行的说明)\n"

@@ -443,3 +443,36 @@
 > ⚠ 顺带修了自己的一个事故:`run_gates.sh` 的五个数组被我改得不**等长**
 > (NAMES/CMDS/NOTE=58、MODE/PAT=59),那会让闸门**整体错位**。现在已核到全 59,
 > 并把这个检查当成改闸门表后的必做项。
+
+> **分层结构(2026-10,`wchat_py` 成为主代码目录后的重组)**
+>
+> 背景:`wchat_py/cli.py` 曾经 2078 行,同时是入口、帮助、工具协议、审批链、会话循环、
+> 配置装配、解释器兜底。迁移期这样是对的(先搬过来能跑),但继续加东西就开始互相踩。
+> 这一轮按职责切出四个模块,`cli.py` 落到 ~1166 行:
+>
+> | 新模块 | 从 cli 切出的东西 |
+> |---|---|
+> | `wchat_py/toolrun.py` | `_run_tool`(431 行)+ 必填校验 + 横幅 + 截断出口 |
+> | `wchat_py/approve.py` | `_GRANTED_PATHS`/`_ALLOW_RW`/`_APPROVED_CMDS` + `_path_guard`/`_grant_path` |
+> | `wchat_py/runtime.py` | 配置装配、`_runtime_fallback`、`_bump_auto`/`_auto_summary` |
+> | `wchat_py/imgstate.py` | `_IMG_REFS`/`_IMG_URLS`/`_IMG_SEQ` + 登记/清零 |
+>
+> 同时把 bash 时代散在仓库根的三支脚本收进包:`input_helper.py → wchat_py/inputbox.py`、
+> `render_helper.py → wchat_py/mdrender.py`、`setup.py → wchat_py/installdeps.py`。
+> 顶层现在只有 `wchat` 一个可执行入口。
+>
+> 闸门 `分层结构` **33/33**,守的是**结构契约**(行为由别的闸门守):
+> 1. `cli.py` 行数 ≤1250,且**已切出的函数名不许在 cli 里重新定义**(防回流);
+> 2. `toolrun/approve/runtime/imgstate` **顶层**不许 import `cli`(下层反向依赖);
+> 3. 三种乱序 `import` 都必须成功 —— 循环依赖的实证判据,不是看代码猜;
+> 4. `cli.X is 目标模块.X`(**同一对象**,防门面里又写一份实现);账本容器同一性也查;
+> 5. 账本只许原地修改:顶层重复赋值 与 函数内 `global X` 两条都判(后者才是真凶);
+> 6. 生产代码不许再引用顶层旧文件名(写死旧路径 = 静默降级)。
+>
+> 变异验证:toolrun 顶层 `import cli` → 3 红(含两条导入顺序);cli 里重写
+> `_runtime_fallback` → 1 红;账本 `global _IMG_URLS; _IMG_URLS = {}` → 1 红;
+> 审批改裸名(绕过 `_seam()`)→ 1 红。
+>
+> ⚠ 两处结构锁原来按**文件路径**切字符串(`cli.py` 里找 `def _run_tool`),实现一搬
+> 就变成假红。已改成 `inspect.getsource(cli._run_tool)` —— 契约跟函数走,不跟文件走。
+> 写结构锁时记住这条:**按名字取源码,别按路径切文件**。

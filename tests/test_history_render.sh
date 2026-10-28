@@ -28,7 +28,7 @@ cd "$(dirname "$0")/.." || exit 1   # 搬进 tests/ 后退回仓库根:被测源
 SRC="${1:-$PWD/wchat_ref}"
 [[ -f "$SRC" ]] || { echo "找不到被测脚本: $SRC"; exit 1; }
 SRC_ABS="$(cd "$(dirname "$SRC")" && pwd)/$(basename "$SRC")"
-HELP="$(dirname "$SRC_ABS")/render_helper.py"
+HELP="$(dirname "$SRC_ABS")/wchat_py/mdrender.py"
 
 pass=0; fail=0
 ok()  { echo "  PASS $1"; pass=$((pass + 1)); }

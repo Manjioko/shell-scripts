@@ -168,9 +168,12 @@ out = cli._run_tool("list_dir", '{"path": "."}')
 ck("list_dir 无必填,空参也放行", not out.startswith("错误:必填"), repr(out)[:80])
 
 print("=== 9. 结构锁:校验挂在 _run_tool 入口,所有工具都过 ===")
-src = open(os.path.join(REPO, "wchat_py", "cli.py"), encoding="utf-8").read()
-body = src[src.index("def _run_tool("):]
-body = body[:body.index("\ndef ", 10)] if "\ndef " in body[10:] else body
+# 用 inspect.getsource 取**函数本体**,而不是按文件路径切字符串:
+# 实现已经搬到 wchat_py/toolrun.py(分层重组),而"校验必须在所有分支之前"这条
+# 契约与它住在哪个文件无关。写死路径会让下次搬文件变成一次假红。
+import inspect
+
+body = inspect.getsource(cli._run_tool)
 ck("_run_tool 里有必填校验调用", "_missing_required(" in body)
 ck("校验发生在任何工具分支之前",
    body.index("_missing_required(") < body.index('if name == "list_dir"'),

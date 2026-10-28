@@ -294,7 +294,8 @@ def _default_meta(action, arg, session=None):
         enter_auto(s, tier)
         return True
     if action == "auto_off":
-        from wchat_py.cli import inp_msg, _auto_summary
+        from wchat_py.cli import inp_msg
+        from wchat_py.runtime import _auto_summary
         from wchat_py.session import auto_off
         s = sess
         if not s.auto_mode:
@@ -385,9 +386,10 @@ def parse_placeholders(text):
 
 
 def _grant_read(path):
+    """Ctrl-F 选中的文件视为"人已经点了它",记进授权账本(唯一写入口在 approve)。"""
     try:
-        from wchat_py import cli as _cli
-        _cli._GRANTED_PATHS.add(("r", os.path.realpath(os.path.expanduser(path))))
+        from wchat_py.approve import _grant_path
+        _grant_path(path, "r")
     except Exception:
         pass
 
@@ -552,13 +554,13 @@ def _file_placeholder(path):
 
 
 def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
-    """交互式：经 input_helper.py(prompt_toolkit) 读行；缺文件时退回 input()。
+    """交互式：经 wchat_py/inputbox.py(prompt_toolkit) 读行；缺文件时退回 input()。
 
     Ctrl-F(rc=4) 按 master 逻辑:弹系统文件选择器 → 把占位行带回输入框继续编辑;
     取消且输入为空 → 本轮无输入。
     """
     _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _helper = os.path.join(_repo, "input_helper.py")
+    _helper = os.path.join(_repo, "wchat_py", "inputbox.py")
     _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
     _hist = os.path.join(_ct, "input_history")
     _clip = os.path.join(_ct, "clip")
@@ -568,7 +570,8 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
             default = ""
             while True:
                 from wchat_py import cli as _cli
-                argv = [_cli._runtime_fallback(), _helper, "--history", _hist,
+                from wchat_py.runtime import _runtime_fallback
+                argv = [_runtime_fallback(), _helper, "--history", _hist,
                         "--clip-dir", _clip, "--no-commands"]
                 if default:
                     argv += ["--default", default]

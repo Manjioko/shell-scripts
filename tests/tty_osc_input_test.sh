@@ -3,7 +3,7 @@
 #
 # 用法: bash tests/tty_osc_input_test.sh
 #       bash tests/tty_osc_input_test.sh --source .scratch/input_helper.old.py   # 负对照
-#       REAL=… HELPER=… 可分别指定被测 wchat_ref / input_helper.py
+#       REAL=… HELP=… 可分别指定被测 wchat_ref / wchat_py/inputbox.py
 #
 # 现象(用户实报,截图为准):`wchat -dp -l` 选完编号后,输入框里出现
 #   ]11;rgb:2828/2c2c/3434]11;rgb:2828/2c2c/3434…
@@ -41,7 +41,7 @@ fi
 export LC_ALL=C
 DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REAL=${REAL:-$DIR/wchat_ref}
-HELP=${HELP:-$DIR/input_helper.py}
+HELP=${HELP:-$DIR/wchat_py/inputbox.py}
 if [[ "${1:-}" == "--source" && -n "${2:-}" ]]; then HELP="$2"; fi
 [[ -f "$HELP" ]] || { echo "❌ 找不到被测输入助手:$HELP"; exit 1; }
 PYBIN=${PYBIN:-python3}

@@ -266,7 +266,7 @@ H6 cd 语境边角（`cd $PWD`、`cd ~` 后 `cat .aws` 类脱敏粒度过宽）�
 ### 运行方式（新布局）
 
 ```bash
-python3 setup.py          # 检测/安装依赖(原 setup.sh)
+python3 wchat_py/installdeps.py          # 检测/安装依赖(原 setup.sh)
 ./wchat                   # 入口(Python 5 行 shim → wchat_py.cli)
 ./wchat -h                # 帮助
 python3 configs/ctmodel.py <model>   # 切换模型(原 configs/ctmodel.sh)

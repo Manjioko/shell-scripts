@@ -136,10 +136,8 @@ ck("名字各自正确",
 print("=== 4. 空 name 的调用:执行侧必须有守卫(对齐 master 的 continue) ===")
 # 注意:守卫在 run_turn 的工具循环里,不在 _run_tool 内部 —— 这是分层:
 # `_consume_stream` 只负责解析,过滤是执行侧的职责。所以这里查**真实执行路径**。
-_src = open(os.path.join(REPO, "wchat_py", "cli.py"), encoding="utf-8").read()
-_loop = _src[_src.index("每个调用都必须有配对的 tool 结果"):]
-_loop = _loop[:_loop.index("sys.stdout.write(box.close())")] \
-    if "sys.stdout.write(box.close())" in _loop else _loop
+import inspect
+_loop = inspect.getsource(cli.run_turn)
 ck("工具循环里有空 name/id 守卫", "_tcn.strip()" in _loop and "_tci.strip()" in _loop)
 ck("守卫在任何执行动作之前",
    _loop.index("_tcn.strip()") < _loop.index("_run_tool("),

@@ -9,7 +9,7 @@ class Wchat < Formula
   depends_on "python@3.12"
 
   def install
-    libexec.install "wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirements.txt"
+    libexec.install "wchat", "wchat_py", "requirements.txt"
     (libexec/"configs").install "configs/config.example"
     (libexec/"configs").install "configs/ctmodel.py"
     (libexec/"doc").install "README.md" if File.exist?("README.md")

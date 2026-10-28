@@ -26,7 +26,7 @@ import tarfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DIST = os.path.join(ROOT, "dist")
 FORMULA_DIR = os.path.join(ROOT, "packaging", "homebrew", "Formula")
-INCLUDE = ["wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirements.txt",
+INCLUDE = ["wchat", "wchat_py", "requirements.txt",
            "README.md", "docs/brew-package.md", "skills"]
 GITHUB_URL = "https://github.com/Manjioko/shell-scripts"
 CONFIG = os.path.join("configs", "config.example")
@@ -118,7 +118,7 @@ FORMULA = '''class Wchat < Formula
   depends_on "python@3.12"
 
   def install
-    libexec.install "wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirements.txt"
+    libexec.install "wchat", "wchat_py", "requirements.txt"
     (libexec/"configs").install "configs/config.example"
     (libexec/"configs").install "configs/ctmodel.py"
     (libexec/"doc").install "README.md" if File.exist?("README.md")
