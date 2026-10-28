@@ -169,55 +169,46 @@ def mcp_dest():
     return os.environ.get("MCP_CONFIG") or os.path.join(_ct_home(), "mcporter.json")
 
 
-def seed_mcp(force=False):
-    """把模板复制成 ~/.ct/mcporter.json。已存在则**拒绝**,返回 (路径或None, 说明)。
+def ensure_manifest():
+    """首次启动时让 `~/.ct/mcporter.json` 就位。**只有一个入口、一条路径**。
 
-    `force=True` 也不覆盖:清单里可能有用户自己的 server 与占位配置。
-    要重来请用户自己删/改名(这是有意的:模型不该能重置用户的 MCP 配置)。
+    顺序(目标已存在就什么都不做):
+      1. 老位置有清单 → 复制过来(老用户升级后不会突然"server 全没了");
+      2. 否则 → 用随包模板生成(新用户开箱就有一份能用的,默认只开 chrome)。
+
+    为什么不保留 `wchat mcp init`:有了这一步,init 永远是空操作或重复机制。
+    少一个命令就少一个"到底该跑哪个"的问题 —— 用户不必知道清单是怎么来的。
+
+    不删老位置的原件:那个目录里还有 mcporter 自己的 daemon 状态与 vault,
+    哪些该留由上游决定,不该我们代删。
     """
-    dest, src = mcp_dest(), mcp_template()
-    if os.path.exists(dest) and not force:
-        return None, "已存在,未改动: %s" % dest
-    if os.path.exists(dest) and force:
-        return None, "已存在,拒绝覆盖(请先自己移走): %s" % dest
+    dest = mcp_dest()
+    if os.path.exists(dest):
+        return None, "已存在"
+    home = os.environ.get("HOME") or ""
+    legacy = os.path.join(home, ".mcporter", "mcporter.json")
+    if os.path.isfile(legacy):
+        src, why = legacy, "从老位置复制(升级迁移)"
+    else:
+        src, why = mcp_template(), "从随包模板生成"
     if not os.path.isfile(src):
-        return None, "包里没有模板: %s" % src
+        return None, "没有可用的源(模板缺失)"
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         tmp = dest + ".tmp"
         shutil.copyfile(src, tmp)
-        os.chmod(tmp, 0o600)        # 里面可能有 env 引用,按凭据级处理
+        os.chmod(tmp, 0o600)      # 清单里可能有 env 引用,按凭据级处理
         os.replace(tmp, dest)
     except OSError as e:
         return None, "写入失败: %s" % e
-    _write_marker("mcp", {"version": _version(), "path": dest})
-    return dest, "已写入 %s(记得 export 模板里引用的环境变量)" % dest
+    _write_marker("mcp", {"version": _version(), "path": dest,
+                          "source": src, "why": why})
+    return dest, why
 
 
 def migrate_from_legacy():
-    """把老的清单位搬到 ~/.ct/mcporter.json(只在目标不存在时)。
-
-    为什么要有:清单从上游默认位收进 `~/.ct/` 之后,老用户如果什么都不做,会突然
-    发现 `-mcp` 里 server 全没了 —— 那不是"没配",是"我们换了读取位置"。所以第一次
-    启动时**复制**一份过去(不删原件:原件里可能还有别的工具在读写,不该我们代删)。
-    """
-    dest = mcp_dest()
-    if os.path.exists(dest):
-        return None
-    home = os.environ.get("HOME") or ""
-    legacy = os.path.join(home, ".mcporter", "mcporter.json")
-    if not os.path.isfile(legacy):
-        return None
-    try:
-        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        tmp = dest + ".tmp"
-        shutil.copyfile(legacy, tmp)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dest)
-    except OSError:
-        return None
-    _write_marker("mcp", {"version": _version(), "path": dest, "migrated_from": legacy})
-    return dest
+    """兼容旧名。等价于 ensure_manifest(),返回路径或 None。"""
+    return ensure_manifest()[0]
 
 
 # ------------------------------------------------------------------ 入口小工具
@@ -254,27 +245,29 @@ def cmd_skills(argv):
 
 
 def cmd_mcp(argv):
-    """`wchat mcp [status|init]` —— 清单在哪、有没有、能不能初始化。"""
+    """`wchat mcp` —— 清单在哪、有哪些 server、文件是哪来的。只读。
+
+    **没有 init 子命令**:清单在首次启动时自动就位(见 ensure_manifest)。
+    多一个命令只会让人问"我该跑哪个",而答案永远是"不用跑"。
+    """
     sub = argv[0] if argv else "status"
-    dest = mcp_dest()
-    if sub in ("init", "--init"):
-        p, msg = seed_mcp()
-        sys.stdout.write("%s\n" % msg)
-        if p:
-            sys.stdout.write("下一步:编辑 %s,把需要的 server 打开;然后 `wchat -mcp` 启动。\n" % p)
-            return 0
-        return 1
     if sub in ("-h", "--help", "help"):
-        sys.stdout.write("用法: wchat mcp [status|init]\n"
-                         "  status:清单路径 + 有哪些 server(不打印任何 env 值)\n"
-                         "  init: 从随包模板生成清单(已存在则拒绝)\n")
+        sys.stdout.write(
+            "用法: wchat mcp\n"
+            "  显示清单位置、有哪些 server、以及这份文件是模板生成的还是从老位置搬来的。\n"
+            "  清单在首次启动时自动就位,不需要手动初始化;\n"
+            "  想改 server 列表直接编辑该文件(注意 env 只写 ${VAR} 占位)。\n")
         return 0
-    # status
+    dest = mcp_dest()
     sys.stdout.write("清单路径: %s\n" % dest)
     if not os.path.isfile(dest):
-        sys.stdout.write("状态: 不存在(`wchat mcp init` 可从模板生成)\n")
-        sys.stdout.write("模板: %s\n" % mcp_template())
+        # 正常不该走到这里(启动时会补),但手工删掉后要说清楚怎么回来
+        sys.stdout.write("状态: 不存在(下次启动 wchat 会自动补一份;模板: %s)\n"
+                         % mcp_template())
         return 0
+    mk = _read_marker("mcp")
+    if mk.get("why"):
+        sys.stdout.write("来源: %s\n" % mk["why"])
     try:
         with open(dest, encoding="utf-8", errors="replace") as f:
             d = json.load(f)
@@ -282,5 +275,6 @@ def cmd_mcp(argv):
         sys.stdout.write("状态: 读不了(%s)\n" % e)
         return 1
     servers = list((d.get("mcpServers") or {}).keys())
-    sys.stdout.write("状态: 有,%d 个 server: %s\n" % (len(servers), ", ".join(servers) or "(空)"))
+    sys.stdout.write("状态: 有,%d 个 server: %s\n"
+                     % (len(servers), ", ".join(servers) or "(空)"))
     return 0

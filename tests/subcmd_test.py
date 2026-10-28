@@ -33,8 +33,12 @@ def ck(name, ok, detail=""):
         print("  FAIL %s%s" % (name, (": " + detail) if detail else ""))
 
 
+_TMPDIRS = []
+
+
 def fresh():
     d = tempfile.mkdtemp(prefix="cmds_", dir=REPO)
+    _TMPDIRS.append(d)
     os.environ["HOME"] = os.path.join(d, "home")
     os.environ["CT_HOME"] = os.path.join(d, "ct")
     os.makedirs(os.environ["HOME"])
@@ -90,16 +94,25 @@ ck("默认路径在 ~/.ct 下",
    mcp_bridge.config_path() == os.path.join(os.environ["CT_HOME"], "mcporter.json"),
    mcp_bridge.config_path())
 ck("没清单时 status 不炸", seed.cmd_mcp([]) == 0)
-ck("init 生成清单", seed.cmd_mcp(["init"]) == 0 and os.path.isfile(seed.mcp_dest()))
+# 唯一入口:ensure_manifest 负责"新用户从模板生成"
+_p, _why = seed.ensure_manifest()
+ck("新用户:自动从模板生成", _p == seed.mcp_dest(), repr((_p, _why)))
+ck("生成时说清了来源", "模板" in _why, _why)
 ck("生成的清单权限 600", (os.stat(seed.mcp_dest()).st_mode & 0o777) == 0o600)
-ck("init 幂等:不覆盖已有",
-   seed.cmd_mcp(["init"]) != 0 and os.path.isfile(seed.mcp_dest()))
-# 故意改一下,确认再 init 不会把它冲掉
-with open(seed.mcp_dest(), "a", encoding="utf-8") as f:
-    f.write("\n")
+ck("只默认开 chrome",
+   mcp_bridge.config_servers() == ["chrome"], repr(mcp_bridge.config_servers()))
+# 幂等:再调不覆盖
 _before = open(seed.mcp_dest(), encoding="utf-8").read()
-seed.cmd_mcp(["init"])
-ck("再 init 一个字都没改", open(seed.mcp_dest(), encoding="utf-8").read() == _before)
+_p2, _why2 = seed.ensure_manifest()
+ck("再 ensure 不覆盖", _p2 is None and _why2 == "已存在", repr((_p2, _why2)))
+ck("再 ensure 一个字都没改",
+   open(seed.mcp_dest(), encoding="utf-8").read() == _before)
+# 结构锁:**不许再有 init 子命令**。两套机制并存正是这次要消灭的东西,
+# 所以直接查源码里没有 "init" 这个分派,而不是查它的输出(输出措辞会变)。
+_src = open(os.path.join(REPO, "wchat_py", "seed.py"), encoding="utf-8").read()
+_help = open(os.path.join(REPO, "wchat_py", "seed.py"), encoding="utf-8").read()
+ck("seed 里不再有 init 分派", 'in ("init", "--init")' not in _src)
+ck("help 文本不再教人 init", "init:" not in _help)
 
 # 迁移:目标不存在 + 老位置有 -> 复制一份过去
 d = fresh()
@@ -162,7 +175,10 @@ ck("播种留了 marker", os.path.isfile(os.path.join(os.environ["CT_HOME"], ".s
 ck("包里有 skills 源目录", os.path.isdir(seed.skills_src()), seed.skills_src())
 ck("源目录里技能数 > 0", len(os.listdir(seed.skills_src())) > 0)
 
-shutil.rmtree(d, ignore_errors=True)
+# 清理必须在**断言之后、打印结论之前**:以前只清了最后一节的目录,
+# 前面每节 fresh() 建的都留在仓库根,跑几次就是几十个 cmds_xxx 垃圾目录。
+for _d in _TMPDIRS:
+    shutil.rmtree(_d, ignore_errors=True)
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
 

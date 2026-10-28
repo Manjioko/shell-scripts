@@ -31,7 +31,7 @@ INCLUDE = ["wchat", "wchat_py", "input_helper.py", "render_helper.py", "requirem
 GITHUB_URL = "https://github.com/Manjioko/shell-scripts"
 CONFIG = os.path.join("configs", "config.example")
 CONFIG_PY = os.path.join("configs", "ctmodel.py")   # 模型档案切换,随包安装为 bin/ctmodel
-MCP_EXAMPLE = os.path.join("configs", "mcporter.example.json")  # MCP 清单模板(wchat mcp init)
+MCP_EXAMPLE = os.path.join("configs", "mcporter.example.json")  # MCP 清单模板(首次启动自动复制到 ~/.ct/)
 
 # 打包时剔除:字节码缓存/编辑器/系统垃圾。匹配的是**路径任一组件或文件名**。
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".git", "build", "dist"}

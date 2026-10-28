@@ -70,7 +70,7 @@ def help_user():
     inp_msg("不开对话、只做配置类动作:")
     inp_msg("  wchat -config        逐项填写配置(接口地址/key/模型),写 ~/.ct/config")
     inp_msg("  wchat model [名字]   看/切换模型组(等价原来的 ctmodel);-l 列组,check 校验,undo 回滚")
-    inp_msg("  wchat mcp [status|init]  看 MCP 清单位置与 server;init 从模板生成 ~/.ct/mcporter.json")
+    inp_msg("  wchat mcp            看 MCP 清单位置与 server(首次启动自动生成 ~/.ct/mcporter.json)")
     inp_msg("  wchat skills [--seed]    看技能来源;--seed 把随包技能补进 ~/.ct/skills(只补缺,不覆盖)")
     inp_msg()
     inp_msg("内容交互时，也可使用以下选项:")
@@ -1620,12 +1620,15 @@ def main(argv):
         sys.executable = _exe
     _load_ct_config()
     _apply_runtime_defaults()
-    # MCP 清单换位置后的老用户迁移(只在 ~/.ct/mcporter.json 不存在时复制一份)。
-    # 必须早于任何 MCP 相关读取;失败不阻止启动。
+    # 让 ~/.ct/mcporter.json 就位(**唯一入口**,见 seed.ensure_manifest):
+    #   目标不存在 → 老位置有清单就搬过来,否则从随包模板生成;
+    #   已存在 → 什么都不做(绝不覆盖用户改过的)。
+    # 无条件执行,不要求带 -mcp:这是"配置文件就位",不是"启用能力";
+    # 否则新用户会看到"没有清单",而正确的默认状态应该是有清单但没启用。
+    # 必须在任何 MCP 相关读取之前;失败不阻止启动。
     try:
         from wchat_py import seed as _seed0
-        if os.environ.get("MCP_ENABLE") == "1":
-            _seed0.migrate_from_legacy()
+        _seed0.ensure_manifest()
     except Exception:
         pass
     # 配置:检测(只提示不接管)与填写(逐项问)分开。

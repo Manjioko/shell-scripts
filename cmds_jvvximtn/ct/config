@@ -1,4 +1,0 @@
-# BASE_URL="https://a/v1/chat/completions" # @model deepseek
-# PRO_MODEL="ds" # @model deepseek
-BASE_URL="https://q/v1/chat/completions" # @model qwen
-PRO_MODEL="qw" # @model qwen
