@@ -553,14 +553,29 @@ def verify():
         return False, "缺少 openai 依赖,请重装 wchat"
     try:
         cli = _make_client(base, key, os.environ.get("API_KEY_HEADER", ""))
+        _ping_msgs = [{"role": "user", "content": "hi"}]
         stream = cli.chat.completions.create(
             model=(model or "default"),
-            messages=[{"role": "user", "content": "hi"}],
+            messages=_ping_msgs,
             max_tokens=1, stream=True)
+        _ping_usage = None
         for _chunk in stream:
+            _ping_usage = getattr(_chunk, "usage", None) or _ping_usage
             break
         try:
             stream.close()
+        except Exception:
+            pass
+        # 连通性自检也是真花钱的调用(--config 每次验一次)。记一笔,免得
+        # "到底谁在花钱"永远少一个来源。
+        try:
+            from wchat_py import apilog as _apilog
+            _d = getattr(_ping_usage, "prompt_tokens_details", None)
+            _apilog.record("ping", model, _ping_msgs, ok=True, extra={"max_tokens": 1},
+                           usage={"prompt": getattr(_ping_usage, "prompt_tokens", 0) or 0,
+                                  "completion": getattr(_ping_usage, "completion_tokens", 0) or 0,
+                                  "cached": (getattr(_d, "cached_tokens", 0)
+                                             if _d is not None else 0) or 0})
         except Exception:
             pass
         return True, "连通了(%s)" % (model or "default")

@@ -31,7 +31,7 @@ def summarize(text):
     try:
         msg = _nonstream_msg([{"role": "system", "content": COMPACT_SYS},
                               {"role": "user", "content": text}],
-                             os.environ.get("FLASH_MODEL", ""))
+                             os.environ.get("FLASH_MODEL", ""), source="compact")
         return getattr(msg, "content", "") or ""
     except Exception:
         return ""

@@ -284,6 +284,8 @@ def _consume_stream(p, on_text, on_reason):
                 os.environ["WCHAT_LAST_PROMPT_TOKENS"] = str(int(_u.get("prompt") or 0))
                 os.environ["WCHAT_LAST_CACHED_TOKENS"] = str(int(_u.get("cached") or 0))
                 os.environ["WCHAT_LAST_IMAGE_TOKENS"] = str(int(_u.get("image") or 0))
+                os.environ["WCHAT_LAST_COMPLETION_TOKENS"] = str(int(_u.get("completion") or 0))
+                os.environ["WCHAT_LAST_USAGE_SEEN"] = "1"
             except (TypeError, ValueError):
                 pass
         elif t == "error":
@@ -299,6 +301,13 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
     """
     import json as _json, subprocess
     from wchat_py import tools as _tools
+    # 每次调用的 usage 必须**独立**:先清空,拿不到就记 0。
+    # 不清的话,这次请求失败(没有 usage 事件)会把上一次的 prompt_tokens 当成本次的
+    # 写进账本 —— 账面上看着花了钱,实际是上一次的旧值,后续所有"用量"分析都跟着歪。
+    for _k in ("WCHAT_LAST_PROMPT_TOKENS", "WCHAT_LAST_CACHED_TOKENS",
+               "WCHAT_LAST_IMAGE_TOKENS", "WCHAT_LAST_COMPLETION_TOKENS"):
+        os.environ.pop(_k, None)
+    os.environ.pop("WCHAT_LAST_USAGE_SEEN", None)
     try:
         _tb = _tools.build(provider=os.environ.get("WEB_SEARCH_PROVIDER", ""),
                            mcp_enable=(1 if os.environ.get("MCP_ENABLE") == "1" else 0),
@@ -368,6 +377,21 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
             p.wait()
         except Exception:
             pass
+        # 记账:流式主对话。**必须放在 finally 里** —— 被 Ctrl+C 打断的请求也**已经**
+        # 产生了输入侧的 token 消耗(服务端按收到的内容计费),不记就等于漏账。
+        # 这里每被调用一次就记一笔:agent 工具循环里一次用户请求会触发 N 次,
+        # 每次都要重发全量上下文 —— 那正是 token 消耗的主要来源,必须逐次可见。
+        try:
+            from wchat_py import apilog as _apilog
+            _apilog.record(
+                "main", _model, msgs,
+                usage={"prompt": os.environ.get("WCHAT_LAST_PROMPT_TOKENS"),
+                       "cached": os.environ.get("WCHAT_LAST_CACHED_TOKENS"),
+                       "image": os.environ.get("WCHAT_LAST_IMAGE_TOKENS"),
+                       "completion": os.environ.get("WCHAT_LAST_COMPLETION_TOKENS")},
+                ok=not bool(err), extra={"think": _think}, tools=_tlist)
+        except Exception:
+            pass
         if _ref_tmp:
             try:
                 os.unlink(_ref_tmp)
@@ -422,7 +446,7 @@ def _auth_think(cmd):
     _sys = AUTH_SYS.replace("{workdir}", os.environ.get("WORK_ROOT") or os.getcwd())
     try:
         raw = _nonstream([{"role": "system", "content": _sys},
-                          {"role": "user", "content": cmd}], model)
+                          {"role": "user", "content": cmd}], model, source="auth")
     except Exception:
         return None, None
     line = (raw or "").split("\n", 1)[0].strip()
@@ -433,20 +457,57 @@ def _auth_think(cmd):
     return None, None
 
 
-def _nonstream(msgs, model):
-    """非流式单次调用(审批器/终审器用),返回 content；失败抛异常由调用方处理。"""
+def _nonstream(msgs, model, source="?"):
+    """非流式单次调用(审批器/终审器用),返回 content；失败抛异常由调用方处理。
+
+    `source` 归因标签:审批器每次**工具调用**都要问一次模型,是容易被忽略的固定成本。
+    记账时必须能和主对话分开 —— 否则"token 消耗快"永远归因不到审批链上。
+    """
     from wchat_py.llm import _make_client
     cli = _make_client(os.environ.get("BASE_URL", ""),
                        os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or "",
                        os.environ.get("API_KEY_HEADER", "api-key"))
-    resp = cli.chat.completions.create(model=(model or "default"), messages=msgs,
-                                       stream=False,
-                                       extra_body={"thinking": {"type": "disabled"}})
+    try:
+        resp = cli.chat.completions.create(model=(model or "default"), messages=msgs,
+                                           stream=False,
+                                           extra_body={"thinking": {"type": "disabled"}})
+    except Exception:
+        # 审批器/终审器不带 tools,这里不能引用 tools(未定义)
+        _log_call(source, model, msgs, None, ok=False)
+        raise
+    _log_call(source, model, msgs, getattr(resp, "usage", None), ok=True)
     return resp.choices[0].message.content or ""
 
 
-def _nonstream_msg(msgs, model, tools=None):
-    """非流式单次调用,返回 message 对象(支持 tools/function calling)。"""
+def _usage_dict(u):
+    """SDK 的 usage 对象 → 记账用的扁平字典(缺字段一律 0,不沿用上一轮)。"""
+    if u is None:
+        return {}
+    d = getattr(u, "prompt_tokens_details", None)
+    return {"prompt": getattr(u, "prompt_tokens", None) or 0,
+            "completion": getattr(u, "completion_tokens", None) or 0,
+            "cached": (getattr(d, "cached_tokens", 0) if d is not None else 0) or 0,
+            "image": (getattr(d, "image_tokens", 0) if d is not None else 0) or 0}
+
+
+def _log_call(source, model, msgs, usage, ok=True, tools=None):
+    """**所有**非流式调用的记账出口;不走它就会重新变成盲区。
+
+    `tools` 也要记:标题/技能这类调用只带一个很小的 tools schema,但也算输入成本。
+    """
+    try:
+        from wchat_py import apilog
+        apilog.record(source, model, msgs, usage=_usage_dict(usage), ok=ok, tools=tools)
+    except Exception:
+        pass
+
+
+def _nonstream_msg(msgs, model, tools=None, source="?"):
+    """非流式单次调用,返回 message 对象(支持 tools/function calling)。
+
+    `source` 是记账归因标签 —— 这一层以前**完全不记 usage**,于是"token 消耗快"
+    时没法判断钱花在标题、压缩、还是提炼技能上。
+    """
     from wchat_py.llm import _make_client
     cli = _make_client(os.environ.get("BASE_URL", ""),
                        os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or "",
@@ -455,7 +516,12 @@ def _nonstream_msg(msgs, model, tools=None):
               extra_body={"thinking": {"type": "disabled"}})
     if tools:
         kw["tools"] = tools
-    resp = cli.chat.completions.create(**kw)
+    try:
+        resp = cli.chat.completions.create(**kw)
+    except Exception:
+        _log_call(source, model, msgs, None, ok=False, tools=tools)
+        raise
+    _log_call(source, model, msgs, getattr(resp, "usage", None), ok=True, tools=tools)
     return resp.choices[0].message
 
 
@@ -485,7 +551,7 @@ def _skill_draft(conv):
                     {"role": "user", "content": user + "\n\n(你上次的输出不符合要求,原文如下,"
                      "请改为调用 save_skill 工具,把内容填进工具参数:)\n" + prev[:500]}]
         try:
-            msg = _nonstream_msg(msgs, model, tools=[SAVE_SKILL_TOOL])
+            msg = _nonstream_msg(msgs, model, tools=[SAVE_SKILL_TOOL], source="skill")
         except Exception:
             return None
         tcs = getattr(msg, "tool_calls", None) or []
@@ -503,30 +569,29 @@ def _skill_draft(conv):
 
 
 def _default_final_call(cmd, reason=""):
+    """auto 模式的终审器。
+
+    输入只有「命令 + 模型自述的执行理由 + 初审结论」—— **不含会话内容**。
+    这一点很关键:终审发生在每次工具调用,如果带上会话历史,auto 模式下
+    每条命令都要重付一次全量上下文。
+
+    ⚠ 这里原来**直接调 SDK、绕过了 `_nonstream`**,于是它是唯一一个不记账的
+    调用点 —— auto 模式无人值守跑长任务时,终审可能被调用几十次,而账本上是 0。
+    统一走 `_nonstream` 就不再需要单独维护记账。
+    """
     model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
     msgs = [{"role": "system", "content": AUTO_FINAL_SYS},
             {"role": "user", "content": "命令: %s\n执行理由: %s\n初审结论: N\n" % (cmd, reason)}]
     try:
-        from wchat_py.llm import _make_client
-        _base = os.environ.get("BASE_URL", "")
-        _key = os.environ.get("API_KEY") or os.environ.get("WCHAT_API_KEY") or ""
-        _hdr = os.environ.get("API_KEY_HEADER", "api-key")
-        _cli = _make_client(_base, _key, _hdr)
-        _resp = _cli.chat.completions.create(model=(model or "default"),
-                                             messages=msgs, stream=False,
-                                             extra_body={"thinking": {"type": "disabled"}})
-        text = (_resp.choices[0].message.content or "")
-        err = None
+        text = _nonstream(msgs, model, source="auth_final") or ""
     except Exception as _e:
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE final EXC %r\n" % (_e,)); sys.stderr.flush()
         return ""
     if os.environ.get("WCHAT_TRACE") == "1":
-        sys.stderr.write("TRACE final model=%r text=%.50r err=%r\n"
-                         % (model, text, err)); sys.stderr.flush()
-    if err:
-        return ""
-    return text or ""
+        sys.stderr.write("TRACE final model=%r text=%.50r\n" % (model, text))
+        sys.stderr.flush()
+    return text
 
 
 def _auto_judge(cmd, call=None, reason=""):
@@ -1541,7 +1606,8 @@ def _gen_title(msgs_json):
         msgs = list(msgs) + [{"role": "user", "content":
                               "根据我们的聊天对话,总结一个恰当的标题。要求:标题简短精炼,"
                               "不超过 30 字,不含特殊字符与换行;请通过调用 set_title 工具提交标题。"}]
-        msg = _nonstream_msg(msgs, os.environ.get("FLASH_MODEL", ""), tools=[TITLE_TOOL])
+        msg = _nonstream_msg(msgs, os.environ.get("FLASH_MODEL", ""),
+                             tools=[TITLE_TOOL], source="title")
         t = ""
         tcs = getattr(msg, "tool_calls", None) or []
         if tcs:
@@ -1650,6 +1716,9 @@ def main(argv):
         if argv and argv[0] == "skills":
             from wchat_py import seed as _seed
             return _seed.cmd_skills(argv[1:])
+        if argv and argv[0] in ("usage", "apilog"):
+            from wchat_py import apilog as _apilog
+            return _apilog.main(argv[1:])
         _rc = _setup.ensure_ready(argv)
         if _rc is not None:
             return _rc
