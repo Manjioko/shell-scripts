@@ -47,13 +47,24 @@ def read_file(resolved, display_path, offset, limit, read_max, work_root):
     返回 (content, status_line)。status_line 是印到屏幕的进度行，**不进上下文**。
     · 非文件 → 错误 content（含解析结果与工作根）+ ` ⛔ 文件不存在:` 状态行
     · 是文件 → filefmt.read_fmt 出 content + ` 已读取 X(N 行)` 状态行
+
+    状态行里的 N 是**文件总行数**(与 master 一致);本次实际返回更少时补一段
+    "本次返回 M 行"。不补的话屏幕上写"已读取 cli.py(2078 行)"、上下文里只有 792 行,
+    对不上账 —— 排查"上下文为什么这么大/这么小"时这条差别很关键。
     """
     if not os.path.isfile(resolved):
         return ("错误:文件不存在: %s(解析为 %s;工作根 %s)" % (display_path, resolved, work_root),
                 " ⛔ 文件不存在:%s" % resolved)
     from wchat_py.filefmt import read_fmt
     j = read_fmt(resolved, display_path, offset, limit, read_max)
-    return (j["content"], " 已读取 %s(%s 行)" % (display_path, j["lines"]))
+    _ret = j.get("returned")
+    # 总行数取 max(wc -l, 本次返回):末尾无换行的文件 wc -l 会少算一行,
+    # 与 filefmt 里 shown_total 同一口径,免得屏上出现"2 行· 本次返回 3 行"。
+    _total = j.get("shown") or max(j["lines"], _ret or 0)
+    status = " 已读取 %s(%s 行)" % (display_path, _total)
+    if _ret is not None and _ret != _total:
+        status += "· 本次返回 %s 行" % _ret
+    return (j["content"], status)
 
 
 def grep(pattern, path, max_matches, max_col, work_root):
