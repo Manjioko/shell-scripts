@@ -912,10 +912,19 @@ def _run_tool(name, args_json):
     # 两者都不报错,却让调用方以为"工具出了问题"。
     _miss = _missing_required(name, a)
     if _miss:
-        return ("错误:%s 缺少必填参数 %s(收到的参数:%r)。"
-                "请重新发起这次调用并补上这些参数;不要假设它们有默认值。"
-                % (name, "/".join(_miss),
-                   _json.dumps(a, ensure_ascii=False)[:200]))
+        # 措辞与 master 对齐:bash 版在 run_shell_command 分支里有
+        #   `if [[ -z "$command" ]]; then content="错误:命令参数为空,工具调用参数解析失败: ..."`
+        # (legacy_wchat.sh:7331)。迁移到 Python 时**这一段漏掉了** ——
+        # 于是空命令被 `bash -c ""` 执行,拿到 0 行 + rc=0,界面显示"完成",
+        # 整条链看起来都正常。用户看到的就是"命令输出为空很奇怪"。
+        # 这里保留 master 的原话来指路(SEARCH 时能对上),再补上"缺哪个参数"。
+        _raw = _json.dumps(a, ensure_ascii=False) if a else "(空)"
+        # 措辞:shell 保持 master 原话("命令参数为空"),其它工具说"参数为空"。
+        # 不为了一致性把 master 那句改掉 —— 那句是排障时的搜索锚点。
+        _what = "命令参数为空" if name == "run_shell_command" else "参数为空"
+        return ("错误:%s,工具调用参数解析失败: %s"
+                "(缺少必填参数:%s;工具:%s。请重新发起这次调用并补上这些参数,"
+                "不要假设它们有默认值。)" % (_what, _raw, "/".join(_miss), name))
     if name == "list_dir":
         path = a.get("path") or "."
         # 授权(resolve_path/path_access)在 bash 侧;Python 版这里只处理工作根内的相对/绝对路径

@@ -90,7 +90,21 @@ print("=== 4. 报错要能指导下一步(不是只说'错了') ===")
 out = cli._run_tool("run_shell_command", "{}")
 ck("说明缺哪个参数", "command" in out, repr(out)[:120])
 ck("要求重新发起调用", "重新发起" in out, repr(out)[:120])
-ck("带上收到的参数便于排查", "收到的参数" in out, repr(out)[:120])
+ck("回显收到的参数便于排查", "(空)" in out or "{}" in out, repr(out)[:140])
+
+print("=== 4b. 与 master 的措辞对齐(排障搜索锚点) ===")
+# master(bash)在 run_shell_command 分支里是:
+#   content="错误:命令参数为空,工具调用参数解析失败: ${fn_args:-\"(空)\"}"
+# 迁移到 Python 时这一段**漏掉了**,才让空命令被当成合法输入执行。
+# 这条断言钉住"master 那句话仍然在",既是行为契约也是排障锚点。
+ck("shell 空参数沿用 master 原话",
+   out.startswith("错误:命令参数为空,工具调用参数解析失败:"), repr(out)[:120])
+ck("非 shell 工具不硬套'命令参数'",
+   cli._run_tool("read_file", "{}").startswith("错误:参数为空,"),
+   repr(cli._run_tool("read_file", "{}"))[:120])
+ck("master 的兜底里有这句(防它被删)",
+   "命令参数为空,工具调用参数解析失败" in
+   open(os.path.join(REPO, "tests", "legacy_wchat.sh"), encoding="utf-8").read())
 
 print("=== 5. 坏 JSON 要回显原文片段 ===")
 out = cli._run_tool("run_shell_command", '{"command": "cd /tmp && gr')
