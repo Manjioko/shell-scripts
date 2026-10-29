@@ -476,3 +476,36 @@
 > ⚠ 两处结构锁原来按**文件路径**切字符串(`cli.py` 里找 `def _run_tool`),实现一搬
 > 就变成假红。已改成 `inspect.getsource(cli._run_tool)` —— 契约跟函数走,不跟文件走。
 > 写结构锁时记住这条:**按名字取源码,别按路径切文件**。
+
+> ---
+>
+> ## Linux 可移植性基线(2026-10,本轮)
+>
+> **两条假红的根因都在夹具,不在产品** —— 但两条都长着"产品坏了"的脸,记在这里防重犯:
+>
+> 1. **写死 `/opt/homebrew/bin/bash`**:34 个测试文件里有 54 处。在 Linux 上它**不报错**
+>    —— 子 shell 里失败,外层只拿到空串,断言于是拿到全空。实测症状:`写熔断 21 红`、
+>    `权限状态 3 红`、`工具运行` 全红。看着像产品判断错了,其实是夹具根本没跑起来。
+>    → 统一到两个解析器:`tests/lib_bash.sh`(shell,导出 `$WCHAT_BASH`)与
+>    `tests/_bashbin.py`(`bash_bin()`),顺序一致,新闸门第 2 节钉住"两个解析器必须给同一个 bash"。
+> 2. **`tests/fixtures/wchat_py` 是绝对路径软链**(曾指向 `/Users/jwan/bin/wchat_py`)。
+>    换检出位置/换机器就是**断链**,而断链不报错:夹具静默走降级(fail-closed),
+>    `hd_write_targets` 返回 1 → auto 下所有含重定向的命令判 P3。实测症状:
+>    `硬墙语料` 6 条 DIFF(H6-5/H6-8/H11-3/H11-6/H12-2/H12-3),像"Linux 上判据偏了";
+>    同一份代码,只是把软链换成相对路径 `../../wchat_py`,6 条全消失。
+>    → 软链已改相对;新闸门第 1 节钉住"不许绝对"。
+>
+> **新闸门 `可移植性`(`bash tests/portable_paths_test.sh`)— 7/7**:
+> 1. `fixtures/wchat_py` 必须存在、是**相对**软链、且能解析到 `wchat_py/_run.py`;
+> 2. `lib_bash.sh` 与 `_bashbin.py` 必须解析到**同一个** bash,且版本 ≥5;
+> 3. 驱动脚本里**不许有写死的 mac bash 路径**(候选列表 / `printf` 提示 / `expect` 语料除外;
+>    冻结的 oracle 与 `legacy_wchat.sh` 是被测对象,不在检查范围内)。
+>
+> 变异验证(都实测过):把软链改回绝对 → 1 红;往 `py_state_test.sh` 注入一行
+> `/opt/homebrew/bin/bash -c ...` → 1 红(并指出文件名:行号)。
+>
+> **Linux(Ubuntu 24.04 / py3.12 / 无 `/opt/homebrew`)全量实测**:
+> 改前 `run=61 pass=46 fail=15`;改后 **`run=62 pass=53 fail=9`**(本机 macOS 同时 `run=62 pass=62 fail=0`)。
+> 转绿的 6 道:写熔断、权限状态、工具运行、硬墙语料、硬墙接缝、运行时自举。
+> 仍未绿的 9 道按"夹具按 macOS 造 / 需要真实流量 / 以 root 跑 / 既有向量前提 / 待查"
+> 分类记在 `packaging/linux/README.md`,**没有一条归因于产品逻辑**。

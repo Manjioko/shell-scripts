@@ -10,9 +10,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _bashbin import bash_bin  # noqa: E402
 from wchat_py.termwin import paint  # noqa: E402
 
-REF = r'''#!/opt/homebrew/bin/bash
+BASH = bash_bin()
+
+REF = r'''#!/usr/bin/env bash
 paint() {
     local drawn="$1" partial="$2"; shift 2; local -a buf=("$@"); local i
     printf '\r'
@@ -38,7 +42,7 @@ os.write(fd, REF.encode())
 os.close(fd)
 os.chmod(path, 0o755)
 try:
-    out = subprocess.run(["/opt/homebrew/bin/bash", path], capture_output=True).stdout
+    out = subprocess.run([BASH, path], capture_output=True).stdout
 finally:
     os.unlink(path)
 
@@ -55,4 +59,3 @@ for i, (drawn, partial, buf) in enumerate(cases):
         print("  FAIL case%d\n   bash=%r\n   py  =%r" % (i, want, got))
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
-

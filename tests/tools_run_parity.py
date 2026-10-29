@@ -11,7 +11,10 @@ import json, os, re, subprocess, sys, tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
-BASH = os.environ.get("BASH_BIN", "/opt/homebrew/bin/bash")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _bashbin import bash_bin  # noqa: E402
+
+BASH = bash_bin()
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 from wchat_py.tools_run import list_dir, read_file, grep, write_file, edit_file

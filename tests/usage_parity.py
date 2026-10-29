@@ -10,7 +10,11 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _bashbin import bash_bin  # noqa: E402
 from wchat_py.session import Session, usage_lines  # noqa: E402
+
+BASH = bash_bin()
 
 FIX = r'''_WCHAT_LIB_ONLY=1 API_KEY=sk-stub
 . "$1" </dev/null >/dev/null 2>&1
@@ -22,7 +26,7 @@ img_token_calib_count(){ echo 0; }
 print_usage
 '''
 
-bash_out = subprocess.run(["/opt/homebrew/bin/bash", "-c", FIX, "_", os.path.join(REPO, "wchat.sh")],
+bash_out = subprocess.run([BASH, "-c", FIX, "_", os.path.join(REPO, "wchat.sh")],
                           capture_output=True).stdout
 bash_out = bash_out.replace(b"\x1b[?25h\x1b[?7h", b"")   # wchat.sh 退出 trap 的光标恢复,非 print_usage
 

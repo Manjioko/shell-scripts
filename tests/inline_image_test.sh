@@ -22,6 +22,8 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     done
     printf '需要 bash5+\n'; exit 1
 fi
+# 内层用的 bash 也必须可移植(见 tests/lib_bash.sh)
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_bash.sh"
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/iimg.XXXXXX")
 IMG_REF_DIR_KEEP=""
@@ -145,7 +147,7 @@ run_body() {  # $1=装载源(保留签名) $2=messages 文件 $3=额外 bash 语
     prd="$(cd "$(dirname "$1")" && pwd)"
     # W12-4b 切换后:请求体由 **Python** 建。bash 只交"输入信封"(make_request_inputs),
     # 里面带 messages_file / ref_map_file(由 img_build_map 产出)/ tmpdir。
-    _WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" /opt/homebrew/bin/bash -c "
+    _WCHAT_LIB_ONLY=1 API_KEY="${WCHAT_API_KEY:-}" "$WCHAT_BASH" -c "
         source '$1' </dev/null >/dev/null 2>&1
         messages=\$(cat '$2')
         no_tools=1

@@ -1,0 +1,8 @@
+# Python 依赖(HTTP/SSE 走官方 OpenAI SDK,不回退 curl)
+# openai 锁 2.x:3.x 改了传输层依赖(不再带 httpx),本项目用 httpx.Timeout 做停滞兜底。
+openai>=2.0,<3
+httpx>=0.24
+prompt_toolkit>=3
+rich>=13
+pillow>=9
+

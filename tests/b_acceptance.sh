@@ -17,6 +17,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RLDIR="$(cd "$HERE/.." && pwd)"
+. "$HERE/lib_bash.sh"
 cd "$RLDIR" || exit 2
 FULL=0; SELF=0
 for a in "$@"; do
@@ -120,7 +121,7 @@ REF
 _bad=0; _n=0
 for v in "-f -st hello world" "-st" "abc" "-t" "-p" "-dp" "-f -dp 问题文本"; do
     _n=$((_n+1))
-    b=$(CT_HOME="$RLDIR/.scratch/_noct" /opt/homebrew/bin/bash "$_po" "$RLDIR/wchat_ref" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
+    b=$(CT_HOME="$RLDIR/.scratch/_noct" "$WCHAT_BASH" "$_po" "$RLDIR/wchat_ref" $v 2>/dev/null | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g' | tr -d '\n')
     content=""; quick_mode=0; forget_history=0; model=""; thinking=disabled
     eval "$(CT_HOME="$RLDIR/.scratch/_noct" PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}" python3 -m wchat_py.cli parse $v 2>/dev/null)"
     [[ "$b" == "$content|$quick_mode|$forget_history|$model|$thinking" ]] || {

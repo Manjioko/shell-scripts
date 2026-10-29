@@ -1,10 +1,15 @@
-#!/opt/homebrew/bin/bash
+#!/usr/bin/env bash
 exec 9>&1   # wchat_ref 退出 trap 会动 fd1，结果走 fd9 保证可见
 # B 阶段接线验证：WCHAT_PY_HARDWALL=1（前端走 Python hardwall）与 =0（bash 原实现）判定应一致，
 # 且等于期望规则号。证明"前端 seam 真的把判定交给了 Python，且结果等价"。
 set -o pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RLDIR="$(cd "$HERE/.." && pwd)"
+if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
+    . "$HERE/lib_bash.sh"
+    [[ -n "$WCHAT_BASH" ]] && exec "$WCHAT_BASH" "$0" "$@"
+    printf '需要 bash5+\n'; exit 1
+fi
 cd /tmp || exit 2
 _WCHAT_LIB_ONLY=1 API_KEY=sk-stub
 . "$RLDIR/wchat_ref" </dev/null >/dev/null 2>&1

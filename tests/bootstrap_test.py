@@ -57,6 +57,12 @@ class Sandbox(object):
         for k in ("WCHAT_NO_BOOTSTRAP", "WCHAT_BOOTSTRAPPED", "WCHAT_BOOTSTRAP_FORCE"):
             os.environ.pop(k, None)
         os.makedirs(self.venv, exist_ok=True)
+        # ensure_runtime 在"当前进程已在某个 venv 里"时会直接 return(那是正确行为:
+        # 依赖就在这个 venv 里)。但本闸门要测的是**重建/自愈那条路**,必须让它以为
+        # 自己在系统解释器上跑 —— 否则测试在 venv 里跑(Linux 打包形态 /work/.venv
+        # 就是这样)会三条断言全红,而产品行为完全正确。实测:Ubuntu 容器 28/31。
+        self.saved_prefix = (sys.prefix, sys.base_prefix)
+        sys.prefix = sys.base_prefix
         return self
 
     def __exit__(self, *a):
@@ -67,6 +73,8 @@ class Sandbox(object):
                 os.environ[k] = v
         for name, fn in self.saved.items():
             setattr(B, name, fn)
+        if getattr(self, "saved_prefix", None):
+            sys.prefix, sys.base_prefix = self.saved_prefix
         shutil.rmtree(self.d, ignore_errors=True)
 
     def stub(self, name, fn):

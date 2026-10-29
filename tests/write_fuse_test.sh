@@ -17,6 +17,9 @@ if (( ${BASH_VERSINFO[0]:-0} < 5 )); then
     done
     printf '需要 bash5+\n'; exit 1
 fi
+# 内层子 shell 也要用同一个 bash:写死 /opt/homebrew/bin/bash 在 Linux 上会让整个
+# load_into 空转(断言拿到全空,看着像"写熔断坏了")。解析器见 tests/lib_bash.sh。
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_bash.sh"
 
 W=$(mktemp -d "${TMPDIR:-/tmp}/wfuse.XXXXXX"); trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/root" "$W/auto"
@@ -34,7 +37,7 @@ ck_ne() { if [[ "$2" != "$3" ]]; then pass=$((pass+1)); printf '  ok   %s\n' "$1
 #   cd+pwd -P 只会得到 /private/var/folders/... —— 同一个目录两种写法。测试要和被测代码
 #   用**同一个口径**比键,否则"键一致性"这条断言测的是符号链接而不是逻辑。
 load_into() {  # $1=要执行的测试函数体
-    ( cd "$W/root" && _WCHAT_LIB_ONLY=1 API_KEY=x /opt/homebrew/bin/bash -c "
+    ( cd "$W/root" && _WCHAT_LIB_ONLY=1 API_KEY=x "$WCHAT_BASH" -c "
         W=\"\$(cd '$W' && pwd -P)\"
         source '$SRC_ABS' </dev/null >/dev/null 2>&1
         AUTO_DIR=\"\$W/auto\"; AUTO_AUDIT_LOG=\"\$W/auto/audit.log\"; AUTO_BACKUP_DIR=\"\$W/auto/backup\"

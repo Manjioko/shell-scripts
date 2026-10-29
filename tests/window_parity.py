@@ -9,9 +9,13 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _bashbin import bash_bin  # noqa: E402
 from wchat_py.termwin import window_output  # noqa: E402
 
-REF = r'''#!/opt/homebrew/bin/bash
+BASH = bash_bin()
+
+REF = r'''#!/usr/bin/env bash
 OUT_HEAD_LINES=$1; OUT_BUF_SIZE=$2; shift 2
 total=0; out_head=""; declare -a tail_buf=(); tail_idx=0
 for line in "$@"; do
@@ -44,7 +48,7 @@ os.chmod(path, 0o755)
 p = f = 0
 try:
     for i, (head, buf, lines) in enumerate(cases):
-        want = subprocess.run(["/opt/homebrew/bin/bash", path, str(head), str(buf)] + lines,
+        want = subprocess.run([BASH, path, str(head), str(buf)] + lines,
                               capture_output=True).stdout
         got = window_output(lines, head, buf).encode()
         if want == got:
@@ -57,4 +61,3 @@ finally:
     os.unlink(path)
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
-

@@ -11,6 +11,7 @@ set -uo pipefail
 SRC=${1:-}
 [[ -n "$SRC" ]] || SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/wchat_ref"
 [[ -f "$SRC" ]] || { printf '找不到被测脚本:%s\n' "$SRC"; exit 1; }
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_bash.sh"
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/cpp.XXXXXX"); trap 'rm -rf "$TMP"' EXIT
 
 # 只抽需要的:三个配置 + 两个纯函数(按名字抽函数体,到行首 } 止)
@@ -185,7 +186,7 @@ printf '%s|%s|%s|%s|%s|%s|%s|%s' \
   "$(k 'Connection reset by peer' 0 100)" "$(k '' 200 100)" "$(k '' 50 100)" \
   "$(k 'prompt is too long' 0 0)"
 REF
-_ovf=$(/opt/homebrew/bin/bash "$_os/k.sh" "$SRC" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
+_ovf=$("$WCHAT_BASH" "$_os/k.sh" "$SRC" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')
 ck "越界判据特征样本(英/大写/中文/抖动/粗算/sig优先)" "$_ovf" "sig|sig|sig|sig|none|est|none|sig"
 rm -rf "$_os"
 

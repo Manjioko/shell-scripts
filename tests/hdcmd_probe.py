@@ -10,7 +10,10 @@
 import json, os, re, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BASH = os.environ.get("BASH_BIN", "/opt/homebrew/bin/bash")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _bashbin import bash_bin  # noqa: E402
+
+BASH = bash_bin()
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")  # wchat.sh 退出 trap 会打 \x1b[?25h 等, 必须剥
 CORPUS = os.path.join(REPO, "tests/hdcmd_corpus.json")
 BASE = os.path.join(REPO, "tests/hdcmd_baseline.tsv")

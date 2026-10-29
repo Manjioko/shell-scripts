@@ -10,6 +10,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RLDIR="$(cd "$HERE/.." && pwd)"
 export PYTHONPATH="$RLDIR${PYTHONPATH:+:$PYTHONPATH}"
+. "$HERE/lib_bash.sh"
 pass=0; fail=0
 ck() { if [[ "$2" == "$3" ]]; then pass=$((pass+1)); printf '  ok   %s\n' "$1"
      else fail=$((fail+1)); printf '  FAIL %s: 得 [%s] 期望 [%s]\n' "$1" "$2" "$3"; fi; }
@@ -48,10 +49,10 @@ case "$2" in
 esac
 REF
 : > "$_dw/empty"; printf 'a\nb\nc' > "$_dw/three"
-ck "list_count 空 → 0"      "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat_ref" count "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "0"
-ck "list_count 三条 → 3"    "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat_ref" count "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "3"
-ck "list_join 三条 → a, b, c" "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat_ref" join  "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "a, b, c"
-ck "list_join 空 → 空"      "$(/opt/homebrew/bin/bash "$_dw/lc.sh" "$RLDIR/wchat_ref" join  "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" ""
+ck "list_count 空 → 0"      "$("$WCHAT_BASH" "$_dw/lc.sh" "$RLDIR/wchat_ref" count "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "0"
+ck "list_count 三条 → 3"    "$("$WCHAT_BASH" "$_dw/lc.sh" "$RLDIR/wchat_ref" count "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "3"
+ck "list_join 三条 → a, b, c" "$("$WCHAT_BASH" "$_dw/lc.sh" "$RLDIR/wchat_ref" join  "$_dw/three" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" "a, b, c"
+ck "list_join 空 → 空"      "$("$WCHAT_BASH" "$_dw/lc.sh" "$RLDIR/wchat_ref" join  "$_dw/empty" | perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g')" ""
 rm -rf "$_dw"
 
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"

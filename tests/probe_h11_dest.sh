@@ -15,6 +15,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd -- "$HERE/.." && pwd)"
 TAB="$HERE/test_hardwall.sh"
 [[ -r "$TAB" ]] || { echo "找不到 $TAB"; exit 2; }
+. "$HERE/lib_bash.sh"
 SRC_TARGET="$ROOT/wchat_ref"
 [[ -r "$SRC_TARGET" ]] || { echo "找不到 $SRC_TARGET"; exit 2; }
 
@@ -75,5 +76,5 @@ for c in "mv /tmp/x /usr/local/bin/y" "truncate -s 0 /var/log/app.log" "echo x >
     else printf '  no   %-44s EXEMPT=[%s]\n' "$c" "$HD_H11_EXEMPT"; fi
 done
 ZZZ
-/opt/homebrew/bin/bash "$SB" "$SRC_TARGET" 2>&1 | tail -45
+"$WCHAT_BASH" "$SB" "$SRC_TARGET" 2>&1 | tail -45
 
