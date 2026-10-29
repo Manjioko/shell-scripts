@@ -13,12 +13,12 @@ ln -s "$W/outside/missing" "$R/linkd" # 悬空链接:走 LINK 分支
 
 fnbody() { awk -v f="$1" '$0 ~ "^"f"\\(\\) \\{" {p=1} p {print} p && /^}$/ {exit}' "$SRC"; }
 # 直接调 python(py 侧语义锚点)
-prule() {  # <path> <mode> <auto_mode> <allow_rw(空格分隔)>
+prule() {  # <path> <mode> <auto_mode> <allow_rw(空格分隔)> [home]
     local subs tmp alw
     subs=$(printf '.ssh\n.aws'); tmp=$(printf '/tmp\n/var/tmp')
     alw=$(printf '%s' "$4" | tr ' ' '\n')
     printf '%s' "$1" | python3 "$RLDIR/wchat_py/_run.py" pathrule hard_deny_path \
-        "$2" "$3" "$H" "$R" "$subs" "$tmp" "$alw"
+        "$2" "$3" "${5:-$H}" "$R" "$subs" "$tmp" "$alw"
 }
 rule() { prule "$1" "$2" "$3" "$4" | jq -r '.rule'; }
 
@@ -33,6 +33,19 @@ ck "悬空链接穿越 → LINK"     "$(rule "$R/linkd" rw '' '')" "LINK"
 ck "tmp 放行"               "$(rule /tmp/x rw '' '')" ""
 ck "/dev/null 放行"          "$(rule /dev/null rw '' '')" ""
 ck "HOME 隐藏配置 → P2"     "$(rule "$H/.config/x" rw '' '')" "P2"
+# ⚠ HOME 落在临时目录里时，主目录保护**不许**被 /tmp 豁免吞掉。
+#   实测(2026-10,Docker/Ubuntu)：这一条原来红，因为判定顺序是 tmp → SYS → HOME，
+#   而容器/CI 里 HOME 常常就在 /tmp 下(`HOME=/tmp/xxx`)，于是 ~/.bashrc、~/.config/*
+#   全部被放行 —— 保护静默消失，且 macOS 上跑不出来(临时 HOME 在 /var/folders)。
+#   与 P1(~/.ssh 在 tmp 之前)同一口径：保护用户自己的配置不该排在"临时目录写"之后。
+# 必须真放在 /tmp 下(这正是要复现的场景):放在 $W 里会被 /private/var 系统前缀
+# 先判成 P2，测到的就不是"tmp 豁免 vs 主目录保护"这条边界了。
+_H2="/tmp/wchat-ph-$$"; mkdir -p "$_H2/.ssh" "$_H2/.config"; trap 'rm -rf "$_H2"' EXIT
+ck "HOME 在 /tmp 下:隐藏配置仍 P2"       "$(prule "$_H2/.config/x" rw '' '' "$_H2" | jq -r '.rule')" "P2"
+ck "HOME 在 /tmp 下:顶层 dotfile 仍 P2"  "$(prule "$_H2/.bashrc" rw '' '' "$_H2" | jq -r '.rule')" "P2"
+ck "HOME 在 /tmp 下:凭据目录仍 P1"       "$(prule "$_H2/.ssh/config" rw '' '' "$_H2" | jq -r '.rule')" "P1"
+ck "HOME 在 /tmp 下:家目录普通文件仍放行" "$(prule "$_H2/notes.txt" rw '' '' "$_H2" | jq -r '.rule')" ""
+ck "普通 /tmp 临时文件仍放行(没被上面几条连坐)" "$(rule /tmp/scratch.log rw '' '')" ""
 ck "root → P2"              "$(rule /root/x rw '' '')" "P2"
 ck "越界写 sandbox → P3"     "$(rule /wchat-fx/out.txt rw sandbox '')" "P3"
 ck "越界写 full 无名单 → P3" "$(rule /wchat-fx/out.txt rw full '')" "P3"

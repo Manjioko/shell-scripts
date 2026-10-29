@@ -99,6 +99,15 @@ def hard_deny_path(path, mode, auto_mode, home, work_root, subdirs, tmp_prefixes
         msg = msg + "(命中: " + f[:80] + ")"
 
     np = _norm(path, home, work_root)
+    # $HOME 也要按**同一个口径**归一,否则下面所有 `home + "/xxx"` 前缀比对都会失效:
+    # 路径一侧走物理归一(消解符号链接),home 一侧是原样字符串。
+    # 实测(macOS):HOME=/tmp/x 时 /tmp 是指向 /private/tmp 的链接,np 变成
+    # /private/tmp/x/...,而 home 还是 /tmp/x → `~/.bashrc`、`~/.ssh/config` 一条都匹配
+    # 不上,随后被 /tmp 豁免整段放走。容器(Linux,/tmp 不是链接)上跑不出来 ——
+    # 又一个"本机恰好成立"。HOME 挂在软链后面(/home/u -> /mnt/u)是常见布局,同一条洞。
+    # 用 realpath 而不是 norm_path:后者对不存在的目录会走"缺失段原样拼回",
+    # 在 macOS 上把 /home/demo 拼成 /demo,反而把前缀带偏。
+    home_n = os.path.realpath(home) if home else home
 
     # LINK:目录内豁免不成立(一条链接就能穿过整份名单)。必须排在最前。
     if _in_root(np, home, work_root) and link_escapes_root(np, home, work_root):
@@ -106,13 +115,13 @@ def hard_deny_path(path, mode, auto_mode, home, work_root, subdirs, tmp_prefixes
         note(np)
         return {"rule": rule, "msg": msg}
 
-    # P1:$HOME 下凭据/会话目录
+    # P1:$HOME 下凭据/会话目录(用 home_n:见上面为什么要归一 home)
     for s in _HOME_CRED_SUBS:
-        if np.startswith(home + "/" + s):
+        if np.startswith(home_n + "/" + s):
             rule, msg = "P1", _MSG_P1_HOMECRED
             note(np)
             return {"rule": rule, "msg": msg}
-    for s in (home + "/.mcporter", home + "/.local/share/mcporter"):
+    for s in (home_n + "/.mcporter", home_n + "/.local/share/mcporter"):
         if np == s or np.startswith(s + "/"):
             rule, msg = "P1", _MSG_P1_HOMECRED
             note(np)
@@ -138,6 +147,18 @@ def hard_deny_path(path, mode, auto_mode, home, work_root, subdirs, tmp_prefixes
     if mode == "rw":
         if _in_root(np, home, work_root):
             return {"rule": "", "msg": ""}
+        # ⚠ 主目录保护**必须排在 tmp 豁免之前**。原顺序是 tmp → SYS → HOME,于是
+        #   `HOME` 本身落在 /tmp 下时(容器/CI 里很常见:HOME=/tmp/xxx),`~/.bashrc`、
+        #   `~/.config/*` 全部被 /tmp 豁免吞掉 → P2 保护**静默消失**。
+        #   实测(2026-10,Docker/Ubuntu):macOS 上跑不出来(临时 HOME 在 /var/folders),
+        #   容器里 HOME 落在 /tmp 才暴露;同一份代码两种判定,正是"本机恰好成立"那类假绿。
+        #   与 P1 的口径对齐:P1(`~/.ssh` 等)本来就在 tmp 之前 —— 同一类"保护用户自己的
+        #   配置",不该一个在前一个在后。顺序调整只影响"HOME 在 tmp 之内"这一种情形,
+        #   正常的 /tmp 临时文件照旧放行(见上面那条 return)。
+        if np == home_n or re.match(re.escape(home_n) + r"/\.[A-Za-z]", np):
+            rule, msg = "P2", _MSG_P2_HOME
+            note(np)
+            return {"rule": rule, "msg": msg}
         for tp in _TMP_LITERALS + list(tmp_prefixes):
             if np == tp or np.startswith(tp + "/"):
                 return {"rule": "", "msg": ""}
@@ -148,10 +169,6 @@ def hard_deny_path(path, mode, auto_mode, home, work_root, subdirs, tmp_prefixes
                 rule, msg = "P2", _MSG_P2_SYS
                 note(np)
                 return {"rule": rule, "msg": msg}
-        if np == home or re.match(re.escape(home) + r"/\.[A-Za-z]", np):
-            rule, msg = "P2", _MSG_P2_HOME
-            note(np)
-            return {"rule": rule, "msg": msg}
         if auto_mode:
             if not (np == work_root or np.startswith(work_root + "/")):
                 if auto_mode != "full" or not authz.auto_allow_hit(np, "rw", [], allow_rw, home, work_root):

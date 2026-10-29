@@ -20,7 +20,8 @@ LOG="${1:-$HOME/.ct/auto/audit.log}"
 SRC="${SRC:-$PWD/wchat_ref}"
 
 fail_hard() { printf '  BAD  %s\n' "$1"; exit "${2:-1}"; }
-[[ -r "$LOG" ]] || fail_hard "语料不可读:$LOG(没有真实流量就不许报'回放全绿')" 1
+# 环境性缺席 → SKIP: 原因 → exit $EXIT_SKIP
+[[ -r "$LOG" ]] || { printf 'SKIP: 没有真实流量语料(%s),回放无从对账\n' "$LOG"; exit 77; }
 [[ -r "$SRC" ]] || fail_hard "被测版本不可读:$SRC" 1
 
 # 装载:复用硬墙表开头的装载区(它负责从 SRC 抽常量+函数,含 HD_* 族)。

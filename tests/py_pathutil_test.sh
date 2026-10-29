@@ -40,7 +40,10 @@ ck "尾斜杠目录归一"              "$(run1 1 norm_path 'd1/')" "OK:$R/d1"
 ck "缺失父目录原样拼回"          "$(run1 1 norm_path 'new/x.txt')" "OK:$R/new/x.txt"
 ck "缺失段含 .. → FAIL"          "$(run1 1 norm_path 'new/../y')" "FAIL"
 ck ".. 上跳(存在目录)"           "$(run1 1 norm_path '..')" "OK:$W"
-ck "越界照给(不设边界)"          "$(run1 1 norm_path '/etc/hosts')" "OK:/private/etc/hosts"
+# 期望值必须是**本机 /etc/hosts 的物理路径**,不能写死 macOS 的 /private/etc/hosts:
+# Linux 上 /etc 不是软链,同一条断言就红,而产品行为完全正确(它给的正是物理归一)。
+_NP_ETC=$(cd /etc && pwd -P)/hosts
+ck "越界照给(不设边界)"          "$(run1 1 norm_path '/etc/hosts')" "OK:$_NP_ETC"
 ck "~ 先展开"                    "$(run1 1 norm_path '~')" "OK:$H"
 
 echo "=== resolve_path 语义(归一 + 强制根内)==="

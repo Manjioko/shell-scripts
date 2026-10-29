@@ -103,6 +103,18 @@ want() {  # 有没有被参数选中
     local f n; for f in "${FILTERS[@]}"; do [[ "$1" == *"$f"* ]] && return 0; done; return 1
 }
 
+# 环境性缺席的**唯一**表达方式:套件打印一行 `SKIP: 原因` 并 exit 77。
+# 为什么要有它:有些闸门天生依赖"这台机器上恰好有的东西" —— 真实流量语料、
+# macOS 专有工具、需要 root/非 root 的前提。**没有语料就报绿是撒谎**(所以
+# traffic_replay 一直很正确地拒绝),可报红又会被当成"产品坏了",于是每次
+# 换机器都要重新做一遍归因(本项目已经栽过:容器里 `MCP通道` 37 条一起红,
+# 真因是没装 node)。77 让"不具备"成为一个**显式、可审计**的第三种状态:
+# 它会打印在结论行里(skip 计数),想让它真跑的人看得到,也不会被当成绿。
+EXIT_SKIP=77
+skip_reason() {  # 从日志里取 `SKIP: ...` 那行
+    grep -a -m1 '^SKIP:' "$1" 2>/dev/null | sed 's/^SKIP:[[:space:]]*//'
+}
+
 if (( LIST_ONLY )); then
     for i in "${!GATE_NAMES[@]}"; do
         (( i == 9 && ! RUN_MAIN )) && printf '  %-10s %-34s (跳过,--main 才跑)\n' "${GATE_NAMES[$i]}" "${GATE_CMDS[$i]}" && continue
@@ -133,7 +145,10 @@ for i in "${!GATE_NAMES[@]}"; do
         "$BASHX" ${cmd#bash } > "$out" 2>&1; rc=$?       # 其余直接 exec,不套 bash -c
     fi
     concl=$(grep -aE "$pat" "$out" | tail -1)
-    if [[ -n "$concl" && $rc -eq 0 ]]; then
+    if (( rc == EXIT_SKIP )); then
+        skip=$((skip + 1))
+        printf '  \033[33m⏭  %-8s\033[0m %s\n' "$name" "$(skip_reason "$out")"
+    elif [[ -n "$concl" && $rc -eq 0 ]]; then
         pass=$((pass + 1)); printf '  \033[32m✅ %-8s\033[0m %s\n' "$name" "$concl"
     else
         fail=$((fail + 1))

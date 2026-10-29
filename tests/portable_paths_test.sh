@@ -60,5 +60,24 @@ done
 ck "无写死调用的 mac bash 路径" "$bad" "0"
 (( bad == 0 )) || printf "%b\n" "$offenders"
 
+echo "=== 4. 夹具里不许用 BSD 专用旗标(GNU 上直接报错 → 断言拿到空串) ==="
+# 实测(2026-10,Docker/Ubuntu):`base64 -D` 是 BSD/macOS 旗标,GNU coreutils 只认 `-d`,
+# 报 "invalid option" 后**仍然以 0 退出并输出空** → 解码出 0 字节 → img_dims 返回空 →
+# `内联图片` 两条断言假红,现象像"请求里的图没被缩"。同类还有 `sed -i ''`(BSD 要参数,
+# GNU 把 '' 当文件名)、`date -r`(GNU 是 -d)、`stat -f`(GNU 是 -c)。
+# 判据只扫**夹具**(product 代码里对 sips 这类 mac 工具的调用是正当的,且有兜底)。
+bad=0; offenders=""
+for f in tests/*.sh tests/*.py; do
+    case "$ALLOW_FILES" in *" $f "*) continue ;; esac
+    while IFS=: read -r ln _; do
+        [[ -z "$ln" ]] && continue
+        line=$(sed -n "${ln}p" "$f")
+        case "$line" in *"#"*) continue ;; esac     # 注释里提到不算
+        bad=$((bad+1)); offenders+="\n      $f:$ln: $line"
+    done < <(grep -nE "base64[[:space:]]+-D([[:space:]]|$)" "$f" 2>/dev/null || true)
+done
+ck "无 BSD 专用 base64 -D" "$bad" "0"
+(( bad == 0 )) || printf "%b\n" "$offenders"
+
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass + fail))" "$pass" "$fail"
 (( fail == 0 ))

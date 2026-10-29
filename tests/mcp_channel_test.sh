@@ -38,6 +38,22 @@ export WCHAT_API_KEY="${WCHAT_API_KEY:-sk-stub}"          # 装载口需要非�
 export BASE_URL="${BASE_URL:-https://stub.invalid/v1}"
 REAL="$SRC"
 
+# 空壳启动器:绝对路径,不依赖 PATH。
+#
+# 为什么必须给:**闸门自称"全部打桩、不依赖 npm/Chrome",但 `mcp_boot` 第一道守卫是
+# `command -v "$MCP_LAUNCHER"`(默认 npx)**。没装 node 的机器上它直接挡下全部逻辑 →
+# MCP_ENABLE=0 → 本文件 37 条断言全红,而产品行为完全正确(找不到启动器就不启用,提示可读)。
+# 实测:Docker/Ubuntu 里 `run=… fail=37`,macOS 上因为装了 node 而全绿 —— 又是"本机恰好有"。
+# 换成空壳后:用例若漏桩 mcp_cli,真实调用只会打到它(输出为空 → boot 报"清单探测失败"
+# → 断言红),物理上无法联网。"找不到启动器"那条分支另有下面第 C 段的显式断言覆盖。
+printf '#!/bin/sh\nexit 0\n' > "$W/noop-launcher"; chmod +x "$W/noop-launcher"
+export NOOP_LAUNCHER="$W/noop-launcher"
+# ⚠ **export MCP_LAUNCHER 本身**,不要只 export NOOP_LAUNCHER 然后在每个用例里传:
+#   本文件有 20 多处以 `"$BASHX" "$W/h-xxx.sh"` 直接起子进程(不经过 run()/run_h()),
+#   漏传一处就是一条假红 —— 实测改完 run() 通道后仍有 18 条红,全是这些漏传的。
+#   环境变量继承是唯一不会漏的传导方式;要测"缺启动器"的用例自己 env 覆盖即可。
+export MCP_LAUNCHER="$W/noop-launcher"
+
 # 每次起一个 bash,装载真脚本 + 打桩三件套,再执行传进来的片段
 run() {
     # ⚠ 必须在**函数上下文**里 source:装载口写的是 `return 0 2>/dev/null || exit 0`,
@@ -72,6 +88,18 @@ done
 ck "空名被拒" "$(run "mcp_name_ok '' && echo ok || echo no")" "no"
 
 echo "=== C mcp_boot:只暴露本地声明的 server ==="
+# 反向锁:**启动器指不到时**必须"按无 MCP 运行 + 提示可读",而不是继续往下跑。
+# 这一条原来全文件都没有 —— 而它正是本闸门在 Linux/无 node 机器上 **37 条一起红**的原因:
+# 上面所有用例都默认 MCP_LAUNCHER 指得到,一旦指不到,mcp_boot 在第一道守卫就 return,
+# 断言拿到的全是空/0,看着像"产品坏了"(实测 Docker/Ubuntu 就是这样)。
+# 钉住它之后,"指不到时会发生什么"有断言守着,不再靠某台机器恰好装了 node。
+out=$(run "
+MCP_LAUNCHER=/nonexistent/mcp-launcher
+MCP_ENABLE=1; MCP_CONFIG='$W/mc.json'; MCP_ONLY=()
+mcp_boot 2>&1; echo \"ENABLED=\$MCP_ENABLE\"")
+ck "启动器指不到 → 按无 MCP 运行(不炸)" "$(printf '%s' "$out" | grep -o 'ENABLED=.*')" "ENABLED=0"
+ck "启动器指不到 → 提示点名启动器与替代做法" "$(printf '%s' "$out" | grep -c '找不到启动器')" "1"
+
 mkcfg() { printf '%s' "$1" > "$W/mc.json"; }
 mkcfg '{"imports":[],"mcpServers":{"chrome":{"command":"npx"}}}'
 out=$(MOCK_OUT="$LIST_OK" run "
@@ -274,10 +302,7 @@ echo "=== H 存活收尾与单会话锁 ==="
 # 夹具形状:每个用例是一段 quoted heredoc 落到 $W/<name>.sh,执行时路径全靠 env 传入。
 # 不用 sh -c / bash -c 套字符串:三层引号下 $(( )) 会在"写文件时"就求值(本轮实测踩过 4 次,
 # 每次现象都像"被测代码坏了",其实都是夹具自己)。
-# 空壳启动器:用例若漏桩 mcp_cli,真实调用只会打到这里(输出为空 → boot 报"清单探测失败" → 断言红),
-# 从而**物理上无法联网**。用绝对路径,不依赖 PATH(上一版用 /bin/true 就被 PATH 裁掉过)。
-printf '#!/bin/sh\nexit 0\n' > "$W/noop-launcher"; chmod +x "$W/noop-launcher"
-export NOOP_LAUNCHER="$W/noop-launcher"
+# 空壳启动器已在文件前部创建并 export(主 run() 通道与这里的 heredoc 用例共用同一份)。
 for _c in lock foreign owned trunc; do mkdir -p "$W/h-$_c/home" "$W/h-$_c/tmp" "$W/h-$_c/clip"; done
 
 cat > "$W/prelude.sh" <<'PEOF'

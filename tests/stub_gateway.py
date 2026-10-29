@@ -139,8 +139,51 @@ class H(BaseHTTPRequestHandler):
         with _lock:
             i = _ctr["main"]
             _ctr["main"] += 1
-        script = json.load(open(REPLY))
-        step = script[i] if i < len(script) else {"type": "text", "text": "结束"}
+        # ⚠ 用"第几次请求"当"第几轮"的地址是**夹具的脆弱点**,不是产品的语义:
+        #   中间任何一次额外请求(标题生成、压缩摘要、重试)都会把序号吃掉,于是"第二轮"
+        #   拿到第三段脚本。实测(2026-10,Docker/Ubuntu):`interrupt_e2e` 的
+        #   "中断后仍可继续对话"因此拿到的回复不是 SECOND-OK ——
+        #   现象像"产品第二轮不渲染",真因是夹具把请求序号当轮次。
+        #   `STUB_REPLY_MAP` 按**最后一条 user 内容**选回复(真实服务端就是这么按内容答的),
+        #   额外请求不再能偷走某一轮的答复。
+        #   **命中关键字才接管**;没命中就照旧按序号 —— 这样只给需要的场景上 map,
+        #   其它套件的行为一点不变(不命中就改成 default 会悄悄改掉所有既有套件的回复)。
+        _txt = None
+        _map = os.environ.get("STUB_REPLY_MAP") or ""
+        if _map:
+            try:
+                _m = json.loads(_map)
+            except ValueError:
+                _m = {}
+            _last_user = ""
+            for _msg in reversed(msgs if isinstance(msgs, list) else []):
+                if isinstance(_msg, dict) and _msg.get("role") == "user":
+                    _last_user = str(_msg.get("content", ""))
+                    break
+            # ⚠ 必须**整行相等**,不能用 `k in _last_user` 做子串匹配:
+            #   实测踩过 —— key "hi" 是 "t**hi**rd" 的子串,于是第三轮 `third` 命中了
+            #   `hi` 的回复,断言等 "结束" 永远等不到,看起来像"产品第三轮不渲染"。
+            #   子串匹配对英文短词必然误伤(hi/in/a/no…),这是我第二次在这个文件里
+            #   被同一类"看起来对"的写法骗到。
+            _key = next((k for k in _m if k and k == _last_user.strip()), None)
+            if _key is not None:
+                _txt = _m[_key]
+        if _txt is not None:
+            step = {"type": "text", "text": _txt}
+            # ⚠ 非流式请求(标题生成/压缩摘要走 _nonstream_msg)必须回**普通 JSON**,
+            #   回 SSE 会让 SDK 解析失败 → 上游当成"失败"静默兜底,夹具里表现为
+            #   某些轮次拿不到回复。auth/final 那两条早就这么分流了,这里补齐。
+            if not body.get("stream"):
+                payload = json.dumps({"choices": [{"message": {"content": _txt}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+        else:
+            script = json.load(open(REPLY))
+            step = script[i] if i < len(script) else {"type": "text", "text": "结束"}
         slow = float(os.environ.get("STUB_SLOW_MS") or 0)
         if step["type"] == "tool":
             out = sse_tool_call(step.get("id", "call_%d" % i), step["name"], step["args"]).encode()
@@ -176,4 +219,11 @@ class H(BaseHTTPRequestHandler):
 
 
 port = sys.argv[1]
-HTTPServer(("127.0.0.1", int(port)), H).serve_forever()
+# ⚠ 必须用**多线程**版本:单线程 HTTPServer 会把下一个请求排在"上一个响应的慢速
+# 吐字"后面 —— 于是 Ctrl+C 打断后那句"socket 已断但仍要吐满 8 秒"的响应会把
+# **下一条请求**一起拖住。实测(Docker/Ubuntu)`interrupt_e2e` 的"中断后仍可继续对话"
+# 就是被这个拖过 25 秒窗口而假红;macOS 上因为 socket 更快拿到 RST 而侥幸通过。
+# 真网关是并发的,桩也该并发。`_ctr`/`_lock` 已经把顺序号保护住了。
+from http.server import ThreadingHTTPServer  # noqa: E402
+
+ThreadingHTTPServer(("127.0.0.1", int(port)), H).serve_forever()

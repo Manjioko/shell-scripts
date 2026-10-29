@@ -39,6 +39,13 @@ log = os.path.join(d, "log.jsonl")
 stub = subprocess.Popen(
     [sys.executable, os.path.join(REPO, "tests/stub_gateway.py"), str(port)],
     env=dict(os.environ, STUB_LOG=log, STUB_REPLY=rp, STUB_SLOW_MS="8000",
+             # ⚠ 按"用户说了什么"选回复,不按"第几次请求"。
+             #   真实服务端一定按内容答;而按序号答会把**中间任何一次额外请求**
+             #   (标题、摘要、重试)当成一轮吃掉 —— 容器里 `again` 那轮于是拿到默认
+             #   文案 `结束`,断言"没得到 SECOND-OK"就红了,像产品第二轮不渲染。
+             STUB_REPLY_MAP=json.dumps({"hi": "SLOWCHUNK-" * 12, "again": "SECOND-OK",
+                                       "third": "结束"}, ensure_ascii=False),
+             STUB_MAP_DEFAULT="结束",
              STUB_AUTH_DENY_IF="", STUB_FINAL_DENY_IF=""),
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(50):
@@ -94,7 +101,14 @@ def poll():
 
 
 def drain(until, deadline_s, want=None, collect=True):
-    """读到 until(b"") 出现 / 超时 / 进程退出;返回这段时间的输出。"""
+    """读到 until(b"") 出现 / 超时 / 进程退出;返回这段时间的输出。
+
+    顺带**扮演真终端回答 CPR**(`ESC[6n` = "光标在哪?"):prompt_toolkit 起来时会问一次,
+    真终端回 `ESC[<行>;<列>R`。这个 pty 夹具原来不回答,于是某些版本(容器里的较新
+    prompt_toolkit)会卡到超时并打印 `WARNING: your terminal doesn't support cursor
+    position requests (CPR)`,把紧跟着的那一轮对话吃掉 —— 本机旧版不发声,所以
+    macOS 上绿、Linux 上红(2026-10 实测)。补上应答后两侧一致,而且更接近真终端。
+    """
     global out
     buf = b""
     deadline = time.time() + deadline_s
@@ -107,6 +121,11 @@ def drain(until, deadline_s, want=None, collect=True):
                 break
             if not data:
                 break
+            if b"\x1b[6n" in data:          # CPR 询问 → 按真终端格式回答
+                try:
+                    os.write(master, b"\x1b[1;1R")
+                except OSError:
+                    pass
             buf += data
             if collect:
                 out += data
@@ -117,11 +136,16 @@ def drain(until, deadline_s, want=None, collect=True):
     return buf
 
 
+# 等待窗口:桩的慢速流按 STUB_SLOW_MS=8000 分 8 片吐,单跑 25s 够;但**整套闸门顺序跑**时
+# 容器里前面几十道套件刚跑完,负载高,pty 读写与 8s 慢流叠加会超 25s(实测:
+# 单独 `run-as-user.sh tests/interrupt_e2e.py` 12/12,整套里 11/12,红的都是"等不到后续轮回复")。
+# 窗口放宽到 45s —— 它只影响"等多久才判失败",不放宽任何判据。
+_WAIT = 45
 out = b""
 try:
     drain(b"", 3.0)                                   # 等 REPL 起来
     os.write(master, b"hi\n")
-    pre = drain(b"", 25, want=b"SLOWCHUNK")
+    pre = drain(b"", _WAIT, want=b"SLOWCHUNK")
     ck("中断前已开始流式输出", b"SLOWCHUNK" in pre, repr(pre[-120:]))
 
     os.write(master, b"\x03")                         # 真 Ctrl+C(SIGINT)
@@ -135,7 +159,7 @@ try:
     ck("没有 KeyboardInterrupt 裸栈", "KeyboardInterrupt" not in txt)
 
     os.write(master, b"again\n")
-    got = drain(b"", 25, want=b"SECOND-OK")
+    got = drain(b"", _WAIT, want=b"SECOND-OK")
     ck("中断后仍可继续对话(得到新回复)", b"SECOND-OK" in got,
        repr(got[-300:]))
 
@@ -145,7 +169,7 @@ try:
     drain(b"", 3.0)
     ck("空提示符 Ctrl+C 不退出", poll() is None, "rc=%r" % (poll(),))
     os.write(master, b"third\n")
-    got3 = drain(b"", 25)          # 桩脚本第 3 条是缺省回复(结束)
+    got3 = drain(b"", _WAIT)          # 桩脚本第 3 条是缺省回复(结束)
     ck("空提示符 Ctrl+C 后仍能对话", "结束".encode() in got3, repr(got3[-200:]))
 
     os.write(master, b"-q\n")

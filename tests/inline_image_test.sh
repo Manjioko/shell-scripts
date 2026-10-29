@@ -57,12 +57,17 @@ ck "_JQ_EXPAND_REFS 恰好占 1 行" "$(sed -n '/^_JQ_EXPAND_REFS=/p' "$SRC" | w
 ck "_JQ_CONTENT_TEXT 恰好占 1 行" "$(sed -n '/^_JQ_CONTENT_TEXT=/p' "$SRC" | wc -l | tr -d ' ')" "1"
 
 # 造一张远超 IMG_INLINE_MAX_SIDE 的图(2600px),用短表切片,别逐像素循环
+# ⚠ 生成器必须产出**结构合法**的 PNG:每行恰好 `1 + S*3` 字节(过滤字节 + RGB)。
+#   原写法 `big[(y*7)%len(tbl):… + S]` 在偏移超过表长时会切出**短行**(2600 行里 1556 行
+#   不足),解压后总字节对不上 —— 严格解码器(Pillow)直接 OSError: unrecognized data
+#   stream contents,于是 Linux 上 prepare_delivery 的 PIL 兜底拿不到图、24 条断言全红;
+#   而 macOS 的 sips 宽容,照缩不误 → 一直是绿的。这不是产品差异,是**夹具在造假图**。
 python3 - "$W/big.png" <<'PY'
 import sys, zlib, struct
 S = 2600
 tbl = bytes((i*37) % 256 for i in range(997))
-big = tbl * (S // len(tbl) + 1)
-rows = b''.join(b'\x00' + big[(y*7) % len(tbl):((y*7) % len(tbl)) + S] for y in range(S))
+row = (tbl * ((S * 3) // len(tbl) + 2))[:S * 3]      # 定长:正好 S 个像素 × 3 通道
+rows = b''.join(b'\x00' + row for _ in range(S))
 def ch(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t+d) & 0xffffffff)
 open(sys.argv[1], 'wb').write(b'\x89PNG\r\n\x1a\n'
     + ch(b'IHDR', struct.pack('>IIBBBBB', S, S, 8, 2, 0, 0, 0))
@@ -81,7 +86,14 @@ messages='[{"role":"system","content":"s"}]'
 img_inline_attach "$del" "图纸A.png"; idA="$inline_ref_id"
 IMG_REF_DIR_KEEP="$IMG_REF_DIR"
 ck "attach 成功" "$([[ -n "$idA" ]] && echo yes)" "yes"
-ck ".url 尾字节 = 3d(不是 0a)" "$(tail -c 1 "$IMG_REF_DIR/$idA.url" | xxd -p | tr -d '\n')" "3d"
+# 判据是"最后 4 个字符是 base64 的合法收尾":要么 `=`/`==`(长度不是 3 的倍数),
+# 要么是 base64 字母表里的字符(正好补齐)。**不能写死 `=`**:那一条在换夹具/换编码器
+# 后必红(实测:把假 PNG 换成合法 PNG 后 sips 出来的 JPEG 长度刚好整除 3、没有 padding,
+# 末字节变成 'Z' —— 断言红,而产品行为完全正确)。真正要守的是"末尾不许是 0x0a"。
+ck ".url 末字节合法(不是换行)" \
+   "$(tail -c 1 "$IMG_REF_DIR/$idA.url" | xxd -p | tr -d '\n' | grep -qiE '^(0a|0d)$' && echo bad || echo ok)" "ok"
+ck ".url 末尾 4 字符是 base64 合法收尾" \
+   "$(tail -c 4 "$IMG_REF_DIR/$idA.url" | grep -qE '^([A-Za-z0-9+/]{4}|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)$' && echo ok || echo bad)" "ok"
 ck ".url 整体不含换行" "$(tr -cd '\n' < "$IMG_REF_DIR/$idA.url" | wc -c | tr -d ' ')" "0"
 
 echo "=== 4. 展开(live):必须真出 image_url 部件 ==="
@@ -1102,8 +1114,13 @@ curl() {   # 桩:把请求体(@"file")拷出来,再回一条假响应、吐 200
 _pc_body() {  # $1=请求体文件 → 打印"请求里那张图"的尺寸(真解出来量,不看中间变量)
     # ⚠ 取 user 那条消息里的图:vision_build_body 把 system 放在 messages[0],
     #   直接写 content[0] 会拿到系统提示词那串字符串(jq 报 "Cannot iterate over string")。
+    # ⚠ base64 解码**不能写 `base64 -D`**:那是 BSD/macOS 的旗标,GNU coreutils 只认 `-d`,
+    #   Linux 上直接报错 → 解出空文件 → img_dims 返回空 → 两条断言假红(实测 2026-10)。
+    #   用 python3 解:两边都有,且不掺命令行旗标差异。
     jq -r '[.messages[] | select(.role=="user")] | .[0].content[0].image_url.url' "$1" 2>/dev/null \
-        | sed 's/^data:[^,]*;base64,//' | tr -d '\n' | base64 -D > "$W/kn9_img.bin"
+        | sed 's/^data:[^,]*;base64,//' | tr -d '\n' \
+        | python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+        > "$W/kn9_img.bin"
     img_dims "$W/kn9_img.bin"
 }
 IMG_PROVIDER=auto; IMG_CAPABLE=1; describe_note=""

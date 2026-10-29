@@ -5060,6 +5060,16 @@ hard_deny_path() {
         case "$p" in
             "$WORK_ROOT"|"$WORK_ROOT"/*) return 1 ;;    # 根内写放行(与常态一致)
         esac
+        # ⚠ 主目录保护必须排在 tmp 豁免**之前**。原来顺序是 tmp → SYS → HOME,
+        #   于是 `HOME` 本身落在 /tmp 下时(容器/CI 常见: HOME=/tmp/xxx),
+        #   `~/.bashrc`、`~/.config/*` 被 /tmp 豁免整段吞掉 → P2 静默消失。
+        #   实测(2026-10, Docker/Ubuntu):macOS 上跑不出来(临时 HOME 在 /var/folders),
+        #   容器里才暴露 —— 与 P1(~/.ssh 等本来就在 tmp 之前)口径对齐。
+        #   Python 活实现(wchat_py/pathrule.py)已按同一顺序修正,这里保持两条路一致。
+        case "$p" in
+            "$HOME"|"$HOME"/.*)
+                hd_rule="P2"; hd_msg="写入主目录顶层或隐藏配置目录(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
+        esac
         case "$p" in
             /tmp/*|/private/tmp/*|/var/tmp/*|/dev/null|/dev/stdin|/dev/stdout|/dev/stderr|/dev/zero)
                 return 1 ;;
@@ -5067,8 +5077,6 @@ hard_deny_path() {
             /Volumes/*|/opt/*|/var/*|/root/*|/proc/*|/sys/*|/run/*|/boot/*|/lib/*|/lib64/*|\
             /srv/*|/media/*|/mnt/*)
                 hd_rule="P2"; hd_msg="写入系统路径被禁止(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
-            "$HOME"|"$HOME"/.*)
-                hd_rule="P2"; hd_msg="写入主目录顶层或隐藏配置目录(路径裁决组件降级为粗判据,未归一)"; return 0 ;;
         esac
     fi
     return 1
@@ -6053,11 +6061,25 @@ prepare_delivery() {
     longest=$(( w > h ? w : h ))
     (( longest <= side )) && { printf '%s\n' "$in"; return 0; }
     out=$(mktemp "${TMPDIR:-/tmp}/ct_inl_XXXXXX")
+    # 三条兜底与 prepare_image 保持同一套:sips → ffmpeg → python3(PIL)。
+    # ⚠ 原来这里**只有前两条**,Linux 上两者皆无(容器/服务器常见)→ 缩不动 → 2600px
+    #   原样交付:token 按面积计费,一张 2600px 图直接顶格(2048px=2500 已封顶,
+    #   2600px 只会更贵),而且 `.url` 侧链一步也不生成 —— `内联图片` 24 条红就是这个。
+    #   实测环境:Ubuntu 24.04 无 sips/ffmpeg,但 venv 里有 Pillow 13。
+    #   prepare_image 早就有第三条,这边漏了 —— 同一件事两份实现必漂,已对齐。
     if command -v sips >/dev/null 2>&1; then
         sips -Z "$side" -s format jpeg -s formatOptions 85 "$in" --out "$out" >/dev/null 2>&1
     elif command -v ffmpeg >/dev/null 2>&1; then
         ffmpeg -y -loglevel error -i "$in" -vf "scale=${side}:-2" \
             -f image2 -c:v mjpeg -q:v 3 "$out" >/dev/null 2>&1
+    fi
+    if [[ ! -s "$out" ]] && python3 -c 'import PIL' >/dev/null 2>&1; then
+        IMG_SIDE="$side" python3 -c 'import os, sys
+from PIL import Image
+side = int(os.environ["IMG_SIDE"])
+im = Image.open(sys.argv[1])
+im.thumbnail((side, side))          # 等比缩到框内,与 sips -Z 同义(不裁剪、不放大)
+im.convert("RGB").save(sys.argv[2], "JPEG", quality=85)' "$in" "$out" >/dev/null 2>&1
     fi
     [[ -s "$out" ]] && { printf '%s\n' "$out"; return 0; }
     printf '%s\n' "$in"          # 缩不动就原样交回,由调用方按体积再判
