@@ -1,0 +1,28 @@
+# deb 构建镜像:在**有网**的构建期把 wheel 下好,运行期就不需要网。
+#
+# 为什么单独一个镜像:运行期容器**没有出网**(实测 curl pypi 超时),所以
+# `pip install` 必须发生在镜像构建阶段。这个镜像的产物 = /wheelhouse/*.whl,
+# 由 make_deb.py 打进 deb。
+ARG BASE=ubuntu:24.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+        python3 python3-venv python3-pip \
+        ca-certificates dpkg-dev fakeroot \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# --only-binary=:all: 很重要:任何需要现场编译的依赖都会让"离线装"变成天方夜谭,
+# 而且编译失败的错误信息与"包不兼容"长得一样,极难归因。宁可在这里明确失败。
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip download -q --only-binary=:all: \
+        --disable-pip-version-check \
+        -r /tmp/requirements.txt -d /wheelhouse \
+    && ls /wheelhouse | head -20 \
+    && echo "wheel 数: $(ls /wheelhouse | wc -l)"
+
+CMD ["sh", "-c", "ls /wheelhouse"]
+

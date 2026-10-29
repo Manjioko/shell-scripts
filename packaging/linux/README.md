@@ -75,9 +75,46 @@ sh packaging/linux/run-as-user.sh tests/py_pathrule_test.sh   # 单道，看全�
 
 1. Docker 跑通 ✅
 2. pipx / uv 分发（自带 venv，绕开 PEP 668）
-3. deb（先 Ubuntu 24.04，自带 manylinux wheels；`WCHAT_NO_BOOTSTRAP=1` 避免二次建 venv）
+3. **deb（已做出并验收 ✅）** —— 见下节
 4. 扩 Debian 12 / Ubuntu 22.04
 5. WSL 专项（剪贴板 `powershell.exe`、文件选择器、`/mnt/c` 性能）
 
-安装布局建议 `/usr/lib/wchat/{wchat, wchat_py/, venv/}` —— `runtime._runtime_fallback()`
+安装布局 `/usr/lib/wchat/{wchat, wchat_py/, venv/, wheels/}` —— `runtime._runtime_fallback()`
 里"同级 venv"那条候选（`<包目录>/venv/bin/python`）天然覆盖这个形态，不用改代码。
+
+## deb 打包
+
+```bash
+# 0) 构建"有网"的取 wheel 镜像（只需一次；依赖版本变了要重建）
+docker build -f packaging/linux/Dockerfile.deb -t wchat-deb:24.04 packaging/linux
+
+# 1) 打 deb（两步容器：先取 wheel，再在有 dpkg-deb 的环境里组装）
+sh packaging/linux/build-deb.sh 0.2.7
+#   -> dist/wchat_0.2.7_arm64.deb（约 14MB，含 23 个 wheel）
+
+# 2) 验收：干净容器里 dpkg -i，**不挂源码**
+sh packaging/linux/test-deb.sh dist/wchat_0.2.7_arm64.deb
+#   -> DEB-ACCEPTANCE-OK
+```
+
+实测结果（Ubuntu 24.04 / aarch64）：`dpkg -i` 后 `wchat --version`、`wchat -h`、
+`wchat usage report` 都能在 `/tmp` 下跑通（不依赖 cwd），依赖全部离线装齐，
+`dpkg -r` 后 venv 与两个可执行都清干净。
+
+### 三个设计决定（都不是随手选的）
+
+| 决定 | 为什么 |
+|---|---|
+| **wheel 内置，postinst 用 `--no-index` 装** | 运行期容器实测**没有出网**（curl pypi 超时）；而且 PEP 668 会拦住全局 pip，发行版的 `python3-openai` 又对不上（我们要 2.x，24.04 里没有）。内置 wheel 是唯一"装完即用、零联网"的路 |
+| **venv 不打进 deb，由 postinst 现场建** | venv 的 `pyvenv.cfg`、脚本 shebang 全是绝对路径，打进包里换台机器/换补丁版本就是僵尸态 |
+| **`Depends: python3-venv`** | Ubuntu 的 `python3` **不带** venv，少了它 postinst 那句 `python3 -m venv` 会失败，而报错是 ensurepip 的一行提示，很难第一眼看懂 |
+
+### 契约闸门
+
+`tests/deb_pkg_test.py`（**29 条**，已进闸门表 = `deb打包`）钉住上面这些约定：
+control 字段、postinst 必须 `--no-index` 且幂等、prerm 删 venv、wrapper 指 venv 的
+python（不是 `env python3`）、文件清单与 brew 包**同源**（`make_deb` 直接 import
+`make_release` 的 `INCLUDE`，不抄第二份）、验收脚本不把源码挂进去。
+
+它只做**静态检查**（秒级）；真构建 + 真装在上面两条命令里 —— 那个要几分钟，
+不适合进闸门表。
