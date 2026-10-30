@@ -71,12 +71,12 @@ sh packaging/linux/run-as-user.sh tests/py_pathrule_test.sh   # 单道，看全�
 > 除上面这一条（环境性 SKIP），其余在 Linux（Ubuntu 24.04 / aarch64 / 普通用户 / 真实 `/home`）
 > 上全绿。历史红的逐条归因见上表。
 
-## 打包路线（建议顺序）
+## 打包路线
 
 1. Docker 跑通 ✅
 2. pipx / uv 分发（自带 venv，绕开 PEP 668）
 3. **deb（已做出并验收 ✅）** —— 见下节
-4. 扩 Debian 12 / Ubuntu 22.04
+4. **APT 源（已做出并端到端验收 ✅）** —— 见下节;扩 Debian 12 / Ubuntu 22.04 / x86_64 待做
 5. WSL 专项（剪贴板 `powershell.exe`、文件选择器、`/mnt/c` 性能）
 
 安装布局 `/usr/lib/wchat/{wchat, wchat_py/, venv/, wheels/}` —— `runtime._runtime_fallback()`
@@ -118,3 +118,95 @@ python（不是 `env python3`）、文件清单与 brew 包**同源**（`make_de
 
 它只做**静态检查**（秒级）；真构建 + 真装在上面两条命令里 —— 那个要几分钟，
 不适合进闸门表。
+
+## APT 源（`apt install wchat` 那一行）
+
+能做到 —— 而且**已经做出来了并端到端验收过**。关键是要明白 apt 和 brew 的差别:
+
+| | brew | apt |
+|---|---|---|
+| 索引 | Formula（Ruby 源文件），tap 就是 git 仓库 | `Packages` 索引 + `Release`，必须是 **HTTP** 静态文件 |
+| 信任 | 无签名要求（靠 git + sha256 校验 tarball） | **强制验签**（`InRelease` 的 GPG 签名），否则现代 apt 直接拒 |
+| 用户端命令 | `brew tap x/y && brew install wchat` | 装 keyring → 配 source → `apt update && apt install wchat` |
+
+apt **做不到** brew 那种"一条命令搞定"：信任锚（公钥）必须由用户亲手建立，
+这是设计使然，不是我们的缺陷。最接近的形态是三行（见下）。
+
+### 怎么做
+
+```sh
+# 生成仓库（首次会自动建签名密钥；生产应换成你自己的离线密钥）
+docker run --rm -v "$PWD":/src -w /src wchat-deb:24.04 \
+    sh -c 'mkdir -p /tmp/g && chmod 700 /tmp/g && python3 packaging/linux/make_apt_repo.py \
+           --deb dist/wchat_0.2.7_arm64.deb --out dist/apt \
+           --gnupg-home /tmp/g --key-email you@example.com'
+
+# 端到端验收：干净容器里**只走 apt**（不 dpkg -i）
+sh packaging/linux/test-apt-repo.sh dist/apt      # -> APT-ACCEPTANCE-OK
+```
+
+产出的 `dist/apt/` 直接就是一个静态站点根目录：
+
+```
+pool/main/w/wchat/wchat_0.2.7_arm64.deb
+dists/stable/InRelease            ← 明文签名（apt 首选）
+dists/stable/Release.gpg          ← 分离签名（老 apt 兜底）
+dists/stable/Release              ← 登记 Packages 与 Packages.gz 的 md5+sha256
+dists/stable/main/binary-arm64/Packages{,.gz}
+wchat.asc                         ← 用户端装 keyring 用（信任锚）
+wchat.sources  READ-ME.txt        ← 给用户抄的模板
+```
+
+### 用户端（这就是"一行命令"的现实形态）
+
+```sh
+# ① 装信任锚（一次性）
+curl -fsSL https://<域名>/apt/wchat.asc | sudo gpg --dearmor -o /usr/share/keyrings/wchat.gpg
+# ② 加源（一次性）
+echo 'deb [signed-by=/usr/share/keyrings/wchat.gpg] https://<域名>/apt stable main' \
+  | sudo tee /etc/apt/sources.list.d/wchat.list
+# ③ 装 / 升级（之后每次只需这条）
+sudo apt update && sudo apt install wchat
+```
+
+发布新版本 = 把新 `.deb` 丢进 `pool/`、重跑 `make_apt_repo.py`、
+把整个 `dist/apt/` 同步上去。客户端 `apt update` 就能看到新版本，
+`apt upgrade` 升级 —— 这一点比 brew 还顺（brew 要 `brew update` 且要等 tap 同步）。
+
+### 一条"本地全绿、上线全红"的坑（已修，并被闸门钉住）
+
+`Packages` 里的 `Filename` 必须是**仓库相对路径**（`pool/main/w/wchat/xxx.deb`）。
+第一版给 `apt-ftparchive` 传了绝对路径，于是生成 `Filename: /src/dist/apt/pool/...`——
+**`file:` 源照样能装**（绝对路径恰好对），一换成 https 就拼成
+`https://域名/src/dist/apt/...` → 404。
+
+**实测证据**（`packaging/linux/prove-filename-must-be-relative.sh`，用
+`apt-get install --print-uris` 拿 apt 的真实下载计划）：
+
+    Filename: pool/main/w/wchat/wchat_0.2.7_arm64.deb        ← 对
+      -> http://host:PORT/pool/main/w/wchat/wchat_0.2.7_arm64.deb      ✅
+
+    Filename: /src/dist/apt/pool/main/w/wchat/wchat_0.2.7_arm64.deb  ← 错
+      -> http://host:PORT//src/dist/apt/pool/main/w/wchat/...          ❌ 404
+
+这类错在本地 `file:` 源上**永远测不出来**，所以 `tests/apt_repo_test.py`（**32 条**，
+闸门名 `apt仓库`）把它静态锁死了，还带一条变异自检证明断言不是恒真。
+
+### 契约闸门
+
+`tests/apt_repo_test.py`（**32 条**，闸门名 `apt仓库`）：pool+dists 结构、
+`Filename` 必须仓库相对、`Release` 双 hash、`InRelease`+`Release.gpg` 都在、
+索引 gzip `mtime=0`（可复现）、`--no-sign` 必须明确警告、验收脚本**不许**用
+`dpkg -i` 绕过索引（绕过去就验不出 Filename/hash/签名）。
+
+## 还缺什么（按"要能给别人用"排）
+
+| # | 缺口 | 为什么必须有 | 成本 |
+|---|---|---|---|
+| 1 | **签名的私钥怎么管** | 现在 `make_apt_repo.py` 会现场生成一把密钥（为了方便跑通）。生产上私钥泄露 = 任何人能给你的用户推任意包。应该：离线生成 → 私钥进 CI secret / 离线机 → 公钥随 README 发布 | 半天 |
+| 2 | **一个能挂静态文件的 HTTPS 域名** | apt 只认 http(s)，不认本地路径。GitHub Pages / Cloudflare Pages / 对象存储都能干，但需要你选一个并配上域名 | 1 小时 |
+| 3 | **`x86_64` 与 Debian 12 / Ubuntu 22.04 的包** | 现在只有 `arm64` + 24.04。wheel 是**平台相关**的（`cp312-manylinux_aarch64`），混用必装不上。要在对应容器里各跑一遍 `build-deb.sh` | 每平台 20 分钟 |
+| 4 | **`apt update` 的 `Release` 过期问题** | `Release` 里 `Date` 是构建时间；长期不重发，某些客户端会因索引"太旧"报警。每次发版重跑即可（脚本已处理） | 0 |
+| 5 | **首装需要 `python3-venv`** | 已在 `Depends` 里，apt 会自动带上 —— 但**离线机器**（无 apt 源）装不了。真要离线分发给别人，得改成"把 venv 一起打包"或提供 tarball 版 | 视需求 |
+| 6 | **自动发版流水线** | 现在是手动三条命令。要可持续，需要：tag → 构建多架构 → 生成仓库 → 同步到域名 → 冒烟。GitHub Actions 能做，但需要仓库托管在 GitHub 且你愿意加 CI | 1–2 天 |
+| 7 | **卸载时的用户数据** | `prerm` 删的是 `/usr/lib/wchat/venv`；用户数据在 `~/.ct/`，我们**故意不动**（和 brew 一致）。要在文档里写清"卸载不删对话历史" | 0（写文档） |

@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         python3 python3-venv python3-pip \
         ca-certificates dpkg-dev fakeroot \
+        apt-utils gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -25,4 +26,3 @@ RUN python3 -m pip download -q --only-binary=:all: \
     && echo "wheel 数: $(ls /wheelhouse | wc -l)"
 
 CMD ["sh", "-c", "ls /wheelhouse"]
-
