@@ -54,14 +54,17 @@ GREY = "\033[2m"
 ZERO = "\033[0m"
 
 
-def _status(text):
+def _status(text, limit=None):
     """上屏一行"非正文"状态(已读取/已列出/已写入…)。
 
     统一规则(2026-11 用户报"画面杂乱"):**只有助手正文用正常亮度**,其余一律灰化,
     与思考内容同色,并压成一行 —— 工具状态行里带文件名/行数,长路径会把行撑得很宽。
+
+    `limit=0` 表示不截断:用于"一次性告知"(如 timeout 被夹紧的说明)。
+    那类文本截一半就失去意义,而它只出现一次、不会刷屏。
     """
     from wchat_py.render import dim
-    s = dim(str(text or "").strip())
+    s = dim(str(text or "").strip(), limit)
     if s:
         sys.stdout.write(" " + s + "\n")
         sys.stdout.flush()
@@ -606,10 +609,46 @@ def _run_tool(name, args_json):
             _status("后台启动 PID %s · 日志 %s" % (_p.pid, _log))
             return _msg
         from wchat_py.termpty import pty_run
+        # 单命令时长:**模型可自主指定**(`timeout` 参数),这是用户明确要的
+        # "给 AI 自己控制上限的权力" —— 构建/跑全套测试/装依赖常常超过 120s,
+        # 固定上限等于逼它把工作拆成做不到的碎片,或者干脆失败。
+        #
+        # 但"自主"不等于"无限":上限由 `CMD_TIMEOUT_MAX`(默认 3600s)兜底,
+        # 否则一条手滑的 `timeout: 999999` 就能让 auto 会话挂一整天(无人值守时没人掐)。
+        # 越界就**夹紧并说出来**:模型看到"实际按 3600s 执行"才知道自己该改。
         try:
-            _timeout = float(os.environ.get("CMD_TIMEOUT", "120"))
+            _default_to = float(os.environ.get("CMD_TIMEOUT", "120") or 120)
         except ValueError:
-            _timeout = 120.0
+            _default_to = 120.0
+        try:
+            _max_to = float(os.environ.get("CMD_TIMEOUT_MAX", "3600") or 3600)
+        except ValueError:
+            _max_to = 3600.0
+        if _max_to < _default_to:
+            _max_to = _default_to
+        _asked = a.get("timeout") if isinstance(a, dict) else None
+        _timeout = _default_to
+        _to_note = ""
+        if _asked is not None and str(_asked).strip() != "":
+            try:
+                _asked_f = float(_asked)
+            except (TypeError, ValueError):
+                _to_note = ("(timeout 参数 %r 不是数字,已按默认 %ss 执行)"
+                            % (_asked, int(_default_to)))
+            else:
+                if _asked_f <= 0:
+                    # 0/负数当"没指定":模型常把 timeout=0 理解成"不设上限"。
+                    # 这里给默认值而不是 1s —— 把"不设"翻成"1 秒"会让命令必然被杀。
+                    _timeout = _default_to
+                elif _asked_f > _max_to:
+                    _timeout = _max_to
+                    _to_note = ("(timeout=%s 超过上限 %ss,已按上限执行;"
+                                "更长的任务请用 run_in_background)"
+                                % (_asked, int(_max_to)))
+                else:
+                    _timeout = _asked_f
+        if _to_note:
+            _status(_to_note, 0)
         _run_env = dict(os.environ,
                         GIT_PAGER="cat", PAGER="cat",
                         GIT_EDITOR="true", GIT_SEQUENCE_EDITOR="true",
@@ -617,33 +656,32 @@ def _run_tool(name, args_json):
         _disp, _full, _rc, _to, _intr = pty_run(
             ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")),
             env=_run_env)
-        # 屏幕只给**一行**:首行 + 行数脚注。用户报"shell 输出全量铺屏,画面杂乱无章" ——
-        # 命令输出动辄几十上百行,把正文挤到看不见。完整内容仍然**原样进上下文**
-        # (下面 _trunc_for_context 之后 return),所以模型的能力一点没减;减的只是屏幕噪音。
-        # 灰色 + 压成一行,与思考内容同色;行数脚注跟在同一行,避免又多一行。
+        # 输出按**窗口**上屏(多行):`pty_run` 的 `_disp` 就是 `WIN`(默认 10)行的尾部窗口,
+        # 这是 master `run_with_window` 的原始行为,也是用户明确要保留的"流箱显示多行"。
+        # 曾经改成"只显示首行" —— 那反而更差:看不到报错行在哪、`git status` 这类
+        # 十几行的日常输出只剩一行,人得再让 AI 读一遍。**多行是要的,只是要灰、别刺眼。**
+        # 完整输出仍然原样进上下文(下面 _trunc_for_context 之后 return)。
         from wchat_py.render import dim as _dim
         _n = len(_full.splitlines())
-        if _disp:
-            _tail = "共 %d 行" % _n
-            if _n > 1:
-                _tail += ",仅显示首行"
-            if _to:
-                _tail += ",超过 %ss 已终止" % os.environ.get("CMD_TIMEOUT", "120")
-            elif _intr:
-                _tail += ",已中断"
-            sys.stdout.write("\033[2K\033[2m│\033[0m %s \033[2m…(%s)%s\r\n"
-                             % (_dim(_disp[0]), _tail, ZERO))
-        else:
-            # 无输出时**必须**留一行汇总:"静默成功"是最难排查的失败形状(0 行 + rc=0)。
-            if _to:
-                sys.stdout.write("%s└─ 超过单命令上限 %ss,已终止 · 共 0 行%s\n"
-                                 % (GREY, os.environ.get("CMD_TIMEOUT", "120"), _ZERO))
-            elif _intr:
-                sys.stdout.write("%s└─ 已中断 · 共 0 行%s\n" % (GREY, _ZERO))
-            else:
-                sys.stdout.write("%s└─ 完成 · 共 0 行%s\n" % (GREY, _ZERO))
+        for _ln in _disp:
+            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _dim(_ln))
         if _to:
-            _full += "\n(命令超过单条上限 %ss,已终止 · rc=%s)" % (_timeout, _rc)
+            # 超时提示必须给"下一步怎么办":光说"已终止"会逼模型猜它是不是该拆命令。
+            _ts = int(_timeout) if _timeout == int(_timeout) else _timeout
+            sys.stdout.write("%s└─ 超过单命令上限 %ss,已终止 · 共 %d 行 ─┘%s\n"
+                             % (GREY, _ts, _n, ZERO))
+            _full += ("\n(命令超过本次上限 %ss,已终止 · rc=%s。"
+                      "若这条命令本来就该更久,请带上更大的 timeout 参数重试(上限 %ss);"
+                      "需要一直活着的进程请改用 run_in_background=true。)"
+                      % (_ts, _rc, int(_max_to)))
+        elif _intr:
+            sys.stdout.write("%s└─ 已中断 · 共 %d 行 ─┘%s\n" % (GREY, _n, ZERO))
+        elif _n > len(_disp):
+            # 只在**被窗口截短**时才说一句,否则纯属噪音(常态是 1-3 行)。
+            sys.stdout.write("%s└─ 完成 · 共 %d 行(屏幕显示最后 %d 行)─┘%s\n"
+                             % (GREY, _n, len(_disp), ZERO))
+        else:
+            sys.stdout.write("%s└─ 完成 · 共 %d 行 ─┘%s\n" % (GREY, _n, ZERO))
         sys.stdout.flush()
         # 进上下文前必须截断(master run_with_window → truncate_output)。
         # 两道闸:① 单行列宽(2000)② 行数(头尾各留)。

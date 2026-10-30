@@ -17,6 +17,7 @@
 为什么必须有 C:把 `dim()` 塞到 render_markdown 里,A/B 依然全绿(正文也灰了),
 而屏幕会变成一坨灰。测试只断言"该灰的灰了",抓不住"不该灰的也灰了"。
 """
+import json
 import os
 import re
 import sys
@@ -104,14 +105,16 @@ import io as _io
 import json as _json
 
 
-def run_shell_capture(cmd, monkey):
+def run_shell_capture(cmd, monkey, **extra):
     buf = _io.StringIO()
     old = sys.stdout
     sys.stdout = buf
+    args = {"command": cmd, "reason": "测试用"}
+    args.update(extra)
     try:
         with monkey():
             out = TR._run_tool("run_shell_command",
-                               _json.dumps({"command": cmd, "reason": "测试用"}, ensure_ascii=False))
+                               _json.dumps(args, ensure_ascii=False))
     finally:
         sys.stdout = old
     return out, buf.getvalue()
@@ -193,25 +196,64 @@ with _Env(AUTO_MODE="sandbox", AUTO_AUDIT_LOG=os.path.join(REPO, ".scratch", "ui
 ck("无判定:屏幕上解释'没回可用判定'", "没回可用判定" in screen, repr(screen[:200]))
 ck("无判定:不把命令摊在屏幕上", "echo hi" not in ANSI.sub("", screen), repr(screen[:200]))
 
-print("=== 6. shell 输出:屏幕只留一行,上下文仍是全量 ===")
-# 走真 _run_tool:3 行输出 → 屏幕**恰好 1 行**(首行 + 行数脚注),回给模型的 content 含 3 行。
+print("=== 6. shell 输出:多行照旧(窗口),但要灰;上下文仍是全量 ===")
+# 2026-11 用户纠正过一次:把 shell 输出折成一行 **反而更差** ——
+# 看不到报错行在哪,`git status` 这类十几行日常输出只剩一行。多行是要的,
+# 只是要求**统一灰**(原来 ┃ 前缀是灰的、内容却是正常亮度,很刺眼)。
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
     out, screen = run_shell_capture(
         "printf 'L1\\nL2\\nL3\\n'", lambda: _Env())
 vis = text_lines(screen)
-ck("屏幕恰好 1 行(首行 + 脚注,不再额外一行汇总)", len(vis) == 1, repr(vis)[:200])
-ck("首行确实显示了内容", vis and "L1" in vis[0], repr(vis)[:200])
-ck("第 2、3 行没上屏", not any("L2" in ln or "L3" in ln for ln in vis), repr(vis)[:200])
-ck("脚注说明只显示首行", vis and "仅显示首行" in vis[0], repr(vis)[:200])
-ck("脚注给出总行数", vis and "共 3 行" in vis[0], repr(vis)[:200])
-ck("回给模型的仍是全量(不因屏幕省略而丢内容)",
-   all(x in out for x in ("L1", "L2", "L3")), repr(out)[:120])
-ck("输出行是灰色", GREY in screen, repr(screen[:80]))
-# 无输出仍必须留一行汇总:0 行 + rc=0 的"静默成功"是最难排查的失败形状。
+ck("三行输出**都**上屏(多行不许折成一行)", sum(1 for ln in vis if "L" in ln) == 3,
+   repr(vis)[:200])
+ck("仍带 │ 边框前缀", all("│" in ln for ln in vis if "L" in ln), repr(vis)[:160])
+ck("末行是 └─ 完成 · 共 3 行 ─┘ 形状",
+   any("完成" in ln and "共 3 行" in ln and "─┘" in ln for ln in vis), repr(vis)[-2:])
+ck("回给模型的仍是全量", all(x in out for x in ("L1", "L2", "L3")), repr(out)[:120])
+# 灰化必须**逐行**覆盖正文内容,不能只灰边框:
+# 原来 `┃ ` 前缀是灰的、`%s` 内容是正常亮度 —— 那正是"刺眼"的来源。
+for ln in [x for x in screen.split("\n") if "L1" in x or "L2" in x]:
+    payload = ln.split("│", 1)[1] if "│" in ln else ln
+    payload = payload.replace("\x1b[0m", "").lstrip()      # 去掉边框后面的 reset
+    ck("内容本身被灰包住(%r)" % ANSI.sub("", payload).strip()[:6],
+       payload.startswith(GREY), repr(payload)[:100])
+ck("无输出的命令仍有一行汇总(防静默成功)",
+   (lambda s: len(text_lines(s)) == 1 and "共 0 行" in s)(
+       run_shell_capture("true", lambda: _Env())[1]))
+
+print("=== 6b. 单命令时长:模型可自主指定 timeout ===")
+import wchat_py.toolrun as TR2  # noqa: E402
+SPEC = json.load(open(os.path.join(REPO, "wchat_py", "tools_spec.json"), encoding="utf-8"))
+SHELL_SPEC = [t for t in SPEC if t["function"]["name"] == "run_shell_command"][0]["function"]
+ck("schema 里有 timeout 属性", "timeout" in SHELL_SPEC["parameters"]["properties"],
+   repr(list(SHELL_SPEC["parameters"]["properties"])))
+ck("timeout 不是必填(不给就按默认)",
+   "timeout" not in (SHELL_SPEC["parameters"].get("required") or []),
+   repr(SHELL_SPEC["parameters"].get("required")))
+ck("说明里写了默认值与上限", "120" in SHELL_SPEC["parameters"]["properties"]["timeout"]["description"]
+   and "3600" in SHELL_SPEC["parameters"]["properties"]["timeout"]["description"],
+   SHELL_SPEC["parameters"]["properties"]["timeout"]["description"][:120])
+
+# 行为断言:真的用上了这个值。用 1s 上限 + sleep 2 证明"参数生效";
+# 只看 status 字符串是抓不住"读进来却没用"的。
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
-    out, screen = run_shell_capture("true", lambda: _Env())
-vis = text_lines(screen)
-ck("无输出时仍有一行汇总(防静默成功)", len(vis) == 1 and "共 0 行" in vis[0], repr(vis)[:200])
+    _o, _s = run_shell_capture("sleep 3", lambda: _Env(), timeout=1)
+ck("timeout=1 的慢命令被掐断(参数真的生效)", "超过" in _s and "1s" in _s, repr(_s[:160]))
+ck("被掐断时告诉模型可以调大重试", "timeout" in _o and "重试" in _o, repr(_o[:200]))
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+    _o2, _s2 = run_shell_capture("sleep 2 && echo ok", lambda: _Env())
+ck("同样 2 秒的命令在默认上限下能跑完(不是一味拒绝)", "ok" in _o2, repr(_o2[:120]))
+
+# 上限兜底:不许模型用 timeout 把 auto 会话挂一整天
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", CMD_TIMEOUT="1", CMD_TIMEOUT_MAX="2"):
+    _o3, _s3 = run_shell_capture("sleep 30", lambda: _Env(), timeout=999)
+ck("超过 CMD_TIMEOUT_MAX 时按上限夹紧并说明",
+   "超过上限" in _s3 and "2s" in _s3, repr(_s3[:200]))
+# 非数字/0 不该把命令变成 1 秒暴死
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+    _o4, _s4 = run_shell_capture("echo ok4", lambda: _Env())
+    _o5, _s5 = run_shell_capture("sleep 1 && echo ok5", lambda: _Env(), timeout=0)
+ck("timeout=0 当作未指定(不会变成 1s 暴死)", "ok5" in _o5, repr((_o5, _s5))[:160])
 
 print("=== 7. 状态行灰化(已读取/已列出/已写入) ===")
 import wchat_py.tools_run as TSR  # noqa: E402

@@ -155,6 +155,10 @@
                         "run_in_background": {
                             "type": "boolean",
                             "description": "是否作为长驻服务后台运行。true 时命令以 nohup 后台启动,输出重定向到日志文件,立即返回进程 PID 与日志路径,不会阻塞终端。启动服务器/监听进程等长驻命令必须设为 true。"
+                        },
+                        "timeout": {
+                            "type": "integer",
+                            "description": "本命令的最长执行秒数(可选,默认 120,上限 3600)。构建、跑全套测试、装依赖这类**已知会慢**的命令请自己调大(例如 900);命令被超时终止时结果里会写明实际用了多少秒,可据此放宽后重试。不要用它替代 run_in_background——需要一直活着的服务仍要走后台。"
                         }
                     },
                     "required": ["command"]

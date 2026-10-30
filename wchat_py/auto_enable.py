@@ -56,6 +56,7 @@ def enable(tier):
     allow_w = os.environ.get("WCHAT_ALLOW_WRITE", "")
     max_rounds = os.environ.get("MAX_TOOL_ROUNDS") or "250"
     cmd_to = os.environ.get("CMD_TIMEOUT") or "120"
+    cmd_to_max = os.environ.get("CMD_TIMEOUT_MAX") or "3600"
     quota = os.environ.get("AUTO_MAX_APPROVALS") or "200"
     streak = os.environ.get("AUTO_DENY_STREAK") or "3"
     install = os.environ.get("WCHAT_ALLOW_INSTALL", "")
@@ -73,8 +74,8 @@ def enable(tier):
     w("    H5 家目录配置 H6 凭据 H7 改写发布历史 H8 电源 H9 批量杀进程 H10 外发密钥 H11 系统路径\n")
     w("    H12 越界写目标 H13 目标不可解析(defaults/plutil/osascript/launchctl/钥匙串) H14 安装(默认拒,除非启动时点名)\n")
     w("    越界写(工作目录之外)按路径判据报 P1/P2/P3,与文件工具同一口径\n")
-    w("  刹车: 单轮工具≤%s 次 · 单命令≤%ss · 自动放行配额 %s 次 · 连续拒 %s 次降级人工\n"
-      % (max_rounds, cmd_to, quota, streak))
+    w("  刹车: 单轮工具≤%s 次 · 单命令默认≤%ss(AI 可按需传 timeout 放宽,上限 %ss) · 自动放行配额 %s 次 · 连续拒 %s 次降级人工\n"
+      % (max_rounds, cmd_to, cmd_to_max, quota, streak))
     w("  安装面:   一律拒绝(H14)。要放行请退出重启加 --allow-install 包名1,包名2\n")
     w("  MCP:      %s\n" % mcp)
     w("  回滚点:   git %s @ %s\n\n" % (_branch(), _git_rev()))

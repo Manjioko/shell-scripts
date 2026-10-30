@@ -55,9 +55,13 @@ ck("审计记放行 allow", os.path.exists(_alogy) and '"allow"' in open(_alogy)
 os.environ.pop("AUTO_AUDIT_LOG", None)
 
 # 4) 超时（放行 + CMD_TIMEOUT=1）
+# 文案从"超过单条上限"改成"超过本次上限":上限现在**按调用可变** ——
+# 模型可以传 timeout 自己放宽(默认 120s,封顶 CMD_TIMEOUT_MAX=3600s)。
 os.environ["CMD_TIMEOUT"] = "1"
 out = run("sleep 3")
-ck("超时提示", "超过单条上限" in out, repr(out))
+ck("超时提示", "超过本次上限" in out, repr(out))
+ck("超时提示告诉模型可以带更大的 timeout 重试", "timeout" in out and "重试" in out, repr(out))
+ck("超时提示点名 run_in_background 这条路", "run_in_background" in out, repr(out))
 os.environ.pop("CMD_TIMEOUT", None)
 os.environ.pop("WCHAT_AUTO_ASSUME_YES", None)
 
