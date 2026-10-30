@@ -95,9 +95,17 @@ python3 packaging/homebrew/make_release.py 0.2.0
   brew install local/wchat/wchat
   ```
   （会装 `python@3.12`；首次运行 `wchat` 在 `~/.ct/venv` 自举依赖）
-- 发布到 tap：把 tarball 做成 release 附件，用
-  `python3 packaging/homebrew/make_release.py 0.2.0 --url <release-url>` 重新生成 Formula，
-  放进 `homebrew-wchat/Formula/wchat.rb`；
+- 发布到 tap：一条命令搞定（打包 → 建 Release → 把 Formula 同步到独立 tap 仓库）：
+  ```bash
+  python3 packaging/release.py patch     # 或 minor / major / x.y.z
+  ```
+  脚本会把 `Formula/wchat.rb` 单向写入 `homebrew-shell-scripts/Formula/wchat.rb`
+  （tap 仓库只放 Formula、不放源码；内容没变化则跳过）。
+  安装方：
+  ```bash
+  brew tap Manjioko/shell-scripts
+  brew install Manjioko/shell-scripts/wchat
+  ```
 - Formula 安装后 `bin/wchat` 包装 `libexec/wchat`；首次运行缺依赖会在 `~/.ct/venv` 自举
   （见上文 `WCHAT_NO_BOOTSTRAP` / `WCHAT_BOOTSTRAP_FORCE`）。
 

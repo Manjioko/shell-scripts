@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""生成 Homebrew 私有 tap 的源码 tarball 与 Formula。
+"""生成 Homebrew tap 的源码 tarball 与 Formula。
 
 用法:
   python3 packaging/homebrew/make_release.py 0.2.0
   # 发布到 tap 时指定最终 URL(默认用本地 file:// 方便试装):
   python3 packaging/homebrew/make_release.py 0.2.0 \
-      --url https://github.com/<you>/homebrew-wchat/releases/download/v0.2.0/wchat-0.2.0.tar.gz
+      --url https://github.com/<you>/shell-scripts/releases/download/v0.2.0/wchat-0.2.0.tar.gz
 
 产物:
   dist/wchat-<ver>.tar.gz            源码包(不含 __pycache__/.pyc/.DS_Store)
