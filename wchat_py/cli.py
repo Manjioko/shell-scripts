@@ -735,7 +735,7 @@ def run_turn(content, model="", max_rounds=None):
         except Aborted:
             # -st 单轮模式被打断:关箱、丢弃本轮输出、退 130(脚本调用方按"被中断"处理)
             sys.stdout.write(box.close()); sys.stdout.flush()
-            sys.stdout.write("\n⏹ 已中断,本轮输出已丢弃\n"); sys.stdout.flush()
+            sys.stdout.write("\n\033[2m⏹ 已中断,本轮输出已丢弃\033[0m\n"); sys.stdout.flush()
             return 130
         if os.environ.get("WCHAT_TRACE") == "1":
             sys.stderr.write("TRACE round tcs=%d names=%r err=%r\n"
@@ -833,7 +833,8 @@ def run_turn(content, model="", max_rounds=None):
     if reason:
         sys.stdout.write(render_reason("".join(reason)))
     sys.stdout.write(render_markdown(last_text)); sys.stdout.write("\n"); sys.stdout.flush()
-    sys.stdout.write("已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\n" % max_rounds)
+    sys.stdout.write("\033[2m⏱ 已达上限 %d 次:本轮助手工具调用过多,已停止自动执行\033[0m\n"
+                     % max_rounds)
     return 0
 
 
@@ -1145,9 +1146,6 @@ def main(argv):
     return main(["repl"])
 
 
-if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 兼容门面:下面这些名字历史上长在 cli 里,测试与 mcp_boot 直接取 `cli.X`。
 # 实现已经搬到分层模块(toolrun/approve/runtime/imgstate),这里只做**再导出**,
@@ -1164,3 +1162,7 @@ from wchat_py.runtime import (_apply_runtime_defaults, _auto_summary,  # noqa: E
 from wchat_py.toolrun import (_args_obj, _auto_backup, _banner_text,  # noqa: E402
                               _missing_required, _required_of, _run_tool,
                               _trunc_for_context)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

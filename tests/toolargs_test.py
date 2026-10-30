@@ -123,7 +123,12 @@ ck("数组参数被拒", out.startswith("错误:"), repr(out)[:100])
 print("=== 7. 横幅:空命令必须显式标出,不许留白 ===")
 b = cli._banner_text("run_shell_command", '{"command": ""}')
 ck("空命令横幅不含'空白即完成'的误导", "命令为空" in b, repr(b))
-ck("空命令横幅仍是红色强调", "\\033[1;31m" in b or "\x1b[1;31m" in b, repr(b))
+# 2026-11:非正文统一灰化(与思考同色),红色不再用于横幅 —— 可辨识度改由 `⚠` +
+# `未执行` 承担。这条断言从"必须是红色"改成"必须是灰 + 有警示标",防止把
+# "灰"误当成"没标出"(两者在纯文本里都看不见,只有断言能区分)。
+ck("空命令横幅是灰色(非正文统一色)", "\x1b[2m" in b, repr(b))
+ck("空命令横幅不再用红色(与'非正文一律灰'冲突)", "\x1b[1;31m" not in b, repr(b))
+ck("空命令横幅带警示标且标明未执行", "⚠" in b and "未执行" in b, repr(b))
 b2 = cli._banner_text("run_shell_command", '{"command": "echo hi"}')
 ck("正常命令横幅原样", "echo hi" in b2 and "命令为空" not in b2, repr(b2))
 b3 = cli._banner_text("read_file", '{"path": "x"}')

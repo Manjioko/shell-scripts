@@ -26,7 +26,7 @@ import sys
 from wchat_py.approve import (_APPROVED_CMDS, _cmd_key, _grant_path,
                              _note_path_grants, _path_guard)
 from wchat_py.imgstate import _IMG_REFS, _IMG_SEQ, _IMG_URLS
-from wchat_py.render import args_preview, tool_banner
+from wchat_py.render import args_preview, dim, ellipsis, tool_banner
 from wchat_py.runtime import _trunc_int
 
 
@@ -46,6 +46,25 @@ _RED = "\033[1;31m"
 
 
 _ZERO = "\033[0m"
+
+
+GREY = "\033[2m"
+
+
+ZERO = "\033[0m"
+
+
+def _status(text):
+    """上屏一行"非正文"状态(已读取/已列出/已写入…)。
+
+    统一规则(2026-11 用户报"画面杂乱"):**只有助手正文用正常亮度**,其余一律灰化,
+    与思考内容同色,并压成一行 —— 工具状态行里带文件名/行数,长路径会把行撑得很宽。
+    """
+    from wchat_py.render import dim
+    s = dim(str(text or "").strip())
+    if s:
+        sys.stdout.write(" " + s + "\n")
+        sys.stdout.flush()
 
 
 def _args_obj(args_json):
@@ -75,14 +94,15 @@ def _banner_text(name, args_json):
         if str(cmd or "").strip():
             return tool_banner("shell", cmd)
         if a is None:
-            why = "(参数不是合法 JSON,未执行)"
+            why = "⚠ (参数不是合法 JSON,未执行)"
         elif "command" in a:
-            why = "(命令为空:command 是空串/纯空白,未执行)"
+            why = "⚠ (命令为空:command 是空串/纯空白,未执行)"
         elif a:
-            why = "(缺 command —— 本次收到的是 %s,键名不对,未执行)" % "/".join(a)
+            why = "⚠ (缺 command —— 本次收到的是 %s,键名不对,未执行)" % "/".join(a)
         else:
-            why = "(本次调用没带任何参数,未执行)"
-        return tool_banner("shell", _RED + why + _ZERO)
+            why = "⚠ (本次调用没带任何参数,未执行)"
+        # 不用红色:非正文一律灰(与思考同色),靠 `⚠` 与前缀 `未执行` 保持可辨识度。
+        return tool_banner("shell", why)
     return tool_banner(name or "", args_preview(args_json or ""))
 
 
@@ -221,7 +241,7 @@ def _run_tool(name, args_json):
             return _deny
         content, status = list_dir(resolved, path)
         if status:
-            sys.stdout.write(status + "\n")
+            _status(status)
         return content
     if name == "read_file":
         path = a.get("path") or ""
@@ -235,7 +255,7 @@ def _run_tool(name, args_json):
         content, status = read_file(resolved, path, a.get("offset"), a.get("limit"),
                                     os.environ.get("READ_MAX_CHARS", "30000"), work_root)
         if status:
-            sys.stdout.write(status + "\n")
+            _status(status)
         return content
     if name == "grep":
         work_root = os.environ.get("WORK_ROOT") or os.getcwd()
@@ -248,7 +268,7 @@ def _run_tool(name, args_json):
                                int(os.environ.get("GREP_MAX_MATCHES", "200")),
                                int(os.environ.get("GREP_MAX_COL", "500")), work_root)
         if status:
-            sys.stdout.write(status + "\n")
+            _status(status)
         return content
     if name == "write_file":
         path = a.get("path") or ""
@@ -262,7 +282,7 @@ def _run_tool(name, args_json):
         _auto_backup(resolved)
         content, status = write_file(resolved, path, a.get("content") or "", work_root)
         if status:
-            sys.stdout.write(status + "\n")
+            _status(status)
         return content
     if name == "edit_file":
         path = a.get("path") or ""
@@ -277,7 +297,7 @@ def _run_tool(name, args_json):
         content, status = edit_file(resolved, path, a.get("old_string") or "",
                                     a.get("new_string") or "", work_root)
         if status:
-            sys.stdout.write(status + "\n")
+            _status(status)
         return content
     if name == "read_image":
         import base64 as _b64
@@ -302,14 +322,14 @@ def _run_tool(name, args_json):
                 if not _st.get("recheck"):
                     _st["recheck"] = True
                     _rid = _st.get("ref") or ("r%d" % _st.get("id", 0))
-                    sys.stdout.write(" 🖼 同一张图已在上下文(引用号 %s),未重复挂载\n" % _rid)
+                    _status("🖼 同一张图已在上下文(引用号 %s),未重复挂载" % _rid)
                     sys.stdout.flush()
                     return ("read_image: %s —— 这张图本会话已经给过你了(见引用号 %s 所在的那条消息),"
                             "本次不再重复挂载。请回看那条消息里的画面作答;若那里已看不到图片本体"
                             "(例如它被回收过),再调用一次本工具,我会收回旧引用并重新挂载。"
                             % (a.get("path") or _p, _rid))
                 _st["gone"] = True
-                print(" ♻ 收回旧引用 #%d 并重新挂载(两次原则)" % _st["id"], flush=True)
+                _status("♻ 收回旧引用 #%d 并重新挂载(两次原则)" % _st["id"])
                 sys.stdout.flush()
         else:
             _IMG_SEQ[0] += 1
@@ -382,12 +402,12 @@ def _run_tool(name, args_json):
         _st["side"] = _side
         _disp = a.get("path") or _p
         if _ow and _oh and (_w < _ow or _h < _oh):
-            sys.stdout.write(" 🖼 原图已交给主模型 %s(已缩到 %spx)\n" % (_disp, _side))
+            _status("🖼 原图已交给主模型 %s(已缩到 %spx)" % (_disp, _side))
         else:
             _dw = _w or _ow or _side
             _dh = _h or _oh or _side
-            sys.stdout.write(" 🖼 原图已交给主模型 %s(交付 %dx%d,与原文件同尺寸)\n"
-                             % (_disp, _dw, _dh))
+            _status("🖼 原图已交给主模型 %s(交付 %dx%d,与原文件同尺寸)"
+                    % (_disp, _dw, _dh))
         sys.stdout.flush()
         _url = "data:%s;base64,%s" % (_mime, _b64.b64encode(_data).decode())
         _IMG_URLS[_st["ref"]] = _url
@@ -463,17 +483,23 @@ def _run_tool(name, args_json):
             sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
             if _auto:
-                _one = (cmd or "").replace("\n", " ")
-                sys.stdout.write(" ⛔ 硬墙拒绝(%s):%s\n" % (_r, _one))
+                # 屏幕上只给**拒绝理由**,不再回显命令正文:
+                # 用户明确说过两个问题 —— ①内容被摊开(画面乱) ②看不到理由。
+                # 原来这行是 `⛔ 硬墙拒绝(H1):<整条命令>`,把 _m(理由) 丢了;
+                # 现在调过来,并按非正文统一灰化(与思考同色)。
+                sys.stdout.write(" %s⛔ 硬墙拒绝(%s):%s%s\n"
+                                 % (GREY, _r, dim(_m or "未给出理由", 0), ZERO))
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                               rule=_r, verdict="auto_deny", cmd=cmd)
                 return ("[硬墙 %s] %s" % (_r, _m))
             # 非 auto:master 保留人的最终裁量权——升级为严格确认(逐字 yes),
             # 而不是代码层直接拒(否则与 master 行为不一致)。
+            # ⚠ 这一支**必须给命令正文**:人要靠它决定敢不敢逐字敲 yes。所谓"拒绝时
+            # 不显示内容"只适用于 auto 那种"程序直接拒、人不需要做决定"的形状。
             sys.stdout.write("\033[2K \033[1;31m⛔ 高危命令(规则 %s),任何模式都不自动执行\033[0m\n" % _r)
-            sys.stdout.write(" \033[2m   命令:%s\033[0m\n" % cmd)
+            sys.stdout.write(" %s   命令:%s%s\n" % (GREY, ellipsis(cmd, None), ZERO))
             if _m:
-                sys.stdout.write(" \033[2m   原因:%s\033[0m\n" % _m)
+                sys.stdout.write(" %s   原因:%s%s\n" % (GREY, dim(_m, 0), ZERO))
             sys.stdout.write(" \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m")
             sys.stdout.flush()
             try:
@@ -502,15 +528,24 @@ def _run_tool(name, args_json):
                 _v, _rs = _seam()._auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
                 if _v == "Y":
                     _seam()._bump_auto()
-                    sys.stdout.write("auto 终审放行: %s\n" % cmd)
+                    # 一律"理由在前、命令不回显":这条是屏幕提示,命令正文对用户没信息量
+                    # (他刚看过横幅那一行),而**判据**才是他要核对的。
+                    sys.stdout.write(" %sauto 终审放行:%s%s\n"
+                                     % (GREY, dim(_rs or "无理由", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_allow", cmd=cmd)
                 elif _v == "N":
-                    sys.stdout.write("auto 终审拒绝: %s\n" % cmd)
+                    sys.stdout.write(" %sauto 终审拒绝:%s%s\n"
+                                     % (GREY, dim(_rs or "未给出理由", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_deny", reason=_rs or "", cmd=cmd)
                     return "auto 终审拒绝(%s): %s" % (_rs or "no-reason", cmd)
                 else:
+                    # "无判定"必须自己解释清楚,否则用户只看到"被拒"却不知为何:
+                    # 这一支是**终审器没回可用判定**(网络失败/输出不含 ALLOW|DENY),
+                    # 安全上只能 fail-closed,但要把"为什么"说出来,并提示怎么继续。
+                    sys.stdout.write(" %sauto 终审不可用(终审器没回可用判定,按安全兜底拒绝):%s%s\n"
+                                     % (GREY, dim(_rs or "无模型输出", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_deny", reason="judge-unavailable", cmd=cmd)
                     return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
@@ -521,7 +556,7 @@ def _run_tool(name, args_json):
             # (硬墙走不到这里:_hd_approved 为真时上面已跳开;硬墙永远每次都要人 yes)
             _ck = _cmd_key(cmd)
             if _ck and _ck in _APPROVED_CMDS:
-                sys.stdout.write("\033[2m↺ 本会话已批准过同一命令,直接执行\033[0m\n")
+                sys.stdout.write("%s↺ 本会话已批准过同一命令,直接执行%s\n" % (GREY, ZERO))
                 sys.stdout.flush()
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                               decision="allow", reason="session-approved", cmd=cmd)
@@ -568,7 +603,7 @@ def _run_tool(name, args_json):
                     "查看输出: 用 shell 工具执行 tail -f %s\n"
                     "停止服务: kill %d(若有残留子进程,先 pkill -P %d 再 kill %d)"
                     % (_p.pid, _log, _log, _p.pid, _p.pid, _p.pid))
-            sys.stdout.write(" 后台启动 PID %s · 日志 %s\n" % (_p.pid, _log)); sys.stdout.flush()
+            _status("后台启动 PID %s · 日志 %s" % (_p.pid, _log))
             return _msg
         from wchat_py.termpty import pty_run
         try:
@@ -582,18 +617,33 @@ def _run_tool(name, args_json):
         _disp, _full, _rc, _to, _intr = pty_run(
             ["bash", "-c", cmd], timeout=_timeout, win=int(os.environ.get("WIN", "10")),
             env=_run_env)
-        # 与 master run_with_window 一致:输出逐行 dim │ 前缀上屏,底部一行 dim 汇总。
+        # 屏幕只给**一行**:首行 + 行数脚注。用户报"shell 输出全量铺屏,画面杂乱无章" ——
+        # 命令输出动辄几十上百行,把正文挤到看不见。完整内容仍然**原样进上下文**
+        # (下面 _trunc_for_context 之后 return),所以模型的能力一点没减;减的只是屏幕噪音。
+        # 灰色 + 压成一行,与思考内容同色;行数脚注跟在同一行,避免又多一行。
+        from wchat_py.render import dim as _dim
         _n = len(_full.splitlines())
-        for _ln in _disp:
-            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _ln)
-        if _to:
-            sys.stdout.write("\033[2m└─ 超过单命令上限 %ss,已终止 · 共 %d 行 ─┘\033[0m\n"
-                             % (os.environ.get("CMD_TIMEOUT", "120"), _n))
-            _full += "\n(命令超过单条上限 %ss,已终止 · rc=%s)" % (_timeout, _rc)
-        elif _intr:
-            sys.stdout.write("\033[2m└─ 已中断 · 共 %d 行 ─┘\033[0m\n" % _n)
+        if _disp:
+            _tail = "共 %d 行" % _n
+            if _n > 1:
+                _tail += ",仅显示首行"
+            if _to:
+                _tail += ",超过 %ss 已终止" % os.environ.get("CMD_TIMEOUT", "120")
+            elif _intr:
+                _tail += ",已中断"
+            sys.stdout.write("\033[2K\033[2m│\033[0m %s \033[2m…(%s)%s\r\n"
+                             % (_dim(_disp[0]), _tail, ZERO))
         else:
-            sys.stdout.write("\033[2m└─ 完成 · 共 %d 行 ─┘\033[0m\n" % _n)
+            # 无输出时**必须**留一行汇总:"静默成功"是最难排查的失败形状(0 行 + rc=0)。
+            if _to:
+                sys.stdout.write("%s└─ 超过单命令上限 %ss,已终止 · 共 0 行%s\n"
+                                 % (GREY, os.environ.get("CMD_TIMEOUT", "120"), _ZERO))
+            elif _intr:
+                sys.stdout.write("%s└─ 已中断 · 共 0 行%s\n" % (GREY, _ZERO))
+            else:
+                sys.stdout.write("%s└─ 完成 · 共 0 行%s\n" % (GREY, _ZERO))
+        if _to:
+            _full += "\n(命令超过单条上限 %ss,已终止 · rc=%s)" % (_timeout, _rc)
         sys.stdout.flush()
         # 进上下文前必须截断(master run_with_window → truncate_output)。
         # 两道闸:① 单行列宽(2000)② 行数(头尾各留)。

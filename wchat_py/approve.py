@@ -131,14 +131,17 @@ def _path_guard(path, mode):
         from wchat_py import audit as _au
         _au.record(os.environ.get("AUTO_AUDIT_LOG", ""), "path", rule=rule,
                    decision="auto_deny", path=path)
-        sys.stdout.write(" ⛔ 越界%s被硬墙拒绝(%s):%s\n" % (_act, rule, path))
+        # 拒绝只给理由(规则号 + 说明),不回显路径正文;非正文统一灰化。
+        from wchat_py.render import dim as _dim
+        sys.stdout.write(" " + _dim("⛔ 越界%s被硬墙拒绝(%s)" % (_act, rule)) + "\n")
         sys.stdout.flush()
 
     if is_cred:
         if auto:
             _deny_status("P1")
             return "错误:%s被拒绝[硬墙 P1]:凭据/会话数据路径不可访问。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
-        sys.stdout.write("\033[2K \033[1;31m⛔ 高危路径\033[0m \033[2m%s\033[0m\n\n" % path)
+        from wchat_py.render import dim as _dim
+        sys.stdout.write("\033[2K \033[1;31m⛔ 高危路径\033[0m " + _dim(path) + "\n\n")
         sys.stdout.write(" \033[1;31m确需放行?必须输入 yes(n/回车 = 拒绝): \033[0m")
         sys.stdout.flush()
         try:
@@ -162,7 +165,8 @@ def _path_guard(path, mode):
         if _m == mode or (_m == "rw" and mode == "r"):
             if under(p, _base):
                 return None
-    sys.stdout.write("\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m \033[2m%s\033[0m\n\n" % path)
+    from wchat_py.render import dim as _dim
+    sys.stdout.write("\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m " + _dim(path) + "\n\n")
     sys.stdout.write(" \033[1;31m是否放行?(y 或 yes,n/回车 = 拒绝): \033[0m")
     sys.stdout.flush()
     try:
@@ -178,5 +182,6 @@ def _path_guard(path, mode):
         # 于是同一个目录每次访问都要再问人 —— 这就是"多次授权"的来源之一)。
         _grant_path(p, "rw" if mode == "rw" else "r")
         return None
-    sys.stdout.write(" ⛔ 用户拒绝%s: %s\n" % (_act, path)); sys.stdout.flush()
+    from wchat_py.render import dim as _dim
+    sys.stdout.write(" " + _dim("⛔ 用户拒绝%s: %s" % (_act, path)) + "\n"); sys.stdout.flush()
     return "用户拒绝访问工作目录外文件: %s" % path

@@ -183,6 +183,24 @@ ck("生产代码不再引用顶层旧文件名", not stale, repr(stale[:3]))
 ck("inputbox 路径指到包内",
    os.path.isfile(os.path.join(REPO, "wchat_py", "inputbox.py")))
 
+print("=== 9. `if __name__ == \"__main__\"` 必须在门面之后(否则 -m 跑就 NameError) ===")
+# 真事故(2026-10,重构 cli.py 时引入):`__main__` 块留在文件**中间**,而兼容门面
+# (`from wchat_py.runtime import _runtime_fallback` 等)在文件末尾。于是:
+#   · `import wchat_py.cli` 正常(模块体执行完,门面已落地);
+#   · `python3 -m wchat_py.cli` 在还没导入门面时就调用 main() →
+#     `NameError: name '_runtime_fallback' is not defined`(用户跑 -st 直接看到 traceback)。
+# 只有 -m/直接执行才踩,所以只跑 import 的闸门看不见它 —— 必须两条都测。
+_mod = ast.parse(cli_src)
+_main_idx = [i for i, n in enumerate(_mod.body)
+             if isinstance(n, ast.If) and "__main__" in ast.dump(n.test)]
+ck("cli.py 里有且只有一个 __main__ 块", len(_main_idx) == 1, repr(_main_idx))
+ck("__main__ 块是文件最后一个顶层语句", _main_idx and _main_idx[0] == len(_mod.body) - 1,
+   "模块体里位置 %r / 共 %d 条:后面的语句在 -m 执行时还没跑" % (_main_idx, len(_mod.body)))
+_r = subprocess.run([sys.executable, "-m", "wchat_py.cli", "-h"], capture_output=True,
+                    text=True, cwd=REPO, env=dict(os.environ, WCHAT_NO_SETUP="1"))
+ck("-m 方式能起来(rc=0)", _r.returncode == 0, ((_r.stderr or "").strip()[-200:] or "rc=%d" % _r.returncode))
+ck("-m 方式打印用法", "使用方法" in (_r.stdout or ""), repr((_r.stdout or "")[:80]))
+ck("-m 方式不抛 NameError", "NameError" not in (_r.stderr or ""), (_r.stderr or "")[:200])
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-

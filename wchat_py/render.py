@@ -213,9 +213,50 @@ def render_reason(text):
     return out
 
 
+# ── 非正文输出的统一灰化(2026-11 用户报"画面杂乱") ────────────────────────────
+# 约定:**只有助手正文用正常亮度**;工具横幅/工具输出/状态行/审批与拒绝提示一律 dim,
+# 与"思考内容"同一个灰(`\033[2m`)。这样一屏里"我要读的东西"只有正文与提问,
+# 其余都是背景信息。工具**名字**保留原来的蓝色(`\033[1;36m`)不动 —— 那是方法色。
+GREY = "\033[2m"
+ZERO = "\033[0m"
+
+
+def ellipsis(text, limit=None):
+    """压到一行并按显示宽度截断(超出补 `…`)。`limit=None` 取终端宽度。"""
+    s = " ".join(str(text or "").split())
+    if limit is None:
+        limit = max(20, term_cols() - 8)     # 留出横幅前缀/行首空格的宽度
+    if display_width(s) <= limit:
+        return s
+    return _fit(s, max(1, limit - 1)) + "…"
+
+
+def dim(text, limit=None):
+    """灰化一段非正文输出(压成一行;`limit=0` 表示**不截断**,允许终端自然折行)。
+
+    为什么留 `limit=0`:拒绝**理由**是屏幕上唯一需要看清的东西,截一半等于没给
+    (实测 80 列终端下 "提权命令(sudo/doas/su)在任何模式下都不自动执行。替代:把命令
+    原样告诉用户…" 的处置建议正好被切掉)。工具输出/横幅预览则必须截 —— 那些可能几百行。
+    """
+    s = " ".join(str(text or "").split())
+    if not s:
+        return ""
+    if limit != 0:
+        s = ellipsis(s, limit)
+    return GREY + s + ZERO
+
+
+
 def tool_banner(name, preview):
-    """等价 bash `tool_banner`：`printf ' \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n'`。"""
-    return " \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n" % (name, preview)
+    """工具横幅:` ⏺ <方法名> · <一行灰预览>`。
+
+    方法名保留原来的蓝色(`\\033[1;36m`,用户说"方法的蓝色不动");**预览一律灰化并压成
+    一行**,超出终端宽度省略。理由:命令预览是多行内容(heredoc / `&&` 串联)时原来会
+    原样铺满屏幕,把正文挤走 —— 用户报"画面很杂乱无章"就是这个。
+    完整命令仍在上下文里(进 messages 的是 arguments 原文,不是这行预览)。
+    """
+    return (" \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n"
+            % (name, dim(preview)))
 
 
 def args_preview(args_json):
@@ -231,4 +272,3 @@ def args_preview(args_json):
     if len(s) > 160:
         s = s[:160] + "…"
     return s
-
