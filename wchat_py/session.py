@@ -283,15 +283,15 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
         for _p in session.input_images:
             _url, _mime, _orig, _actual = _img.load_data_url(_p, _maxside)
             if _orig and _actual and _actual < _orig:
-                from wchat_py.render import dim as _dim1
-                sys.stdout.write(" " + _dim1("⤷ %s 已缩到 %dpx(精度随之下调)"
+                from wchat_py.render import dim_after as _dim1
+                sys.stdout.write(" " + _dim1(" ", "⤷ %s 已缩到 %dpx(精度随之下调)"
                                              % (os.path.basename(_p), _actual)) + "\n")
                 _shrunk += 1
             from wchat_py.imgstate import register_image_url
             _ref = register_image_url(_p, _url, _actual)
             _markers.append("[[IMGREF:%s]]" % _ref)
-        from wchat_py.render import dim as _dim
-        sys.stdout.write(" " + _dim("🖼 %d/%d 张原图已随本轮消息交给主模型"
+        from wchat_py.render import dim_after as _dim
+        sys.stdout.write(" " + _dim(" ", "🖼 %d/%d 张原图已随本轮消息交给主模型"
                                     "(其中 %d 张已缩过)" % (_n, _n, _shrunk)) + "\n")
         sys.stdout.flush()
         msgs.append({"role": "user",
@@ -385,8 +385,8 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
         msgs.append({"role": "assistant", "content": text or ""})
         break
     if hit_limit:
-        from wchat_py.render import dim as _dim2
-        print(" " + _dim2("⏱ 已达工具轮次上限 %d(MAX_TOOL_ROUNDS),本轮结束;可再发\"继续\"接着跑"
+        from wchat_py.render import dim_after as _dim2
+        print(" " + _dim2(" ", "⏱ 已达工具轮次上限 %d(MAX_TOOL_ROUNDS),本轮结束;可再发\"继续\"接着跑"
                           % max_rounds))
     session.messages_json = json.dumps(msgs, ensure_ascii=False)
     session.msg_count = len(msgs)

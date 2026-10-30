@@ -221,11 +221,23 @@ GREY = "\033[2m"
 ZERO = "\033[0m"
 
 
+def room_for(prefix, slack=1):
+    """`prefix` 之后还剩多少列可写(留 `slack` 列,避免在最后一列写字触发折行)。
+
+    **不要再用"减一个常数"来估可用宽度。** 这里踩过一次:横幅前缀 ` ⏺ shell · `
+    实际 11 列,而 `ellipsis` 里写的是 `term_cols() - 8` —— 于是每一条横幅都比终端
+    宽 3 列,终端自动折行,`…` 落到**第二行**开头。看起来像"省略号位置不对",
+    根因是宽度算错;而且它不报错、不崩,只有在真终端里用肉眼看才发现。
+    判据必须由**实测前缀宽度**推出。
+    """
+    return max(8, term_cols() - display_width(prefix) - slack)
+
+
 def ellipsis(text, limit=None):
-    """压到一行并按显示宽度截断(超出补 `…`)。`limit=None` 取终端宽度。"""
+    """压到一行并按显示宽度截断(超出补 `…`)。`limit=None` 取"带 1 列缩进的整行"。"""
     s = " ".join(str(text or "").split())
     if limit is None:
-        limit = max(20, term_cols() - 8)     # 留出横幅前缀/行首空格的宽度
+        limit = room_for(" ", slack=1)       # 行首 1 个空格 + 1 列余量
     if display_width(s) <= limit:
         return s
     return _fit(s, max(1, limit - 1)) + "…"
@@ -246,17 +258,26 @@ def dim(text, limit=None):
     return GREY + s + ZERO
 
 
+def dim_after(prefix, text, slack=1):
+    """灰化 `text`,宽度正好塞进 `prefix` 之后的剩余列 —— 保证整行不折。
+
+    用它替代 `prefix + dim(x)` 这种写法:后者不知道 prefix 有多宽,只能估,
+    估错就是"折行 + 省略号跑到第二行"(见 `room_for` 的注释)。
+    """
+    return dim(text, room_for(prefix, slack))
+
+
 
 def tool_banner(name, preview):
     """工具横幅:` ⏺ <方法名> · <一行灰预览>`。
 
     方法名保留原来的蓝色(`\\033[1;36m`,用户说"方法的蓝色不动");**预览一律灰化并压成
-    一行**,超出终端宽度省略。理由:命令预览是多行内容(heredoc / `&&` 串联)时原来会
-    原样铺满屏幕,把正文挤走 —— 用户报"画面很杂乱无章"就是这个。
+    一行**,宽度按**实测前缀宽度**算出来(见 `room_for`) —— 早期用"减 8"估算,
+    结果每条横幅都比终端宽 3 列,终端折行,`…` 掉到第二行开头。
     完整命令仍在上下文里(进 messages 的是 arguments 原文,不是这行预览)。
     """
-    return (" \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m %s\n"
-            % (name, dim(preview)))
+    head = " \033[36m⏺\033[0m \033[1;36m%s\033[0m \033[2m·\033[0m " % name
+    return head + dim_after(head, preview) + "\n"
 
 
 def args_preview(args_json):

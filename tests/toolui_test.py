@@ -60,6 +60,35 @@ ck("横幅不超过终端宽度", display_width(b.rstrip("\n")) <= 200, str(disp
 ck("方法名仍是蓝色(不动方法色)", "\x1b[1;36mshell" in b, repr(b)[:60])
 ck("预览是灰色(与思考同色)", GREY in b, repr(b)[:80])
 
+print("=== 1b. 宽度:横幅/输出行/状态行都必须**塞得进终端**,不许折行 ===")
+# 真事故(2026-11,用户贴的就是这一条):
+#   `⏺ shell · date; echo "=== 0.2.8 目录内容 ==="; ls -la …; echo "=== INSTALL…
+#   省略号跑到**第二行开头**。`
+# 根因不是省略号位置,是宽度算错:`ellipsis` 里硬写 `term_cols() - 8`,
+# 而横幅前缀 ` ⏺ shell · ` 实际 11 列 → 11 + (cols-8) = cols+3 → 终端自动折行。
+# 这种错不崩不报,只有在真终端里用肉眼看;所以必须用"物理宽度 ≤ 终端宽"来钉。
+import wchat_py.render as R2  # noqa: E402
+
+USER_CMD = ('date; echo "=== 0.2.8 目录内容 ==="; ls -la /opt/homebrew/Cellar/wchat/0.2.8/; '
+            'echo "=== INSTALL_RECEIPT 是否存在（brew 安装完成的标志） ==="; '
+            'ls -la /opt/homebrew/Cellar/wchat/0.2.8/INSTALL_RECEIPT.json 2>&1')
+_orig_cols = R2.term_cols
+try:
+    for cols in (40, 60, 80, 100, 120, 140, 160, 200):
+        R2.term_cols = (lambda c: (lambda d=80: c))(cols)
+        b = tool_banner("shell", USER_CMD)
+        w = display_width(b.rstrip("\n"))
+        ck("%3d 列:用户那条命令的横幅不折行(宽 %d)" % (cols, w), w <= cols,
+           "溢出 %d 列 → 终端会把 … 折到第二行" % (w - cols))
+        # 长参数名(read_file 的 JSON 可能很长)同样不许折
+        b2 = tool_banner("read_file", '{"path":"%s","purpose":"%s"}'
+                         % ("/很长的中文路径/" * 6, "看实现" * 20))
+        ck("%3d 列:read_file 横幅不折行" % cols,
+           display_width(b2.rstrip("\n")) <= cols,
+           "宽 %d" % display_width(b2.rstrip("\n")))
+finally:
+    R2.term_cols = _orig_cols
+
 print("=== 2. dim/ellipsis 的边界 ===")
 ck("空串不留灰块", dim("") == "", repr(dim("")))
 ck("多行折成单行", "\n" not in ANSI.sub("", dim("a\nb\n\tc d")), repr(dim("a\nb\nc d")))
@@ -271,6 +300,29 @@ for label, txt in (("已读取", " 已读取 a.py(12 行)"),
     s = buf.getvalue()
     ck("%s 状态行是灰色" % label, GREY in s, repr(s[:80]))
     ck("%s 状态行只有 1 行" % label, len(text_lines(s)) == 1, repr(text_lines(s))[:120])
+
+print("=== 8. 80 列下的输出行/状态行也塞得进(同一条宽度规则) ===")
+import wchat_py.render as R3  # noqa: E402
+
+_oc = R3.term_cols
+try:
+    R3.term_cols = (lambda d=80: 80)
+    _o, _s = run_shell_capture("python3 -c \"print('y'*400)\"", lambda: _Env())
+    _long = [x for x in _s.split("\n") if "y" in x]
+    ck("超长输出行被截到不折行", _long and all(display_width(x.rstrip("\r")) <= 80
+                                        for x in _long),
+       repr([display_width(x.rstrip("\r")) for x in _long]))
+    _buf = _io.StringIO()
+    _old = sys.stdout
+    sys.stdout = _buf
+    try:
+        TR._status(" 已读取 " + "/very/long/path/" * 8 + "f.py(10 行)")
+    finally:
+        sys.stdout = _old
+    ck("长路径状态行不折行", display_width(_buf.getvalue().rstrip("\n")) <= 80,
+       "宽 %d" % display_width(_buf.getvalue().rstrip("\n")))
+finally:
+    R3.term_cols = _oc
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

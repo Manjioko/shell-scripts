@@ -26,7 +26,7 @@ import sys
 from wchat_py.approve import (_APPROVED_CMDS, _cmd_key, _grant_path,
                              _note_path_grants, _path_guard)
 from wchat_py.imgstate import _IMG_REFS, _IMG_SEQ, _IMG_URLS
-from wchat_py.render import args_preview, dim, ellipsis, tool_banner
+from wchat_py.render import args_preview, dim, dim_after, ellipsis, tool_banner
 from wchat_py.runtime import _trunc_int
 
 
@@ -63,8 +63,9 @@ def _status(text, limit=None):
     `limit=0` 表示不截断:用于"一次性告知"(如 timeout 被夹紧的说明)。
     那类文本截一半就失去意义,而它只出现一次、不会刷屏。
     """
-    from wchat_py.render import dim
-    s = dim(str(text or "").strip(), limit)
+    from wchat_py.render import dim, dim_after
+    s = (dim_after(" ", str(text or "").strip()) if limit is None
+         else dim(str(text or "").strip(), limit))
     if s:
         sys.stdout.write(" " + s + "\n")
         sys.stdout.flush()
@@ -500,7 +501,8 @@ def _run_tool(name, args_json):
             # ⚠ 这一支**必须给命令正文**:人要靠它决定敢不敢逐字敲 yes。所谓"拒绝时
             # 不显示内容"只适用于 auto 那种"程序直接拒、人不需要做决定"的形状。
             sys.stdout.write("\033[2K \033[1;31m⛔ 高危命令(规则 %s),任何模式都不自动执行\033[0m\n" % _r)
-            sys.stdout.write(" %s   命令:%s%s\n" % (GREY, ellipsis(cmd, None), ZERO))
+            _pfx = "    命令:"
+            sys.stdout.write(" %s" % dim_after(_pfx, cmd) + "\n")
             if _m:
                 sys.stdout.write(" %s   原因:%s%s\n" % (GREY, dim(_m, 0), ZERO))
             sys.stdout.write(" \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m")
@@ -661,10 +663,12 @@ def _run_tool(name, args_json):
         # 曾经改成"只显示首行" —— 那反而更差:看不到报错行在哪、`git status` 这类
         # 十几行的日常输出只剩一行,人得再让 AI 读一遍。**多行是要的,只是要灰、别刺眼。**
         # 完整输出仍然原样进上下文(下面 _trunc_for_context 之后 return)。
-        from wchat_py.render import dim as _dim
+        from wchat_py.render import dim_after as _dim_after
         _n = len(_full.splitlines())
         for _ln in _disp:
-            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _dim(_ln))
+            # 宽度按 `│ `(2 列)之后剩余算,行内不折 —— 折了会多出没有边框的续行,
+            # 看上去像"输出错位"。
+            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _dim_after("│ ", _ln))
         if _to:
             # 超时提示必须给"下一步怎么办":光说"已终止"会逼模型猜它是不是该拆命令。
             _ts = int(_timeout) if _timeout == int(_timeout) else _timeout
