@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""一条命令发版:打包 → 打 tag → 推 GitHub → 建 Release → 更新 tap 里的 Formula。
+"""一条命令发版:打包 → 打 tag → 推 GitHub → 建 Release → 同步 Formula 到独立 tap 仓库。
 
 用法:
   python3 packaging/release.py 0.3.0              # 发 0.3.0
@@ -23,6 +23,7 @@
 反过来(先建 release)会得到一个指向不存在 tag 的 release,删起来更麻烦。
 """
 import argparse
+import base64
 import json
 import os
 import re
@@ -129,8 +130,9 @@ def preflight(dry):
         print("    可行的三条路:")
         print("      a) 仓库转 public: gh repo edit %s/%s --visibility public" % (owner, repo))
         print("         → brew tap/install 立刻可用(代码会公开)")
-        print("      b) 建一个**公开**的 tap 仓库(如 %s/homebrew-wchat)," % owner)
-        print("         把 tarball 传到它的 release、Formula 也放它里面 → 代码保持私有")
+        print("      b) 方案 B:建一个**公开**的 tap 仓库(如 %s/homebrew-%s)," % (owner, repo))
+        print("         只放 Formula、把 tarball 传到**它**的 release → 主仓库代码保持私有")
+        print("         本脚本默认(--tap-repo auto)已按此方式同步 Formula。")
         print("      c) 只给自己/内网用: 走本地 file:// 或手动下载 tarball 安装")
         print("    本次仍会完成发布(Release 已建、tag 已打),但请按上面选一条路。")
         print()
@@ -232,6 +234,59 @@ def create_release(tag, tar, version, dry):
         ok("已创建 Release %s 并上传资产" % tag)
 
 
+def _gh_contents(repo, path):
+    """读仓库里某个文件:返回 (内容, sha);不存在返回 ("", "")。"""
+    r = sh(["gh", "api", "repos/%s/contents/%s" % (repo, path),
+            "--jq", "{c:.content,s:.sha}"], check=False)
+    if r.returncode != 0:
+        return "", ""
+    try:
+        d = json.loads(r.stdout or "{}")
+    except ValueError:
+        return "", ""
+    raw = d.get("c") or ""
+    text = base64.b64decode(raw).decode("utf-8") if raw else ""
+    return text, d.get("s") or ""
+
+
+def update_tap_repo(tap_repo, formula_text, version, dry):
+    """把 Formula 同步到**独立 tap 仓库**(方案 B)的默认分支。
+
+    为什么主仓库仍是唯一真源:tap 仓库里只有 Formula/*.rb、不放源码,所以根本不存在
+    "两边代码同步"的问题——每次发版由本脚本单向覆盖一个 .rb 过去,方向永远是单向的。
+    用 Contents API 而不是 clone:不污染本地、不需要维护第二个工作副本。
+    """
+    step("6.5 同步 Formula 到 tap 仓库 %s" % tap_repo)
+    if dry:
+        warn("--dry-run:跳过 tap 仓库同步")
+        return
+    r = sh(["gh", "repo", "view", tap_repo, "--json", "name"], check=False)
+    if r.returncode != 0:
+        ok("tap 仓库不存在,创建中…")
+        r = sh(["gh", "repo", "create", tap_repo, "--public",
+                "--description", "Homebrew tap for wchat"], check=False)
+        if r.returncode != 0:
+            warn("创建 tap 仓库失败,跳过: %s" % (r.stderr or "").strip()[:160])
+            return
+        ok("已创建 %s" % tap_repo)
+    path = "Formula/wchat.rb"
+    old, sha = _gh_contents(tap_repo, path)
+    if old == formula_text:
+        ok("tap 上的 Formula 已是最新,跳过")
+        return
+    payload = {"message": "tap: wchat %s" % version,
+               "content": base64.b64encode(formula_text.encode("utf-8")).decode("ascii")}
+    if sha:
+        payload["sha"] = sha
+    p = subprocess.run(["gh", "api", "-X", "PUT",
+                        "repos/%s/contents/%s" % (tap_repo, path), "--input", "-"],
+                       input=json.dumps(payload), capture_output=True, text=True)
+    if p.returncode != 0:
+        warn("推送 Formula 到 tap 失败: %s" % (p.stderr or "").strip()[:160])
+        return
+    ok("已更新 %s/%s" % (tap_repo, path))
+
+
 def update_tap_branch(branch, formula_text, version, dry):
     """把 Formula 单独推到 tap 分支(通常是 main)。
 
@@ -319,7 +374,10 @@ def main():
     ap.add_argument("--full-gates", action="store_true")
     ap.add_argument("--no-verify-url", action="store_true")
     ap.add_argument("--tap-branch", default="main",
-                    help="把 Formula 单独推到哪个分支供 brew tap 使用(默认 main;写空则跳过)")
+                    help="把 Formula 单独推到主仓库哪个分支(默认 main;仅在没有 --tap-repo 时使用)")
+    ap.add_argument("--tap-repo", default="auto",
+                    help="独立 tap 仓库 owner/homebrew-<repo>(方案 B);'auto' 按 owner 推导;"
+                         "传空串则退回 --tap-branch 模式")
     a = ap.parse_args()
 
     cur = read_version()
@@ -335,12 +393,19 @@ def main():
     else:
         warn("已跳过发布前自检(--skip-gates)")
     tar, h, url = build(version, owner, repo, a.dry_run)
-    if a.tap_branch:
-        with open(os.path.join(mr.FORMULA_DIR, "wchat.rb"), encoding="utf-8") as f:
-            formula_text = f.read() if not a.dry_run else None
+    formula_text = None
+    if a.tap_branch or a.tap_repo:
         if a.dry_run:
             formula_text = (mr.FORMULA.replace("__URL__", url).replace("__SHA__", h)
                             .replace("__VER__", version).replace("__HOMEPAGE__", mr.GITHUB_URL))
+        else:
+            with open(os.path.join(mr.FORMULA_DIR, "wchat.rb"), encoding="utf-8") as f:
+                formula_text = f.read()
+    tap_repo = ""
+    if a.tap_repo:
+        tap_repo = ("%s/homebrew-%s" % (owner, repo)) if a.tap_repo == "auto" else a.tap_repo
+        update_tap_repo(tap_repo, formula_text, version, a.dry_run)
+    elif a.tap_branch:
         update_tap_branch(a.tap_branch, formula_text, version, a.dry_run)
     tag = commit_and_push(version, owner, repo, a.dry_run)
     create_release(tag, tar, version, a.dry_run)
@@ -352,9 +417,14 @@ def main():
     print("  资产     %s" % url)
     print("  sha256   %s" % h)
     print("\n别人这样装/升级:")
-    print("  # 首次(仓库不是 homebrew-* 前缀,所以要显式给 URL)")
-    print("  brew tap %s/%s https://github.com/%s/%s" % (owner, repo, owner, repo))
-    print("  brew install %s/%s/wchat" % (owner, repo))
+    if tap_repo:
+        print("  # 首次(tap 仓库 %s 已就位,无需显式 URL)" % tap_repo)
+        print("  brew tap %s/%s" % (owner, repo))
+        print("  brew install %s/%s/wchat" % (owner, repo))
+    else:
+        print("  # 首次(仓库不是 homebrew-* 前缀,所以要显式给 URL)")
+        print("  brew tap %s/%s https://github.com/%s/%s" % (owner, repo, owner, repo))
+        print("  brew install %s/%s/wchat" % (owner, repo))
     print("  # 之后每次升级")
     print("  brew update && brew upgrade wchat")
 
