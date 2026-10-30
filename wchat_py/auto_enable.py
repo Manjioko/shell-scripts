@@ -60,8 +60,18 @@ def enable(tier):
     quota = os.environ.get("AUTO_MAX_APPROVALS") or "200"
     streak = os.environ.get("AUTO_DENY_STREAK") or "3"
     install = os.environ.get("WCHAT_ALLOW_INSTALL", "")
-    mcp = "已启用" if os.environ.get("MCP_ENABLE") == "1" else \
-        "未启用(不带 -mcp 时不注册 mcp_* 通道;模型仍可经 shell 自行调用,见 -h)"
+    # MCP 三态。以前只看 MCP_ENABLE,而它在启动早期就被设成 1 再没回滚 ——
+    # 于是启动失败时会先打一行"⚠ MCP 不可用"、紧接着在横幅里写"MCP: 已启用",
+    # 自相矛盾且指向错误的自检结论。状态由 mcp_boot.install() 实测后写入。
+    _mcp_st = os.environ.get("MCP_STATE") or ""
+    if _mcp_st == "ok":
+        mcp = "已启用(%s 可用)" % (os.environ.get("MCP_USABLE") or "?")
+    elif _mcp_st == "degraded":
+        mcp = "已启用 · 降级(%s 可用,其余原因见启动提示)" % (os.environ.get("MCP_USABLE") or "?")
+    elif os.environ.get("MCP_REQUESTED") == "1":
+        mcp = "请求了 -mcp 但**本次不可用**(见上方告警;未注册 mcp_* 工具)"
+    else:
+        mcp = ("未启用(不带 -mcp 时不注册 mcp_* 通道;模型仍可经 shell 自行调用,见 -h)")
 
     w = sys.stdout.write
     w("\n\033[1;31m═══ auto 模式:%s ═══\033[0m\n" % tier)

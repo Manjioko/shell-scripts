@@ -509,3 +509,42 @@
 > 转绿的 6 道:写熔断、权限状态、工具运行、硬墙语料、硬墙接缝、运行时自举。
 > 仍未绿的 9 道按"夹具按 macOS 造 / 需要真实流量 / 以 root 跑 / 既有向量前提 / 待查"
 > 分类记在 `packaging/linux/README.md`,**没有一条归因于产品逻辑**。
+
+> ---
+>
+> ## MCP 启动链基线(2026-10-30,本轮)
+>
+> **事故形状**:4 个 stdio server 全部声明,首次冷启动装依赖超过 60s → 外框
+> `subprocess.run(timeout=60)` 把**整条** `npx mcporter list` 杀掉 → 一个都没起来。
+> 实测时间线:16:11:52 启动,16:12:41 uvx 的两个 server 才起(前 49s 耗在两个
+> `npm exec` 冷启动上),16:12:52 到点被杀;daemon 是独立进程,**超时之后仍在继续装**,
+> 16:12–16:14 把 wheel 下完,于是"再开一次反而好了"。用户看到的是玄学,不是因果。
+>
+> **改了三处**(`wchat_py/`,不改 bash 侧 `wchat_ref`):
+> 1. `mcp_bridge.list_json` 把"单 server 多久算失败"交给 mcporter 的 `--timeout`
+>    (`_discovery_budget()`:默认 per=20000ms,可用 `MCP_DISCOVERY_TIMEOUT_MS` 覆盖;
+>    外框 `min(600, max(30, per*n//1000 + 20))` 只当安全网)。于是一个 server 卡住时
+>    它自己 `status=error`,其余照常返回 —— **降级粒度从"全有全无"变成按 server**。
+> 2. `mcp_boot.install` 失败分支补三件善后:关回 `MCP_ENABLE`(`_build` 据此不注册
+>    `mcp_*`,模型不再对着死工具反复试)、**当场放锁**(原来锁要到进程退出才释放,
+>    下一次 `-mcp` 会被"已有会话独占"再挡一道)、不认领 daemon(冷启动时它正在干活,
+>    stop 掉等于把下次启动重新拖回超时)。
+> 3. `_dispatch` 改读启动时写定的 `_BOOT_SRV` 缓存 —— 原来**每个** `mcp_*` 调用都重跑
+>    一次 `npx -y mcporter list --json`(热态白花 1~2s,冷态再挂一次超时)。
+> 另:`auto_enable` 的横幅改成三态(`MCP_STATE` ok/degraded/off),不再出现
+> "先报不可用、紧接着写 MCP: 已启用"的自相矛盾;`_surface` 不再把冷启动误归因成
+> "daemon 有阻塞标记"(真因就在上游原文里,没有证据不许编病因)。
+>
+> **新闸门 `MCP启动`(`python3 tests/py_mcp_boot_test.py`)— 21/21**,全离线
+> (打桩 `_run`/`list_json`,不碰 npx 与 daemon)。断言分五节:超时预算与 `--timeout`
+> 真的进 argv、失败三件善后、部分可用降级、不重复枚举、归因不编病因。
+> **变异验证 5/5 可杀**:删 `--timeout` → 2 红;删 `_lock_release()` → 1 红;
+> `_dispatch` 恢复重跑 list → 1 红;`_build` 不判 `MCP_ENABLE` → 1 红;
+> 归因改回恒真 → 1 红。
+>
+> 连带:`ctx_budget_test.py` 的 MCP 字节帽夹具要同步新契约(它直接调 `_dispatch`,
+> 前提是"`install()` 已跑过"),`26/26` 不变。
+>
+> **本轮实测基线**:`MCP启动` 21/21、`MCP通道` **133/133**(README 上文记的 130/130
+> 是历史值,未回改旧行)、`上下文体积` 26/26、全量 **run=66 pass=66 fail=0 skip=1**
+> (skip 为主套件)。闸门数 **65 → 66**。

@@ -89,7 +89,13 @@ import wchat_py.mcp_boot as MB      # noqa: E402
 import wchat_py.mcp_bridge as MBr   # noqa: E402
 
 _orig_list, _orig_call = MBr.list_json, MBr.call
-MBr.list_json = lambda: ([{"name": "s1", "status": "ok", "tools": [{"name": "t1"}]}], "")
+_orig_boot = MB._BOOT_SRV[0]
+_FAKE_SRV = [{"name": "s1", "status": "ok", "tools": [{"name": "t1"}]}]
+# list_json 的签名带 timeout(per-server 预算),桩要对齐,否则调用点传参就 TypeError。
+# 另:_dispatch 现在读的是**启动时**写定的缓存(不再每次重跑 list —— 冷启动会挂 60s),
+# 所以夹具要同时把缓存填好,模拟"install() 已经跑过"这个前提。
+MBr.list_json = lambda timeout=None: (_FAKE_SRV, "")
+MB._BOOT_SRV[0] = _FAKE_SRV
 MBr.call = lambda s, t, a: ("X" * 100000)
 os.environ.pop("MCP_RESULT_MAX", None)
 os.environ["MCP_GRANTED"] = "s1"
@@ -97,6 +103,7 @@ try:
     r = quiet(MB._dispatch, "mcp_call", json.dumps({"server": "s1", "tool": "t1"}))
 finally:
     MBr.list_json, MBr.call = _orig_list, _orig_call
+    MB._BOOT_SRV[0] = _orig_boot
 ck("MCP 结果被字节帽截断(≤ 20KB)", len(r.encode()) <= 20000, "%d 字节" % len(r.encode()))
 ck("截断标记出现", "MCP 结果过长已截断" in r, r[:80])
 
@@ -250,4 +257,3 @@ for p in (big1, big2):
 
 print("RESULT total=%d pass=%d fail=%d" % (P[0] + len(F), P[0], len(F)))
 sys.exit(0 if not F else 1)
-

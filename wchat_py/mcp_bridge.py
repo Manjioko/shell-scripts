@@ -86,7 +86,12 @@ def _run(argv, timeout=60):
     except FileNotFoundError:
         return None, "找不到启动器 %s" % argv[0]
     except subprocess.TimeoutExpired:
-        return None, "mcporter 超时(结果未知,严禁原样重发)"
+        # 必须说清"没返回"与"没做"是两件事:超时只杀了 npx 这个直接子进程,
+        # daemon 是独立进程、会继续把依赖装完。实测:16:11 那次超时后,daemon 在
+        # 16:12-16:14 把 uvx 的 wheel 下完了,下一次启动直接复用 —— 用户看到的是
+        # "第二次突然就好了",而没人知道第一次其实干了一半活。
+        return None, ("mcporter 未在 %ss 内返回(结果未知,严禁原样重发;"
+                      "daemon 侧的安装/连接可能仍在继续)" % timeout)
     return p.stdout, (p.stderr if p.returncode != 0 else None)
 
 
@@ -119,12 +124,42 @@ def config_servers():
         return []
 
 
-def list_json(timeout=60):
-    """返回 (servers 列表, err)。servers = [{name,description,tools:[{name,description}]}]"""
+def _discovery_budget():
+    """返回 (per_server_ms, outer_s):单 server 发现超时 与 外框安全网。
+
+    两件事必须分开:
+      · mcporter 的 `--timeout` 是 **per-server** 的:某个 server 卡住时它自己标
+        status=error 并**继续返回其余 server**,这是我们要的降级粒度;
+      · 外框 subprocess 超时是**一刀切**的:到点连成功的那几个一起丢,这就是
+        2026-10-30 那次"4 个 server 声明了、一个都没起来"的直接原因。
+    所以:把判定交给 per-server,外框只按 server 数量留足安全网。
+    """
+    try:
+        per = int(os.environ.get("MCP_DISCOVERY_TIMEOUT_MS") or 20000)
+    except ValueError:
+        per = 20000
+    if per <= 0:
+        per = 20000
+    n = max(1, len(config_servers()))
+    # 每个 server 一个发现窗口 + 20s 固定开销(npx 自身解析、daemon 握手、JSON 解析)。
+    # 上限 600s:真到这一步已经该去看具体 server 了,再长只是让人干等。
+    outer = min(600, max(30, (per * n) // 1000 + 20))
+    return per, outer
+
+
+def list_json(timeout=None):
+    """返回 (servers 列表, err)。servers = [{name,description,tools:[{name,description}]}]
+
+    timeout=None 表示按 _discovery_budget() 自适应;显式传值只影响外框,per-server 仍走预算。
+    """
     global LAST_COUNTS
     if not shutil.which(LAUNCHER):
         return None, "找不到启动器 %s(本次按无 MCP 运行)" % LAUNCHER
-    out, err = _run([LAUNCHER, "-y", PKG, "list", "--json"], timeout=timeout)
+    per_ms, outer = _discovery_budget()
+    if timeout is not None:
+        outer = timeout
+    out, err = _run([LAUNCHER, "-y", PKG, "list", "--json", "--timeout", str(per_ms)],
+                    timeout=outer)
     if out is None:
         return None, err
     try:

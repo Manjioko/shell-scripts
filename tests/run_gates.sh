@@ -94,6 +94,15 @@ GATE_NOTE=('两个脚本语法' '569 条判据向量 + 总数守卫(默认走 Py
            'add_message/auth_add_message(M 制拆分)'
            'history pack/drop_orphan_tools(M 制拆分)'
            'filefmt.read(M 制拆分·已收口)' 'pathutil expand_tilde/norm_path/resolve_path/in_root_exempt(W3·已收口)' 'py_cfg_dump 配置导出 + schema 一致性(W12-1)' 'hard_deny_path 纯判定化(W12-2·已收口)' 'is_granted/auto_allow_hit 会话授权(W12-3·已收口)' 'llm.py Seam 编码/kwargs/依赖探测(W12-4a)' '请求建体 parity(Python 建体 vs jq 逐字节)' 'messages 文件 store(回滚=截断/原子写/损坏抛错)' '权限会话态形状(幂等/顺序/rw⊃r/空串)' '工具注册表(原样字节/两句独立变换/组合不丢 MCP)' 'tools_run 五工具 parity(content/状态行/落盘字节)' '硬墙差分语料 44 条(bash 基线稳定; Python 版 parity 的 oracle)' '硬墙接缝(前端 WCHAT_PY_HARDWALL=1 vs 0 判定等价)' '终端层地基: raw_mode 三路退出恢复 termios)' '终端引擎: raw/pty/信号/run_shell_command 四用例' '工具完整性:tools_spec 每个工具都有实现(行为断言)' '编排:轮次上限缺省 250/撞顶不静默/审计空路径落 CT_HOME' '历史文件名只有一个 .json(-fs 不许出 xxx.json.json)' 'Ctrl+C 打断流式输出:回输入框/不刷栈/半截输出不入上下文' '发行包:可复现/无字节码/装后能跑/Formula 一致' '确认链:硬墙yes不再问/同命令不重问/路径记账不重问' 'H14 范围:叙述文本不算装包/真安装仍拦/包名不跨段' '首次引导:缺项只提示不进循环/逐项问/校验指到点上/600落盘/强制验连通' '录入终端:真 pty 里 key 能收进去/key 回显/整段粘贴不丢值' '上下文体积:工具输出列宽+行数截断/MCP字节帽/标题兜底/轮内压缩/越界自愈' '安装完整性:包内不缺模块/解释器失效可兜底/缺模块提示可读' '渲染字节:reserve/paint/close 逐字节 + 禁 CSI s/u 存光标 + close 擦净' '流箱屏幕:阶梯重复/右移在四种终端能力组合下都不出现' '子命令:model 一份实现/MCP 清单收进 .ct 并迁移/技能只补缺不覆盖' '运行时自举:断链自愈/锁不重跑/版本校验/安装失败停住' '调用记账:不记正文/归因标签齐全/工具定义成本/审计判据' '工具参数:必填缺失必须报错(spec 为真源)/空命令不执行/横幅不留白' '工具流解析:分片缺 index 也归同一 slot(对齐 master)/空名调用不进执行' 'UTF8完整性:合法输入不产生替换字符/pty 先 join 再解码' 'read_file 分页:limit 生效/只给 offset 也前进(零进展检测)/越界明说/负 offset 归 1/头部不许谎报区间' '分层结构:cli 行数上限/已切出函数不许回流/下层不 import cli/任意导入顺序/门面同一对象/账本不重新绑定' 'Python版本:shebang 只管"要个 python3"/brew wrapper 不读 shebang(实验双向)/低于下限自动换解释器/兜底也要过版本校验' '可移植性:夹具不写死 mac bash 路径/fixtures 软链必须相对(两条都实测假红过)' 'deb 包契约:control/python3-venv/postinst 离线幂等/prerm 删 venv/wrapper 指 venv/清单与 brew 同源/验收不挂源码' 'APT 仓库:pool+dists 结构/Filename 必须仓库相对(上线才炸)/Release 双 hash/InRelease+Release.gpg/验收真走 apt 不绕 dpkg' '非正文输出统一灰化:横幅/输出/状态行各≤1行 + 拒绝给理由不回显命令 + 正文不灰(对照)')
+# 新闸门用 += 追加,**不改上面的字面量**:那五个数组按位置一一对应,
+# 在长行中间插一个字面量极易错位(插错位置会得到一条假绿,本项目已踩过同类)。
+# 追加到所有数组末尾,顺序天然一致。
+GATE_NAMES+=('MCP启动')
+GATE_CMDS+=('python3 tests/py_mcp_boot_test.py')
+GATE_MODE+=('c')   # 复合命令(python3 ...)必须走 bash -c,选 x 会变成 `bash python3 ...` → rc=126
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('MCP 启动链:per-server 超时预算/失败当场放锁且不注册死工具/不重复枚举(全离线)')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。
