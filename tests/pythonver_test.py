@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import warnings
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -191,6 +192,36 @@ else:
                 if pat.search(open(os.path.join(root, fn), encoding="utf-8").read()):
                     hits.append(fn)
     ck("%s 未安装 → 静态扫描无 3.10+ 语法" % want, not hits, repr(hits[:5]))
+
+print("=== 5b. 全库编译不得有无效转义(SyntaxWarning) ===")
+# 3.12 起 `"\;"`、``"\`"`` 这类无效转义会发 SyntaxWarning,未来版本直接变 SyntaxError。
+# 它只在**首次编译**该文件时打印一次,所以能一路混进发布包:用户装完第一次跑就看见
+#   tools_run.py:9: SyntaxWarning: invalid escape sequence '\;'
+# 而所有闸门全绿(默认不把 warning 当错误)。这里用**当前**解释器逐个 compile():
+# 不写 __pycache__、也不受"已缓存所以不报"的影响。
+_bad = []
+for _root, _dirs, _files in os.walk(REPO):
+    _dirs[:] = [d for d in _dirs if d not in (".git", "__pycache__", "node_modules", ".venv")]
+    for _fn in _files:
+        if not _fn.endswith(".py"):
+            continue
+        _p = os.path.join(_root, _fn)
+        try:
+            _src = open(_p, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        with warnings.catch_warnings(record=True) as _ws:
+            warnings.simplefilter("always")
+            try:
+                compile(_src, _p, "exec")
+            except SyntaxError as _e:
+                _bad.append("%s:%s %s" % (os.path.relpath(_p, REPO), _e.lineno, _e.msg))
+                continue
+            for _x in _ws:
+                if issubclass(_x.category, SyntaxWarning):
+                    _bad.append("%s:%s %s" % (os.path.relpath(_p, REPO),
+                                               getattr(_x, "lineno", 0), _x.message))
+ck("全库无无效转义(否则用户首次运行就看见 SyntaxWarning)", not _bad, repr(_bad[:3]))
 
 print("=== 6. 非空转自检:把下限抬到当前版本之上,判定必须反转 ===")
 # 证明 §3 的判据不是恒真:同一个 _py_ok,喂一个不可能满足的下限必须返回假。

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""B 阶段 1d：工具实现的 Python 版（**逐字复刻** bash 的输出，因为工具输出会进下一轮上下文）。
+r"""B 阶段 1d：工具实现的 Python 版（**逐字复刻** bash 的输出，因为工具输出会进下一轮上下文）。
 
 第一个工具：`list_dir`。bash 原文（`wchat.sh` 6031–6044）：
 ```bash
