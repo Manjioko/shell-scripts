@@ -47,6 +47,12 @@ def sse_text(text):
 
 
 class H(BaseHTTPRequestHandler):
+    # 必须 HTTP/1.1:下面用 `Transfer-Encoding: chunked` 分块吐 SSE,而 http.server
+    # 默认是 HTTP/1.0 —— HTTP/1.0 没有 chunked,客户端(httpx)按 chunked 解析会得到
+    # 残缺内容,报 `Expecting value: line 1 column 1 (char 0)`。
+    # bash+curl 时代 curl 对 HTTP/1.0+chunked 很宽容,所以这个坑一直没暴露;
+    # 迁到 Python(httpx)后,发行闸门的"真实一轮"就红了 4 条。
+    protocol_version = "HTTP/1.1"
     def log_message(self, *a):
         pass
 
