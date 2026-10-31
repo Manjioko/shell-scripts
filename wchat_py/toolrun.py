@@ -92,6 +92,11 @@ def _banner_text(name, args_json):
     带空 command / 缺 command 但有别的键 / 根本不是 JSON / 一个参数都没有。
     """
     from wchat_py.render import tool_banner, args_preview
+    if name not in known_tools():
+        # 未知工具名不做"看起来很正规"的横幅 —— 否则屏幕上那行
+        # `⏺ bash_placeholder · {}` 会让人以为这是我们支持的调用。
+        return tool_banner(name or "", "⚠ 未知工具名,不执行(可用:%s)"
+                           % "/".join(known_tools()))
     if name == "run_shell_command":
         a = _args_obj(args_json)
         cmd = (a or {}).get("command") if a is not None else (args_json or "")
@@ -111,6 +116,30 @@ def _banner_text(name, args_json):
 
 
 _REQUIRED_CACHE = {}
+_KNOWN_CACHE = []
+
+
+def known_tools():
+    """tools_spec.json 里声明的工具名集合(唯一真源,缓存)。
+
+    用途只有一个:**在分发前认出"模型编造的工具名"**。模型偶尔会发明
+    `bash_placeholder` 这种名字,旧代码会一路走到兜底,回一句
+    "工具 X 尚未迁移到 Python 入口(1d 进行中)" —— 既暗示这个工具存在过,
+    又不告诉模型到底有哪些工具可用,于是它会拿另一个瞎编的名字再试一次。
+    """
+    if _KNOWN_CACHE:
+        return _KNOWN_CACHE
+    try:
+        import json as _j
+        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools_spec.json")
+        with open(spec_path, encoding="utf-8") as f:
+            for t in _j.load(f) or []:
+                fn = (t or {}).get("function") or {}
+                if fn.get("name"):
+                    _KNOWN_CACHE.append(fn["name"])
+    except Exception:
+        pass
+    return _KNOWN_CACHE
 
 
 def _required_of(name):
@@ -195,9 +224,22 @@ def _trunc_for_context(text):
 
 
 def _run_tool(name, args_json):
-    """执行一个工具。目前只接 list_dir(1d 的第一个);其余**明示未迁移**, 不静默成功。"""
+    """执行一个工具。**先认出"不存在的工具名"**,再分发给各实现。"""
     import json as _json
     from wchat_py.tools_run import list_dir, read_file, grep, write_file, edit_file
+    # 第一道:名字本身在不在 tools_spec.json 里。
+    # 真事故:模型编了个 `bash_placeholder` 的工具名,界面照常打印
+    # `⏺ bash_placeholder · {}`,结果那句话是"尚未迁移到 Python 入口(1d 进行中)"
+    # —— 用户当场问"我们没有这个方法吧"。旧文案把"模型瞎编"说成"我们没移植完",
+    # 既误导人,也不给模型任何"该用哪个"的信息,它会换个瞎编的名字再试。
+    _known = known_tools()
+    if _known and name not in _known:
+        sys.stdout.write("%s⚠ 未知工具名: %s(不执行)%s\n" % (GREY, name, ZERO))
+        sys.stdout.flush()
+        return ("错误:没有名为 %r 的工具,这条调用无法执行(工具名是模型编造的,"
+                "不是 wchat 少装了东西)。可用工具只有:%s。"
+                "请改用其中一个重新发起本次调用。"
+                % (name, "、".join(_known)))
     try:
         a = _json.loads(args_json or "{}")
     except Exception:
@@ -692,4 +734,8 @@ def _run_tool(name, args_json):
         # 少了第①道,`cat` 一个 minified 文件就等于把几十万字符塞进上下文,
         # 而且之后每次请求都重发一遍 —— 实测这一条就是 token 飞涨的主因。
         return _trunc_for_context(_full)
-    return "错误:工具 %s 尚未迁移到 Python 入口(1d 进行中)" % name
+    # 走到这里说明:名字**在** tools_spec.json 里,但下面没有对应分支。
+    # 这是**我们的实现缺口**(声明了却没接实现),不是模型的问题,
+    # 所以要明说"请报告",而不是含糊地说一句"尚未迁移"。
+    return ("错误:工具 %s 已在 schema 中声明,但缺少实现分支(这是 wchat 的内部缺陷,"
+            "不是参数问题)。请改用其它工具完成这件事,并把这条信息告知用户。" % name)

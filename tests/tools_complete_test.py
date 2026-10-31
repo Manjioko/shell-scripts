@@ -56,6 +56,16 @@ for n in names:
         continue
     ck("工具 %s 已实现(非'尚未迁移')" % n, "尚未迁移" not in str(out), str(out)[:80])
 
+print("=== 模型编造的工具名必须被认出来 ===")
+# 真事故:模型发了个 `bash_placeholder`。旧实现一路走到兜底,回
+# "工具 bash_placeholder 尚未迁移到 Python 入口(1d 进行中)" ——
+# 暗示这工具存在过,还不给"该用哪个"的信息,模型于是换个瞎编的名字再试一次。
+# 用户看到的第一反应是"我们没有这个方法吧"。
+_ghost = cli._run_tool("bash_placeholder", "{}")
+ck("未知工具名: 明说'没有名为'", "没有名为" in _ghost, str(_ghost)[:120])
+ck("未知工具名: 不说'尚未迁移'", "尚未迁移" not in _ghost, str(_ghost)[:120])
+ck("未知工具名: 列出可用工具", "run_shell_command" in _ghost or "list_dir" in _ghost, str(_ghost)[:200])
+ck("未知工具名: 提示改用一个", "重新发起" in _ghost, str(_ghost)[:200])
+
 print("RESULT total=%d pass=%d fail=%d" % (T, T - F, F))
 sys.exit(0 if F == 0 else 1)
-
