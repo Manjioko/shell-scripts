@@ -35,6 +35,32 @@ def _dep_error() -> str:
             "(W12-4 的 HTTP/SSE 层已改用官方 SDK,不再回退 curl)。" % (DEP, DEP))
 
 
+def _has_dep(name) -> bool:
+    """模块真的可用吗(不 import,避免副作用)。"""
+    try:
+        import importlib.util as _ilu
+        return _ilu.find_spec(name) is not None
+    except Exception:
+        return False
+
+
+def _import_error_reason(e) -> str:
+    """把 `_make_client` 阶段的 ImportError 分成人话。
+
+    **不能一律当成"缺 openai"**——这是本项目一次真实误诊:socks5 代理下 httpx 需要
+    `socksio`,没有就抛 `ImportError("Using SOCKS proxy, but the 'socksio' package
+    is not installed")`。它在 `client = _make_client(...)` 里抛出,被笼统的
+    `except ImportError` 抓成"缺少 openai 依赖",用户看到的是"我明明装了 openai",
+    于是怎么重装都不好(报错位置离真因极远)。
+    """
+    s = str(e)
+    if "socksio" in s.lower():
+        return ("检测到 SOCKS 代理,但缺少 socksio 支持。修复:"
+                "`brew reinstall wchat`(装 httpx[socks]);"
+                "或临时取消代理(ALL_PROXY/HTTPS_PROXY/all_proxy)后重试")
+    return "依赖不完整:%s" % s
+
+
 def _normalize_base_url(base_url: str) -> str:
     """把**完整端点**折成 SDK 要的"根"。
 
@@ -218,9 +244,14 @@ def cmd_stream(argv) -> int:
     hdr = req.get("api_key_header", "api-key")
     try:
         client = _make_client(base_url, api_key, hdr)
-    except ImportError:
-        sys.stderr.write(_dep_error() + "\n")
-        return _contract.EXIT_ENV
+    except ImportError as e:
+        # openai 确实不在 → 缺依赖;openai 在却抛 ImportError → 是它的某个传递依赖
+        # (典型:socks 代理缺 socksio),必须把真实原因说出来,别误报"缺 openai"。
+        if not _has_dep(DEP):
+            sys.stderr.write(_dep_error() + "\n")
+            return _contract.EXIT_ENV
+        _emit({"t": "error", "v": _import_error_reason(e)})
+        return _contract.EXIT_FAIL
     except Exception as e:
         # 凭据缺失/URL 非法等在**构造客户端**阶段就抛(SDK 不联网先校验 key)。
         # 必须在这里转成 error 事件:否则异常冒到 stderr,读循环把它当 api_error 拼进

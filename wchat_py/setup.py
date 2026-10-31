@@ -522,6 +522,12 @@ def _hint_for(exc):
     """把异常翻成人话 + 一句怎么改。"""
     s = "%s" % (exc)
     low = s.lower()
+    # 必须先判:socks 缺 socksio 时抛的是 ImportError,文案里带 "install",容易被
+    # 后面的分支误读成网络问题;而它的修法很具体(装 httpx[socks]),要排在最前面。
+    if "socksio" in low or "httpx[socks]" in low:
+        return ("检测到 SOCKS 代理,但缺 socksio 支持",
+                "`brew reinstall wchat`(新版已带 httpx[socks]);"
+                "或临时取消代理(all_proxy/ALL_PROXY/HTTPS_PROXY)后重试")
     if "401" in low or "unauthorized" in low or "invalid_api_key" in low or "authentication" in low:
         return ("key 无效(服务端返回 401)", "把 WCHAT_API_KEY 换成你自己的 key")
     if "403" in low or "permission" in low or "forbidden" in low:
@@ -547,9 +553,10 @@ def verify():
     if not base or not key:
         return False, "还缺 BASE_URL 或 WCHAT_API_KEY"
     try:
-        from wchat_py.llm import _make_client
-        from openai import OpenAI  # noqa: F401  确认依赖在
+        from wchat_py.llm import _make_client, _has_dep
     except ImportError:
+        return False, "缺少 openai 依赖,请重装 wchat"
+    if not _has_dep("openai"):
         return False, "缺少 openai 依赖,请重装 wchat"
     try:
         cli = _make_client(base, key, os.environ.get("API_KEY_HEADER", ""))

@@ -1,8 +1,9 @@
 # Python 依赖(HTTP/SSE 走官方 OpenAI SDK,不回退 curl)
 # openai 锁 2.x:3.x 改了传输层依赖(不再带 httpx),本项目用 httpx.Timeout 做停滞兜底。
 openai>=2.0,<3
-httpx>=0.24
+# [socks]:国内常见 ALL_PROXY/HTTPS_PROXY=socks5://…;只装 httpx 时 SDK 一构造就抛
+# ImportError("'socksio' package is not installed"),在 WSL/Linux 上表现为"一用就报错"。
+httpx[socks]>=0.24
 prompt_toolkit>=3
 rich>=13
 pillow>=9
-

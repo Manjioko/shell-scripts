@@ -215,6 +215,14 @@ with Sandbox() as sb:
     ck("装着 openai 1.x 时 _deps_ok 为 False(要建 venv)", B._deps_ok() is False)
     ck("缺的正是 openai", B._missing_deps() == ["openai"], repr(B._missing_deps()))
 
+# extras 语法(httpx[socks])必须仍被解析成"必需的 httpx"。
+# 不认 extras 会让整行被跳过 → httpx 从必需依赖里消失 → 缺它也不建 venv,
+# 表现为"装了 wchat 但 httpx 缺席也报齐全"(比不写还糟)。
+_names = [n for n, _s in B._requirements()]
+ck("requirements 里的 httpx[socks] 解析成 httpx", "httpx" in _names, repr(_names))
+ck("extras 不带进模块名", not any("[" in n for n in _names), repr(_names))
+ck("httpx 被列为必需依赖", "httpx" in B._required(), repr(B._required()))
+
 # ---------------- 5) 安装失败必须停住,不许静默降级 ----------------
 print("=== 5. 安装失败 ===")
 import subprocess as _sp  # noqa: E402
@@ -310,4 +318,3 @@ with Sandbox() as sb:
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-

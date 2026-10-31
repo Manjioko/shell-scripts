@@ -181,6 +181,9 @@ for line in open(os.path.join(sys.argv[1], "requirements.txt")):
     if not s:
         continue
     pkg = s.split(">=")[0].split("==")[0].split("<")[0].strip()
+    # 剥掉 extras(httpx[socks] -> httpx):extras 是"可选附加",不是模块名,
+    # 带着它 import_module 必然 ModuleNotFoundError,会把测试自己搞红。
+    pkg = pkg.split("[")[0].strip()
     # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips),
     # 所以不强制本机 import;但必须仍写在 requirements 里,让 brew 装进 venv。
     if pkg.lower() == "pillow":

@@ -31,7 +31,9 @@ from .version import MIN_PYTHON as MIN_PY   # 最低版本只有一处(version.p
 # requirements.txt 是唯一的依赖真源;这里不再抄一份名字列表。
 _OPTIONAL = ("pillow",)          # 可选:缺了不建 venv(图片缩放会退回 sips)
 _MARK = ".ready"
-_SPEC_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*([<>=!~].*)?$")
+# 允许 `name[extras]>=x` 形式(如 httpx[socks]):不认 extras 会让**整行被跳过**,
+# 于是 httpx 从"必需依赖"里消失,缺它也不建 venv —— 比不写还糟。
+_SPEC_RE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)(\[[^\]]*\])?\s*([<>=!~].*)?$")
 
 
 def _repo_root():
@@ -56,7 +58,7 @@ def _requirements():
                     continue
                 m = _SPEC_RE.match(line)
                 if m:
-                    out.append((m.group(1), (m.group(2) or "").strip()))
+                    out.append((m.group(1), (m.group(3) or "").strip()))
     except OSError:
         pass
     return out

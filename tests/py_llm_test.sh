@@ -109,6 +109,13 @@ ck "llm.py 存在"               "$([[ -f "$RLDIR/wchat_py/llm.py" ]] && echo y)
 ck "llm.py 不 shell-out"       "$(grep -cE 'subprocess|os\.system|Popen|check_output|check_call' "$RLDIR/wchat_py/llm.py")" "0"
 ck "llm.py 用官方 SDK"         "$(grep -c 'from openai import OpenAI' "$RLDIR/wchat_py/llm.py")" "1"
 ck "requirements 登记 openai"  "$(grep -c '^openai' "$RLDIR/requirements.txt")" "1"
+# SOCKS 代理锁:只写 `httpx` 时,socks5 代理下 SDK 一构造就抛 ImportError
+# ("'socksio' package is not installed"),而 llm.py 的 `except ImportError` 会把它
+# 误报成"缺少 openai 依赖"——用户装了 openai 也照报,重装多少次都没用(实见)。
+ck "requirements 给 httpx 带 socks 支持" "$(grep -cE '^httpx\[socks\]' "$RLDIR/requirements.txt")" "1"
+ck "ImportError 不再一律当缺 openai" "$(grep -c '_has_dep(DEP)' "$RLDIR/wchat_py/llm.py")" "1"
+ck "socks 缺 socksio 有专门文案" "$(grep -c '缺少 socksio 支持' "$RLDIR/wchat_py/llm.py")" "1"
+ck "配置自检也对 socks 给人话" "$(grep -c '缺 socksio 支持' "$RLDIR/wchat_py/setup.py")" "1"
 # W12-4c 收口锁:ask_ai 的流式请求必须走 Python(唯一活实现),旧 curl 主请求块必须已删。
 # 只钉"调用点存在/旧路径不存在"这类结构事实;行为由 auto_test.sh 的 E5/E6(续发不被吞)覆盖。
 ck "ask_ai 主请求走 py_run llm stream" "$(grep -c 'py_run llm stream' "$RLDIR/wchat_ref")" "1"
