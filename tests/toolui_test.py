@@ -246,9 +246,17 @@ for ln in [x for x in screen.split("\n") if "L1" in x or "L2" in x]:
     payload = payload.replace("\x1b[0m", "").lstrip()      # 去掉边框后面的 reset
     ck("内容本身被灰包住(%r)" % ANSI.sub("", payload).strip()[:6],
        payload.startswith(GREY), repr(payload)[:100])
-ck("无输出的命令仍有一行汇总(防静默成功)",
-   (lambda s: len(text_lines(s)) == 1 and "共 0 行" in s)(
-       run_shell_capture("true", lambda: _Env())[1]))
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+    # 这条测的是"**防静默成功**":命令没输出,也必须有一行 `└─ 完成 · 共 0 行 ─┘`。
+    # 不能断言"屏幕上恰好只有 1 行" —— auto 档下还会多一行
+    # `auto 终审放行:assume-yes`,那是审批链的正常输出,不是本用例要管的东西。
+    # 原来写成 `len(text_lines(s)) == 1`,于是:
+    #   ① 在带 AUTO_MODE 的环境里跑 → 多那行 → 假红(而且它还会去真调模型);
+    #   ② 换个没 openai 的解释器 → 终审失败 → 命令没跑 → 也是红。
+    # 现在只认"有且只有一条汇总行"。
+    _s0 = run_shell_capture("true", lambda: _Env())[1]
+    _sums = [ln for ln in text_lines(_s0) if "└─" in ANSI.sub("", ln) and "共 0 行" in ANSI.sub("", ln)]
+    ck("无输出的命令仍有一行汇总(防静默成功)", len(_sums) == 1, repr(_s0)[:200])
 
 print("=== 6b. 单命令时长:模型可自主指定 timeout ===")
 import wchat_py.toolrun as TR2  # noqa: E402
@@ -307,7 +315,8 @@ import wchat_py.render as R3  # noqa: E402
 _oc = R3.term_cols
 try:
     R3.term_cols = (lambda d=80: 80)
-    _o, _s = run_shell_capture("python3 -c \"print('y'*400)\"", lambda: _Env())
+    with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+        _o, _s = run_shell_capture("python3 -c \"print('y'*400)\"", lambda: _Env())
     _long = [x for x in _s.split("\n") if "y" in x]
     ck("超长输出行被截到不折行", _long and all(display_width(x.rstrip("\r")) <= 80
                                         for x in _long),
