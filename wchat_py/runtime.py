@@ -8,7 +8,46 @@
 `sys.executable` 仍指向旧目录 —— 所有 spawn 子进程的地方都必须经它取解释器。
 """
 import os
+import subprocess
 import sys
+
+
+def _brew_prefix():
+    """问 brew 自己的 prefix —— Linux/WSL 上是 `/home/linuxbrew/.linuxbrew`。
+
+    硬编码 `/opt/homebrew`、`/usr/local` 只覆盖 macOS;Linux 上这两条一条都不存在,
+    兜底于是落到**没有 openai 的系统 python3**,用户看到的是"缺少 openai 依赖"。
+    """
+    try:
+        r = subprocess.run(["brew", "--prefix"], capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
+def _can_import_openai(exe):
+    """该解释器**真能 import openai** 吗。
+
+    `_suitable` 只验"存在 + 可执行 + 版本达标"。Linux 的系统 python3 版本够新却
+    没有 openai,挑中它等于让子进程报"缺少 openai 依赖"——报错位置离真因很远。
+    """
+    if not exe:
+        return False
+    try:
+        if sys.executable and os.path.abspath(exe) == os.path.abspath(sys.executable):
+            import importlib.util as _ilu
+            return _ilu.find_spec("openai") is not None
+    except Exception:
+        pass
+    try:
+        r = subprocess.run([exe, "-c", "import openai"],
+                           capture_output=True, timeout=15)
+        return r.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _seam():
@@ -118,32 +157,46 @@ def _runtime_fallback():
     _fixed = os.environ.get("WCHAT_PYTHON", "")
     if _fixed:
         _cand.append(_fixed)
-    # <Cellar>/wchat/<ver>/libexec/wchat_py/cli.py → 同级的 venv/bin/python
+    # <Cellar>/wchat/<ver>/libexec/wchat_py/runtime.py → 同级 venv/bin/python
     _here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _cand.append(os.path.join(_here, "venv", "bin", "python"))
+    # brew prefix 先动态问(Linux 是 /home/linuxbrew/.linuxbrew),再硬编码兜底
+    _pfxs = []
+    _bp = _brew_prefix()
+    if _bp:
+        _pfxs.append(_bp)
+    for _p in ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"):
+        if _p not in _pfxs:
+            _pfxs.append(_p)
     # brewed opt 链接(版本无关;`brew reinstall` 后自然指向新版本)
-    _cand.append("/opt/homebrew/opt/wchat/libexec/venv/bin/python")
-    _cand.append("/usr/local/opt/wchat/libexec/venv/bin/python")
+    for _p in _pfxs:
+        _cand.append(os.path.join(_p, "opt", "wchat", "libexec", "venv", "bin", "python"))
     # 升级后"新 Cellar 已装好、但本进程仍指着旧版本" —— 挑一个存在的版本目录用
     import glob as _glob
-    _cand.extend(sorted(_glob.glob("/opt/homebrew/Cellar/wchat/*/libexec/venv/bin/python"),
-                        reverse=True))
-    _cand.extend(sorted(_glob.glob("/usr/local/Cellar/wchat/*/libexec/venv/bin/python"),
-                        reverse=True))
+    for _p in _pfxs:
+        _cand.extend(sorted(_glob.glob(os.path.join(
+            _p, "Cellar", "wchat", "*", "libexec", "venv", "bin", "python")),
+            reverse=True))
     _cand.append("/usr/bin/python3")
     try:
         from wchat_py.bootstrap import _suitable
     except Exception:
         _suitable = None
+    _first_ok = ""
     for c in _cand:
         if not c:
             continue
         if _suitable is not None:
-            if _suitable(c):
-                return c
-        elif os.path.exists(c):
+            if not _suitable(c):
+                continue
+        elif not os.path.exists(c):
+            continue
+        # 解释器能跑还不够:它必须能 import openai,否则子进程会误报"缺依赖"
+        if _can_import_openai(c):
             return c
-    return exe or "python3"
+        if not _first_ok:
+            _first_ok = c
+    return _first_ok or exe or "python3"
 
 
 def _sync_runtime(s):

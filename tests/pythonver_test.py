@@ -151,6 +151,17 @@ ck("_runtime_fallback 也过 _suitable", "_suitable(c)" in rt,
    "只看 exists 会退到没有 openai 的 /usr/bin/python3")
 ck("_runtime_fallback 里 venv 候选排在 /usr/bin/python3 之前",
    rt.index("venv\", \"bin\", \"python\"") < rt.index('"/usr/bin/python3"'))
+# Linux/WSL:brew prefix 是 /home/linuxbrew/.linuxbrew,不是 /opt/homebrew。
+# 只写 macOS 两条候选 = 在 Linux 上全部落空 → 退到没有 openai 的系统 python3,
+# 子进程一启动就报"缺少 openai 依赖"(用户实见)。这里把 Linux 前缀钉住。
+ck("_runtime_fallback 覆盖 Linuxbrew 前缀", "linuxbrew" in rt,
+   "Linux 上 /opt/homebrew、/usr/local 都不存在,会退到没有 openai 的系统 python3")
+ck("_runtime_fallback 动态问 brew prefix", "_brew_prefix" in rt,
+   "写死前缀漏机;应问 `brew --prefix`")
+ck("_runtime_fallback 校验候选能 import openai", "_can_import_openai" in rt,
+   "只验版本不够:系统 python3 版本达标却没 openai")
+ck("_base_python 覆盖 Linuxbrew 前缀", "linuxbrew" in bs,
+   "Linux 上找不到 brew 的 python@3.12")
 
 print("=== 5. 声明与代码对得上:下限版本能编译全包 ===")
 # 用**声明的下限**解释器去 compileall。找不到该版本就退化为"用当前解释器",
@@ -236,4 +247,3 @@ else:
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-

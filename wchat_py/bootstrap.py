@@ -179,6 +179,22 @@ def _ready(venv):
     return _venv_ok(venv)
 
 
+def _brew_prefix():
+    """问 brew 自己的 prefix —— Linux/WSL 上是 `/home/linuxbrew/.linuxbrew`。
+
+    只硬编码 `/opt/homebrew`、`/usr/local` 会漏掉整个 Linuxbrew,
+    于是 `_base_python` 在 Linux 上找不到 brew 的 python@3.12。
+    """
+    try:
+        r = subprocess.run(["brew", "--prefix"], capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode == 0 and (r.stdout or "").strip():
+            return r.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def _base_python():
     """造 venv 用的基础解释器 —— 必须**满足 MIN_PYTHON**,不能"手里有谁用谁"。
 
@@ -195,14 +211,24 @@ def _base_python():
         return sys.executable
     cands = [os.environ.get("WCHAT_PYTHON", "")]
     # brew 的 python@3.x(Formula 依赖的那个版本优先 —— 与发布形态一致)
+    # prefix 先动态问 brew(Linux/WSL 是 /home/linuxbrew/.linuxbrew),再硬编码兜底
     import glob as _glob
-    for pat in ("/opt/homebrew/opt/python@3.*/bin/python3.*",
-                "/usr/local/opt/python@3.*/bin/python3.*"):
-        cands.extend(sorted(_glob.glob(pat), reverse=True))
+    _pfxs = []
+    _bp = _brew_prefix()
+    if _bp:
+        _pfxs.append(_bp)
+    for _p in ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"):
+        if _p not in _pfxs:
+            _pfxs.append(_p)
+    for _p in _pfxs:
+        cands.extend(sorted(_glob.glob(os.path.join(
+            _p, "opt", "python@3.*", "bin", "python3.*")), reverse=True))
     for ver in ("3.13", "3.12", "3.11", "3.10", "3.9"):
         cands.append(shutil.which("python" + ver))
-    cands.extend([shutil.which("python3"), shutil.which("python"),
-                  "/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"])
+    cands.extend([shutil.which("python3"), shutil.which("python")])
+    for _p in _pfxs:
+        cands.append(os.path.join(_p, "bin", "python3"))
+    cands.append("/usr/bin/python3")
     for c in cands:
         if _suitable(c):
             return c
