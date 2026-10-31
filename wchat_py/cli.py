@@ -12,6 +12,7 @@
 优先取环境变量，其次取这里的默认值。任何一处不一致，`help` 基线的 bytes 比对会立刻红。
 """
 import os
+import re
 import sys
 
 # MCP 清单默认位:**在 ~/.ct/ 下**,与 config/history/skills 同源。
@@ -443,6 +444,84 @@ AUTO_FINAL_SYS = _AFS
 AUTH_SYS = _AH + "{workdir}" + _AT
 
 
+_VERDICT_RE = re.compile(
+    r"(?<![A-Za-z])(ALLOW|DENY|YES|NO|Y|N)(?![A-Za-z])", re.IGNORECASE)
+# 判定词前面常有的装饰:`**ALLOW**`、`- ALLOW`、`> ALLOW`、`1. ALLOW`、`【ALLOW】`
+_VERDICT_LEAD = " \t\r\n*_`#>~-•·)]}"
+_VERDICT_SEP = " \t\r\n:：,，。.、;；-—()（）[]【】\"'“”*_`"
+# 判定词前的否定语境:把 "我不能 ALLOW 这条" 读成放行是**最危险的误判**
+# (auto 模式无人看屏幕,放行错一条可能毁掉用户环境)。宁可判无判定(拒绝)。
+# 英文用 \b 词边界:否则 "not " 在行首(前面没有空格)会匹配不到。
+_NEG_RE = re.compile(
+    r"(不能|不可|不得|不应|不要|不该|无法|禁止|拒绝|切勿|不准"
+    r"|\bnot\b|\bcannot\b|\bcan't\b|\bdon't\b|\bnever\b|\bn't\b)", re.IGNORECASE)
+
+
+def _negated(pre):
+    return _NEG_RE.search(pre) is not None
+
+
+def _parse_verdict(raw):
+    """把初审/终审模型的回复解析成 ('Y'|'N'|None, reason)。
+
+    **为什么要容错**:提示词要求"只回一行 ALLOW 或 DENY",但模型实际会回
+    `ALLOW：只读命令`(中文冒号)、`**ALLOW** ...`(markdown)、`ALLOW。...`(句号)、
+    `ALLOW\t...`(tab)、`ALLOW（无风险）`(括号)。旧实现是"按空格切成 token、再全等
+    比对",上面每一种都→无判定→fail-closed 拒绝,用户看到的是"auto 终审不可用"。
+
+    安全边界**不放宽**:只有在**第一个**判定词明确是 ALLOW 系列时才放行;既没判定词
+    也没 Y/N 开头 → None(fail-closed)。中文口语("可以/安全")不做猜测 —— 猜错方向
+    是放行一条危险命令,代价远大于多拒一次。
+
+    只在**结论行**里找判定词(首个非空行),避免把理由里的 "不要 DENY 这条" 读成 DENY。
+    """
+    if not raw:
+        return None, None
+    text = str(raw).replace("\r", "")
+    lines = [l.strip(_VERDICT_LEAD) for l in text.split("\n")]
+    lines = [l for l in lines if l][:5]      # 只在开头几行找,别扫到理由深处
+    if not lines:
+        return None, None
+    for line in lines:
+        for m in _VERDICT_RE.finditer(line):
+            tok = m.group(1).upper()
+            # 否定语境里的 ALLOW("我不能 ALLOW"/"not allow")是**拒绝**,不是放行。
+            # 显式判 N,而不是落到下面的首字符兜底(那样是偶然正确,换个措辞就错)。
+            if tok in ("ALLOW", "YES", "Y") and _negated(line[:m.start()]):
+                return "N", line.strip(_VERDICT_SEP)
+            reason = line[m.end():].strip(_VERDICT_SEP)
+            if tok in ("ALLOW", "YES", "Y"):
+                return "Y", reason
+            return "N", reason
+    # 兜底:首字符 Y/N(与 _auth_think 同口径,兼容 "Y安全" 这类无分隔写法)
+    head = lines[0]
+    if head[:1] in ("Y", "y"):
+        return "Y", head[1:].strip(_VERDICT_SEP)
+    if head[:1] in ("N", "n"):
+        return "N", head[1:].strip(_VERDICT_SEP)
+    return None, None
+
+
+def _judge_text(resp):
+    """取判定文本:优先 content;content 为空时退回 reasoning_content。
+
+    思考型模型(deepseek-reasoner 等)可能把内容整段放进 reasoning_content,
+    此时 content 是空串 —— 旧实现直接当"无模型输出"拒绝,同样是误判。
+    """
+    if resp is None:
+        return ""
+    try:
+        msg = resp.choices[0].message
+    except (AttributeError, IndexError, TypeError):
+        return ""
+    txt = getattr(msg, "content", "") or ""
+    if txt.strip():
+        return txt
+    extra = getattr(msg, "model_extra", None) or {}
+    alt = getattr(msg, "reasoning_content", None) or extra.get("reasoning_content") or ""
+    return alt if str(alt).strip() else ""
+
+
 def _auth_think(cmd):
     """初审：Y 放行 / N(带原因) 交终审。异常返回 (None,None) 供调用方 fail-closed。"""
     model = os.environ.get("AUTH_MODEL") or os.environ.get("PRO_MODEL") or ""
@@ -452,13 +531,9 @@ def _auth_think(cmd):
                           {"role": "user", "content": cmd}], model, source="auth")
     except Exception:
         return None, None
-    line = (raw or "").split("\n", 1)[0].strip()
-    if line[:1] in ("Y", "y"):
-        return "Y", ""
-    if line[:1] in ("N", "n"):
-        return "N", line[1:].strip()
-    return None, None
-
+    # 与终审共用同一套容错解析:两处口径必须一致,否则"初审认、终审不认"会
+    # 让同一条回复在两道闸上得到不同结论(且报错形式完全不同)。
+    return _parse_verdict(raw)
 
 def _nonstream(msgs, model, source="?"):
     """非流式单次调用(审批器/终审器用),返回 content；失败抛异常由调用方处理。
@@ -479,7 +554,7 @@ def _nonstream(msgs, model, source="?"):
         _log_call(source, model, msgs, None, ok=False)
         raise
     _log_call(source, model, msgs, getattr(resp, "usage", None), ok=True)
-    return resp.choices[0].message.content or ""
+    return _judge_text(resp)
 
 
 def _usage_dict(u):
@@ -614,16 +689,7 @@ def _auto_judge(cmd, call=None, reason=""):
         raw = call(cmd)
     except Exception:
         return None, None
-    if not raw:
-        return None, None
-    line = str(raw).split("\n", 1)[0].replace("\r", "").strip()
-    tok = line.split(" ", 1)[0].strip().upper()
-    reason = line[len(line.split(" ", 1)[0]):].strip()
-    if tok in ("Y", "YES", "ALLOW"):
-        return "Y", reason
-    if tok in ("N", "NO", "DENY"):
-        return "N", reason
-    return None, None
+    return _parse_verdict(raw)
 
 
 def _retry_after_compact(session, msgs, err):
