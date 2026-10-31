@@ -30,8 +30,9 @@ _IMAGE_TYPE = "image_url"
 
 
 def _dep_error() -> str:
-    return ("缺少 %s 依赖:请 `pip3 install %s`(W12-4 的 HTTP/SSE 层已改用官方 SDK,"
-            "不再回退 curl)。" % (DEP, DEP))
+    return ("缺少 %s 依赖:brew 装的请 `brew reinstall wchat`(会重建 venv);"
+            "从源码跑的用本解释器装 `pip3 install %s`"
+            "(W12-4 的 HTTP/SSE 层已改用官方 SDK,不再回退 curl)。" % (DEP, DEP))
 
 
 def _normalize_base_url(base_url: str) -> str:
