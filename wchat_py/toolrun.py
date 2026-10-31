@@ -101,7 +101,17 @@ def _banner_text(name, args_json):
         a = _args_obj(args_json)
         cmd = (a or {}).get("command") if a is not None else (args_json or "")
         if str(cmd or "").strip():
-            return tool_banner("shell", cmd)
+            # 横幅必须带**实际生效**的限时:模型能自己指定 timeout 之后,用户
+            # 完全看不到"这条要等多久",既没法建立时间预期,也不知道什么时候该
+            # 提前 Ctrl+C 掐掉(模型幻觉出的 600 秒会让人干坐着等)。
+            # 秒数取自 `_effective_timeout` —— 与真正执行用的是同一个值,
+            # 不能照抄模型传的 `timeout`(可能被上限夹紧)。
+            _bg = a.get("run_in_background") if isinstance(a, dict) else None
+            if _bg is True or str(_bg).lower() == "true":
+                # 后台任务不受 timeout 约束(立即返回 PID),写"限时N秒"是骗人的。
+                return tool_banner("shell", "后台 · %s" % cmd)
+            _to, _ = _effective_timeout(a)
+            return tool_banner("shell", "限时%s秒 · %s" % (_fmt_secs(_to), cmd))
         if a is None:
             why = "⚠ (参数不是合法 JSON,未执行)"
         elif "command" in a:
@@ -117,6 +127,60 @@ def _banner_text(name, args_json):
 
 _REQUIRED_CACHE = {}
 _KNOWN_CACHE = []
+
+
+def _timeout_caps():
+    """(默认秒数, 上限秒数)。上限永远不小于默认,否则夹紧逻辑会自相矛盾。"""
+    try:
+        default_to = float(os.environ.get("CMD_TIMEOUT", "120") or 120)
+    except ValueError:
+        default_to = 120.0
+    try:
+        max_to = float(os.environ.get("CMD_TIMEOUT_MAX", "3600") or 3600)
+    except ValueError:
+        max_to = 3600.0
+    if max_to < default_to:
+        max_to = default_to
+    return default_to, max_to
+
+
+def _effective_timeout(a):
+    """算出这条命令**实际生效**的限时(秒),返回 (timeout, note)。
+
+    单一真源:横幅上显示的秒数必须就是真正拿去跑的那个值。
+    分两处算必然分叉 —— 模型说 `timeout: 999999`,横幅若照抄它就写着
+    "限时999999秒",而实际只跑 3600s,用户的时间预期就是错的(这条横幅的
+    全部意义就是给用户一个准数、好决定要不要提前掐)。
+    """
+    default_to, max_to = _timeout_caps()
+    asked = a.get("timeout") if isinstance(a, dict) else None
+    timeout, note = default_to, ""
+    if asked is not None and str(asked).strip() != "":
+        try:
+            asked_f = float(asked)
+        except (TypeError, ValueError):
+            note = "(timeout 参数 %r 不是数字,已按默认 %ss 执行)" % (asked, int(default_to))
+        else:
+            if asked_f <= 0:
+                # 0/负数当"没指定":模型常把 timeout=0 理解成"不设上限"。
+                # 这里给默认值而不是 1s —— 把"不设"翻成"1 秒"会让命令必然被杀。
+                timeout = default_to
+            elif asked_f > max_to:
+                timeout = max_to
+                note = ("(timeout=%s 超过上限 %ss,已按上限执行;"
+                        "更长的任务请用 run_in_background)" % (asked, int(max_to)))
+            else:
+                timeout = asked_f
+    return timeout, note
+
+
+def _fmt_secs(v):
+    """120.0 -> '120';1.5 -> '1.5'。横幅上不显示没意义的小数尾巴。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f == int(f) else ("%g" % f)
 
 
 def known_tools():
@@ -660,37 +724,9 @@ def _run_tool(name, args_json):
         # 但"自主"不等于"无限":上限由 `CMD_TIMEOUT_MAX`(默认 3600s)兜底,
         # 否则一条手滑的 `timeout: 999999` 就能让 auto 会话挂一整天(无人值守时没人掐)。
         # 越界就**夹紧并说出来**:模型看到"实际按 3600s 执行"才知道自己该改。
-        try:
-            _default_to = float(os.environ.get("CMD_TIMEOUT", "120") or 120)
-        except ValueError:
-            _default_to = 120.0
-        try:
-            _max_to = float(os.environ.get("CMD_TIMEOUT_MAX", "3600") or 3600)
-        except ValueError:
-            _max_to = 3600.0
-        if _max_to < _default_to:
-            _max_to = _default_to
-        _asked = a.get("timeout") if isinstance(a, dict) else None
-        _timeout = _default_to
-        _to_note = ""
-        if _asked is not None and str(_asked).strip() != "":
-            try:
-                _asked_f = float(_asked)
-            except (TypeError, ValueError):
-                _to_note = ("(timeout 参数 %r 不是数字,已按默认 %ss 执行)"
-                            % (_asked, int(_default_to)))
-            else:
-                if _asked_f <= 0:
-                    # 0/负数当"没指定":模型常把 timeout=0 理解成"不设上限"。
-                    # 这里给默认值而不是 1s —— 把"不设"翻成"1 秒"会让命令必然被杀。
-                    _timeout = _default_to
-                elif _asked_f > _max_to:
-                    _timeout = _max_to
-                    _to_note = ("(timeout=%s 超过上限 %ss,已按上限执行;"
-                                "更长的任务请用 run_in_background)"
-                                % (_asked, int(_max_to)))
-                else:
-                    _timeout = _asked_f
+        # 算法在 `_effective_timeout`(单一真源):横幅显示的那个秒数就是这里要用的,
+        # 两处各算一遍必然分叉 —— 横幅写着 999999 而实际只跑 3600 就骗了用户。
+        _timeout, _to_note = _effective_timeout(a)
         if _to_note:
             _status(_to_note, 0)
         _run_env = dict(os.environ,
@@ -713,13 +749,14 @@ def _run_tool(name, args_json):
             sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _dim_after("│ ", _ln))
         if _to:
             # 超时提示必须给"下一步怎么办":光说"已终止"会逼模型猜它是不是该拆命令。
-            _ts = int(_timeout) if _timeout == int(_timeout) else _timeout
+            _ts = _fmt_secs(_timeout)
+            _, _max_to = _timeout_caps()
             sys.stdout.write("%s└─ 超过单命令上限 %ss,已终止 · 共 %d 行 ─┘%s\n"
                              % (GREY, _ts, _n, ZERO))
             _full += ("\n(命令超过本次上限 %ss,已终止 · rc=%s。"
                       "若这条命令本来就该更久,请带上更大的 timeout 参数重试(上限 %ss);"
                       "需要一直活着的进程请改用 run_in_background=true。)"
-                      % (_ts, _rc, int(_max_to)))
+                      % (_ts, _rc, _fmt_secs(_max_to)))
         elif _intr:
             sys.stdout.write("%s└─ 已中断 · 共 %d 行 ─┘%s\n" % (GREY, _n, ZERO))
         elif _n > len(_disp):

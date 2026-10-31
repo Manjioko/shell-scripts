@@ -60,6 +60,48 @@ ck("横幅不超过终端宽度", display_width(b.rstrip("\n")) <= 200, str(disp
 ck("方法名仍是蓝色(不动方法色)", "\x1b[1;36mshell" in b, repr(b)[:60])
 ck("预览是灰色(与思考同色)", GREY in b, repr(b)[:80])
 
+print("=== 1a. 横幅必须写出**实际生效**的限时(用户要的时间预期) ===")
+# 模型能自己指定 timeout 之后,用户看不到"这条要等多久",既没法建立预期,
+# 也不知道何时该 Ctrl+C 掐掉(模型幻觉出的 600 秒会让人干坐着等)。
+# 关键是显示**实际生效值**,不能照抄模型传的 timeout(可能被上限夹紧)。
+import wchat_py.toolrun as TRb  # noqa: E402
+
+
+def _ban(args, **envkv):
+    old = {k: os.environ.get(k) for k in envkv}
+    os.environ.update(envkv)
+    try:
+        return ANSI.sub("", TRb._banner_text(
+            "run_shell_command", json.dumps(args, ensure_ascii=False)))
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+_b0 = _ban({"command": "ls -la"}, CMD_TIMEOUT="120", CMD_TIMEOUT_MAX="3600")
+ck("未指定 timeout:横幅写默认 120 秒", "限时120秒" in _b0, repr(_b0))
+ck("未指定 timeout:命令仍在横幅里", "ls -la" in _b0, repr(_b0))
+_b1 = _ban({"command": "npm test", "timeout": 600}, CMD_TIMEOUT="120", CMD_TIMEOUT_MAX="3600")
+ck("模型指定 600 秒:横幅照实写", "限时600秒" in _b1, repr(_b1))
+# 这条是核心:模型狮子大开口要 999999,横幅必须写夹紧后的 3600,
+# 否则用户按 999999 秒建预期,而命令 3600 秒就被杀了(预期与事实相反)。
+_b2 = _ban({"command": "x", "timeout": 999999}, CMD_TIMEOUT="120", CMD_TIMEOUT_MAX="3600")
+ck("超上限:横幅写**夹紧后**的 3600,不写 999999",
+   "限时3600秒" in _b2 and "999999" not in _b2, repr(_b2))
+_b3 = _ban({"command": "x", "timeout": 0}, CMD_TIMEOUT="120", CMD_TIMEOUT_MAX="3600")
+ck("timeout=0 当未指定:写默认 120 秒(不写 0 秒)", "限时120秒" in _b3, repr(_b3))
+_b4 = _ban({"command": "x", "timeout": "abc"}, CMD_TIMEOUT="120", CMD_TIMEOUT_MAX="3600")
+ck("非数字 timeout:退回默认 120 秒", "限时120秒" in _b4, repr(_b4))
+# 后台任务不受 timeout 约束(立即返回 PID) —— 写"限时N秒"就是骗人。
+_b5 = _ban({"command": "npm start", "run_in_background": True})
+ck("后台任务:横幅写'后台'而不写限时",
+   "后台" in _b5 and "限时" not in _b5, repr(_b5))
+# 横幅变长后仍不许折行(限时前缀是新增的宽度负担),见下面 1b 的宽度断言。
+
+
 print("=== 1b. 宽度:横幅/输出行/状态行都必须**塞得进终端**,不许折行 ===")
 # 真事故(2026-11,用户贴的就是这一条):
 #   `⏺ shell · date; echo "=== 0.2.8 目录内容 ==="; ls -la …; echo "=== INSTALL…
