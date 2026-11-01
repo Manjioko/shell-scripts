@@ -234,6 +234,15 @@ def install(argv=None):
     enable, only = _arg_mcp(argv)
     if not enable:
         return
+    # 清单必须**先**就位:本函数在 cli.main 之前执行(ensure_manifest 却在 cli.main 里),
+    # 于是全新机器第一次跑 `wchat -mcp` 会带着"没有 ~/.ct/mcporter.json"去探测,
+    # 必然一个 server 也回不来 —— 用户看到的是"全部 server 探测失败",而真因是顺序。
+    # 用与 cli 同一个入口(seed.ensure_manifest),失败不阻止启动,原因留给 cli 报。
+    try:
+        from wchat_py import seed as _seed_boot
+        _seed_boot.ensure_manifest()
+    except Exception:
+        pass
     os.environ["MCP_ENABLE"] = "1"
     os.environ["MCP_REQUESTED"] = "1"
     if only:

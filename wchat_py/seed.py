@@ -192,7 +192,7 @@ def ensure_manifest():
     else:
         src, why = mcp_template(), "从随包模板生成"
     if not os.path.isfile(src):
-        return None, "没有可用的源(模板缺失)"
+        return None, "没有可用的源(模板缺失: %s)" % src
     try:
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
         tmp = dest + ".tmp"
@@ -261,9 +261,17 @@ def cmd_mcp(argv):
     dest = mcp_dest()
     sys.stdout.write("清单路径: %s\n" % dest)
     if not os.path.isfile(dest):
-        # 正常不该走到这里(启动时会补),但手工删掉后要说清楚怎么回来
-        sys.stdout.write("状态: 不存在(下次启动 wchat 会自动补一份;模板: %s)\n"
-                         % mcp_template())
+        # 正常不该走到这里(启动时会补),但手工删掉后要说清楚怎么回来。
+        # 也不能无条件说"下次启动会自动补":随包模板缺失(装包不完整)时**永远补不出来**,
+        # 那句承诺会把用户指向"再启一次"这种无效动作,而真因在安装包。
+        if os.path.isfile(mcp_template()):
+            sys.stdout.write("状态: 不存在(下次启动 wchat 会自动补一份;模板: %s)\n"
+                             % mcp_template())
+        else:
+            sys.stdout.write("状态: 不存在,而且**随包模板也缺失**(%s)\n" % mcp_template())
+            sys.stdout.write("  → 这是安装包不完整:清单无法自动生成,MCP 会一直不可用。\n"
+                             "  → 修复:重装本包(brew reinstall wchat / 重新 dpkg -i);"
+                             "装完再跑一次 wchat mcp 确认。\n")
         return 0
     mk = _read_marker("mcp")
     if mk.get("why"):

@@ -107,6 +107,33 @@ _p2, _why2 = seed.ensure_manifest()
 ck("再 ensure 不覆盖", _p2 is None and _why2 == "已存在", repr((_p2, _why2)))
 ck("再 ensure 一个字都没改",
    open(seed.mcp_dest(), encoding="utf-8").read() == _before)
+# 模板缺失(装包不完整)时必须说"生成不了",而不是"下次启动会自动补" ——
+# v0.3.2 的 brew 包就是这个形状:libexec/configs 里没有模板,那句承诺永远不成立。
+d = fresh()
+_saved_tpl = seed.mcp_template
+seed.mcp_template = lambda: os.path.join(REPO, "configs", "no-such-template.json")
+try:
+    _p3, _why3 = seed.ensure_manifest()
+    ck("模板缺失时明确报缺(不假装成功)", _p3 is None and "模板缺失" in _why3,
+       repr((_p3, _why3)))
+    ck("模板缺失时不落半份清单", not os.path.exists(seed.mcp_dest()))
+    import contextlib                                                    # noqa: E402
+    import io                                                            # noqa: E402
+    _buf = io.StringIO()
+    with contextlib.redirect_stdout(_buf):
+        seed.cmd_mcp([])
+    _o = _buf.getvalue()
+    ck("status 说清是安装包不完整(指向重装,不是再启一次)",
+       "安装包不完整" in _o and "reinstall" in _o, _o[:300])
+    # 真入口也得听见这句话:用户不会主动跑 `wchat mcp`,他跑的是 wchat / wchat -mcp。
+    from wchat_py import cli as _cli                                     # noqa: E402
+    _err = io.StringIO()
+    with contextlib.redirect_stderr(_err):
+        _cli.main(["-h"])
+    ck("启动时把清单初始化失败说给用户(不静默)",
+       "MCP 清单没有就位" in _err.getvalue(), _err.getvalue()[:300])
+finally:
+    seed.mcp_template = _saved_tpl
 # 结构锁:**不许再有 init 子命令**。两套机制并存正是这次要消灭的东西,
 # 所以直接查源码里没有 "init" 这个分派,而不是查它的输出(输出措辞会变)。
 _src = open(os.path.join(REPO, "wchat_py", "seed.py"), encoding="utf-8").read()
@@ -140,6 +167,26 @@ for sname, s in (_tpl.get("mcpServers") or {}).items():
         if isinstance(v, str) and v and not (v.startswith("${") and v.endswith("}")):
             _leak.append("%s.%s" % (sname, k))
 ck("模板里没有明文密钥", not _leak, repr(_leak))
+
+# 顺序锁:`wchat` 入口先调 mcp_boot.install(探测),再进 cli.main(才 ensure_manifest)。
+# 所以 mcp_boot 必须自己先把清单补上,否则全新机器第一次 `-mcp` 永远探测不到 server。
+# 在**子进程**里跑:install() 会改 cli._run_tool / tools.build / os.environ 并注册 atexit。
+d = fresh()
+_code = (
+    "import os, sys\n"
+    "sys.path.insert(0, %r)\n"
+    "os.environ['WCHAT_NO_SETUP'] = '1'\n"
+    "from wchat_py import mcp_bridge as mb, mcp_boot, seed\n"
+    "mb.list_json = lambda timeout=None: ([], 'stub')\n"
+    "mb.sock_state = lambda: 2\n"
+    "print('BEFORE=', os.path.exists(seed.mcp_dest()))\n"
+    "mcp_boot.install(['wchat', '-mcp'])\n"
+    "print('AFTER=', os.path.exists(seed.mcp_dest()))\n" % REPO)
+_r = subprocess.run([sys.executable, "-c", _code], capture_output=True, text=True,
+                    env=dict(os.environ, CT_HOME=os.environ["CT_HOME"]))
+ck("-mcp 首跑:探测前清单已就位(顺序锁)",
+   "BEFORE= False" in _r.stdout and "AFTER= True" in _r.stdout,
+   (_r.stdout + _r.stderr)[:300])
 
 # ---------------- 3) 技能只补缺、不覆盖 ----------------
 print("=== 3. skills 子命令 ===")
@@ -181,4 +228,3 @@ for _d in _TMPDIRS:
     shutil.rmtree(_d, ignore_errors=True)
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-

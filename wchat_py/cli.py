@@ -964,9 +964,16 @@ def main(argv):
     # 必须在任何 MCP 相关读取之前;失败不阻止启动。
     try:
         from wchat_py import seed as _seed0
-        _seed0.ensure_manifest()
-    except Exception:
-        pass
+        _mp, _mwhy = _seed0.ensure_manifest()
+        if _mp is None and _mwhy != "已存在":
+            # 不许静默:以前这里把原因扔了,用户只看到 -mcp 那句"全部 server 探测失败",
+            # 真因(装包漏了模板)完全不可见 —— v0.3.2 的 brew 包就是这样。
+            sys.stderr.write("⚠ MCP 清单没有就位: %s\n"
+                             "  → 随包模板缺失(装包不完整)或目标目录不可写时,清单永远生成不了,"
+                             "本次 MCP 不可用;修复: brew reinstall wchat(或重装 deb),"
+                             "并确认 ~/.ct 可写。\n" % _mwhy)
+    except Exception as _me:
+        sys.stderr.write("⚠ MCP 清单初始化失败: %s(本次 MCP 不可用)\n" % _me)
     # 配置:检测(只提示不接管)与填写(逐项问)分开。
     #   · `wchat -config …`  → 交给 setup.configure(),它负责校验/写盘/验连通
     #   · 其余入口           → setup.ensure_ready():缺配置就打印"哪里不对 + 下一步"

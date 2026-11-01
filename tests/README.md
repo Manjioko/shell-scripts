@@ -56,6 +56,19 @@
 > 而假红 —— 已改成**行为断言**(调 `hard_deny_path` 看 `hd_rule`/`hd_msg`),这是铁律 5 的又一实例。
 > 基线:`py_pathrule` 25/25、全表 569/569。
 
+> **MCP 清单首启生成修复轮**:`configs/mcporter.example.json` 进了 tarball,却没进 Formula 的
+> `install` 行 —— brew 装出来 `libexec/configs/` 里没有模板,`ensure_manifest` 静默放弃,
+> 用户机器上 `~/.ct/mcporter.json` **永远生成不了**,而 `-mcp` 只会说"全部 server 探测失败"。
+> 修法:打包与 Formula 都按 `configs/` **枚举目录**生成(不再手抄文件名);`ensure_manifest`
+> 的失败原因不再被 `cli` 吞掉;`wchat mcp` 在模板缺失时不再承诺"下次启动会自动补"。
+> 基线:发行包 **35 → 46**(含模板/按 Formula 声明铺 prefix/首启生成清单+600+只有 chrome/双向资产一致)、
+> 安装完整性 **12 → 15**、子命令 **37 → 42**(模板缺失要报安装不完整 + 启动告警不静默 + `-mcp` 首跑
+> 必须先补清单的顺序锁)。变异验证:枚举漏掉 `.json` → 发行包 4 红 + 安装完整性 3 红;
+> 启动告警改 `if False` → 子命令 1 红;去掉 `mcp_boot.install` 里的前置 `ensure_manifest` → 子命令 1 红
+> (三处都已实跑)。
+> ⚠ 本机 `python3`(3.14)缺 `openai` 时,发行包闸门会自动改用 `CT_HOME/venv` 并在开头打印一句;
+> 首次引导(96 条)在不带依赖的解释器下也会红 5 条,同上属环境,不是判据。
+
 | 全表断言(即"517 那张表") | `bash tests/test_hardwall.sh` | `RESULT total=… pass=… fail=0` + `PASS=… FAIL=0`;**默认走生产路**(真实 `_py_on`/`py_run`:已迁移/已收口的谓词走 Python 唯一活实现,未迁移的照旧 bash;`HW_PY=0` 才回退桩,仅供调试);**慢**,几百条各起一次判定,请用后台通道跑,别在 3 秒无输出的前台管道里等 |
 | 判据规则失败核查 | `bash tests/rulefail_check.sh` | `PASS=111 FAIL=0` |
 | 形状探针(36 行表) | `bash tests/probe_shapes.sh` | 逐条 `ok H3/NP …` |

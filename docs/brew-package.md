@@ -462,8 +462,11 @@ python3 packaging/homebrew/make_release.py 0.3.0 --url https://github.com/<you>/
 - **不含** `__pycache__` / `*.pyc` / `.DS_Store`；残留旧 `.pyc` 可能盖住新源码，装出来
   和仓库不一致，这类问题极难查；
 - 文件 mtime 与 gzip 头固定为常量，**同内容 → 同 sha256**（可复现构建）；
-- 必装清单：`wchat`、`wchat_py/`、`requirements.txt`、
-  `configs/config.example`、`configs/ctmodel.py`、`README.md`、本文件。
+- 必装清单：`wchat`、`wchat_py/`、`requirements.txt`、`configs/` 下的**全部**文件
+  （`config.example`、`ctmodel.py`、`mcporter.example.json`）、`README.md`、本文件。
+  `configs/` 用**枚举目录**生成 tarball 与 Formula 的 `install` 行，不再手抄文件名 ——
+  v0.3.2 漏装 `mcporter.example.json`，表现不是打包失败，而是 brew 装出来
+  `~/.ct/mcporter.json` **永远生成不了**、`-mcp` 只说"server 探测失败"。
 
 发布前自查：
 

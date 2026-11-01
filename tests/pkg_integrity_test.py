@@ -53,6 +53,24 @@ ck("发布包含仓库里每一个 wchat_py/*.py", not missing, "缺: " + ", ".j
 ck("发布包含 msg.py(0.2.1 漏过这个)", "wchat_py/msg.py" in in_tar)
 ck("发布包含 version.py", "wchat_py/version.py" in in_tar)
 
+# ---- 1b) 随包资产:configs/ 下每一个文件都要在包里、也要被 Formula 装上 ----
+# v0.3.2 的真实故障:模板进了 tarball,但 Formula 的 install 行漏了它 →
+# brew 装出来 libexec/configs 没有 mcporter.example.json → ~/.ct/mcporter.json
+# 永远生成不了,用户只看到 "-mcp 全部 server 探测失败"。两个环节各断言一次。
+_cfg_dir = os.path.join(REPO, "configs")
+_repo_cfg = sorted("configs/" + n for n in os.listdir(_cfg_dir)
+                   if os.path.isfile(os.path.join(_cfg_dir, n))
+                   and not n.startswith(".") and not n.endswith((".pyc", ".pyo")))
+_tar_missing = sorted(set(_repo_cfg) - in_tar)
+ck("发布包含 configs/ 下每一个资产", not _tar_missing, "缺: " + ", ".join(_tar_missing))
+ck("发布包含 MCP 清单模板(首次运行靠它生成 ~/.ct/mcporter.json)",
+   "configs/mcporter.example.json" in in_tar)
+_ftxt = mr.build_formula("0.0.0", "https://example.invalid/x.tar.gz", "0" * 64)
+_inst_missing = [r for r in _repo_cfg
+                 if '(libexec/"configs").install "%s"' % r not in _ftxt]
+ck("Formula 安装包内每一个 configs 资产", not _inst_missing,
+   "缺: " + ", ".join(_inst_missing))
+
 # 每个模块都真的能 import(缺文件/坏 import 在这一步就红,而不是等用户点 /compact)
 code = ("import importlib,sys;"
         "[importlib.import_module('wchat_py.'+m) for m in sys.argv[1:]];print('ok')")

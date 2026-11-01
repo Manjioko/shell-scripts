@@ -173,8 +173,7 @@ def build(version, owner, repo, dry=False):
     ok("打包 %s (%d KB)" % (os.path.relpath(tar, ROOT), os.path.getsize(tar) // 1024))
     ok("sha256 %s" % h)
     step("5/8 生成 Formula")
-    text = (mr.FORMULA.replace("__URL__", url).replace("__SHA__", h)
-            .replace("__VER__", version).replace("__HOMEPAGE__", mr.GITHUB_URL))
+    text = mr.build_formula(version, url, h)
     if not dry:                      # dry-run 不落盘:演练不该留下"版本已改"的假象
         for p in (TAP_FORMULA, os.path.join(mr.FORMULA_DIR, "wchat.rb")):
             os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -396,8 +395,7 @@ def main():
     formula_text = None
     if a.tap_branch or a.tap_repo:
         if a.dry_run:
-            formula_text = (mr.FORMULA.replace("__URL__", url).replace("__SHA__", h)
-                            .replace("__VER__", version).replace("__HOMEPAGE__", mr.GITHUB_URL))
+            formula_text = mr.build_formula(version, url, h)
         else:
             with open(os.path.join(mr.FORMULA_DIR, "wchat.rb"), encoding="utf-8") as f:
                 formula_text = f.read()

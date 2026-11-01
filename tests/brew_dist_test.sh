@@ -8,11 +8,25 @@
 #   4. 脱离源码树也能跑(到 / 下、PYTHONPATH 只留 user-site);
 #   5. 真实一轮走桩网关:工具真的执行了、正文真的到了、请求数=2;
 #   6. Formula 里写的 sha256/url/version 与实际产物一致(防手改漏改);
-#   7. bootstrap 开关语义:WCHAT_NO_BOOTSTRAP=1 不建 venv,venv 路径跟随 CT_HOME/WCHAT_VENV。
+#   7. bootstrap 开关语义:WCHAT_NO_BOOTSTRAP=1 不建 venv,venv 路径跟随 CT_HOME/WCHAT_VENV;
+#   8. 装出来的 prefix 必须能**首启生成** `~/.ct/mcporter.json`(600,默认只有 chrome)——
+#      随包模板漏装时这里会红。prefix 的 configs 不再手抄:从生成的 Formula 里抽 install 行。
 set -u
 cd "$(dirname "$0")/.." || exit 1
 REPO=$PWD
-PY=$(command -v python3)
+PY=${PY:-$(command -v python3)}
+# 本道闸门的第 7 节与"真实一轮"需要 openai 等运行期依赖。PATH 上的 python3 若没装,
+# 退回产品自己的运行期 venv(开发机在 CT_HOME/venv,装好后在 libexec/venv),并**打印**
+# 换了哪个解释器 —— 静默替换会让"包坏了"和"解释器缺依赖"混成一个红。
+if ! "$PY" -c 'import openai' >/dev/null 2>&1; then
+    for c in "${CT_HOME:-$HOME/.ct}/venv/bin/python" "$HOME/.ct/venv/bin/python"; do
+        if [ -x "$c" ] && "$c" -c 'import openai' >/dev/null 2>&1; then
+            echo "  ⚠ PATH 上的 python3 缺运行期依赖,改用: $c"
+            PY=$c
+            break
+        fi
+    done
+fi
 # 真 user-site 必须在改 HOME 之前算好:site.getusersitepackages() 读 HOME,
 # 沙箱 HOME 会把 user-site 指到沙箱里,导致 openai 找不到(踩过多次)。
 USERSITE=$("$PY" -c 'import site;print(site.getusersitepackages())')
@@ -45,18 +59,29 @@ tar tzf "$T1" >"$LIST" 2>/dev/null
 ck "不含 __pycache__/.pyc" "$(grep -cE '__pycache__|\.pyc$' "$LIST")" 0
 for must in "wchat-$V/wchat" "wchat-$V/wchat_py/cli.py" "wchat-$V/wchat_py/session.py" \
             "wchat-$V/requirements.txt" "wchat-$V/configs/config.example" \
+            "wchat-$V/configs/mcporter.example.json" \
             "wchat-$V/docs/brew-package.md"; do
     ck "含 $must" "$(grep -cx "wchat-$V/$(echo "$must" | sed "s|^wchat-$V/||")" "$LIST")" 1
 done
 
+# 每个 configs/ 资产都必须能"从 Formula 的 install 行"落到 prefix 里。
+# ⚠ 这一段以前是**手抄 Formula 的两行 cp**:Formula 漏装 mcporter 模板时,手抄清单
+# 跟着一起漏,闸门全绿 —— 用户装完 ~/.ct 里永远没有清单,而这里毫无知觉。
+# 现在改成从生成的 Formula 里**抽 install 行**来铺 prefix:抄写口径不再有第二份。
 echo "=== 3. 按 Formula 布局安装 ==="
 tar xzf "$T1" -C "$BASE" || echo "!! 解包失败"
-SRC=$BASE/wchat-$V; PFX=$BASE/prefix
+SRC=$BASE/wchat-$V; PFX=$BASE/prefix; FML_GEN=$BASE/a/wchat.rb
 mkdir -p "$PFX/bin" "$PFX/libexec/configs"
 cp -R "$SRC/wchat" "$SRC/wchat_py" \
       "$SRC/requirements.txt" "$PFX/libexec/"
-cp "$SRC/configs/config.example" "$PFX/libexec/configs/"
-cp "$SRC/configs/ctmodel.py" "$PFX/libexec/configs/"
+CFGLIST=$BASE/configs_installs.txt
+sed -n 's/.*(libexec\/"configs")\.install "\([^"]*\)".*/\1/p' "$FML_GEN" >"$CFGLIST"
+ck "Formula 声明了 configs 安装行" "$([ -s "$CFGLIST" ] && echo y)" y
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    mkdir -p "$PFX/libexec/$(dirname "$rel")"
+    cp "$SRC/$rel" "$PFX/libexec/$rel"
+done <"$CFGLIST"
 printf '#!/bin/bash\nexec "%s" "%s/wchat" "$@"\n' "$PY" "$PFX/libexec" >"$PFX/bin/wchat"
 printf '#!/bin/bash\nexec "%s" "%s/configs/ctmodel.py" "$@"\n' "$PY" "$PFX/libexec" >"$PFX/bin/ctmodel"
 chmod 755 "$PFX/bin/wchat" "$PFX/bin/ctmodel"
@@ -65,6 +90,14 @@ mkdir -p "$BASE/home" "$BASE/proj" && echo "x" >"$BASE/proj/f.txt"
 out=$(HOME="$BASE/home" CT_HOME="$BASE/home/.ct" WCHAT_NO_BOOTSTRAP=1 PYTHONPATH="$USERSITE" \
       "$PFX/bin/wchat" -h 2>&1 </dev/null)
 ck "装好后 -h 打印使用方法" "$(grep -c '使用方法' <<<"$out")" 1
+# 首次运行(连 -h 也算)就必须把 MCP 清单就位 —— 这是"用户开箱 -mcp 能用"的前提。
+# 缺了随包模板时 ensure_manifest 会静默放弃,所以这里必须**看盘上文件**,不能只看提示不报错。
+_MF="$BASE/home/.ct/mcporter.json"
+ck "首次运行生成 ~/.ct/mcporter.json" "$([ -f "$_MF" ] && echo y)" y
+ck "清单权限 600" "$("$PY" -c 'import os,sys;print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])' "$_MF" 2>/dev/null)" 600
+out=$(HOME="$BASE/home" CT_HOME="$BASE/home/.ct" WCHAT_NO_BOOTSTRAP=1 PYTHONPATH="$USERSITE" \
+      "$PFX/bin/wchat" mcp 2>&1 </dev/null)
+ck "清单里默认只有 chrome" "$(grep -c '状态: 有,1 个 server: chrome' <<<"$out")" 1
 out=$(cd / && HOME="$BASE/home" CT_HOME="$BASE/home/.ct" WCHAT_NO_BOOTSTRAP=1 \
       PYTHONPATH="$USERSITE" "$PFX/bin/wchat" -h 2>&1 </dev/null)
 ck "脱离源码树(cwd=/)也能跑" "$(grep -c '使用方法' <<<"$out")" 1
@@ -144,6 +177,16 @@ ck "Formula sha256 == tarball 实测" \
 ck "Formula version 一致" "$(grep -c "version \"$V\"" "$FML")" 1
 ck "Formula url 指向该 tarball" "$(grep -c "wchat-$V.tar.gz" "$FML")" 1
 ck "Formula 安装清单含 wchat_py" "$(grep -c 'libexec.install "wchat", "wchat_py"' "$FML")" 1
+# 包里有、Formula 没装 = 用户机器上那份功能永远缺失(v0.3.2 的 MCP 清单模板正是这个形状)。
+# 反向也不能有:Formula 装了包里没有的文件,brew install 直接失败。
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    ck "Formula 安装包内资产 $rel" "$(grep -cF "(libexec/\"configs\").install \"$rel\"" "$FML")" 1
+done < <(tar tzf "$T1" | sed -n "s|^wchat-$V/\(configs/[^/]*\)\$|\1|p")
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    ck "包内含 Formula 要装的文件 $rel" "$(grep -cx "wchat-$V/$rel" "$LIST")" 1
+done <"$CFGLIST"
 # 装期建 venv(依赖随包)→ 运行期零联网;brew test 才能在断网 CI 里跑通。
 # 反例(真踩过):用 opt_bin/"python3" 装完直接 exec,路径不存在 → 装出来根本起不来;
 # 且依赖没装,test 里的 WCHAT_NO_BOOTSTRAP=1 必然红。

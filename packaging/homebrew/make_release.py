@@ -33,6 +33,24 @@ CONFIG = os.path.join("configs", "config.example")
 CONFIG_PY = os.path.join("configs", "ctmodel.py")   # 模型档案切换,随包安装为 bin/ctmodel
 MCP_EXAMPLE = os.path.join("configs", "mcporter.example.json")  # MCP 清单模板(首次启动自动复制到 ~/.ct/)
 
+
+def config_assets():
+    """`configs/` 下随包发布的**全部**单文件(按名排序,跳过字节码/隐藏文件)。
+
+    为什么用"枚举目录"而不是几个常量:这些文件全是**运行期必需**的随包资产,
+    漏一个不会让打包失败,只会让用户机器上某个功能永远缺失 —— v0.3.2 的
+    `mcporter.example.json` 就是这么漏掉的(brew 装出来 ~/.ct 里永远没有清单,
+    而报错只是"server 探测失败")。新加一个 configs/ 文件不该再要求人去改三处清单。
+    """
+    d = os.path.join(ROOT, "configs")
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return []
+    return [os.path.join("configs", n) for n in names
+            if os.path.isfile(os.path.join(d, n))
+            and not n.startswith(".") and not n.endswith((".pyc", ".pyo"))]
+
 # 打包时剔除:字节码缓存/编辑器/系统垃圾。匹配的是**路径任一组件或文件名**。
 SKIP_DIRS = {"__pycache__", ".mypy_cache", ".pytest_cache", ".git", "build", "dist"}
 SKIP_NAMES = {".DS_Store", ".gitignore", "Thumbs.db"}
@@ -100,7 +118,7 @@ def build_tarball(version, out_dir=None):
                                    filter=_filter, recursive=False)
                     else:
                         tf.add(path, arcname=os.path.join(top, name), filter=_filter)
-                for rel in (CONFIG, CONFIG_PY, MCP_EXAMPLE):
+                for rel in config_assets():
                     f = os.path.join(ROOT, rel)
                     if os.path.exists(f):
                         tf.add(f, arcname=os.path.join(top, rel), filter=_filter)
@@ -119,8 +137,7 @@ FORMULA = '''class Wchat < Formula
 
   def install
     libexec.install "wchat", "wchat_py", "requirements.txt"
-    (libexec/"configs").install "configs/config.example"
-    (libexec/"configs").install "configs/ctmodel.py"
+__CONFIG_INSTALLS__
     (libexec/"doc").install "README.md" if File.exist?("README.md")
     (libexec/"doc").install Dir["docs/*.md"] if Dir.exist?("docs")
 
@@ -159,6 +176,20 @@ end
 '''
 
 
+def build_formula(version, url, sha, homepage=GITHUB_URL):
+    """把模板里的占位符换成实际值;configs 安装行按目录枚举生成。
+
+    **唯一入口**:make_release 与 packaging/release.py 都必须走这里。以前两边各自
+    `.replace(...)` 一份,加占位符时漏改一处就会写出带 `__CONFIG_INSTALLS__` 的 Formula
+    (brew 直接语法错误)。少一处重复,就少一处"只有发布那一刻才炸"的隐患。
+    """
+    installs = "\n".join('    (libexec/"configs").install "%s"' % rel
+                         for rel in config_assets())
+    return (FORMULA.replace("__CONFIG_INSTALLS__", installs)
+            .replace("__URL__", url).replace("__SHA__", sha)
+            .replace("__VER__", version).replace("__HOMEPAGE__", homepage))
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -182,8 +213,7 @@ def main():
     fp = a.formula_out or os.path.join(FORMULA_DIR, "wchat.rb")
     os.makedirs(os.path.dirname(os.path.abspath(fp)), exist_ok=True)
     with open(fp, "w", encoding="utf-8") as f:
-        f.write(FORMULA.replace("__URL__", url).replace("__SHA__", h)
-                .replace("__VER__", a.version).replace("__HOMEPAGE__", a.homepage))
+        f.write(build_formula(a.version, url, h, a.homepage))
     print("tarball:", tar)
     print("sha256:", h)
     print("formula:", fp)

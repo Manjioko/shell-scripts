@@ -12,6 +12,7 @@ class Wchat < Formula
     libexec.install "wchat", "wchat_py", "requirements.txt"
     (libexec/"configs").install "configs/config.example"
     (libexec/"configs").install "configs/ctmodel.py"
+    (libexec/"configs").install "configs/mcporter.example.json"
     (libexec/"doc").install "README.md" if File.exist?("README.md")
     (libexec/"doc").install Dir["docs/*.md"] if Dir.exist?("docs")
 

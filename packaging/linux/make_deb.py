@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(ROOT, "packaging", "homebrew"))
 
 # 与 brew 包**共用同一份文件清单与剔除规则**:两份实现迟早漂(而且漂了是"deb 里有、
 # brew 里没有"这种最难察觉的形态)。这里 import 它，不复制。
-from make_release import INCLUDE, CONFIG, CONFIG_PY, MCP_EXAMPLE, SKIP_DIRS, SKIP_NAMES, SKIP_SUFFIX  # noqa: E402
+from make_release import INCLUDE, config_assets, SKIP_DIRS, SKIP_NAMES, SKIP_SUFFIX  # noqa: E402
 
 LIBDIR = "usr/lib/wchat"
 BINDIR = "usr/bin"
@@ -202,7 +202,7 @@ def build(version, wheelhouse, out_dir, arch):
                 shutil.copy2(src, dest)
                 os.chmod(dest,
                          0o755 if (os.stat(src).st_mode & 0o111) else 0o644)
-        for rel in (CONFIG, CONFIG_PY, MCP_EXAMPLE):
+        for rel in config_assets():
             f = os.path.join(ROOT, rel)
             if os.path.exists(f):
                 dest = os.path.join(lib, rel)
