@@ -276,6 +276,7 @@ ctmodel undo         # 回滚
 wchat                  # 交互模式(REPL)
 wchat -st "解释这个报错"   # 单轮:答完即退
 wchat -t               # 开思考模式
+wchat -tf=on           # 思考内容整段展示(默认只展示两行:灰色▸ + 首行,其余省略)
 wchat -p               # 用 pro 档模型(-dp = 思考 + pro)
 wchat -l               # 列历史并选择加载;  -f = 忽略历史,开新会话
 wchat -f "问题"        # 新会话 + 首轮内容

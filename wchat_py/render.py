@@ -200,8 +200,71 @@ def render_markdown(text):
     return text or ""
 
 
-def render_reason(text):
-    """复刻 bash flush_thinking:灰色 ▸ + 每行两空格缩进 + dim(markdown 渲染后整体灰)。"""
+# ── 思考文本的展示档位(`-tf=on` / `-tf=off`)──────────────────────────────────
+# 默认**只展示两行**:第一行是灰色三角,第二行是思考的第一个非空行,其余用 `…` 省略。
+# 完整的思考链照常累积、照常进 messages 回传给模型 —— 这里改的只是**屏幕占用**,
+# 不是"少想"。`-tf=on`(或 WCHAT_THINK_FULL=1)回到整段渲染。
+_THINK_ON = ("1", "on", "true", "yes", "y")
+_THINK_OFF = ("0", "off", "false", "no", "n")
+
+
+def think_full(value=None):
+    """思考是否整段展示。`value=None` 时读 WCHAT_THINK_FULL(未设 = 两行)。"""
+    v = os.environ.get("WCHAT_THINK_FULL", "") if value is None else value
+    return str(v if v is not None else "").strip().lower() in _THINK_ON
+
+
+def set_think_full(value):
+    """把 on/off 写进环境变量；返回新的布尔状态,值不认识返回 None(不改动)。
+
+    真值表只在这里定义一份:启动参数 `-tf=`、会话内 `-tf=`、`-md` 的显示都走它。
+    分开写三份的下场是"on 的别名各认各的"——那种不一致没有任何报错。
+    """
+    v = str(value if value is not None else "").strip().lower()
+    if v in _THINK_ON:
+        os.environ["WCHAT_THINK_FULL"] = "1"
+        return True
+    if v in _THINK_OFF:
+        os.environ["WCHAT_THINK_FULL"] = "0"
+        return False
+    return None
+
+
+def _reason_brief(text):
+    """两行档:灰色 ▸ + 第一个非空行(压成一行,超出宽度或还有内容都补 `…`)。
+
+    取**原文**首行而不是"先渲染 markdown 再取第一行":rich 会给每行套 SGR,
+    按显示宽度截断时一旦切在转义序列中间,颜色会漏到后面的正文上(踩过同款)。
+    """
+    first, more = "", False
+    for ln in (text or "").splitlines():
+        s = " ".join(ln.split())
+        if not s:
+            continue
+        if not first:
+            first = s
+        else:
+            more = True
+            break
+    if not first:
+        return ""            # 只有空白:不画一个孤零零的三角
+    limit = room_for("  ")   # 行首两格缩进
+    line = first + ("…" if more else "")
+    if display_width(line) > limit:
+        line = _fit(line, max(1, limit - 1)) + "…"
+    return "\033[2m▸\033[0m\n  \033[2m" + line + "\033[0m\n\n"
+
+
+def render_reason(text, full=None):
+    """思考块渲染。`full=None` 时按当前档位(见 think_full)。
+
+    · 两行档(默认) → 灰色 ▸ + 首行,其余 `…` 省略;
+    · 整段档(-tf=on) → 旧行为:逐行两空格缩进、markdown 渲染后整体灰。
+    """
+    if full is None:
+        full = think_full()
+    if not full:
+        return _reason_brief(text)
     body = render_markdown(text or "")
     body = body.replace("\033[0m", "\033[0m\033[2m")   # 保持整段灰,rich 内部 reset 后补 dim
     lines = body.split("\n")

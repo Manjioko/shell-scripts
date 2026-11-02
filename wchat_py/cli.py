@@ -37,6 +37,7 @@ def help_user():
     inp_msg("使用方法: ct [选项] [内容]")
     inp_msg("选项:")
     inp_msg("  -t    启用思考模式")
+    inp_msg("  -tf=on|-off  思考文本展示:on=整段(旧行为);off=只展示两行(灰色三角+首行,其余省略;默认)")
     inp_msg("  -p    使用 deepseek-v4-pro 模型")
     inp_msg("  -dp   启用思考模式并使用 deepseek-v4-pro 模型")
     inp_msg("  -l    查看历史记录并选择加载")
@@ -81,6 +82,7 @@ def help_user():
     inp_msg("  -noauto  关闭 auto,恢复逐次人工确认")
     inp_msg("  -stt  开启思考模式")
     inp_msg("  -stf  恢复默认(flash 模型,关闭思考)")
+    inp_msg("  -tf=on|-off  思考文本整段/两行 切换(默认两行:灰色三角+首行,其余省略)")
     inp_msg("  -fs   立即保存当前对话历史(-f 模式下静默跳过)")
     inp_msg("  -md   查看当前模型/思考/标题信息")
     inp_msg("  -u    查看当前上下文 token 用量")
@@ -114,6 +116,7 @@ def parse(argv):
     auto_mode = ""
     mcp_enable = 0
     mcp_only = ""
+    think_full = ""
     allow_ro = []
     allow_rw = []
     unknown = []
@@ -130,6 +133,8 @@ def parse(argv):
             forget_history = 1
         elif a == "-t":
             thinking = "enabled"
+        elif a == "-tf" or a.startswith("-tf="):
+            think_full = a.split("=", 1)[1] if "=" in a else "on"
         elif a == "-p":
             model = os.environ.get("PRO_MODEL", "")
         elif a == "-dp":
@@ -172,6 +177,7 @@ def parse(argv):
             "forget_history": str(forget_history),
             "quick_mode": str(quick_mode), "seen_help": str(seen_help), "action": action,
             "auto_mode": auto_mode, "unknown": " ".join(unknown),
+            "think_full": think_full,
             "allow_ro": "\n".join(allow_ro), "allow_rw": "\n".join(allow_rw)}
 
 
@@ -1198,6 +1204,8 @@ def main(argv):
         os.environ["WCHAT_MODEL"] = st["model"]
     if st.get("thinking"):
         os.environ["WCHAT_THINKING"] = st["thinking"]
+    if st.get("think_full"):
+        _apply_think_flag(st["think_full"])
     if st["action"] == "list_history":
         os.environ["WCHAT_FIRST_ACTION"] = "list_history"
     if st["action"] == "usage":
@@ -1229,6 +1237,7 @@ from wchat_py.approve import (_APPROVED_CMDS, _ALLOW_RW, _GRANTED_PATHS,  # noqa
 from wchat_py.imgstate import (_IMG_REFS, _IMG_SEQ, _IMG_URLS,  # noqa: E402
                               _register_image_url, _reset_image_refs)
 from wchat_py.runtime import (_apply_runtime_defaults, _auto_summary,  # noqa: E402
+                              apply_think_flag as _apply_think_flag,
                               _bump_auto, _detect_web_provider, _load_ct_config,
                               _runtime_fallback, _skills_dir_default, _sync_runtime,
                               _trunc_int)

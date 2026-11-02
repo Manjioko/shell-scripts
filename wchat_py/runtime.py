@@ -117,6 +117,20 @@ def _detect_web_provider():
     return "none"
 
 
+def apply_think_flag(value):
+    """把 `-tf=on|off` 落到环境变量(思考文本:整段 / 两行)。
+
+    属于"用户以为开了却还是两行"那类**不报错**的故障,所以非法值必须说出来;
+    但它也不该拦住启动 —— 告警后按默认(两行)继续。
+    """
+    v = str(value or "").strip()
+    if not v:
+        return
+    from wchat_py.render import set_think_full
+    if set_think_full(v) is None:
+        sys.stderr.write("⚠ -tf 只接受 on/off(收到 %r),本次按默认:只展示两行\n" % v)
+
+
 def _apply_runtime_defaults():
     """补齐 bash 的派生默认值:窗口/压缩阈值/联网方式/超时。缺这些 -md/-u 显示全 0/空。"""
     os.environ.setdefault("CTX_WINDOW", "1000000")

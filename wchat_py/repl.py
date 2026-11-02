@@ -198,6 +198,18 @@ def _default_meta(action, arg, session=None):
         for ln in model_status_lines(sess):
             inp_msg(ln)
         return True
+    if action == "think_full":
+        # 会话内切换思考文本展示档位(渲染层每次调用都读 env,所以立刻生效)。
+        from wchat_py.cli import inp_msg
+        from wchat_py.render import set_think_full
+        _on = set_think_full(arg or "on")
+        if _on is None:
+            inp_msg("用法: -tf=on 整段展示思考内容 / -tf=off 只展示两行(默认)")
+        elif _on:
+            inp_msg("✅ 思考内容:整段展示(-tf=off 可切回两行)")
+        else:
+            inp_msg("✅ 思考内容:只展示两行(灰色三角 + 首行,其余省略)")
+        return True
     if action in ("model_pro", "thinking_on", "model_flash"):
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, set_pro, set_flash, thinking_on

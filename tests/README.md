@@ -66,6 +66,16 @@
 > 必须先补清单的顺序锁)。变异验证:枚举漏掉 `.json` → 发行包 4 红 + 安装完整性 3 红;
 > 启动告警改 `if False` → 子命令 1 红;去掉 `mcp_boot.install` 里的前置 `ensure_manifest` → 子命令 1 红
 > (三处都已实跑)。
+
+> **思考文本展示轮(`-tf=on` / `-tf=off`)**:默认**只占两行** —— 灰色 `▸` + 思考第一个非空行,
+> 其余用 `…` 省略;`-tf=on` 回到整段(旧行为)。启动参数与会话内元命令走**同一个**
+> `render.set_think_full` 真值表(非法值当场告警,不许静默当 on/off);`-md` 如实显示当前档位。
+> 只改屏幕占用,**不动请求里的 thinking、不动 messages 里的 reasoning_content**(回传照旧)。
+> **新增闸门 `思考显示`(35 条)**,闸门总数 66 → **67**;断言钉在字节上(灰三角/两格缩进/`…` 收尾/
+> SGR 只开两份),因为这是纯展示层,没有返回值可断言;"颜色泄漏"只有看字节才看得出来。
+> 变异三条各自可杀:两行档退回整段 → 5 红;-tf 参数丢失 → 5 红;会话内 -tf 丢失 → 4 红(均实跑)。
+> 另:真 SSE 端到端(桩网关新增 `"type":"think"` 回复,先流式 reasoning 再给正文)实测
+> 默认只剩两行、`-tf=on` 三行俱全、正文照常输出。
 > ⚠ 本机 `python3`(3.14)缺 `openai` 时,发行包闸门会自动改用 `CT_HOME/venv` 并在开头打印一句;
 > 首次引导(96 条)在不带依赖的解释器下也会红 5 条,同上属环境,不是判据。
 
@@ -82,6 +92,7 @@
 | 写熔断闸门 | `bash tests/write_fuse_test.sh` | 28 条(**不联网**;第 6 组是回归锁 —— **全新会话、日志文件不存在时也必须建文件并计数**:刀3 把"检查时记账"拆成"只判 + 成功后记"两处,两边都写了 `[[ -f "$log" ]] || return 0` 却没人创建该文件,于是整个会话里熔断 100% 静默失效;而当时 24 条断言全绿,因为每条向量都先 `: > "$L"` 建好了文件 —— **夹具把 bug 复制成了前提**。这一组刻意不预建,且在带 bug 的版本上必红);在临时工作根里 source 被测脚本,跑真实的 `tool_write_file`/`tool_edit_file`):F1 超上限、**上限=0 是"关闭"不是"全拒"**、非 auto 不判、F2 来回改必拒、**线性推进不许拒**(误杀正当重构就是这条在挡)、F3 同内容连写必拒、远期重复 `A B C A` 不算来回改、**旧格式行仍计数**(升级不许把刹车解除)、失败编辑不记账、record 只在两个写工具里(结构锁)、键两步归一同源(接线锁)。负对照:对 `git show HEAD:wchat.sh` 必须红(实测 17/24 红)。六条变异各自可杀:检查时追加 6 / 计数退回 `grep -cxF` 1 / 拆 F2 2 / 指纹带空格 1 / 键退回原始 `$p` 1 / 上限改回 8 1。⚠ 三条踩过才写进来的坑:① body 是在**内层 bash** 展开的,`$W` 必须显式传进去,否则路径塌成 `/root/...`、报出"记账没发生"这种看着像产品坏了的假信号;② 比键必须走 `pwd -P` 物理路径(`/var/…` 与 `/private/var/…` 是同一目录两种写法);③ 结构锁要先剔注释再数 —— 熔断块注释里本来就要讨论 `record`,不剔就是假红 |
 | 审批链单测 | `bash tests/auto_test.sh` | `ck` 系列:缺 reason 直接 DENY 等 |
 | MCP 通道闸门 | `bash tests/mcp_channel_test.sh` | `-mcp` 开关与暴露面(排除别家程序 import 进来的 server)、名字校验拒 `-y`/`../`、L0 幂等注入与超预算折叠、`mcp_call` 的成功/isError/CLI 失败/图片丢弃四分支、**会话级授权的四种形状**(默认只问 1 次 / `always` 问 3 次 / auto 不问 / 被拒不记账)、**次数刹车的默认形状**(默认不限、显式设上限才生效、"不限"绝不写成"上限 0 次"、标记不带 `/0` 分母)、**通用暴露面**(参数差异不改变暴露、实际命令行逐字摊出、缺 description 被点名、源码零第三方专名与 flag 字面量)、**启动失败的五种形状**(秒失败/慢失败/在线但空/上游缺席/名字不合法各自措辞,`durationMs` 与上游 `counts` 必须转述;点名打错不许静默;失败原因**只走 stderr**,有反向锁禁止它进 L0/`tools()`)、次数刹车、无人值守范围闸、`tools()` 关闭时逐字节不变。**全部打桩**:不依赖 npm/Chrome,可离线跑 |
+| 思考文本展示闸门(新增) | `python3 tests/think_view_test.py` | **35/35**:默认两行(灰▸+首行,其余 `…`,中间行一个字不上屏)、单行不补 `…`、超宽按列截断、空白不画孤立三角、`-tf=on` 整段 / `-tf=off` 切回、启动参数真落到 `WCHAT_THINK_FULL`(走 `cli.main` 全链路)、会话内 `-tf=` 同一真值表、非法值明说、`-md` 如实显示档位 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
 | 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 50 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本,第 7 节另管**输入语义**(回车=发送;行尾 `\`+回车=续行且反斜杠不许留在正文里;空缓冲区回车不发送不退出;行中反斜杠不触发续行)。负对照两条:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";整表对 HEAD 版 helper → 8 条红(含第 7 节全 4 条),再只去掉 `delete_before_cursor` 一行做变异 → 恰好红 1 条且正是"反斜杠被吃掉"(实得 `abc\\\ndef`)。变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |
 | Python 迁移通道(**已拆分·W0–W9**) | `bash tests/py_channel_test.sh`(通道机制 4) + `tests/py_<模块>_test.sh`(各模块 parity) | 原单体 221 条已**机械拆分**成"共享前奏 `tests/py_prelude.sh` + 每模块一个 gate",合计仍 221、逐文件全绿;`py_channel_test.sh` 缩为通道机制 4 条(开关/回退/哨兵)。各模块 gate:`py_textutil`(27)/`py_authparse`(22)/`py_hd`(98)/`py_skill`(14)/`py_mcp_client`(22)/`py_img`(24)/`py_compaction`(18)/`py_msg`(19)/`py_history`(27)/`py_filefmt`(22)/`py_pathutil`(49,W3)/`py_config`(16,W12-1)/`py_pathrule`(25,W12-2)/`py_authz`(20,W12-3·已收口)/`py_llm`(20,W12-4a)。**目的**:增删/收口模块只动各自小文件,不再反复改大文件(解**路径熔断**死结);收口样板见 `tests/webs_py_test.sh`。⚠ 各 gate 各 source 主脚本多次,`py_hd` 最慢(~3min),务必后台跑。坑:①`truncate_output` 读**全局** `TOOL_OUTPUT_MAX_*`;②**`python3 -m` 的 cwd 会遮蔽本包** → 用绝对路径启动器 `wchat_py/_run.py`;③BSD `tail` 不补末行换行;④重定向别把 `"$outf"` 写成 `'$outf'`;⑤`source`/抽函数式闸门须有 `_py_on` 回退桩;⑥谓词 `rc=1` 是业务结果、不回退;⑦`clip_bytes` 返回带尾换行的"流",`$(...)` 要自己剥;⑧parity 会把既有隐 bug 也钉住(`\n\n` 字面两字符);⑨`$'...'` 别套外层双引号;⑩大内容走临时文件/stdin;⑪`jq -r` 回读记得 `-j`。方案见 `docs/migration-to-python.md` |

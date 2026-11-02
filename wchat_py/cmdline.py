@@ -25,6 +25,10 @@ def classify(line):
         return "auto_on", ""
     if s.startswith("-auto="):
         return "auto_on", s[len("-auto="):]
+    # `-tf` / `-tf=on` / `-tf=off`:思考文本展示档位(整段 / 两行)。
+    # 裸 `-tf` 按 on 处理(与会话里敲 `-tf` 的直觉一致),具体别名由 render.set_think_full 判。
+    if s == "-tf" or s.startswith("-tf="):
+        return "think_full", (s.split("=", 1)[1] if "=" in s else "on")
     if s == "-img" or s.startswith("-img "):
         return "image", s[len("-img"):].lstrip(" ")
     return "text", s

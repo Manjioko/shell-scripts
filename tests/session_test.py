@@ -79,6 +79,7 @@ ma = Session.from_env({"WCHAT_MODEL": "stub-pro", "WCHAT_THINKING": "enabled",
                        "WCHAT_AUDIT_LOG": "/a.log", "WCHAT_RO_COUNT": "2", "WCHAT_RW_COUNT": "1"})
 j = "\n".join(model_status_lines(ma))
 ck("md 模型/思考", "模型: stub-pro" in j and "思考: enabled" in j, j)
+ck("md 思考显示(默认两行)", "思考显示: 两行(默认;-tf=on 展开)" in j, j)
 ck("md 联网/阈值", "联网搜索: openai(超时 9s)" in j and "压缩阈值: 50000 tokens" in j)
 ck("md auto 开", "auto: full 档 · 已自动放行 3/50 次 · 本轮工具 2/25 轮" in j, j)
 ck("md 回滚点/备份/审计", "回滚点: ck-1 · 备份 4 份 · 审计 /a.log" in j)

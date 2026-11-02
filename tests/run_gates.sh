@@ -102,6 +102,11 @@ GATE_CMDS+=('python3 tests/py_mcp_boot_test.py')
 GATE_MODE+=('c')   # 复合命令(python3 ...)必须走 bash -c,选 x 会变成 `bash python3 ...` → rc=126
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('MCP 启动链:per-server 超时预算/失败当场放锁且不注册死工具/不重复枚举(全离线)')
+GATE_NAMES+=('思考显示')
+GATE_CMDS+=('python3 tests/think_view_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('思考文本:默认两行(三角+首行,其余 …)/-tf=on 整段/启动与会话内同一真值表/非法值明说')
 
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——

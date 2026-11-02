@@ -25,6 +25,8 @@ cases = [
     ("-h", ("help", "")), ("-n", ("new_session", "")), ("-cl", ("clear", "")),
     ("-stp", ("model_pro", "")), ("-stt", ("thinking_on", "")), ("-stf", ("model_flash", "")),
     ("-noauto", ("auto_off", "")), ("-fs", ("save_history", "")), ("-md", ("model_status", "")),
+    ("-tf", ("think_full", "on")), ("-tf=on", ("think_full", "on")),
+    ("-tf=off", ("think_full", "off")), ("-tf=YES", ("think_full", "YES")),
     ("-auto", ("auto_on", "")), ("-auto=full", ("auto_on", "full")),
     ("-img /tmp/x.png", ("image", "/tmp/x.png")), ("-img", ("image", "")),
     ("hello world", ("text", "hello world")), ("-dp", ("text", "-dp")),

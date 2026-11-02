@@ -29,6 +29,7 @@ class Session:
     autocal: int = 1
     calib_count: int = 0
     thinking: str = "disabled"
+    think_full: str = ""          # 思考文本展示档位:1/on=整段,其余=两行(默认)
     web_provider: str = "none"
     web_timeout: int = 0
     chat_title: str = ""
@@ -79,6 +80,7 @@ class Session:
             autocal=i("IMG_TOKENS_AUTOCAL", 1),
             calib_count=i("WCHAT_CALIB_COUNT", 0),
             thinking=e.get("WCHAT_THINKING", "disabled"),
+            think_full=e.get("WCHAT_THINK_FULL", ""),
             web_provider=e.get("WEB_SEARCH_PROVIDER", "none"),
             web_timeout=i("WEB_SEARCH_TIMEOUT", 0),
             chat_title=e.get("WCHAT_CHAT_TITLE", ""),
@@ -168,9 +170,12 @@ def compact_status(s):
 
 def model_status_lines(s):
     """复刻 bash `-md` 的模型状态行（不含 `│ ` 前缀）。"""
+    from wchat_py.render import think_full as _think_full
     out = [
         "模型: %s" % s.model,
         "思考: %s" % s.thinking,
+        "思考显示: %s" % ("整段(-tf=on)" if _think_full(s.think_full)
+                          else "两行(默认;-tf=on 展开)"),
         "联网搜索: %s(超时 %ss)" % (s.web_provider or "none", s.web_timeout),
         "压缩阈值: %d tokens" % s.token_threshold,
         "标题: %s" % (s.chat_title or "（空）"),

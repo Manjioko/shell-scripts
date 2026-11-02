@@ -40,6 +40,21 @@ def sse_text_pieces(text, pieces=8):
     return evs
 
 
+def sse_think(reason, text):
+    """先流式思考(reasoning_content),再给正文 —— 与真实思考型网关同形。
+
+    存在的理由:`-tf=off`(默认两行)改的是**思考块最终渲染**,而思考在流式期间
+    还会进流箱。只有走真 SSE 才能证明"箱里滚过、上屏只留两行"这两件事都成立。
+    """
+    parts = [reason[i:i + 8] for i in range(0, len(reason), 8)] or [""]
+    evs = [{"choices": [{"delta": {"reasoning_content": p}}]} for p in parts]
+    if text:
+        evs.append({"choices": [{"delta": {"content": text}}]})
+    evs.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    return "".join("data: %s\n\n" % json.dumps(x, ensure_ascii=False)
+                   for x in evs) + "data: [DONE]\n\n"
+
+
 def sse_text(text):
     chunk = {"choices": [{"delta": {"content": text}}]}
     end = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
@@ -193,6 +208,8 @@ class H(BaseHTTPRequestHandler):
         slow = float(os.environ.get("STUB_SLOW_MS") or 0)
         if step["type"] == "tool":
             out = sse_tool_call(step.get("id", "call_%d" % i), step["name"], step["args"]).encode()
+        elif step["type"] == "think":
+            out = sse_think(step.get("reason", ""), step.get("text", "")).encode()
         elif slow > 0:
             out = None            # 慢速分支自己逐片写,不走下面的整块编码
         else:
