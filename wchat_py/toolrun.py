@@ -55,19 +55,24 @@ ZERO = "\033[0m"
 
 
 def _status(text, limit=None):
-    """上屏一行"非正文"状态(已读取/已列出/已写入…)。
+    """上屏一行"非正文"状态(已读取/已列出/已写入/已修改/后台启动…)。
 
     统一规则(2026-11 用户报"画面杂乱"):**只有助手正文用正常亮度**,其余一律灰化,
     与思考内容同色,并压成一行 —— 工具状态行里带文件名/行数,长路径会把行撑得很宽。
 
+    **前缀 `└─` 是常置样式**(2026-12 用户要求):它与 shell 输出箱的收尾行
+    `└─ 完成 · 共 N 行` 同一个形状,读起来就是"上一个 `⏺ 工具 · 参数` 块到此收口"。
+    与 `-tf` 无关,永远在 —— 它不是内容,是结构。
+
     `limit=0` 表示不截断:用于"一次性告知"(如 timeout 被夹紧的说明)。
     那类文本截一半就失去意义,而它只出现一次、不会刷屏。
     """
-    from wchat_py.render import dim, dim_after
-    s = (dim_after(" ", str(text or "").strip()) if limit is None
+    from wchat_py.render import STATUS_PREFIX, dim, dim_after
+    s = (dim_after(STATUS_PREFIX, str(text or "").strip()) if limit is None
          else dim(str(text or "").strip(), limit))
     if s:
-        sys.stdout.write(" " + s + "\n")
+        # 前缀也要灰:它与后面的文字是同一行结构,一半灰一半亮会显得断掉。
+        sys.stdout.write(GREY + STATUS_PREFIX + s.replace(GREY, "", 1) + "\n")
         sys.stdout.flush()
 
 
@@ -525,6 +530,15 @@ def _run_tool(name, args_json):
             {"url": _url, "path": _p, "ref": _st["ref"],
              "text": "已读取图片 #%d: %s(档位 %d px)" % (_st["id"], _p, _side)},
             ensure_ascii=False)
+    if name == "memory":
+        # 项目记忆。写盘在**进程内**(见 memory.py 文件头):`~/.ct/memory` 在工作根
+        # 之外,走 write_file 会在 auto 档被拒、非 auto 档每次弹确认 —— "存一条记忆
+        # 要用户点一次 y" = 没人用。
+        from wchat_py import memory as _mem
+        try:
+            return _mem.tool_run(a)
+        except _mem.MemoryError_ as _e:
+            return "错误: %s" % _e
     if name == "read_skill":
         from wchat_py import skill as _sk
         _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
@@ -634,6 +648,7 @@ def _run_tool(name, args_json):
             # 人工批过的命令同样要把外部路径落账,否则随后对同一目录的读还要再问
             _note_path_grants(cmd, "rw")
         if _auto:
+            from wchat_py.render import STATUS_PREFIX as _SP
             _av, _ars = _seam()._auth_think(cmd)
             if _av != "Y":
                 _v, _rs = _seam()._auto_judge(cmd, reason=(a.get("reason", "") if isinstance(a, dict) else ""))
@@ -641,13 +656,13 @@ def _run_tool(name, args_json):
                     _seam()._bump_auto()
                     # 一律"理由在前、命令不回显":这条是屏幕提示,命令正文对用户没信息量
                     # (他刚看过横幅那一行),而**判据**才是他要核对的。
-                    sys.stdout.write(" %sauto 终审放行:%s%s\n"
-                                     % (GREY, dim(_rs or "无理由", 0), ZERO))
+                    sys.stdout.write("%s%sauto 终审放行:%s%s\n"
+                                     % (GREY, _SP, dim(_rs or "无理由", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_allow", cmd=cmd)
                 elif _v == "N":
-                    sys.stdout.write(" %sauto 终审拒绝:%s%s\n"
-                                     % (GREY, dim(_rs or "未给出理由", 0), ZERO))
+                    sys.stdout.write("%s%sauto 终审拒绝:%s%s\n"
+                                     % (GREY, _SP, dim(_rs or "未给出理由", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_deny", reason=_rs or "", cmd=cmd)
                     return "auto 终审拒绝(%s): %s" % (_rs or "no-reason", cmd)
@@ -655,8 +670,8 @@ def _run_tool(name, args_json):
                     # "无判定"必须自己解释清楚,否则用户只看到"被拒"却不知为何:
                     # 这一支是**终审器没回可用判定**(网络失败/输出不含 ALLOW|DENY),
                     # 安全上只能 fail-closed,但要把"为什么"说出来,并提示怎么继续。
-                    sys.stdout.write(" %sauto 终审不可用(终审器没回可用判定,按安全兜底拒绝):%s%s\n"
-                                     % (GREY, dim(_rs or "无模型输出", 0), ZERO))
+                    sys.stdout.write("%s%sauto 终审不可用(终审器没回可用判定,按安全兜底拒绝):%s%s\n"
+                                     % (GREY, _SP, dim(_rs or "无模型输出", 0), ZERO))
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "final",
                                   rule="final", verdict="auto_deny", reason="judge-unavailable", cmd=cmd)
                     return "auto 终审不可用(无判定),已拒(安全兜底): %s" % cmd
@@ -741,30 +756,46 @@ def _run_tool(name, args_json):
         # 曾经改成"只显示首行" —— 那反而更差:看不到报错行在哪、`git status` 这类
         # 十几行的日常输出只剩一行,人得再让 AI 读一遍。**多行是要的,只是要灰、别刺眼。**
         # 完整输出仍然原样进上下文(下面 _trunc_for_context 之后 return)。
-        from wchat_py.render import dim_after as _dim_after
+        from wchat_py.render import (BOX_PREFIX as _BP, STATUS_PREFIX as _SP,
+                                     dim_after as _dim_after, think_full as _think_full)
         _n = len(_full.splitlines())
-        for _ln in _disp:
-            # 宽度按 `│ `(2 列)之后剩余算,行内不折 —— 折了会多出没有边框的续行,
-            # 看上去像"输出错位"。
-            sys.stdout.write("\033[2K\033[2m│\033[0m %s\r\n" % _dim_after("│ ", _ln))
+        # 展开与否**只看 `-tf`**(2026-12 用户明确要求:不要给同一件事两个开关)。
+        # `-tf=off`(默认)→ 折叠成一行收尾;`-tf=on` → 多行展开。屏幕占用统一由一个
+        # 档位决定,用户记一个就够了;`_full` 两档都原样回给模型。
+        _expanded = _think_full()
+        # 折叠档**没有箱子**,所以不收口(`└─ 完成 · 共 N 行`);展开档有 `│` 边框,
+        # 才需要 `─┘` 闭合。两档混用会让折叠行看起来像"框被剪掉了"。
+        _tail = " ─┘" if _expanded else ""
+        if _expanded:
+            for _ln in _disp:
+                # 宽度按 `│ `(2 列)之后剩余算,行内不折 —— 折了会多出没有边框的续行,
+                # 看上去像"输出错位"。
+                sys.stdout.write("\033[2K\033[2m%s\033[0m%s\r\n"
+                                 % (_BP, _dim_after(_BP, _ln)))
         if _to:
             # 超时提示必须给"下一步怎么办":光说"已终止"会逼模型猜它是不是该拆命令。
             _ts = _fmt_secs(_timeout)
             _, _max_to = _timeout_caps()
-            sys.stdout.write("%s└─ 超过单命令上限 %ss,已终止 · 共 %d 行 ─┘%s\n"
-                             % (GREY, _ts, _n, ZERO))
+            sys.stdout.write("%s%s超过单命令上限 %ss,已终止 · 共 %d 行%s%s\n"
+                             % (GREY, _SP, _ts, _n, _tail, ZERO))
             _full += ("\n(命令超过本次上限 %ss,已终止 · rc=%s。"
                       "若这条命令本来就该更久,请带上更大的 timeout 参数重试(上限 %ss);"
                       "需要一直活着的进程请改用 run_in_background=true。)"
                       % (_ts, _rc, _fmt_secs(_max_to)))
         elif _intr:
-            sys.stdout.write("%s└─ 已中断 · 共 %d 行 ─┘%s\n" % (GREY, _n, ZERO))
+            sys.stdout.write("%s%s已中断 · 共 %d 行%s%s\n"
+                             % (GREY, _SP, _n, _tail, ZERO))
+        elif not _expanded:
+            # 折叠档:**内容不上屏,只留收尾行**。`_full` 仍原样返回给模型,
+            # 屏幕少几行不影响上下文。不再写"(屏幕显示最后 N 行)"—— 既然一行
+            # 都没显示,那句话反而在骗人。
+            sys.stdout.write("%s%s完成 · 共 %d 行%s%s\n" % (GREY, _SP, _n, _tail, ZERO))
         elif _n > len(_disp):
             # 只在**被窗口截短**时才说一句,否则纯属噪音(常态是 1-3 行)。
-            sys.stdout.write("%s└─ 完成 · 共 %d 行(屏幕显示最后 %d 行)─┘%s\n"
-                             % (GREY, _n, len(_disp), ZERO))
+            sys.stdout.write("%s%s完成 · 共 %d 行(屏幕显示最后 %d 行)%s%s\n"
+                             % (GREY, _SP, _n, len(_disp), _tail, ZERO))
         else:
-            sys.stdout.write("%s└─ 完成 · 共 %d 行 ─┘%s\n" % (GREY, _n, ZERO))
+            sys.stdout.write("%s%s完成 · 共 %d 行%s%s\n" % (GREY, _SP, _n, _tail, ZERO))
         sys.stdout.flush()
         # 进上下文前必须截断(master run_with_window → truncate_output)。
         # 两道闸:① 单行列宽(2000)② 行数(头尾各留)。

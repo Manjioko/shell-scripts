@@ -26,9 +26,14 @@ def classify(line):
     if s.startswith("-auto="):
         return "auto_on", s[len("-auto="):]
     # `-tf` / `-tf=on` / `-tf=off`:思考文本展示档位(整段 / 两行)。
-    # 裸 `-tf` 按 on 处理(与会话里敲 `-tf` 的直觉一致),具体别名由 render.set_think_full 判。
+    # `-tf` 同时管思考文本与 shell 输出箱(用户要求:同一件事不要两个开关),
+    # 所以这里不再有 `-sf`。裸 `-tf` 按 on 处理(与会话里敲 `-tf` 的直觉一致)。
     if s == "-tf" or s.startswith("-tf="):
         return "think_full", (s.split("=", 1)[1] if "=" in s else "on")
+    # `-sf` 已删除,但**不能当正文**:那样用户敲 `-sf=on` 会把字面串发给模型,
+    # 却以为开关生效了。单独给它一个"已废弃"动作,由 repl 明说一句。
+    if s == "-sf" or s.startswith("-sf="):
+        return "deprecated_sf", (s.split("=", 1)[1] if "=" in s else "")
     if s == "-img" or s.startswith("-img "):
         return "image", s[len("-img"):].lstrip(" ")
     return "text", s
@@ -38,4 +43,3 @@ if __name__ == "__main__":
     import sys
     for ln in sys.stdin:
         print("%s\t%s" % classify(ln.rstrip("\n")))
-

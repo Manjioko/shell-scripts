@@ -179,6 +179,9 @@ def model_status_lines(s):
         "联网搜索: %s(超时 %ss)" % (s.web_provider or "none", s.web_timeout),
         "压缩阈值: %d tokens" % s.token_threshold,
         "标题: %s" % (s.chat_title or "（空）"),
+        # 记忆条数要可见:-md 是"我发现它记歪了"的唯一入口。没有索引就不显示这一行
+        # (新项目每次开都提示"0 条"是噪音)。
+        *([_mem_line] if (_mem_line := _memory_status()) else []),
     ]
     if s.auto_mode:
         out.append("auto: %s 档 · 已自动放行 %d/%d 次 · 本轮工具 %d/%d 轮"
@@ -189,6 +192,18 @@ def model_status_lines(s):
     else:
         out.append("auto: 关闭(权限逐次人工确认)")
     return out
+
+
+def _memory_status():
+    """`-md` 用:有记忆就返回一行人话,没有返回空串(不占行)。"""
+    try:
+        from wchat_py import memory as _mem
+        st = _mem.index_stats()
+        if not st["count"]:
+            return ""
+        return "记忆: %d 条 · %s" % (st["count"], _mem.project_dir())
+    except Exception:
+        return ""
 
 
 def set_pro(s):

@@ -120,7 +120,7 @@ python3 packaging/homebrew/make_release.py 0.2.0
 | `wchat` | 唯一入口 shim(9 行):自举 → 装配 → `wchat_py.cli.main` |
 | `wchat_py/` | 全部实现。分层见下表 |
 | `configs/` | 配置模板、`ctmodel.py`(兼容壳,实现在 `wchat_py/setup.py:cmd_model`)、`mcporter.example.json` |
-| `skills/` | 随包技能。首次运行补进 `~/.ct/skills/`(**只补缺、不覆盖**) |
+| `skills/` | 随包技能。首次运行补进 `~/.ct/skills/`(**只补缺、不覆盖**);第三方技能用 `wchat skills add <来源>` 安装 |
 | `tests/` | 闸门与测试;`tests/legacy_wchat.sh` 仅为 **bash 基线 oracle**,产品不引用 |
 | `docs/` | 设计与迁移文档(`migration-to-python-B.md` 为 B 阶段结项) |
 
@@ -136,7 +136,7 @@ python3 packaging/homebrew/make_release.py 0.2.0
 | 安全 | `hardwall.py` `hd.py` `hd_re.py` `pathrule.py` `pathutil.py` `authz.py` `authparse.py` `approve.py` `auto_enable.py` | 硬墙判据、路径裁决、**授权账本** |
 | 模型 I/O | `llm.py` `request.py` `prompts.py` `webs.py` `vision.py` `img.py` `imgstate.py` | 请求建体、SEAM 事件流、图片引用账本 |
 | 终端 | `render.py` `term.py` `termpty.py` `termwin.py` `shellio.py` `textutil.py` `mdrender.py` `inputbox.py` | raw/pty/流箱/宽字符截断/markdown/输入框 |
-| 运行期 | `runtime.py` `config.py` `bootstrap.py` `installdeps.py` `setup.py`(子命令:setup/model/mcp/skills) `audit.py` `apilog.py` `version.py` `mcp_boot.py` `mcp_bridge.py` `mcp_client.py` `skill.py` `seed.py` `_contract.py` `_run.py` | 配置装配、解释器兜底、依赖安装、记账、MCP、技能 |
+| 运行期 | `runtime.py` `config.py` `bootstrap.py` `installdeps.py` `setup.py`(子命令:setup/model/mcp/skills) `audit.py` `apilog.py` `version.py` `mcp_boot.py` `mcp_bridge.py` `mcp_client.py` `skill.py` `skillinstall.py` `memory.py` `seed.py` `_contract.py` `_run.py` | 配置装配、解释器兜底、依赖安装、记账、MCP、技能 |
 
 三条硬约束(都有闸门钉住):
 

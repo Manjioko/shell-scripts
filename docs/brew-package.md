@@ -276,7 +276,7 @@ ctmodel undo         # 回滚
 wchat                  # 交互模式(REPL)
 wchat -st "解释这个报错"   # 单轮:答完即退
 wchat -t               # 开思考模式
-wchat -tf=on           # 思考内容整段展示(默认只展示两行:灰色▸ + 首行,其余省略)
+wchat -tf=on           # 展示档位:思考整段 + shell 输出多行(默认:思考两行 + shell 只留 `└─ 完成 · 共 N 行`)
 wchat -p               # 用 pro 档模型(-dp = 思考 + pro)
 wchat -l               # 列历史并选择加载;  -f = 忽略历史,开新会话
 wchat -f "问题"        # 新会话 + 首轮内容
@@ -317,7 +317,8 @@ ls ~/.ct/auto/backup/            # 回滚点
 | `~/.ct/config` | 凭据/模型配置 | 能（会丢配置） |
 | `~/.ct/ctmodel` | 模型档案（`@model` 标记） | 能（会丢档案） |
 | `~/.ct/history/` | 对话历史 | 能（会丢历史） |
-| `~/.ct/skills/` | 技能 | **别删**（会丢自己写的技能） |
+| `~/.ct/skills/` | 技能（`<名>/SKILL.md`；第三方技能带 `.source.json` 记账） | **别删**（会丢自己写的技能） |
+| `~/.ct/memory/<项目键>/` | 项目记忆：`MEMORY.md` 索引（每次会话注入）+ `topics/*.md` 详情 | 可清旧条目（`wchat memory prune`），删了只是丢经验，无副作用 |
 | `~/.ct/auto/audit.log` | auto 审计日志 | 能（但要留证就别删） |
 | `~/.ct/auto/backup/` | auto 回滚备份 | 能 |
 | `~/.ct/venv/` | 自举出来的虚拟环境 | 能（下次启动会重建，费一次安装时间） |

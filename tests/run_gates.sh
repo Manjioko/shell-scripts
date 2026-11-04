@@ -107,6 +107,28 @@ GATE_CMDS+=('python3 tests/think_view_test.py')
 GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('思考文本:默认两行(三角+首行,其余 …)/-tf=on 整段/启动与会话内同一真值表/非法值明说')
+GATE_NAMES+=('输出折叠')
+GATE_CMDS+=('python3 tests/shell_view_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('shell 输出箱跟随 -tf:默认只留收尾行(-tf=on 展开)/上下文仍全量/-sf 已并入且会明说')
+GATE_NAMES+=('输入框形状')
+GATE_CMDS+=('python3 tests/inputbox_layout_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('输入框:两横线紧贴且同宽(宽度取自本帧)/配色全 dim/折行与窄终端不裂/resize 补 reflow 行数')
+
+GATE_NAMES+=('装技能')
+GATE_CMDS+=('python3 tests/skill_install_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('第三方技能安装:四形态发现/落盘前校验/解引用软链/逃逸拒绝/记账/dry-run/只备份不删')
+
+GATE_NAMES+=('项目记忆')
+GATE_CMDS+=('python3 tests/memory_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('项目记忆:按 git 根隔离/索引超限报错不静默截断/拒收凭据/注入带边界声明/工具四动作/CLI')
 
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——

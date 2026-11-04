@@ -214,7 +214,12 @@ def migrate_from_legacy():
 # ------------------------------------------------------------------ 入口小工具
 
 def cmd_skills(argv):
-    """`wchat skills` —— 看技能从哪来、哪些被自己改过。只读。"""
+    """`wchat skills` —— 看技能从哪来、哪些被自己改过;安装/卸载第三方技能。"""
+    # 安装/卸载委派给 skillinstall(那是**唯一**会往 ~/.ct/skills 写东西的两条路径之一,
+    # 另一条是只补缺的 seed)。放这里而不是 cli.py:入口已经 1190 行,分层闸门守着 1250。
+    if argv and argv[0] in ("add", "install", "remove", "rm", "uninstall"):
+        from wchat_py import skillinstall
+        return skillinstall.main(list(argv))
     if argv and argv[0] in ("--seed", "seed", "--sync"):
         added, skipped, msg = seed_skills(force=True)
         sys.stdout.write("播种技能: %s\n" % msg)
@@ -224,9 +229,12 @@ def cmd_skills(argv):
             sys.stdout.write("  = %s(已存在,未改动)\n" % n)
         return 0
     if argv and argv[0] in ("-h", "--help", "help"):
-        sys.stdout.write("用法: wchat skills [--seed]\n"
+        sys.stdout.write("用法: wchat skills [--seed] | add <来源> | remove <名字>\n"
                          "  默认:列出 ~/.ct/skills 里的技能与来源\n"
-                         "  --seed:把随包技能补进 ~/.ct/skills(只补缺,不覆盖)\n")
+                         "  --seed:把随包技能补进 ~/.ct/skills(只补缺,不覆盖)\n"
+                         "  add <来源>:安装第三方技能(owner/repo、URL、本地目录、压缩包);\n"
+                         "              装之前会把来源/文件/依赖摊开给你看,默认不装\n"
+                         "  remove <名字>:移出技能(进 .trash/,不删除)\n")
         return 0
     rows = skills_status()
     d = skills_dest()
@@ -234,10 +242,13 @@ def cmd_skills(argv):
         sys.stdout.write("技能目录 %s 里还没有技能。\n" % d)
         sys.stdout.write("跑 `wchat skills --seed` 可把随包的 %d 个技能补进去。\n"
                          % len(_existing_skills(skills_src())))
+        sys.stdout.write("或 `wchat skills add <owner/repo>` 装一个第三方的。\n")
         return 0
     sys.stdout.write("技能目录: %s\n" % d)
     for name, src, dirty in rows:
         tag = "包里带的" if src == "packaged" else "自己写的"
+        if os.path.isfile(os.path.join(d, name, ".source.json")):
+            tag = "装的(第三方)"
         if dirty:
             tag += ",已本地修改"
         sys.stdout.write("  %-28s %s\n" % (name, tag))

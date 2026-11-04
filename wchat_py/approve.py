@@ -132,8 +132,10 @@ def _path_guard(path, mode):
         _au.record(os.environ.get("AUTO_AUDIT_LOG", ""), "path", rule=rule,
                    decision="auto_deny", path=path)
         # 拒绝只给理由(规则号 + 说明),不回显路径正文;非正文统一灰化。
-        from wchat_py.render import dim_after as _dim_after
-        sys.stdout.write(" " + _dim_after(" ", "⛔ 越界%s被硬墙拒绝(%s)" % (_act, rule)) + "\n")
+        # 前缀与工具状态行同源(render.STATUS_PREFIX),不在这里手写第二份。
+        from wchat_py.render import STATUS_PREFIX as _SP, dim_after as _dim_after
+        sys.stdout.write("\033[2m" + _SP + _dim_after(_SP, "⛔ 越界%s被硬墙拒绝(%s)" % (_act, rule))
+                         + "\033[0m\n")
         sys.stdout.flush()
 
     if is_cred:
@@ -184,7 +186,8 @@ def _path_guard(path, mode):
         # 于是同一个目录每次访问都要再问人 —— 这就是"多次授权"的来源之一)。
         _grant_path(p, "rw" if mode == "rw" else "r")
         return None
-    from wchat_py.render import dim_after as _dim_after
-    sys.stdout.write(" " + _dim_after(" ", "⛔ 用户拒绝%s: %s" % (_act, path)) + "\n")
+    from wchat_py.render import STATUS_PREFIX as _SP2, dim_after as _dim_after
+    sys.stdout.write("\033[2m" + _SP2 + _dim_after(_SP2, "⛔ 用户拒绝%s: %s" % (_act, path))
+                     + "\033[0m\n")
     sys.stdout.flush()
     return "用户拒绝访问工作目录外文件: %s" % path

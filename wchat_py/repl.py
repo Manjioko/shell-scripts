@@ -198,17 +198,26 @@ def _default_meta(action, arg, session=None):
         for ln in model_status_lines(sess):
             inp_msg(ln)
         return True
+    if action == "deprecated_sf":
+        # `-sf` 已并入 `-tf`(2026-12:同一件事不要两个开关)。这里必须**明说**:
+        # 静默把它当正文发给模型,用户会以为开关生效了,实际是把这串字发出去问了一遍。
+        from wchat_py.cli import inp_msg
+        inp_msg("⚠ -sf 已并入 -tf(-tf=on 展开 / -tf=off 只留收尾行),本次未执行")
+        return True
     if action == "think_full":
         # 会话内切换思考文本展示档位(渲染层每次调用都读 env,所以立刻生效)。
+        # shell 输出箱**跟随这一档**:同一句回执里说清楚,省得用户以为少了个开关。
         from wchat_py.cli import inp_msg
         from wchat_py.render import set_think_full
         _on = set_think_full(arg or "on")
         if _on is None:
-            inp_msg("用法: -tf=on 整段展示思考内容 / -tf=off 只展示两行(默认)")
+            inp_msg("用法: -tf=on 整段展示思考内容与 shell 输出 / -tf=off 只展示两行、"
+                    "shell 只留收尾行(默认)")
         elif _on:
-            inp_msg("✅ 思考内容:整段展示(-tf=off 可切回两行)")
+            inp_msg("✅ 思考内容:整段展示 · shell 输出:展开多行(-tf=off 可切回)")
         else:
-            inp_msg("✅ 思考内容:只展示两行(灰色三角 + 首行,其余省略)")
+            inp_msg("✅ 思考内容:只展示两行(灰色三角 + 首行,其余省略) · "
+                    "shell 输出:只留收尾行")
         return True
     if action in ("model_pro", "thinking_on", "model_flash"):
         from wchat_py.cli import inp_msg

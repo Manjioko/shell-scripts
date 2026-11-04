@@ -37,4 +37,3 @@ for line, want in cases:
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
-

@@ -267,20 +267,31 @@ with _Env(AUTO_MODE="sandbox", AUTO_AUDIT_LOG=os.path.join(REPO, ".scratch", "ui
 ck("无判定:屏幕上解释'没回可用判定'", "没回可用判定" in screen, repr(screen[:200]))
 ck("无判定:不把命令摊在屏幕上", "echo hi" not in ANSI.sub("", screen), repr(screen[:200]))
 
-print("=== 6. shell 输出:多行照旧(窗口),但要灰;上下文仍是全量 ===")
-# 2026-11 用户纠正过一次:把 shell 输出折成一行 **反而更差** ——
-# 看不到报错行在哪,`git status` 这类十几行日常输出只剩一行。多行是要的,
-# 只是要求**统一灰**(原来 ┃ 前缀是灰的、内容却是正常亮度,很刺眼)。
-with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+print("=== 6. shell 输出:跟随 -tf —— 默认折叠成收尾行;-tf=on 才展开多行 ===")
+# 2026-11 先把多行改成"一行摘要"被用户否掉(看不到报错行);2026-12 用户又明确
+# 要"默认折叠成一行、内容不展示",再进一步要求**不给第二个开关**:`-tf` 管思考文本
+# 也管 shell 输出箱,`-sf` 已删除。两档都必须真跑:只测折叠会漏掉"想展开时打不开",
+# 只测展开会漏掉"默认还是满屏灰字"。
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", WCHAT_THINK_FULL="0"):
     out, screen = run_shell_capture(
-        "printf 'L1\\nL2\\nL3\\n'", lambda: _Env())
+        "printf 'L1\\nL2\\nL3\\n'", lambda: _Env(WCHAT_THINK_FULL="0"))
 vis = text_lines(screen)
-ck("三行输出**都**上屏(多行不许折成一行)", sum(1 for ln in vis if "L" in ln) == 3,
+ck("默认折叠:三行内容一个字都不上屏", not any("L1" in ln or "L2" in ln or "L3" in ln for ln in vis),
    repr(vis)[:200])
-ck("仍带 │ 边框前缀", all("│" in ln for ln in vis if "L" in ln), repr(vis)[:160])
-ck("末行是 └─ 完成 · 共 3 行 ─┘ 形状",
-   any("完成" in ln and "共 3 行" in ln and "─┘" in ln for ln in vis), repr(vis)[-2:])
-ck("回给模型的仍是全量", all(x in out for x in ("L1", "L2", "L3")), repr(out)[:120])
+ck("默认折叠:只留一条收尾行", len(vis) == 1, repr(vis)[:200])
+ck("默认折叠:收尾行是 `└─ 完成 · 共 3 行`(折叠档没有箱子,不收口 ─┘)",
+   any(ANSI.sub("", ln).strip() == "└─ 完成 · 共 3 行" for ln in vis), repr(vis)[-2:])
+ck("默认折叠:回给模型的仍是全量", all(x in out for x in ("L1", "L2", "L3")), repr(out)[:120])
+
+with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", WCHAT_THINK_FULL="1"):
+    out, screen = run_shell_capture(
+        "printf 'L1\\nL2\\nL3\\n'", lambda: _Env(WCHAT_THINK_FULL="1"))
+vis = text_lines(screen)
+ck("-tf=on:三行输出都上屏", sum(1 for ln in vis if "L" in ln) == 3, repr(vis)[:200])
+ck("-tf=on:仍带 │ 边框前缀", all("│" in ln for ln in vis if "L" in ln), repr(vis)[:160])
+ck("-tf=on:末行是 └─ 完成 · 共 3 行 ─┘(展开档有箱子才收口)",
+   any(ANSI.sub("", ln).strip() == "└─ 完成 · 共 3 行 ─┘" for ln in vis), repr(vis)[-2:])
+ck("-tf=on:回给模型的仍是全量", all(x in out for x in ("L1", "L2", "L3")), repr(out)[:120])
 # 灰化必须**逐行**覆盖正文内容,不能只灰边框:
 # 原来 `┃ ` 前缀是灰的、`%s` 内容是正常亮度 —— 那正是"刺眼"的来源。
 for ln in [x for x in screen.split("\n") if "L1" in x or "L2" in x]:
@@ -289,7 +300,8 @@ for ln in [x for x in screen.split("\n") if "L1" in x or "L2" in x]:
     ck("内容本身被灰包住(%r)" % ANSI.sub("", payload).strip()[:6],
        payload.startswith(GREY), repr(payload)[:100])
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
-    # 这条测的是"**防静默成功**":命令没输出,也必须有一行 `└─ 完成 · 共 0 行 ─┘`。
+    # 这条测的是"**防静默成功**":命令没输出,也必须有一行 `└─ 完成 · 共 0 行`
+    #(默认折叠档不收口,所以这里只认"有且只有一条汇总行",不钉 ─┘)。
     # 不能断言"屏幕上恰好只有 1 行" —— auto 档下还会多一行
     # `auto 终审放行:assume-yes`,那是审批链的正常输出,不是本用例要管的东西。
     # 原来写成 `len(text_lines(s)) == 1`,于是:
@@ -357,7 +369,7 @@ import wchat_py.render as R3  # noqa: E402
 _oc = R3.term_cols
 try:
     R3.term_cols = (lambda d=80: 80)
-    with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1"):
+    with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", WCHAT_THINK_FULL="1"):
         _o, _s = run_shell_capture("python3 -c \"print('y'*400)\"", lambda: _Env())
     _long = [x for x in _s.split("\n") if "y" in x]
     ck("超长输出行被截到不折行", _long and all(display_width(x.rstrip("\r")) <= 80

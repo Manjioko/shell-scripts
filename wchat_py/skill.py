@@ -162,14 +162,21 @@ def read_skill(name: str, skills_dir: str, read_max: str, external: str) -> dict
         rmax = int(read_max)
     except (TypeError, ValueError):
         rmax = 0
+    # 把技能目录一起交回去:装进来的第三方技能常带脚本/模板(如
+    # `scripts/render_xhs.py`),而模型的工作目录**不是**技能目录。以前这里只说
+    # "这是 SKILL.md 全文",模型就按 `python scripts/x.py` 相对 CWD 去跑,必然找不到;
+    # 报错看起来像"技能坏了",实际是少了一行路径。
+    _where = "技能目录: %s(正文里的相对路径都相对于它,执行脚本请写绝对路径)\n\n" \
+             % os.path.join(skills_dir, name)
     if len(text) > rmax:
         out = _truncate_by_lines(text, rmax)
         # ⚠ 这里刻意用**字面** `\n`(反斜杠+n),不是换行:复刻 bash 双引号串
         #   `"...:\n\n$out"` —— bash 双引号里 `\n` 是两个字符。原实现即如此(疑似历史
         #   笔误,应为 $'\n'),迁移只做等价、不改行为;要修另开一刀。
-        content = "📖 技能 %s(SKILL.md,共 %d 字符,过长已截断):\\n\\n%s" % (name, len(text), out)
+        content = "📖 技能 %s(SKILL.md,共 %d 字符,过长已截断):\\n\\n%s%s" % (
+            name, len(text), _where, out)
     else:
-        content = "📖 技能 %s(SKILL.md)全文:\\n\\n%s" % (name, text.rstrip("\n"))
+        content = "📖 技能 %s(SKILL.md)全文:\\n\\n%s%s" % (name, _where, text.rstrip("\n"))
     return {"content": content, "status": " 已读取技能 %s" % name}
 
 

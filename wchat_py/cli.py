@@ -17,9 +17,6 @@ import sys
 
 # MCP 清单默认位:**在 ~/.ct/ 下**,与 config/history/skills 同源。
 # (上游默认位留给 mcporter 自己的 daemon socket / vault —— 那是运行态,不是配置。)
-MC_CONFIG_DEFAULT = os.path.join(".ct", "mcporter.json")
-
-
 def inp_msg(msg=""):
     """等价 bash 的 inp_msg：每行加暗色 `│ ` 前缀(多行也逐行加)。"""
     for ln in str(msg).split("\n"):
@@ -27,77 +24,10 @@ def inp_msg(msg=""):
 
 
 def help_user():
-    # 默认位与 mcp_bridge.config_path() 必须同源 —— 猜错会让 help 基线的 bytes 比对
-    # 立刻红,这正是 bytes 级判据的价值。
-    mcp_cfg = os.environ.get("MCP_CONFIG") or os.path.join(
-        os.environ.get("HOME", ""), MC_CONFIG_DEFAULT)
-    skills_dir = os.environ.get("SKILLS_DIR") or _skills_dir_default()
-    sd_default = _skills_dir_default()
-
-    inp_msg("使用方法: ct [选项] [内容]")
-    inp_msg("选项:")
-    inp_msg("  -t    启用思考模式")
-    inp_msg("  -tf=on|-off  思考文本展示:on=整段(旧行为);off=只展示两行(灰色三角+首行,其余省略;默认)")
-    inp_msg("  -p    使用 deepseek-v4-pro 模型")
-    inp_msg("  -dp   启用思考模式并使用 deepseek-v4-pro 模型")
-    inp_msg("  -l    查看历史记录并选择加载")
-    inp_msg("  -f    忽略历史记录")
-    inp_msg("  -st   单轮模式:执行一轮对话后退出,不进交互循环(内容为空时在提示符输入一轮)")
-    inp_msg("  -auto  敏感权限全自动(免逐次确认)。可接档位: -auto / -auto=read|sandbox|full")
-    inp_msg("         read=只自动放行越界读取 | sandbox(默认)=工作目录内全自动 | full=再加 --allow-write 名单")
-    inp_msg("         硬墙(提权/系统路径/凭据/越界写/强推/下载即执行)任何档位都不放行;启动需输入 AUTO 签字")
-    inp_msg("  --allow 路径 / --allow-write 路径  越界只读/可写白名单(可多次,配合 -auto)")
-    inp_msg("  --allow-install [包名,逗号]  允许 auto 安装这些包(配额 AUTO_MAX_INSTALLS,默认 5);不带包名 = 全开并警告。换源一律拒")
-    inp_msg("  -mcp [服务器,逗号]  启用 MCP 外部能力(mcp_tools/mcp_schema/mcp_call 三条通道)")
-    inp_msg("         清单来自 %s;**必须在该文件里写 \"imports\": []**,否则会带进" % mcp_cfg)
-    inp_msg("         Codex/VS Code 等其它程序声明的 server(wchat 会主动报出并排除,但别依赖这个)")
-    inp_msg("         ⚠ 这是**能力开关,不是安全边界**:不带 -mcp 只表示我们不提供这三条通道,")
-    inp_msg("           模型仍可用 run_shell_command 自行调用 mcporter。无人值守 + auto 时必须点名")
-    inp_msg("         启动时把每个 server **实际拿到的命令行原样摊开**;我们不解释也不替你改第三方参数")
-    inp_msg("         (第三方参数会随版本改名,写死在我们代码里只会静默失效)。遥测、脱敏头这类")
-    inp_msg("         开关请按各 server 自己的文档设;启动输出里那行就是它实际拿到的参数。")
-    inp_msg("  -img  发送图片(后接图片路径,自动转述为文字)")
-    inp_msg("  -skill 从当前对话提炼技能,确认后保存到本次生效的技能目录(见下)")
-    inp_msg("         当前技能目录: %s(未设 SKILLS_DIR 时为 %s;外置值须过校验)" % (skills_dir, sd_default))
-    inp_msg("  -c    手动压缩对话历史")
-    inp_msg("  -u    查看当前上下文 token 用量")
-    inp_msg("  -q    退出程序(Ctrl+C 不会退出,这是唯一退出方式)")
-    inp_msg("  -h    显示帮助信息")
-    inp_msg()
-    inp_msg("不开对话、只做配置类动作:")
-    inp_msg("  wchat -config        逐项填写配置(接口地址/key/模型),写 ~/.ct/config")
-    inp_msg("  wchat model [名字]   看/切换模型组(等价原来的 ctmodel);-l 列组,check 校验,undo 回滚")
-    inp_msg("  wchat mcp            看 MCP 清单位置与 server(首次启动自动生成 ~/.ct/mcporter.json)")
-    inp_msg("  wchat skills [--seed]    看技能来源;--seed 把随包技能补进 ~/.ct/skills(只补缺,不覆盖)")
-    inp_msg()
-    inp_msg("内容交互时，也可使用以下选项:")
-    inp_msg("  -msgs 显示当前消息记录")
-    inp_msg("  -l    查看历史记录并选择加载")
-    inp_msg("  -skill 从当前对话提炼技能,确认后保存到 %s" % skills_dir)
-    inp_msg("  -c    手动压缩对话历史")
-    inp_msg("  -n    新对话(清空历史并清屏)")
-    inp_msg("  -cl   清屏(保留对话历史)")
-    inp_msg("  -stp  切换到 pro 模型")
-    inp_msg("  -auto[=read|sandbox|full]  会话中途开启/切换 auto 档位(需重新签字)")
-    inp_msg("  -noauto  关闭 auto,恢复逐次人工确认")
-    inp_msg("  -stt  开启思考模式")
-    inp_msg("  -stf  恢复默认(flash 模型,关闭思考)")
-    inp_msg("  -tf=on|-off  思考文本整段/两行 切换(默认两行:灰色三角+首行,其余省略)")
-    inp_msg("  -fs   立即保存当前对话历史(-f 模式下静默跳过)")
-    inp_msg("  -md   查看当前模型/思考/标题信息")
-    inp_msg("  -u    查看当前上下文 token 用量")
-    inp_msg("  -img <路径> 发送图片(自动转述为文字)")
-    inp_msg("  Ctrl+F 选择文件(图片自动转述;文本传路径,由 AI 用工具按需读取)")
-    inp_msg("  Ctrl+G/Ctrl+V 粘贴剪贴板图片(截图后直接附加,自动转述;部分终端下直接粘贴亦可)")
-    inp_msg("  -q    退出程序(询问是否保存,默认保存;N/n 不保存;-f 不询问)")
-    inp_msg("  -h    显示帮助信息")
-    inp_msg()
-    inp_msg("输入规则:")
-    inp_msg("  - 回车 = 发送整段(缓冲区为空时不动)")
-    inp_msg("  - 想换行:把行尾写成 \\ 再回车(反斜杠会被吃掉,不发送,继续输入)")
-    inp_msg("  - 粘贴多行文本会自动折叠成一行占位,回车发送时原样展开")
-    inp_msg("  - -x 命令仅在单行输入时生效;多行/续行中输入 -x 按正文处理")
-    inp_msg("  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入")
+    """打印 `-h`。正文在 `helptext.py`:入口只负责"加前缀上屏",不持有 60 行静态文案。"""
+    from wchat_py.helptext import help_lines
+    for ln in help_lines():
+        inp_msg(ln)
 
 
 def parse(argv):
@@ -135,6 +65,10 @@ def parse(argv):
             thinking = "enabled"
         elif a == "-tf" or a.startswith("-tf="):
             think_full = a.split("=", 1)[1] if "=" in a else "on"
+        elif a == "-sf" or a.startswith("-sf="):
+            # `-sf` 已并入 `-tf`。**必须明说**:静默忽略会让用户以为档位变了,
+            # 而屏幕上一点反应都没有(这类"看起来成功"的静默最费时间)。
+            sys.stderr.write("⚠ -sf 已并入 -tf(-tf=on 展开 / -tf=off 只留收尾行),本次忽略\n")
         elif a == "-p":
             model = os.environ.get("PRO_MODEL", "")
         elif a == "-dp":
@@ -752,6 +686,16 @@ def _system_prompt_text():
     _mcp = os.environ.get("MCP_MANIFEST", "")
     if _mcp:
         base += "\n\n" + _mcp
+    # 项目记忆:只有当**这个工作根**已经有索引时才注入(空索引不该占一行预算,
+    # 也不该在每次新项目里都提示一次"你还没有记忆" —— 那是纯噪音)。
+    # 有索引时注入 = 索引全文 + 边界声明 + "何时查/何时存"的契约(见 memory.injection)。
+    try:
+        from wchat_py import memory as _mem
+        _memtxt = _mem.injection()
+        if _memtxt:
+            base += _memtxt
+    except Exception:
+        pass
     return base
 
 
@@ -882,9 +826,11 @@ def run_turn(content, model="", max_rounds=None):
                             "模型返回了缺少工具名与调用 id 的调用,无法继续"
                             "(参数分片可能被网关拆坏了)。请重试一次。")
                 continue
+            # 同上:横幅后不留空行,空行放在整个工具块之后。
             sys.stdout.write(_banner_text(_tcn, tc.get("arguments") or ""))
-            sys.stdout.write("\n"); sys.stdout.flush()
+            sys.stdout.flush()
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
+            sys.stdout.write("\n"); sys.stdout.flush()
             if isinstance(out, str) and out.startswith("IMGJSON:"):
                 import json as _j
                 try:
@@ -999,6 +945,11 @@ def main(argv):
         if argv and argv[0] == "skills":
             from wchat_py import seed as _seed
             return _seed.cmd_skills(argv[1:])
+        if argv and argv[0] == "memory":
+            # 子命令必须排在 parse(argv) 之前:否则 "memory" 会被当成对话正文发给模型
+            # (词面完全合法,不报错,只是行为诡异 —— 与 model/mcp/skills 同一条坑)。
+            from wchat_py import memory as _mem
+            return _mem.cmd_memory(argv[1:])
         if argv and argv[0] in ("usage", "apilog"):
             from wchat_py import apilog as _apilog
             return _apilog.main(argv[1:])
@@ -1128,9 +1079,14 @@ def main(argv):
                     sys.stdout.write(render_markdown("".join(_text_acc)))
                     sys.stdout.write("\n"); sys.stdout.flush()
                     _text_acc.clear()
+                # 横幅后**不留空行**(2026-12 用户要求):横幅与它下面那行
+                # `└─ 已读取…` 是同一个工具块的两半,中间空一行会让它们看着不相关。
+                # 块与块之间的空行由块**末尾**的 `sys.stdout.write("\n")` 负责。
                 sys.stdout.write(_banner_text(n, a))
+                sys.stdout.flush()
+                out = _run_tool(n, a)
                 sys.stdout.write("\n"); sys.stdout.flush()
-                return _run_tool(n, a)
+                return out
 
             def _abort():
                 # 关箱并丢弃半截正文/思考(本轮输出整体不渲染,与 master 一致)

@@ -23,6 +23,70 @@ import subprocess
 import tempfile
 
 
+def _term_cols_now():
+    """当前终端宽度。优先问 prompt_toolkit 的 output(CPR 后是真值),
+    拿不到时退回 COLUMNS/shutil —— 取窄一点也不要紧,规则线宁短勿折。"""
+    try:
+        from prompt_toolkit.application import get_app
+        return int(get_app().output.get_size().columns) or 80
+    except Exception:
+        return shutil.get_terminal_size((80, 24)).columns or 80
+
+
+def _rule(columns):
+    """给定列数生成一条横线。留 1 列:在最后一列写字会触发自动折行。"""
+    return "─" * max(1, int(columns) - 1)
+
+
+def _rule_text(fd=None):
+    """**框内**横线(输入助手活着的时候)不在这里取宽度,见 `_WidthControl`。
+
+    这个函数只剩一个用途:输入框退出后由 `_close_box()` 补底边 —— 那时没有
+    prompt_toolkit 的 app 可问,必须直接量 /dev/tty(prompt_toolkit 的
+    DummyApplication 会报 80 列,在 70 列的终端上画出来就会折行)。
+    """
+    cols = None
+    if fd is not None:
+        try:
+            cols = os.get_terminal_size(fd).columns
+        except OSError:
+            cols = None
+    if not cols:
+        cols = _term_cols_now()
+    return _rule(cols)
+
+
+def _width_control(make_text):
+    """按**本帧渲染宽度**生成文本的控件(FormattedTextControl 子类)。
+
+    为什么必须这样,而不是在回调里问 `get_app().output.get_size()`:
+    后者是"活的"终端尺寸,拖拽改变窗口大小时它会在同一帧内就变,而 prompt_toolkit
+    这一帧是按它自己缓存的 size 渲染的。两者一旦不一致,我们画出来的横线就比
+    渲染宽度宽或窄 —— 宽出去的那截**不会被下一帧的 `ESC[K` 擦掉**(终端只擦到当前
+    宽度),叠加回流就是用户看到的"输入框上部不规则残影"。
+    实测证据:一次 resize 里上下两条横线宽度不同(上面 ~200 列、下面 ~170 列),
+    只可能来自"同一帧内两次活查询拿到不同宽度"。
+
+    `UIControl.create_content(width, height)` 收到的 `width` 就是这一帧真正渲染的
+    列数 —— 唯一可信的来源。
+    """
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    class _C(FormattedTextControl):
+        def __init__(self):
+            super().__init__(text="")
+
+        def create_content(self, width, height):
+            self.text = make_text(width)
+            return super().create_content(width, height)
+
+    return _C()
+
+
+# 活跃输入时的快捷键提示(只在输入框存在期间显示,提交后不重复打进历史)。
+INPUT_HINT = "? 回车发送 · 行尾 \\ 续行 · Ctrl+F 选文件"
+
+
 def _erase_stale_box(tty, height):
     """Ctrl+F 退出时擦掉残留在屏上的输入框。prompt_toolkit 退出会把
     光标停到框下一行、框本体留在屏上(render_as_done 的收尾帧);bash 侧
@@ -365,6 +429,171 @@ def _insert_clip_image(event, clip_dir):
     return True
 
 
+def _squeeze_box(session):
+    """把输入窗的高度从"撑满剩余屏幕"改成"按内容高度",让底部横线紧贴输入行。
+
+    为什么必须动:prompt_toolkit 给输入窗口的默认高度是裸 `Dimension()`,意思是
+    **可延伸**(剩余空间全归它);而 `bottom_toolbar` 挂在 HSplit 末尾,于是底部工具条
+    被推到**屏幕最后一行** —— 实测 24 行终端里输入行在第 2 行、横线掉到第 24 行,
+    中间 21 行空白,看着像"框裂了"。它只在 `renderer_height_is_known` 之后才画,
+    所以现象是"每次刷新位置都会跳",更难辨认。
+
+    改法只碰一个属性:`dont_extend_height`(preferred height 由 BufferControl 按
+    行数给出,多行输入照常长高,行为不变)。不改 prompt_toolkit 的类、不重写 Layout ——
+    我们只调实例,与 `_guarded_input` 包实例而不动类的口径一致。
+    """
+    try:
+        from prompt_toolkit.filters import to_filter
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.controls import BufferControl
+        for c in session.layout.walk():
+            if isinstance(c, Window) and isinstance(c.content, BufferControl):
+                if c.content.buffer is session.default_buffer:
+                    # 属性存的是**Filter**(渲染时当函数调用),写裸 True 会在下一帧
+                    # 抛 TypeError:'bool' object is not callable —— 表现为输入框直接消失。
+                    c.dont_extend_height = to_filter(True)
+    except Exception:
+        pass      # 只是观感:拿不到内部布局就退回默认(仍是可用的输入框),不阻断输入
+
+
+def _install_rules(session):
+    """把上下两条横线换成"按本帧渲染宽度填"的控件。
+
+    要解决两件事:
+      1. **宽度来源**(resize 残影的根因):绝不能用 `get_app().output.get_size()`
+         这种活查询 —— 拖拽改变窗口大小时它会在同一帧内变,而我们这一帧是
+         prompt_toolkit 按自己缓存的 size 渲染的。宽出去那截擦不掉,回流之后
+         就成了"输入框上部不规则残影"。`create_content(width, ...)` 的 `width`
+         才是这一帧真正的列数。
+      2. 上下两条线必须**同宽**:它们现在来自同一种控件、同一个 width,天然一致。
+
+    定位方式**按结构**,不按"第一个 FormattedTextControl":
+    那个窗口是 HSplit 里紧挨着 buffer 窗口的前一个孩子(`_create_layout` 里
+    `ConditionalContainer(Window(FormattedTextControl(get_prompt_text_1)), ...)`)。
+    按类型撞运气会先撞到 `Frame` 的 label 窗口(它也是 FormattedTextControl),
+    结果横线被塞进一个不渲染的窗口 —— 表现是"顶部横线凭空消失",极难归因。
+
+    只替换控件实例,不动 prompt_toolkit 的类、不重写 Layout。任何一步拿不到就
+    整体放弃、退回旧行为 —— 框难看总比输入框坏掉好。
+    """
+    try:
+        from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+        from prompt_toolkit.layout.controls import BufferControl
+
+        rule_ctl = _width_control(lambda w: [("class:border", _rule(w))])
+        bar_ctl = _width_control(
+            lambda w: [("class:border", _rule(w)), ("class:hint", "\n" + INPUT_HINT)])
+
+        top_done = bar_done = False
+        for c in session.layout.walk():
+            if not isinstance(c, Window):
+                continue
+            if getattr(c, "style", "") == "class:bottom-toolbar":
+                c.content = bar_ctl
+                bar_done = True
+
+        # 输入行上方那一行:HSplit 里紧挨着"buffer 窗口"的前一个孩子。
+        # 注意 buffer 窗口外面还套着一层 ConditionalContainer(_create_layout 里是
+        # `ConditionalContainer(default_buffer_window, Condition(...))`),
+        # 直接判 `isinstance(k, Window)` 会一个都匹配不上 —— 那样整套替换静默失效,
+        # 表现就是"顶部横线凭空消失"。
+        def _win_of(container):
+            c2 = container
+            while isinstance(c2, ConditionalContainer):
+                c2 = c2.content
+            return c2 if isinstance(c2, Window) else None
+
+        for c in session.layout.walk():
+            if not isinstance(c, HSplit):
+                continue
+            kids = list(c.children)
+            for i, k in enumerate(kids):
+                w = _win_of(k)
+                if (w is not None and isinstance(w.content, BufferControl)
+                        and w.content.buffer is session.default_buffer):
+                    prev = _win_of(kids[i - 1]) if i else None
+                    if prev is not None:
+                        prev.content = rule_ctl
+                        top_done = True
+                    break
+            if top_done:
+                break
+        return top_done and bar_done
+    except Exception:
+        return False
+
+
+def _reflow_extra(line_lens, cursor_y, new_width):
+    """估算"窗口变窄后,光标**上方**那几行多折出来了几行"。
+
+    这是 resize 残影的第二个根因,与宽度来源无关:
+    终端(会 reflow 的那些)把**旧**的长横线按新宽度重新折行,于是箱子在屏幕上
+    实际占的行数变多;而 prompt_toolkit 自己记的 `_cursor_pos.y` 是**它上一帧画的
+    逻辑行数**,没跟着变。它擦屏时只上移 `y` 行,落点就在箱子中间 ——
+    上面剩下的那截旧横线擦不到,用户看到的就是"上方多出一条横杠"。
+
+    修法:擦之前先多上移 `extra` 行,让"回箱顶"真正回到箱顶。extra 只算
+    **光标上方**的行(下方那些行 reflow 后仍在光标下面,erase_down 会一并擦掉),
+    所以多擦的就是箱子自己那几行,不会吃掉箱子之上的历史正文。
+
+    `line_lens` 是上一帧每行的**显示宽度**(末尾空行传 0)。极窄宽度下也不至于
+    算出个天文数字:返回值由调用方再夹上限。
+    """
+    try:
+        w = max(1, int(new_width))
+        need = 0
+        for ln in list(line_lens)[:max(0, int(cursor_y)) + 1]:
+            n = int(ln or 0)
+            need += max(1, -(-n // w)) if n > 0 else 1
+        return max(0, need - (max(0, int(cursor_y)) + 1))
+    except Exception:
+        return 0
+
+
+def _resize_guard(session, cap=4):
+    """resize 时先"多上移几行"再让 prompt_toolkit 擦屏(见 `_reflow_extra`)。
+
+    只包 `renderer.erase` 的实例方法,不重写 PTK 的类;任何一步算不出来就退回
+    原样(残影难看总比输入框错位好)。
+    """
+    try:
+        from wchat_py.render import display_width
+
+        renderer = session.app.renderer
+        orig = renderer.erase
+
+        def erase(leave_alternate_screen=True):
+            extra = 0
+            try:
+                last = getattr(renderer, "_last_screen", None)
+                last_size = getattr(renderer, "_last_size", None)
+                cur = renderer.output.get_size()
+                if last is not None and last_size is not None and cur.columns < last_size.columns:
+                    lens = []
+                    for y in range(last.height):
+                        row = last.data_buffer[y]
+                        lens.append(max((x for x, cell in row.items()
+                                         if cell.char != " "), default=-1) + 1)
+                    extra = _reflow_extra(lens, getattr(renderer._cursor_pos, "y", 0),
+                                          cur.columns)
+            except Exception:
+                extra = 0
+            if extra > 0:
+                # 多上移的这几行:紧接着由 orig 的 cursor_up + erase_down 一并擦掉,
+                # 顺带把折出来的旧横线残片清干净。
+                try:
+                    renderer.output.cursor_up(min(extra, cap))
+                    renderer.output.flush()
+                except Exception:
+                    pass
+            return orig(leave_alternate_screen=leave_alternate_screen)
+
+        renderer.erase = erase
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--history", default="", help="历史文件路径(空=不持久)")
@@ -596,16 +825,35 @@ def main() -> int:
             event.app.output.bell()
 
     try:
-        tty = open("/dev/tty", "w")
+        # 显式 utf-8:`LC_ALL=C` 下 open() 默认 ASCII,新输入框的 `❯`/`─`
+        # 会在收尾补横线时抛 UnicodeEncodeError(真终端与 tty 闸门都会踩)。
+        tty = open("/dev/tty", "w", encoding="utf-8", errors="replace")
     except OSError:
         return 2
 
     def _continuation(width, line_number, is_soft_wrap):
-        """续行提示符:硬换行的续行加灰色 │ 前缀(与首行一致);
-        软折行不加(与旧 read -e 的终端自然折行一致)"""
+        """续行提示符:硬换行的续行缩进两格(对齐 `❯ ` 后面的正文);
+        软折行不加(与旧 read -e 的终端自然折行一致)。"""
         if is_soft_wrap:
             return []
-        return [("class:prompt", "│ ")]
+        return [("class:prompt", "  ")]
+
+    def _top():
+        """输入行上方:先占一行给横线(`_split_multiline_prompt` 会把最后一个
+        `\\n` 之前的内容画成"输入行上方的一行")。
+
+        ⚠ 这一行**不在这里取宽度**:宽度由 `_install_rules()` 换上的
+        `_width_control` 按本帧渲染宽度填 —— 详见那里的注释(残影根因)。
+        """
+        return [("class:border", "\n"), ("class:prompt", "❯ ")]
+
+    def _bottom():
+        """输入行下方:横线 + 快捷键提示(提示只在活跃输入时出现)。
+
+        提交后 prompt_toolkit 会把 bottom_toolbar 收掉、把光标停在输入行下一行;
+        main() 在返回前再补一条同样的横线,于是**历史里也留下完整的输入框**,
+        但不会每轮重复那句快捷键提示。横线宽度同样由 `_width_control` 给。"""
+        return [("class:border", ""), ("class:hint", INPUT_HINT)]
 
     # 渲染(提示符/输入行/重绘)全部经 output 写到 /dev/tty 上屏;
     # stdout 只承载结果文本,由 bash 的命令替换捕获
@@ -615,16 +863,53 @@ def main() -> int:
         history=history,
         key_bindings=kb,
         multiline=True,
-        message=[("class:prompt", "│ ")],
+        message=_top,
+        bottom_toolbar=_bottom,
+        # 占位文本必须**自己带样式类**:prompt_toolkit 没给 placeholder 任何默认样式类,
+        # 裸字符串会用终端默认前景色 —— 深色主题下就是白的,比输入框本体还亮。
+        placeholder=[("class:placeholder", "问点什么…(回车发送)")],
         prompt_continuation=_continuation,
-        style=Style.from_dict({"prompt": "#808080"}),
+        style=Style.from_dict({
+            # 上下横线 / `❯` / 占位 / 提示 **一律 dim**(= SGR 2),与思考内容
+            # (`render.GREY = "\033[2m"`)同一个灰。这是用户明确要求的"一屏只有助手正文
+            # 是亮的";也是 2026-12 把边框从蓝灰 `#5f6b7a` 改回来的原因 —— 自定义色
+            # 只能近似,永远和"思考内容那一档灰"对不上。
+            "prompt": "dim",
+            "border": "dim",
+            "placeholder": "dim",
+            "hint": "dim",
+            # 默认主题给 bottom-toolbar 套了 reverse(整条反色)与前景色;这里必须去掉,
+            # 否则我们画出来的横线会变成一条高亮色块,比输入框本身还抢眼。
+            "bottom-toolbar": "noreverse bg:default",
+            "bottom-toolbar.text": "noreverse bg:default",
+        }),
         output=_counting_output(create_output(stdout=tty)),
         input=_guarded_input(),
     )
 
+    _squeeze_box(session)
+    _install_rules(session)
+    _resize_guard(session)
+
+    def _close_box():
+        """提交/退出后补上底部横线。prompt_toolkit 收尾帧会收掉 bottom_toolbar,
+        光标停在输入行下一行;在这里写一条横线,历史里就留下一个完整的输入框。
+
+        **必须自己包 `\\033[2m`**:这条线不是 prompt_toolkit 画的,样式表管不到它;
+        裸写就是用终端默认前景色(深色主题下是白的),表现为"AI 回答完之后,框的下边
+        突然比上边亮" —— 用户实报的这个 bug,真因就在这里。SGR 2 与样式表里的
+        `dim` 是同一个灰(见 Vt100 的 `if dim: parts.append("2")`)。
+        """
+        try:
+            tty.write("\r\033[2m" + _rule_text(tty.fileno()) + "\033[0m\n")
+            tty.flush()
+        except OSError:
+            pass
+
     try:
         result = session.prompt(default=args.default)
     except (EOFError, KeyboardInterrupt):
+        _close_box()
         return 1
 
     if isinstance(result, tuple) and result and result[0] == "file-pick":
@@ -644,6 +929,7 @@ def main() -> int:
     for token, content in stored_pastes.items():
         result = result.replace(token, content)
     result = result.replace("​", "")
+    _close_box()
     sys.stdout.write(result)
     return 0
 
