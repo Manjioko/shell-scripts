@@ -130,6 +130,18 @@ GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('项目记忆:按 git 根隔离/索引超限报错不静默截断/拒收凭据/注入带边界声明/工具四动作/CLI')
 
+GATE_NAMES+=('MCP加删')
+GATE_CMDS+=('python3 tests/mcp_cmd_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('mcp add/remove:只插入一段(注释/缩进/键序/末尾空行照抄)/600/拒明文密钥/重名不覆盖/坏JSON不顺手修')
+
+GATE_NAMES+=('shell孤儿')
+GATE_CMDS+=('python3 tests/shell_orphan_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('shell/pty 孤儿:SIGTERM 主动 killpg(不靠 SIGHUP)/pgid 用后归零/超时三形态/SIGKILL 边界如实记录/nohup 不清')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。
@@ -160,6 +172,29 @@ if (( LIST_ONLY )); then
 fi
 
 LOG=$(mktemp -d "${TMPDIR:-/tmp}/gates.XXXXXX"); trap 'rm -rf "$LOG"' EXIT
+
+# --- 并发互斥:同一时间只允许一份 run_gates -------------------------------------
+# 为什么需要:跑两份会互相抢 pty 与信号状态,得到"看起来产品坏了、实际是测试打架"。
+# 但**更常见**的假红来源是另一件事(2026-11 发布前实测):
+#   用 `nohup … &` / 后台任务跑闸门时,bash 会把后台作业的 **SIGINT 设成 SIG_IGN**,
+#   这个处置会被所有子进程继承(POSIX:被忽略的信号跨 exec 保留)。于是:
+#     · `MCP启动` 的"不抢 SIGINT"断言看到 `getsignal(SIGINT) is SIG_IGN` ⇒ 红;
+#     · `MCP加删` 的 Ctrl+C/pty 用例收不到 SIGINT ⇒ 挂到超时(HUNG= True)。
+#   前台跑同样代码 100% 绿 —— **这不是产品 bug,是运行方式的问题**。
+#   所以:闸门必须**前台**跑(发布脚本 packaging/release.py 本来就是前台调用)。
+_LOCK="${TMPDIR:-/tmp}/.wchat_gates.lock"
+if ! mkdir "$_LOCK" 2>/dev/null; then
+    _held=$(cat "$_LOCK/pid" 2>/dev/null || echo '?')
+    if [ -n "$_held" ] && kill -0 "$_held" 2>/dev/null; then
+        echo "⚠ 已有一份 run_gates 在跑(pid ${_held}),并发跑会互相干扰(pty/信号)。" >&2
+        echo "  等它跑完再跑,或先 kill ${_held}。" >&2
+        exit 2
+    fi
+    rm -rf "$_LOCK"; mkdir "$_LOCK" 2>/dev/null || true
+fi
+echo $$ > "$_LOCK/pid" 2>/dev/null || true
+trap 'rm -rf "$LOG" "$_LOCK"' EXIT
+
 SRC_SHA=$(sha256sum wchat_ref 2>/dev/null | cut -c1-12); [[ -n "$SRC_SHA" ]] || SRC_SHA='<无sha256sum>'
 pass=0 fail=0 skip=0 rows=""
 printf '\n\033[1m══ 闸门对账(工作目录 %s · 源码 %s)══\033[0m\n' "$PWD" "$SRC_SHA"
@@ -199,6 +234,10 @@ for i in "${!GATE_NAMES[@]}"; do
         # (语料增长后回放就是这个样子:rc=1、结论行不再是"无新增漂移"),现象是"没跑完",
         # 实际是"该重固化基线"。两种处置完全不同,不能靠猜。
         tail -3 "$out" | sed 's/^/      │ /'
+        # 只留 3 行不够定位(2026-11 发布前:两道闸门偶发红,尾巴里全是 ok,看不到
+        # 到底是哪条断言的错)。把完整日志留一份到固定路径,便于事后查证。
+        _keep="/tmp/wchat_gate_fail_${name//\//_}.log"
+        cp "$out" "$_keep" 2>/dev/null && printf '      │ 完整日志: %s\n' "$_keep"
     fi
 done
 

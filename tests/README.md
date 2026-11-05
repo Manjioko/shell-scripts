@@ -633,3 +633,378 @@
 > **本轮实测基线**:`MCP启动` 21/21、`MCP通道` **133/133**(README 上文记的 130/130
 > 是历史值,未回改旧行)、`上下文体积` 26/26、全量 **run=66 pass=66 fail=0 skip=1**
 > (skip 为主套件)。闸门数 **65 → 66**。
+
+---
+
+## 惰性 MCP + 多实例按 server 分座 + `wchat mcp add`(本轮)
+
+> **改了什么**:`-mcp` 从"入口无条件同步探测"改成两条路 ——
+> ①**惰性**(默认,仅当这台机器此前成功用过 MCP)启动只登记工具、不碰网络,
+> 首次 `mcp_*` 调用才探测;②显式 `-mcp` 仍是当场探测,但探测**之前**先打一行
+> `正在连接 N 个 server`(旧版实测 8.9s 终端全静默,真实冷启动是分钟级,用户只会
+> 认为程序挂了)。会话内新增 `-mcp` / `-mcp=off` / `-no-mcp` / `-mcp add …`。
+>
+> **锁的语义变了**:整机独占 → **daemon 引用计数 + per-server 座位**。旧版第二个
+> wchat 直接 `MCP_ENABLE=0`、一个 server 都用不了(实测);根因是 `_atexit_stop()`
+> "谁拉起的 daemon 谁停",A 退出就把 B 用到一半的 MCP 掐死。现在账本里还有人就不停,
+> 有状态 server 按座位互斥,被占的那个会点名 **pid + 起始时间**,其余照常。
+>
+> **基线**:`MCP启动` **56/56**(21 → 56,新增 35 条:惰性 8 / 失败终态 7 / 重试封顶 1 /
+> 多实例 8 / 引用计数 1 / auto 与 -no-mcp 2 / 静默告警 2 / Ctrl+C 3 / 路由提示 3)、
+> 新闸门 `MCP加删` **58/58**(33 → 58:JSON 三种形状 + 6,密钥/坏JSON/空条目 +3,
+> 粘 JSON 不卡死 +5,Ctrl+C 安静退出 +6,子命令不装 MCP +6)。
+> 闸门数 **66 → 67**,全量 **run=72 pass=72 fail=0 skip=1**。
+>
+> **三条测试纪律(都是这轮真踩出来的,写在这里免得下一个人重踩)**:
+> ① 测"不许卡在交互提示"**必须用真 pty** —— DEVNULL 下 `isatty()` 为假,走的是
+> "非交互"分支,会得到假绿(变异验证时逮到:把拦截改成 `if False` 仍然 57/57 全过);
+> ② pty 测试**不要 exec 完整 `wchat` 入口** —— 入口先跑 bootstrap(可能建 venv),
+> 在闸门环境里偶发挂起,把整道闸门拖到 90s 超时、连结论行都没有;**直接调 `mcp_cmd.main`**;
+> ③ 子进程自带 `signal.alarm(20)` + 父进程 WNOHANG 轮询到点 kill —— "测试挂住"
+> 必须表现为**一条红断言**,不能是整道闸门超时。
+>
+> **一处必须记账的回退**:`ROUTE_HINT`("什么时候该用 mcp_call")原来由 `manifest()`
+> 注入 system。改成惰性后 `MCP_MANIFEST` 置空,这块**两端都落空** —— 模型手里有一把
+> `mcp_*` 工具却不知道什么时候该用,只能等用户提醒。已把它挪到 `mcp_call` 的
+> description(每轮重建,和目录同一条路),并用 3 条断言钉住(变异:删掉 → 2 红)。
+> 教训:把某段文本从 system 搬到工具描述时,要**逐段核对搬全**,不能只搬目录。
+
+### 追加修复(同日,用户实测反馈)
+
+> **`mcp_*` 登记必须在三处同时做**:执行层 `cli._run_tool`、schema 层 `tools.build`、
+> **横幅/校验层 `toolrun.known_tools`**。上一轮漏了第三处,结果是能跑却打
+> `⏺ mcp_tools · ⚠ 未知工具名,不执行`,模型据此去猜别的名字(用户记录里它连开个
+> 网页试了 5 次)。现在三处共用 `MCP_TOOL_NAMES`,并有 `register_known/unregister_known`
+> (-mcp=off 时撤干净)。
+>
+> **`wchat mcp add` 的 Ctrl+C**:`_ask` 原来裸抛 `KeyboardInterrupt`,Python 打出两段栈
+> ("During handling of the above exception…")。改成内部 `_Cancelled`,rc=130。
+>
+> **`[mcp] 按需模式` 横幅不再出现在子命令**:`install()` 在 `cli.main` 之前跑,以前对
+> `wchat mcp add` 也照常登记工具、打横幅、并可能写下 `.enabled`(用户在向导里按
+> Ctrl+C 取消,却被记成"要用 MCP")。`_skip_mcp()` 覆盖 mcp/skills/memory/model/
+> usage/apilog/--help。
+>
+> **MCP 子进程 cwd 必须固定(本轮根因)**:mcporter 把**调用方进程的 cwd** 算进 daemon
+> 的连接身份。wchat 每个会话都在用户项目目录启动,于是**每换一个目录就多一个
+> server 实例**。对有状态 server(chrome 抢同一个 `~/.cache/…/chrome-profile` 锁)
+> 来说,第一个赢、其余全报 `The browser is already running`,并在 15 分钟 idle
+> 窗口里堆积。实测对照(同 daemon 同清单):
+>
+> | 调用方 cwd | daemon 视图 | server 进程 | 结果 |
+> |---|---|---|---|
+> | projA | 1 | 1 | rc=0 |
+> | projB | 2 | 2 | rc=1 profile 冲突 |
+> | projC | 3 | 3 | rc=1 profile 冲突 |
+>
+> 修复:`mcp_bridge._run()` 给所有 mcporter 子进程传固定 `cwd=~/.ct/mcp/root`
+> (建不出来则降级为不传)。修复后 4 个不同目录 → 视图恒为 1(实测真实 daemon 上
+> 跨 3 个目录:4 → 4 → 4,不再增长)。
+>
+> **已排除的变量**(都做过对照,避免下次重复排查):`--root` 无效、显式 `--config`
+> 无效、`MCPORTER_DISABLE_CHROME_DEVTOOLS_RELAY` 无关、探测超时不会堆积、
+> "一次 profile 冲突后雪崩"也不成立(失败会复用那个坏连接,不新建)。
+>
+> **基线**:`MCP启动` 56 → **61**(新增 5 条:固定 cwd / 不随目录变 / 用 _mcp_root /
+> 目录自建 / 建不出来时降级)。`MCP加删` 46 → **61**。变异验证:去掉 `cwd` → 2 红。
+> daemon 侧顺带清理:视图「只增不减」(清理前 51 个陈旧视图),已 `daemon restart` 归零。
+
+### 孤儿进程治理(同日第二轮,用户问"daemon/server 会不会变孤儿")
+
+> **结论:会,而且原来完全没管。** 实测四条退出路径:
+>
+> | 退出方式 | daemon 是否留下 |
+> |---|---|
+> | 正常退出(sys.exit)→ atexit | 否 ✅ |
+> | `kill -TERM` / 关终端(SIGHUP) | **是** ❌ → 已修 |
+> | `kill -9` / 崩溃 / OOM | **是**(拦不住) |
+> | 惰性模式(首次探测才拉起 daemon) | **是** ❌ → 已修(见下) |
+>
+> **为什么"留下"就等于"永久留下"**:daemon 本该按 `daemonIdleTimeoutMs` 空闲退出,
+> 但上游 `host.js` 的 `canonicalUserConfiguration()` **只认它自己的 canonical 路径、
+> 忽略 `MCPORTER_CONFIG`**,所以从我们的清单里永远读不到这个字段 ——
+> `daemon status` 里 `idleTimeoutMs=None`(实测),`scheduleIdle()` 直接 return ⇒
+> **daemon 不会因为空闲而退出**。于是 kill -9 之后它会一直活着到机器重启。
+>
+> **修的三处**
+> 1. `_install_signal_handlers()`:接管 SIGTERM/SIGHUP → 走 `_atexit_stop()`
+>    (不碰 SIGINT,那是 REPL/流式输出的地盘)。
+> 2. 惰性模式补 `_OWN` 认领:以前只有显式 `-mcp` 才设 `_OWN`,惰性模式下
+>    `_atexit_stop()` 因 `_OWN=False` 直接 return ⇒ **daemon 永远不停**。
+> 3. `reap_orphan_daemon()`:启动时收割 kill -9 留下的孤儿。**三条保护缺一不可**
+>    —— ①`~/.ct/mcp/daemon.owner` 里的 pid 必须**就是**当前 daemon(pid 变了说明是
+>    别家/新实例);②`owners` 账本里没有活着的 wchat;③socket 真可连。
+>    否则 daemon socket 是全机一个,Claude Desktop 等别家也在用,乱杀会打断别人。
+>
+> **`MCPORTER_DAEMON_*` 环境变量没被尊重(顺带发现的真 bug)**:`SOCK_PATH` 原来写死
+> `~/.mcporter/daemon/user.sock`,于是 `sock_state()` 回答的是**另一个 daemon** 的状态
+> —— 而 `_atexit_stop()` 正是拿它当"要不要停 daemon"的闸门。已改成 `sock_path()`:
+> `MCPORTER_DAEMON_SOCKET` > `MCPORTER_DAEMON_DIR` > 默认。这个 bug 还让所有"隔离
+> 测试"变成了对着真实 daemon 跑(实测时才会发现 `sock_state` 恒为 0)。
+>
+> **server 子进程**:实测不会成孤儿 —— `daemon stop` 会清;即使 `kill -9` daemon,
+> server 的 stdio 管道断开后读到 EOF 自己退。
+>
+> **基线**:`MCP启动` 61 → **74**(+4 段共 13 条:sock_path 4 / 信号 3 / 收割保护 5 /
+> 清理幂等 1)。变异验证 3/3:去掉信号接管 → 2 红;sock_path 忽略环境变量 → 1 红;
+> 去掉收割 busy 保护 → 2 红。
+
+### shell/pty 孤儿治理(同日第三轮,顺着"孤儿"这条线查 shell 侧)
+
+> **先说方法教训**:第一版探针用注释 `# TAG` 标记命令,`ps` 只匹配到**我自己**的
+> Python 进程(`-c` 脚本里含 TAG),真正的 `sleep`/`nohup` 命令行里没有 TAG ——
+> 七种场景**全部假绿**。第二版改成"每个场景用唯一的 sleep 秒数(701..715)精确匹配
+> 进程命令行"才看到真相。**测孤儿必须让被观测进程自己的 argv 带上可识别特征。**
+>
+> **实测九种边景(修复前)**
+>
+> | 场景 | 结果 |
+> |---|---|
+> | wchat 被 SIGTERM / SIGKILL,前台命令普通 | 干净 ✅(pty master 关闭 → 内核发 SIGHUP)|
+> | wchat 被杀 + 命令 `trap '' HUP` | **残留 2 个**(bash + sleep,ppid=1)❌ |
+> | 超时:单进程 / 管道 / `trap '' TERM` | 干净 ✅(`killpg` SIGKILL)|
+> | 超时 + 命令内部 `os.setsid()` | **残留**(不在同一进程组)❌ |
+> | 命令内部 `nohup … &` | **残留**(显式脱离)|
+> | `run_in_background` | 留下(设计如此,输出里有 PID + 日志路径)|
+> | Ctrl+C 一次 / 两次 | 干净 ✅ |
+>
+> **关键发现**:wchat 被杀时,前台命令的清理**只**依赖"pty master 关闭 →
+> 内核给前台进程组发 SIGHUP"这一个机制 —— 没有任何代码主动 killpg。
+> 命令屏蔽 HUP 就整组活下来。而用户 `kill` 掉 wchat 的语义是"我要退出",不是
+> "让这条命令继续跑"。
+>
+> **修了两处**
+> 1. `termpty._ACTIVE` + `kill_active_group()`:`pty_run` spawn 时登记前台进程组,
+>    `finally` 里归零(pgid 会被系统复用,留着会误杀下一条命令)。
+> 2. `install_signal_cleanup(extra=…)`:跑命令前装 SIGTERM/SIGHUP 处理器 →
+>    主动 `killpg(SIGKILL)`。`extra` 用来串 MCP 的 daemon 收尾 —— **两套 handler
+>    不许互相覆盖**(MCP 的 `_on_term` 若不带前台清理,谁后装谁生效,前台命令就没人管)。
+>    MCP 的 `_on_term` 也补了 `kill_active_group()`。
+>
+> **明确不修的三条边界**(写进闸门当预期行为,免得以后被"顺手统一清理"):
+> · **SIGKILL wchat** —— 拦不住,只能靠 SIGHUP;命令 `trap '' HUP` 仍会残留。内核边界。
+> · **命令内部 `nohup` / `setsid`** —— 显式要求脱离,杀掉违背用户/模型意图。
+> · **`run_in_background`** —— 官方后台语义,保留,输出里已给 PID、日志、停止命令。
+>
+> **基线**:新增闸门 `shell孤儿` **15/15**。变异验证 2/2:把 `kill_active_group`
+> 改成空操作 → 1 红(实测残留 `bash -c trap '' HUP TERM; sleep 901` + `sleep 901`);
+> 去掉 pgid 归零 → 1 红(第一版漏了这条,补测试后才杀掉)。
+
+### 用户复测反馈的两条(同日第四轮)
+
+> **1) 启动横幅**:`./wchat` 每次启动都刷 `[mcp] 按需模式:…`,用户判定为噪音。
+> 已去掉。状态仍可查(`wchat mcp` / `-md`),MCP 真出错时的告警保留(那些只在
+> 出问题时出现)。
+>
+> **2) chrome 仍然报 `The browser is already running for …/chrome-profile`** ——
+> 这一条挖出了三层因果,前两层上一轮已知,第三层是新的:
+>
+> | 层 | 事实 | 状态 |
+> |---|---|---|
+> | ① | mcporter 把**调用方 cwd** 算进连接身份,每换项目目录多一条连接 | 已修(固定 cwd)|
+> | ② | **chrome 类连接的 `idleTimeoutMs` 恒为 `undefined`** —— 上游 `connection-identity.js` 写的是 `!chrome && … ? … : undefined`,所以 broker **永不回收**它们 | 上游行为,改不了 |
+> | ③ | 于是历史脏连接**永久堆积**:daemon 里 11 条连接 / 4 个 server、8 个 chrome 实例,其中一条占住 profile 锁,其余全废 | 新增自愈 |
+>
+> **实测对比**(同一台机器):
+>
+> | | daemon 视图 | connected | chrome 实例 | 调用结果 |
+> |---|---|---|---|---|
+> | 脏 daemon | 24 | 11 | 8 | `The browser is already running` |
+> | 干净 daemon | 4 | 4 | 1 | 连续 3 次 `list_pages` 全成功 |
+>
+> **`_daemon_hygiene()`**:启动时若 `connected > 配置 server 数`,按保护条件处理 ——
+> ①有归属标记且 pid 匹配 + 无别的 wchat → **自动 restart**(实测 7 条脏连接 → 新 daemon 0 条);
+> ②无标记(daemon 早就存在/别家程序拉起)→ **只提示 + 给命令**,不擅自重启
+> (socket 全机一个,Claude Desktop 也在用);③有别的 wchat → 连提示都不打。
+>
+> 注意这一层是**兜底不是根治**:根治靠 ①,而 ① 只对"以后新增的连接"生效;
+> 已经堆在 daemon 里的必须清一次。
+>
+> **基线**:`shell孤儿` 15 → **23**(+8:横幅 1、hygiene 保护 6、无标记提示 1)。
+> 变异验证:去掉 busy 保护 → 1 红;把横幅加回去 → 1 红。
+
+### 用户第二次复测(同日第五轮):座位机制是错的 + 冲突要能自愈
+
+> 用户给了一张活动监视器截图(17 个 `chrome-devtools-mcp` 进程)和一段历史记录
+> (`.ct/history/Chrome_MCP_打开_GitHub_仓库受阻排查.json`)。历史记录暴露了关键时序:
+>
+> ```
+> mcp_call new_page        → 成功(返回了页面标题)
+> mcp_call take_snapshot   → The browser is already running for …/chrome-profile
+> mcp_call list_pages      → 同上
+> ...后续全部同上
+> ```
+>
+> **`new_page` 成功、其余全失败**说明 daemon 里有**多条** chrome 连接,只有一条拥有
+> 浏览器。逐条查下来是两个我自己的问题:
+>
+> **① 座位机制是错的抽象(已整个移除)**
+> 它假定"两个 wchat 会话会抢同一个 server",但 daemon 是**全机共享**的 ——
+> 几条会话调 chrome 都命中 daemon 里**同一条**连接,座位挡在 wchat 这一层,
+> 挡不住真并发,只是假保护。代价却是硬的:第二个会话被**完全拒绝**
+> ("chrome 正被另一个 wchat 会话占用")。用户上一轮抱怨"开第二个 wchat 用不了 MCP",
+> 我这轮把"整机失能"改成"按 server 失能",形状没变,只是范围小了。
+> 更糟:座位文件 `kill -9` 后残留,pid 会被系统复用 ⇒ `_alive()` 误判 ⇒ **永久锁死**,
+> 只能手动删 `~/.ct/mcp/seats/`。
+> 现在 `claim_server()` 保留接口但永远放行,`_cleanup_legacy_seats()` 清历史文件。
+>
+> **② profile 冲突要能自愈(新增)**
+> `_is_profile_conflict()` 认这个错,`_heal_profile_conflict()` 在**真出错时**
+> 重启 daemon 并重探、重试本次调用(daemon 共享,不能因为预防就重启)。
+> 不能自愈时 `_profile_conflict_hint()` 给一条人话说明,而不是把原始报错甩给模型。
+>
+> **实测(脏 daemon 8 条连接 / 4 个 server)**
+>
+> ```
+> [mcp] 检测到重复的 chrome 连接(8 条 / 4 个 server),已重建 MCP daemon 并重试本次调用。
+> 会话A #1 → 视图=(4,4) | ## Pages 1: about:blank [selected]
+> 会话A #2 → 视图=(4,4) | ## Pages 1: about:blank [selected]
+> ⇒ 视图 4/4、chrome 进程 1 个、两次调用都成功
+> ```
+>
+> 而修之前同样的场景(历史记录里的),`take_snapshot` / `list_pages` / `connect` 全失败。
+>
+> **基线**:`MCP启动` 74 → **72**(座位断言删 3 条、改写 1 条:拒绝→放行);
+> `shell孤儿` 23 → **31**(+8:座位移除 2、冲突识别 3、自愈 3)。
+> 变异验证:不再拒绝那条已由 `claim_server` 永远放行钉住。
+>
+> **变异验证 4/4 可杀**(每条都真跑过,还原后复跑绿):
+> ① 失败不再终态(每次调用重探)→ `PROBES= 4`,`-2` 红,这正是"无限重启"的形状;
+> ② 探测时就占座 → "探测完不占任何座位"红(第一版真犯过:第一个会话启动就把全部
+> server 预定,第二个又整机失能);
+> ③ 惰性启动即探测 → "惰性启动当场不探测"红;
+> ④ 探测成功不撤 busy → 被状态机断言逮到。
+>
+> **一处刻意的取舍**:`auto` 档**不进入**惰性(与 `--allow-write` 白名单"启动时一次批好、
+> 模型不能半路自己加"同一条纪律)。无人值守时让模型自行拉起外部能力并把内容发到 API 端,
+> 是能力扩张 + 无人在场两个风险叠在一起。所以要 MCP 的 auto 会话仍需显式 `-mcp`。
+>
+> **没改旧行**:`py_mcp_boot_test.py` 里 `DISPATCH= 错误:MCP 启动时未就绪` 那条随文案改成
+> `错误:MCP 本次会话连接失败` + 额外钉住"话里必须出现『不要再次调用』" —— 文案漂移,语义未变。
+---
+
+## 用户第三次复测:我引入了「MCP 无限重启」(第六轮,我的 bug)
+
+> 用户日志里连续出现:
+> ```
+> [mcp] 检测到重复的 chrome 连接(6 条 / 4 个 server),已重建 MCP daemon 并重试本次调用。
+> … (同一条又出现 3 次)
+> ```
+>
+> **根因:`_heal_profile_conflict()` 没有次数上限。** 当病因不是"daemon 里重复连接"、
+> 而是"某个 Chrome 一直占着 profile"时,每次调用都会:冲突 → 重启 daemon → 重探 →
+> 重试 → 又冲突 → 又重启。用户看到的就是"MCP 无限重启"。
+> 而重启 daemon **治不了**这种病:daemon 只杀自己的子进程,已脱离的 Chrome 照样活着。
+>
+> **修三处**
+> 1. **每会话最多自愈 1 次**(`_HEALED` / `_HEAL_MAX`),之后一律返回 False,
+>    并明确告诉模型「不要再重试」+ 给 `pkill -f chrome-devtools-mcp/chrome-profile`。
+> 2. **自愈后必须验证** `connected <= want`,不达标就判定失败(不许拿"重启过"当修好了)。
+> 3. **`_daemon_hygiene()` 撤掉自动重启**。"连接数 > server 数"**不是可靠信号** ——
+>    实测一台干净机器上 4 个 server 有 5 条连接(全正常、功能没问题)。
+>    现在只在 >2 倍时提示一句,任何情况下都不自己动手。真病因交给错误驱动。
+>
+> **验收(干净环境,就是用户那个 URL)**
+> ```
+> #1 new_page      → 超时 10s(页面其实开了)
+> #2 list_pages    → ## Pages … 2: GitHub - comeonzhj/Auto-Redbook-Skills … [selected]
+> #3 take_snapshot → ## Latest page snapshot uid=1_0 RootWebArea "GitHub - comeonzhj/…"
+> #4 take_snapshot → 同上
+> ```
+> `take_snapshot` 成功 —— 正是历史记录里失败的那一步。视图稳定 5、不再触发自愈。
+>
+> **基线**:`shell孤儿` **29/29**(hygiene 段改写 4 条、自愈段 7 条含"只重启 1 次")。
+> 变异验证:去掉次数上限 → 1 红;hygiene 恢复自动重启 → 3 红。
+
+---
+
+## MCP 重建:根治连接爆炸(第七轮,按用户要求重做)
+
+> 用户判定"实现方式有问题、产品设计有重大缺陷",要求先调查、允许重做,不要在旧结构上填砖头。
+>
+> ### 根因(实测,单一原因解释全部现象)
+>
+> **mcporter 把子进程的整套环境变量算进 daemon 的连接身份。** 同一 cwd、同一清单,
+> 只改一个环境变量,连接数就整套翻倍且永不回收:
+>
+> | 操作 | daemon 连接数 |
+> |---|---|
+> | `list --json` | 4 |
+> | `FOO=1 list --json` | 8 |
+> | `BAR=2 list --json` | 12 |
+> | `WCHAT_DEBUG=1 list --json` | 16 |
+>
+> 而 wchat 传的是 `dict(os.environ)`,并且**自己在会话里不断改它**
+> (`MCP_STATE`/`MCP_USABLE`/`MCP_GRANTED`/`MCP_ENABLE`/`WCHAT_LAST_*_TOKENS`…)。
+> 单会话实测:1 次调用 1 条 → 改 env 后 2 条 → 再改 3 条 → 再改 4 条。
+>
+> 五层因果:①身份含全环境 → ②wchat 透传且不断改 → ③chrome 类连接 `idleTimeoutMs`
+> 恒为 undefined(上游 `!chrome && … ? … : undefined`)⇒ **永不回收** → ④浏览器 profile
+> 是**全局独占锁** → ⑤daemon 可成不可见孤儿继续握着锁和浏览器。
+>
+> 所以 `navigate_page` 成功(它那条连接拥有浏览器)而 `take_snapshot` 失败
+> (新连接想起新浏览器 → 抢锁);而当时的"自愈"重启把已经打开的页面杀掉了 ——
+> **"快照显示空白页"不是 bug,是自愈把浏览器重启了。**
+>
+> ### 修法(A+B,只保留最小稳定态)
+>
+> **A. `mcp_bridge.child_env()`:最小稳定环境。** 只传 `PATH/HOME/TMPDIR/USER/LOGNAME/
+> SHELL/LANG/LANGUAGE/TERM/TZ` + `LC_*/MCPORTER_*/XDG_*`,再加上**清单里 `${VAR}` 实际
+> 引用到的变量**(动态解析,否则 `${GITHUB_TOKEN}` 会变成空串,症状是"连上了但全 401")。
+> 实测:env 怎么抖,连接数恒等于 server 数。
+>
+> **B. chrome 改走隔离 profile。** 模板与旧清单都加 `--isolated`。
+> **不能用 `--userDataDir`** —— mcporter 把 `--userDataDir/--user-data-dir/--channel/
+> --browserUrl/--executablePath/--wsEndpoint/…` 列为 `CONNECTION_VALUE_FLAGS`,带这些会被
+> 它的 chrome-owner 直接拒绝("only canonical auto-connect is supported",实测)。
+> `--isolated` 不在名单里,实测可用,且 Chrome 完全不碰全局 profile 锁。
+> 配套 `seed.migrate_chrome_profile()`:一次性给已装机的旧清单补上(`seed` 只补缺不覆盖,
+> 模板改了传不到老用户)。**文本级插入**,不重写整份文件 —— 否则 `"args": ["mcp-server-git"]`
+> 会被展开成多行,diff 从 1 行变成整份重排(本项目第二次踩这个坑)。
+>
+> ### 砍掉的机制(治症状,越治越糟)
+>
+> | 机制 | 为什么删 |
+> |---|---|
+> | 按 server 占座 | daemon 全机共享,座位挡不住真并发,只让第二个会话完全不能用;且 kill -9 后残留 + pid 复用 ⇒ 永久锁死 |
+> | `_daemon_hygiene`(连接数启发式 + 自动重启) | 4 server 也可能有 5 条正常连接(实测),误判;重启还会杀掉已开页面 |
+> | `_heal_profile_conflict`(出错后重启重试) | 没上限时变成"MCP 无限重启"(实测);根因既除,不需要任何运行期自愈 |
+>
+> `mcp_boot.py` **1174 → 947 行**。文件头写明"不要加回来"及理由,闸门钉住它们不许回来。
+>
+> ### 验收(6 次混合调用,env 全程抖动)
+> ```
+> #1 list_pages      → 连接=4/4 进程=1 | ## Pages 1: about:blank [selected]
+> #2 navigate_page   → 连接=4/4 进程=1 | Successfully navigated to https://github.com/comeonzhj/…
+> #3 take_snapshot   → 连接=4/4 进程=1 | ## Latest page snapshot … "GitHub - comeonzhj/…"
+> #4 evaluate_script → 连接=4/4 进程=1 | Script ran on page and returned: "GitHub - comeonzhj/…"
+> #5 take_snapshot   → 连接=4/4 进程=1 | ## Latest page snapshot …
+> #6 list_pages      → 连接=4/4 进程=1 | ## Pages 1: GitHub - comeonzhj/Auto-Redbook-Skills: …
+> 全局 profile 锁: 无
+> ```
+>
+> **基线**:`MCP启动` 72 → **80**(+8:最小环境 5、隔离 profile 3);
+> `shell孤儿` 29 → **25**(删掉已删机制的断言,改为"不许回来 6 + 生命周期治理保留 3")。
+> 变异验证 3/3:回到 `dict(os.environ)` → 2 红;模板去掉 `--isolated` → 1 红。
+
+---
+
+## 跑闸门的两个环境陷阱(2026-11 发布前踩到的假红)
+
+> **1. 不要用 `nohup … &` / 后台任务跑闸门。**
+> bash 会把**后台作业**的 SIGINT 设成 `SIG_IGN`,这个处置被所有子进程继承
+> (POSIX:被忽略的信号跨 exec 保留)。后果是两道闸门**假红**:
+> ```
+> MCP启动: FAIL 不抢 SIGINT        ← INT_UNTOUCHED= False(getsignal 是 SIG_IGN)
+> MCP加删: FAIL Ctrl+C 之后进程会退出 ← HUNG= True(收不到 SIGINT,挂到超时)
+> ```
+> 同样代码**前台跑 100% 绿**。要跑很久就把工具超时放宽,别转后台。
+> 判据真假不明的第一件事:先确认自己不是后台跑的。
+>
+> **2. 不要并发跑两份 `run_gates`。** 两份会互相抢 pty 与信号状态。
+> 已在 `run_gates.sh` 里加了 mkdir 锁,第二份会直接拒绝并打印持有的 pid。
+> 另外**跑的时候别编辑 `run_gates.sh` 或被测脚本**(bash 增量读文件,
+> 会得到 `line N: xxx: command not found` 之类看起来像判据坏掉的错)。
+>
+> **3. 失败时完整日志会留在 `/tmp/wchat_gate_fail_<名字>.log`。**
+> 以前只 tail 3 行,偶发红的时候尾巴里全是 `ok`,根本看不到是哪条断言的错。
