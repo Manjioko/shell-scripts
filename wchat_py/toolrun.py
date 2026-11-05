@@ -132,6 +132,11 @@ def _banner_text(name, args_json):
 
 _REQUIRED_CACHE = {}
 _KNOWN_CACHE = []
+# 运行期动态注册的工具名(MCP 的 mcp_tools/mcp_schema/mcp_call)。
+# 为什么不写进 tools_spec.json:那三个是否可用取决于 **运行时开关**(没启用 MCP 时
+# 它们确实不存在),而 tools_spec 是静态清单。写死进去会让"没开 MCP 却认识 mcp_*",
+# 于是模型瞎调 mcp_call 时得到的不是"没有这个工具",而是一句莫名其妙的失败。
+_KNOWN_EXTRA = []
 
 
 def _timeout_caps():
@@ -188,26 +193,52 @@ def _fmt_secs(v):
     return str(int(f)) if f == int(f) else ("%g" % f)
 
 
+def register_known(names):
+    """运行期登记额外可用的工具名(MCP 的 mcp_* 用)。
+
+    真事故(2026-11,用户实测):MCP 明明可用、`_dispatch` 也能跑,但**横幅**这一层
+    按 `known_tools()` 判"未知工具名",于是屏幕上打 `⏺ mcp_tools · ⚠ 未知工具名,不执行`,
+    模型看到就去猜别的名字,连开个网页都要试五次。
+    根因:登记 mcp_* 只改了 `cli._run_tool`(执行层)和 `tools.build`(schema 层),
+    漏掉了**第三处**——`toolrun` 的"模型编造名字"校验。三处必须同源。
+    """
+    for n in names or []:
+        if n and n not in _KNOWN_EXTRA:
+            _KNOWN_EXTRA.append(n)
+    return _KNOWN_EXTRA
+
+
+def unregister_known(names):
+    """撤掉运行期登记的名字(会话内关 MCP 时用)。返回撤掉后剩下的动态名。"""
+    for n in names or []:
+        while n in _KNOWN_EXTRA:
+            _KNOWN_EXTRA.remove(n)
+    return _KNOWN_EXTRA
+
+
 def known_tools():
-    """tools_spec.json 里声明的工具名集合(唯一真源,缓存)。
+    """可用工具名集合 = tools_spec.json 声明的 + 运行期登记的(缓存)。
 
     用途只有一个:**在分发前认出"模型编造的工具名"**。模型偶尔会发明
     `bash_placeholder` 这种名字,旧代码会一路走到兜底,回一句
     "工具 X 尚未迁移到 Python 入口(1d 进行中)" —— 既暗示这个工具存在过,
     又不告诉模型到底有哪些工具可用,于是它会拿另一个瞎编的名字再试一次。
     """
-    if _KNOWN_CACHE:
-        return _KNOWN_CACHE
-    try:
-        import json as _j
-        spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools_spec.json")
-        with open(spec_path, encoding="utf-8") as f:
-            for t in _j.load(f) or []:
-                fn = (t or {}).get("function") or {}
-                if fn.get("name"):
-                    _KNOWN_CACHE.append(fn["name"])
-    except Exception:
-        pass
+    if not _KNOWN_CACHE:
+        try:
+            import json as _j
+            spec_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools_spec.json")
+            with open(spec_path, encoding="utf-8") as f:
+                for t in _j.load(f) or []:
+                    fn = (t or {}).get("function") or {}
+                    if fn.get("name"):
+                        _KNOWN_CACHE.append(fn["name"])
+        except Exception:
+            pass
+    if _KNOWN_EXTRA:
+        # 不并进 _KNOWN_CACHE:_KNOWN_CACHE 的语义是"静态清单",混进动态项后
+        # 一旦运行期关掉 MCP(-mcp=off),这里就会继续认得 mcp_叫不存在的工具。
+        return _KNOWN_CACHE + [n for n in _KNOWN_EXTRA if n not in _KNOWN_CACHE]
     return _KNOWN_CACHE
 
 
@@ -731,7 +762,16 @@ def _run_tool(name, args_json):
                     % (_p.pid, _log, _log, _p.pid, _p.pid, _p.pid))
             _status("后台启动 PID %s · 日志 %s" % (_p.pid, _log))
             return _msg
-        from wchat_py.termpty import pty_run
+        from wchat_py.termpty import pty_run, install_signal_cleanup
+        # 跑命令前装上"被 kill 也要收掉前台进程组"的处理器(幂等)。
+        # 为什么必须在这里装而不是启动时装:它的唯一职责是防前台命令变孤儿,
+        # 没有前台命令时改变进程退出语义没有好处。MCP 的清理作为 extra 串进来,
+        # 避免两套 handler 互相覆盖(谁后装谁生效)。
+        try:
+            from wchat_py import mcp_boot as _mbc
+            install_signal_cleanup(extra=_mbc._atexit_stop)
+        except Exception:
+            install_signal_cleanup()
         # 单命令时长:**模型可自主指定**(`timeout` 参数),这是用户明确要的
         # "给 AI 自己控制上限的权力" —— 构建/跑全套测试/装依赖常常超过 120s,
         # 固定上限等于逼它把工作拆成做不到的碎片,或者干脆失败。

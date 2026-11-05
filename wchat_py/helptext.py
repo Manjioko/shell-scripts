@@ -37,6 +37,10 @@ def help_lines():
         "  --allow 路径 / --allow-write 路径  越界只读/可写白名单(可多次,配合 -auto)",
         "  --allow-install [包名,逗号]  允许 auto 安装这些包(配额 AUTO_MAX_INSTALLS,默认 5);不带包名 = 全开并警告。换源一律拒",
         "  -mcp [服务器,逗号]  启用 MCP 外部能力(mcp_tools/mcp_schema/mcp_call 三条通道)",
+        "         不带 -mcp 时:**按需模式**(仅当这台机器此前成功用过 MCP)。工具已登记但不连接,",
+        "         首次真正用到时才探测 —— 启动不再等它。想立刻就绪就带 -mcp(启动时当场连接并摊开暴露面)。",
+        "         会话内也可用: -mcp 立刻连接 | -mcp=off 本次关闭 | -no-mcp 启动即关闭",
+        "         多个 wchat 并存时按 server 分座:被别的会话占着的那个会明说是哪个 pid,其余照常",
         "         清单来自 %s;**必须在该文件里写 \"imports\": []**,否则会带进" % mcp_cfg,
         "         Codex/VS Code 等其它程序声明的 server(wchat 会主动报出并排除,但别依赖这个)",
         "         ⚠ 这是**能力开关,不是安全边界**:不带 -mcp 只表示我们不提供这三条通道,",
@@ -68,6 +72,8 @@ def help_lines():
         "  -cl   清屏(保留对话历史)",
         "  -stp  切换到 pro 模型",
         "  -auto[=read|sandbox|full]  会话中途开启/切换 auto 档位(需重新签字)",
+        "  -mcp  立刻连接 MCP server(按需模式下平时不连接,敲它才连;失败会说原因与恢复命令)",
+        "  -mcp=off  本次会话关闭 MCP(mcp_* 工具从模型视野移除);-mcp=git,figma 只启用点名的",
         "  -noauto  关闭 auto,恢复逐次人工确认",
         "  -stt  开启思考模式",
         "  -stf  恢复默认(flash 模型,关闭思考)",
@@ -89,4 +95,3 @@ def help_lines():
         "  - Ctrl+C 清空当前行,Ctrl+R 整段清空本轮输入",
     ]
     return out
-

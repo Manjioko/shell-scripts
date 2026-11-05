@@ -14,6 +14,9 @@ _EXACT = {
     "-skill": "skill_save", "-u": "usage", "-h": "help", "-n": "new_session",
     "-cl": "clear", "-stp": "model_pro", "-stt": "thinking_on", "-stf": "model_flash",
     "-noauto": "auto_off", "-fs": "save_history", "-md": "model_status",
+    # MCP 会话内开关。`-mcp` 与命令行 `-mcp` 走**同一条** enable_now():
+    # 两套实现必然漂移,而"启动时能连上、中途敲同一条命令连不上"是最难查的那种漂移。
+    "-mcp=off": "mcp_off", "-no-mcp": "mcp_off", "-mcp=on": "mcp_on",
 }
 
 
@@ -21,6 +24,15 @@ def classify(line):
     s = line or ""
     if s in _EXACT:
         return _EXACT[s], ""
+    if s == "-mcp":
+        return "mcp_on", ""
+    if s.startswith("-mcp add") or s.startswith("-mcp remove"):
+        # 会话内加/删 server:直接转给 mcp_cmd(cli 子命令与它共用一份实现)。
+        # 必须先于 startswith("-mcp=") 判:否则 "-mcp add …" 会被当正文发给模型。
+        return "mcp_edit", s[len("-mcp "):]
+    if s.startswith("-mcp="):
+        # -mcp=off 已在 _EXACT 里;其余按"只启用这些 server"处理(-mcp=git,figma)
+        return "mcp_on", s[len("-mcp="):]
     if s == "-auto":
         return "auto_on", ""
     if s.startswith("-auto="):

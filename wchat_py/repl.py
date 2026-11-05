@@ -328,6 +328,30 @@ def _default_meta(action, arg, session=None):
             auto_off(s)
             inp_msg("✅ 已关闭 auto,恢复逐次人工确认")
         return True
+    if action == "mcp_on":
+        from wchat_py.cli import inp_msg
+        from wchat_py import mcp_boot as _mb
+        ok, msg = _mb.enable_now(arg or "", surface=False)
+        inp_msg(("✅ " if ok else "⚠ ") + msg)
+        if not ok:
+            inp_msg("  mcp_* 工具本次会话不再提供;按上面那行恢复命令预热后重开会话。")
+        return True
+    if action == "mcp_off":
+        from wchat_py.cli import inp_msg
+        from wchat_py import mcp_boot as _mb
+        _mb.turn_off()
+        inp_msg("✅ 已关闭 MCP(mcp_* 工具已从模型视野移除;重开会话可恢复)")
+        return True
+    if action == "mcp_edit":
+        from wchat_py.cli import inp_msg
+        from wchat_py import mcp_cmd
+        # 参数原样转给 mcp_cmd:会话内 "-mcp add foo --command npx" 与
+        # 命令行 "wchat mcp add foo --command npx" 是**同一份**实现。
+        rc = mcp_cmd.main(arg.split())
+        if rc == 0:
+            inp_msg("提示:清单变了,但当前会话的 MCP 连接还是旧的;"
+                    "敲 -mcp 重新连接,或重开会话。")
+        return True
     if action == "image":
         from wchat_py.cli import inp_msg
         from wchat_py.session import Session, add_image

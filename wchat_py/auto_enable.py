@@ -68,8 +68,15 @@ def enable(tier):
         mcp = "已启用(%s 可用)" % (os.environ.get("MCP_USABLE") or "?")
     elif _mcp_st == "degraded":
         mcp = "已启用 · 降级(%s 可用,其余原因见启动提示)" % (os.environ.get("MCP_USABLE") or "?")
+    elif _mcp_st == "lazy":
+        # 惰性:工具已登记,但**没探测**。不能写"已启用"(没连上任何东西),
+        # 也不能写"未启用"(工具确实在,模型看得见)。
+        mcp = ("按需(首次调用 mcp_* 时才连接,不占启动时间;"
+               "本会话未探测,可用性未知)")
     elif os.environ.get("MCP_REQUESTED") == "1":
         mcp = "请求了 -mcp 但**本次不可用**(见上方告警;未注册 mcp_* 工具)"
+    elif os.environ.get("MCP_DISABLE") == "1":
+        mcp = "已按 -no-mcp 关闭(不注册 mcp_* 通道)"
     else:
         mcp = ("未启用(不带 -mcp 时不注册 mcp_* 通道;模型仍可经 shell 自行调用,见 -h)")
 
