@@ -14,7 +14,8 @@
                 "chrome-devtools-mcp@1.10.1",
                 "--performanceCrux=false",
                 "--usageStatistics=false",
-                "--redactNetworkHeaders"
+                "--redactNetworkHeaders",
+                "--isolated"
             ],
             "description": "浏览器(全量+安全开关)",
             "lifecycle": {
@@ -24,4 +25,3 @@
         }
     }
 }
-

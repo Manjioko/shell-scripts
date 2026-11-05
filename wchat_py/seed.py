@@ -14,6 +14,7 @@
 """
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -169,6 +170,149 @@ def mcp_dest():
     return os.environ.get("MCP_CONFIG") or os.path.join(_ct_home(), "mcporter.json")
 
 
+def migrate_chrome_profile():
+    """给清单里**已有的** chrome 条目补上 `--isolated`。
+
+    为什么需要一次性迁移(2026-11):
+      chrome-devtools-mcp 默认用 `~/.cache/chrome-devtools-mcp/chrome-profile`,
+      那是**全机独占锁**。任何别的程序(Claude Desktop、残留 daemon、用户自己开的
+      chrome-devtools-mcp)抢到它,wchat 这边就全体报
+      `The browser is already running for …/chrome-profile`,而且**重启 daemon 也治不好**
+      (锁在别的进程手里)。
+
+      为什么用 `--isolated` 而不是 `--userDataDir`:mcporter 把
+      `--userDataDir/--user-data-dir/--channel/--browserUrl/…` 列为**连接选择标志**
+      (`CONNECTION_VALUE_FLAGS`),带这些的标志会被它的 chrome-owner 直接拒绝
+      ("only canonical auto-connect is supported",实测)。`--isolated` 不在该名单里,
+      实测可用,且 Chrome 用临时 profile、完全不碰全局锁。
+
+    `seed` 的纪律是"只补缺、不覆盖",所以模板改了传不到已装机的用户 —— 这条迁移
+    只做一件极窄的事:**在 chrome 的 args 数组里增量加一项**,别的字节一个都不动。
+    已经是 `--userDataDir=…` / `--user-data-dir=…` / `--isolated` 的跳过(用户选过,尊重)。
+
+    ⚠ 必须**文本级**插入,不能用 json.dump 重写:实测重写会把
+    `"args": ["mcp-server-git"]` 这种紧凑数组展开成多行,diff 从"1 行"变成整份重排
+    (本项目在 tools_spec.json 上吃过一模一样的亏)。
+
+    返回 (做了吗, 说明)。
+    """
+    dest = mcp_dest()
+    if not os.path.isfile(dest):
+        return False, "清单不存在"
+    try:
+        with open(dest, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        data = json.loads(text)
+    except (OSError, ValueError) as e:
+        return False, "清单读不了: %s" % e
+    servers = data.get("mcpServers") or {}
+    if not isinstance(servers, dict):
+        return False, "mcpServers 结构异常"
+
+    targets = []
+    for name, entry in servers.items():
+        if not isinstance(entry, dict):
+            continue
+        args = entry.get("args")
+        if not isinstance(args, list):
+            continue
+        blob = " ".join(str(x) for x in [name, entry.get("command") or ""] + list(args))
+        if "chrome-devtools-mcp" not in blob and "chrome_devtools_mcp" not in blob:
+            continue
+        if any(str(a).startswith("--userDataDir") or str(a).startswith("--user-data-dir")
+               or str(a) == "--isolated" for a in args):
+            continue
+        targets.append(name)
+    if not targets:
+        return False, "无需迁移"
+
+    new_text = text
+    for name in targets:
+        new_text = _insert_args_item(new_text, name,
+                                     "--isolated")
+        if new_text is None:
+            return False, "定位不到 %s 的 args(清单格式特殊,未改动)" % name
+    try:
+        shutil.copyfile(dest, dest + ".bak")
+        try:
+            os.chmod(dest + ".bak", 0o600)
+        except OSError:
+            pass
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, dest)
+    except OSError as e:
+        return False, "写入失败: %s" % e
+    return True, "已给 %s 补上独立 profile" % ", ".join(targets)
+
+
+def _insert_args_item(text, server_name, item):
+    """在 `"<server_name>": { ... "args": [ ... ] ... }` 的数组末尾插入一项。
+
+    纯文本操作,保留原有缩进与紧凑写法。定位不到返回 None(调用方不改文件)。
+    """
+    # 1) 找到该 server 的条目起点
+    m = re.search(r'("\s*%s"\s*:\s*\{)' % re.escape(server_name), text)
+    if not m:
+        return None
+    start = m.end()
+    # 2) 从条目起点向后找 "args" 与其后的 [ ... ]
+    am = re.search(r'("args"\s*:\s*\[)', text[start:])
+    if not am:
+        return None
+    arr_open = start + am.end()
+    depth = 1
+    i = arr_open
+    while i < len(text) and depth:
+        if text[i] == "[":
+            depth += 1
+        elif text[i] == "]":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if depth:
+        return None
+    close = i                                  # 指向收尾的 ']'
+    inner = text[arr_open:close]
+    quoted = json.dumps(item)                  # 带引号、按 JSON 转义
+    if "\n" not in inner:
+        # 单行数组:["a", "b"] 或 [] 或 [ ]
+        stripped = inner.strip()
+        if not stripped:
+            new_inner = " %s " % quoted
+            lead = " " if not inner.startswith((" ", "") ) else inner[:1]
+            return text[:arr_open] + (" " + quoted + " ") + text[close:]
+        # 保留原有空格风格,在最后一项后追加
+        sep = "" if stripped.endswith(",") else ","
+        body = inner.rstrip()
+        return text[:arr_open] + body + sep + " " + quoted + text[close:]
+    # 多行数组:在收尾 ']' 所在行之前插入一行,缩进跟随数组内已有元素
+    line_start = text.rfind("\n", 0, close) + 1
+    close_line = text[line_start:close]
+    tail_indent = re.match(r"^(\s*)", close_line).group(1)
+    # 数组内元素的缩进 = 上一行非空元素的缩进
+    prev_items = [ln for ln in inner.split("\n") if ln.strip()]
+    item_indent = tail_indent + "    "
+    if prev_items:
+        item_indent = re.match(r"^(\s*)", prev_items[-1]).group(1) or item_indent
+    # 上一项若没有逗号,补一个
+    if prev_items and not prev_items[-1].rstrip().endswith(","):
+        # 在上一项末尾补逗号
+        last = text.rfind(prev_items[-1], arr_open, close)
+        if last >= 0:
+            eol = text.find("\n", last)
+            text = text[:eol] + "," + text[eol:]
+            close += 1
+            line_start = text.rfind("\n", 0, close) + 1
+    return text[:line_start] + item_indent + quoted + "\n" + text[line_start:]
+
+
 def ensure_manifest():
     """首次启动时让 `~/.ct/mcporter.json` 就位。**只有一个入口、一条路径**。
 
@@ -256,19 +400,21 @@ def cmd_skills(argv):
 
 
 def cmd_mcp(argv):
-    """`wchat mcp` —— 清单在哪、有哪些 server、文件是哪来的。只读。
+    """`wchat mcp` —— 清单在哪、有哪些 server、文件是哪来的。默认只读。
 
     **没有 init 子命令**:清单在首次启动时自动就位(见 ensure_manifest)。
     多一个命令只会让人问"我该跑哪个",而答案永远是"不用跑"。
+
+    add/remove/help 委派给 mcp_cmd(那是**唯一**会往清单里写东西的路径),
+    与 `-mcp add` 共用一份实现。
     """
+    from wchat_py import mcp_cmd
+    rc = mcp_cmd.main(list(argv or []))
+    if rc is not None:
+        return rc
     sub = argv[0] if argv else "status"
     if sub in ("-h", "--help", "help"):
-        sys.stdout.write(
-            "用法: wchat mcp\n"
-            "  显示清单位置、有哪些 server、以及这份文件是模板生成的还是从老位置搬来的。\n"
-            "  清单在首次启动时自动就位,不需要手动初始化;\n"
-            "  想改 server 列表直接编辑该文件(注意 env 只写 ${VAR} 占位)。\n")
-        return 0
+        return _help()
     dest = mcp_dest()
     sys.stdout.write("清单路径: %s\n" % dest)
     if not os.path.isfile(dest):
