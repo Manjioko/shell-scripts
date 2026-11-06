@@ -350,10 +350,14 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
     return "".join(text), tcs, err
 
 
-def _shell_approved(cmd, strict=True):
+def _shell_approved(cmd, strict=True, reason=None):
     """shell 工具人工审批：auto=full 由硬墙裁决(此处放行)；显式 ASSUME_YES 放行；
     有 tty 弹确认；否则 fail-closed 拒（无头环境绝不静默执行）。
-    strict=True 必须逐字 yes；strict=False 接受 y/yes(普通确认,同 master)。"""
+    strict=True 必须逐字 yes；strict=False 接受 y/yes(普通确认,同 master)。
+
+    提示块走 `render.confirm_block`(与 `⏺ shell · …` 同一个块形状)。
+    **命令正文与处置建议都不上屏**:横幅已给过命令,建议是给模型的。
+    `cmd`/`reason` 仍保留在签名里供审计与将来使用,不用于屏幕显示。"""
     if os.environ.get("AUTO_MODE") == "full":
         return True
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
@@ -363,19 +367,8 @@ def _shell_approved(cmd, strict=True):
             return False
     except Exception:
         return False
-    sys.stdout.write("\033[2K \033[1;31m⚠ 需要人工确认\033[0m\n")
-    sys.stdout.write(" \033[2m   命令:%s\033[0m\n" % cmd)
-    if strict:
-        sys.stdout.write(" \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m")
-    else:
-        sys.stdout.write(" \033[1;31m是否执行?(y 或 yes,n/回车 = 拒绝): \033[0m")
-    sys.stdout.flush()
-    try:
-        ans = (sys.stdin.readline() or "").strip()
-    except (KeyboardInterrupt, EOFError):
-        ans = ""
-    sys.stdout.write("\n"); sys.stdout.flush()
-    return ans == "yes" if strict else (ans.lower() in ("y", "yes"))
+    from wchat_py.render import confirm_block
+    return confirm_block("需要人工确认", strict=strict)
 
 
 from wchat_py.prompts import AUTO_FINAL_SYS as _AFS, AUTH_HEAD as _AH, AUTH_TAIL as _AT

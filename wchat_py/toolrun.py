@@ -649,27 +649,15 @@ def _run_tool(name, args_json):
                 return ("[硬墙 %s] %s" % (_r, _m))
             # 非 auto:master 保留人的最终裁量权——升级为严格确认(逐字 yes),
             # 而不是代码层直接拒(否则与 master 行为不一致)。
-            # ⚠ 这一支**必须给命令正文**:人要靠它决定敢不敢逐字敲 yes。所谓"拒绝时
-            # 不显示内容"只适用于 auto 那种"程序直接拒、人不需要做决定"的形状。
-            sys.stdout.write("\033[2K \033[1;31m⛔ 高危命令(规则 %s),任何模式都不自动执行\033[0m\n" % _r)
-            _pfx = "    命令:"
-            sys.stdout.write(" %s" % dim_after(_pfx, cmd) + "\n")
-            if _m:
-                sys.stdout.write(" %s   原因:%s%s\n" % (GREY, dim(_m, 0), ZERO))
-            sys.stdout.write(" \033[1;31m确需执行?必须输入 yes(n/回车/Ctrl+C = 拒绝): \033[0m")
-            sys.stdout.flush()
-            try:
-                _ans = (sys.stdin.readline() or "").strip()
-            except KeyboardInterrupt:
-                _ans = ""
-            except Exception:
-                _ans = ""
-            sys.stdout.write("\n"); sys.stdout.flush()
-            if _ans != "yes":
+            # 屏幕上只给"哪条规则 + 命中什么";`_m` 里的处置建议是**给模型的**,
+            # 不上屏,改由下面的返回值带给模型。
+            from wchat_py.render import confirm_block as _confirm, mark_of as _mark
+            if not _confirm("高危命令(规则 %s)" % _r, mark=_mark(_m), strict=True):
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                               rule=_r, verdict="human_no", cmd=cmd)
-                return ("用户拒绝执行高危命令(规则 %s): %s\n请换方案,或把命令告知用户请他手动执行。"
-                        % (_r, cmd))
+                return ("用户拒绝执行高危命令(规则 %s): %s\n%s\n"
+                        "请换方案,或把命令告知用户请他手动执行。"
+                        % (_r, cmd, (_m or "").strip()))
             # 人已逐字 yes → 直接执行。**绝不能再走审批器**:
             # 下面若残留一个 N 判定,会紧接着再弹一次"是否执行?"把刚批的命令又问一遍
             # (实测:每次都变成"硬墙 yes" + "人工确认 y" 两道)。master 用 hd_approved=1 挡住。
@@ -722,14 +710,8 @@ def _run_tool(name, args_json):
                 _av2, _ars2 = _seam()._auth_think(cmd)
             if _av2 != "Y":
                 if os.environ.get("AUTO_MODE") == "read":
-                    sys.stdout.write("该命令需人工确认: %s [y/N] " % cmd); sys.stdout.flush()
-                    try:
-                        _ans = (sys.stdin.readline() or "").strip().lower()
-                    except KeyboardInterrupt:
-                        _ans = ""
-                    except Exception:
-                        _ans = ""
-                    if _ans not in ("y", "yes"):
+                    from wchat_py.render import confirm_block as _confirm2
+                    if not _confirm2("需要人工确认"):
                         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                                       decision="deny", reason="human-n", cmd=cmd)
                         return "用户未批准(转人工): %s" % cmd

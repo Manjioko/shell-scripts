@@ -363,6 +363,83 @@ def tool_banner(name, preview):
     return head + dim_after(head, preview) + "\n"
 
 
+# ── 交互确认块(2026-12 用户要求:与 shell 工具块统一)─────────────────────────
+# 旧形状是**另起一套**:`⚠ 需要人工确认` + `    命令:<整条命令>` + 红字提问。
+# 用户指出两处毛病:①和 `⏺ shell · …` / `└─ 完成 · …` 的块不是一个形状;
+# ②命令正文又摊一遍("上面的 shell 已经写过了"),把画面弄乱。
+# 再后来去掉了"原因"行 —— 用户原话:"原因描述明显是给 AI 模型看的,并不是给人看的"。
+# 确实:硬墙那段话术是"替代:把配置写进工作目录内的文件,或把内容打印出来交给用户
+# 自行放置",那是**给模型的指令**,不是人做决定需要的材料。人只需要知道
+# "哪条规则 + 命中了什么",这两样都在标题里。话术照旧通过工具返回值交给模型。
+# 现在统一成:
+#      ⏺ shell · 限时120秒 · cp /tmp/a.json ~/.ct/mcporter.json …
+#        └─ 高危命令(规则 H5),命中: cp
+#        └─ 是否执行?(必须逐字 yes,n/回车 = 拒绝):
+# 红色**只染标题词**;`└─`、命中、提问一律 GREY(与"思考"同色)。
+RED = "\033[1;31m"
+
+# 硬墙话术末尾自带 `(命中: cp)` / `(命中目标: /path)`。这里只取那个片段给人看,
+# 话术正文不上屏。`_MARK_RE` 仍然需要 —— 它是"命中"的唯一来源,不是"原因"。
+_MARK_RE = re.compile(r"\s*\(命中(?:目标)?:\s*(.*?)\)\s*$")
+
+
+def mark_of(text):
+    """从硬墙/拒绝话术里取出 `(命中: xxx)` 的 xxx;没有则返回空串。
+
+    屏幕只显示这个片段;话术正文(`text`)由调用方通过返回值交给模型。
+    """
+    m = _MARK_RE.search(str(text or ""))
+    return m.group(1).strip() if m else ""
+
+
+def confirm_block(title, mark="", strict=False, ask="是否执行?"):
+    """打印一条交互确认块并读入答案,返回是否批准。
+
+    五处调用(普通审批 / 硬墙升级 / read 档转人工 / 高危路径 / 工作目录外访问)
+    共用这一份 —— 文案散在各处手写,迟早出现"有的带 └─ 有的不带"。
+
+    `mark` 是"命中了什么"(规则片段 / 目标路径)。**没有"原因"参数**:
+    给人看的是"哪条规则 + 命中什么",处置建议是给模型的,走返回值。
+    路径类确认要把路径传进 `mark` —— 它没有上一行 `⏺` 横幅可参照,
+    不给出路径人就不知道该放行哪个文件。
+
+    `strict=True` 必须**逐字** `yes`(硬墙口径:输 y 不算);否则 `y`/`yes` 都算批准。
+    提问行如实反映这一点,不为了文案整齐把"必须逐字 yes"写成"y 或 yes"
+    —— 那会让人打了 y 才发现被拒。
+    """
+    mark = " ".join(str(mark or "").split())
+    head = "%s%s%s%s%s" % (GREY, STATUS_PREFIX, RED, title, ZERO)
+    if mark:
+        seg = ",命中: "
+        # 长路径(如 /Users/…/very/deep/f.txt)必须按实测宽度截,否则折行后
+        # `└─` 会被顶到第 0 列,看起来像从上一段输出里漏出来的。
+        avail = max(8, term_cols() - display_width(STATUS_PREFIX)
+                    - display_width(title) - display_width(seg) - 1)
+        if display_width(mark) > avail:
+            mark = _fit(mark, max(1, avail - 1)) + "…"
+        line = head + "%s%s%s%s" % (GREY, seg, mark, ZERO)
+    else:
+        line = head
+    sys.stdout.write("\033[2K" + line + "\n")
+
+    tail = ("(必须逐字 yes,n/回车 = 拒绝): " if strict
+            else "(y 或 yes,n/回车 = 拒绝): ")
+    # 提问文字灰,但**行末就复位**:否则用户敲的 yes 会继承灰色回显。
+    sys.stdout.write("%s%s%s%s%s" % (GREY, STATUS_PREFIX, ask, tail, ZERO))
+    sys.stdout.flush()
+    try:
+        ans = (sys.stdin.readline() or "").strip()
+    except (KeyboardInterrupt, EOFError):
+        # Ctrl+C / 关掉 stdin 一律当"拒绝",不能让它冒泡成 traceback
+        # (项目踩过:交互向导里 Ctrl+C 吐 traceback)。注意 KeyboardInterrupt
+        # 继承 BaseException,**不是** Exception,单写 `except Exception` 捕不到。
+        ans = ""
+    except Exception:
+        ans = ""
+    sys.stdout.write("\n"); sys.stdout.flush()
+    return ans == "yes" if strict else ans.lower() in ("y", "yes")
+
+
 def args_preview(args_json):
     """等价 bash 的 `jq -c '.'` + null→(参数为空) + >160 字符截断加 `…`。"""
     import json

@@ -142,19 +142,14 @@ def _path_guard(path, mode):
         if auto:
             _deny_status("P1")
             return "错误:%s被拒绝[硬墙 P1]:凭据/会话数据路径不可访问。这不是用户拒绝,是代码级红线,换方案继续,不要改写路径重试同一目标。" % _act
-        from wchat_py.render import dim_after as _dim_after
-        _head = "\033[2K \033[1;31m⛔ 高危路径\033[0m "
-        sys.stdout.write(_head + _dim_after(_head, path) + "\n\n")
-        sys.stdout.write(" \033[1;31m确需放行?必须输入 yes(n/回车 = 拒绝): \033[0m")
-        sys.stdout.flush()
-        try:
-            ans = (sys.stdin.readline() or "").strip()
-        except KeyboardInterrupt:
-            ans = ""
-        except Exception:
-            ans = ""
-        sys.stdout.write("\n"); sys.stdout.flush()
-        return None if ans == "yes" else "用户拒绝访问: %s" % path
+        # 提示块与 shell 工具块同一个形状(render.confirm_block)。
+        # 路径**必须留在提示里** —— 它不是 shell 命令,没有上一行横幅可参照,
+        # 去掉路径人就不知道该放行什么。所以路径进"命中"。
+        from wchat_py.render import confirm_block
+        if not confirm_block("高危路径(不可%s)" % _act, mark=path,
+                             strict=True, ask="是否放行?"):
+            return "用户拒绝访问: %s" % path
+        return None
     if auto:
         if mode == "r":
             return None
@@ -168,26 +163,16 @@ def _path_guard(path, mode):
         if _m == mode or (_m == "rw" and mode == "r"):
             if under(p, _base):
                 return None
-    from wchat_py.render import dim_after as _dim_after
-    _head = "\033[2K \033[1;31m⚠ AI 请求访问工作目录外文件\033[0m "
-    sys.stdout.write(_head + _dim_after(_head, path) + "\n\n")
-    sys.stdout.write(" \033[1;31m是否放行?(y 或 yes,n/回车 = 拒绝): \033[0m")
-    sys.stdout.flush()
-    try:
-        ans = (sys.stdin.readline() or "").strip().lower()
-    except KeyboardInterrupt:
-        ans = ""
-    except Exception:
-        ans = ""
-    sys.stdout.write("\n"); sys.stdout.flush()
-    if ans in ("y", "yes"):
-        # 记账要在**拿到许可之后**,而且记的是实际被问的那条路径(不是 key:
-        # 旧实现这里写的是未定义变量 `key`,NameError 一抛,授权永远记不上,
-        # 于是同一个目录每次访问都要再问人 —— 这就是"多次授权"的来源之一)。
-        _grant_path(p, "rw" if mode == "rw" else "r")
-        return None
-    from wchat_py.render import STATUS_PREFIX as _SP2, dim_after as _dim_after
-    sys.stdout.write("\033[2m" + _SP2 + _dim_after(_SP2, "⛔ 用户拒绝%s: %s" % (_act, path))
-                     + "\033[0m\n")
-    sys.stdout.flush()
-    return "用户拒绝访问工作目录外文件: %s" % path
+    from wchat_py.render import confirm_block
+    if not confirm_block("工作目录外%s" % _act, mark=path,
+                         strict=False, ask="是否放行?"):
+        from wchat_py.render import STATUS_PREFIX as _SP2, dim_after as _dim_after
+        sys.stdout.write("\033[2m" + _SP2 + _dim_after(_SP2, "⛔ 用户拒绝%s: %s" % (_act, path))
+                         + "\033[0m\n")
+        sys.stdout.flush()
+        return "用户拒绝访问工作目录外文件: %s" % path
+    # 记账要在**拿到许可之后**,而且记的是实际被问的那条路径(不是 key:
+    # 旧实现这里写的是未定义变量 `key`,NameError 一抛,授权永远记不上,
+    # 于是同一个目录每次访问都要再问人 —— 这就是"多次授权"的来源之一)。
+    _grant_path(p, "rw" if mode == "rw" else "r")
+    return None

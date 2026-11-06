@@ -387,5 +387,97 @@ try:
 finally:
     R3.term_cols = _oc
 
+print("=== 9. 交互确认块与 shell 工具块同形(2026-12 用户要求) ===")
+# 用户原话:旧的 `⚠ 需要人工确认` + `    命令:<整条命令>` 与 `⏺ shell · …` 不是一个形状。
+# 现在统一为 `   └─ <红标题>,命中: <原因>` + `   └─ 是否执行?(…): `,
+# 且**不再回显命令正文**(上面那行横幅已经给过)。
+import wchat_py.render as R4  # noqa: E402
+
+
+class _In:
+    def __init__(self, ans):
+        self.ans = ans
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self.ans + "\n"
+
+
+def _confirm_out(title, mark="", strict=True, ans="yes", ask="是否执行?"):
+    buf = _io.StringIO()
+    oi, oo = sys.stdin, sys.stdout
+    sys.stdin, sys.stdout = _In(ans), buf
+    try:
+        ok = R4.confirm_block(title, mark=mark, strict=strict, ask=ask)
+    finally:
+        sys.stdin, sys.stdout = oi, oo
+    return ok, buf.getvalue()
+
+
+_ok, _s = _confirm_out("高危命令(规则 H5)", mark="cp")
+_pl = [ANSI.sub("", x) for x in text_lines(_s)]
+ck("确认块 2 行:标题(含命中)+提问", len(_pl) == 2, repr(_pl))
+ck("确认块每行都用统一前缀 └─", all(x.startswith(R4.STATUS_PREFIX) for x in _pl), repr(_pl))
+ck("标题是红的(只染标题词)", "\x1b[1;31m高危命令(规则 H5)\x1b[0m" in _s, repr(_s)[:160])
+ck("命中片段挂在标题行", "命中: cp" in _pl[0], repr(_pl[0]))
+ck("确认块不再回显命令正文", "命令:" not in _s, repr(_s)[:200])
+ck("严格档如实写'必须逐字 yes'(不写成 y 或 yes)", "必须逐字 yes" in _s, repr(_pl[-1]))
+ck("严格档 y 不算批准", _confirm_out("t")[0] and
+   not _confirm_out("t", ans="y")[0], "")
+
+# 2026-12 用户第二次修:"原因描述明显是给 AI 模型看的,并不是给人看的"。
+# 硬墙话术(含"替代:把配置写进…")**一律不上屏**,只通过返回值交给模型。
+_LONG = ("写入/删除主目录下的配置文件或凭据目录被禁止(持久改变环境且不可回滚)。"
+         "替代:把配置写进工作目录内的文件,或把内容打印出来交给用户自行放置(命中: cp )")
+_ok, _s3 = _confirm_out("高危命令(规则 H5)", mark=R4.mark_of(_LONG))
+ck("mark_of 能从话术里取出命中片段", R4.mark_of(_LONG) == "cp", R4.mark_of(_LONG))
+ck("处置建议不上屏", "替代" not in _s3 and "不可回滚" not in _s3, repr(_s3)[:200])
+ck("长话术只留标题+命中+提问三行", len(text_lines(_s3)) == 2, repr(_pl))
+
+# 路径类确认:路径必须留住(没有上一行 ⏺ 横幅可参照),超长时按宽度截断。
+_ok4, _s4 = _confirm_out("高危路径(不可读)", mark="/Users/jwan/.ct/mcporter.json",
+                         ask="是否放行?")
+ck("路径确认保留路径", "/Users/jwan/.ct/mcporter.json" in _s4, repr(_s4)[:200])
+_oc2 = R4.term_cols
+try:
+    R4.term_cols = (lambda d=80: 80)
+    _ok5, _s5 = _confirm_out("高危路径(不可读)", mark="/very/long/path/" * 8 + "f.txt",
+                             ask="是否放行?")
+finally:
+    R4.term_cols = _oc2
+ck("超长路径不折行(否则 └─ 会被顶到第 0 列)",
+   all(display_width(x.rstrip("\r")) <= 80 for x in _s5.split("\n") if x.strip()),
+   repr([display_width(x.rstrip("\r")) for x in _s5.split("\n") if x.strip()]))
+
+_ok2, _s2 = _confirm_out("需要人工确认", strict=False)
+ck("普通档接受 y", _confirm_out("t", strict=False, ans="y")[0], "")
+ck("普通档提示写 y 或 yes", "y 或 yes" in _s2, repr(_s2)[:160])
+ck("普通档没有命中时不拼空',命中:'", "命中" not in _s2, repr(_s2)[:160])
+
+
+class _InKb:
+    """在 readline 时抛 KeyboardInterrupt(Ctrl+C)。"""
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        raise KeyboardInterrupt()
+
+
+_oi, _oo = sys.stdin, sys.stdout
+sys.stdin, sys.stdout = _InKb(), _io.StringIO()
+try:
+    _kb = R4.confirm_block("t", strict=True)
+    _kb_exc = None
+except BaseException as _e:          # noqa: BLE001  —— 这里就是要抓"有没有冒泡"
+    _kb, _kb_exc = None, _e
+finally:
+    sys.stdin, sys.stdout = _oi, _oo
+ck("Ctrl+C 在确认块里当拒绝,不吐 traceback", _kb is False and _kb_exc is None,
+   repr(_kb_exc))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

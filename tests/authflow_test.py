@@ -90,9 +90,13 @@ try:
 finally:
     hardwall.detail = _real_detail
 ck("硬墙 yes 后命令真的执行", "HDRUN" in out, repr(out[:120]))
-ck("硬墙 yes 只问一次(出现严格确认提示)", screen.count("确需执行?必须输入 yes") == 1,
+ck("硬墙 yes 只问一次(出现严格确认提示)", screen.count("必须逐字 yes") == 1,
    repr(screen[-200:]))
-ck("硬墙 yes 后**没有**第二道普通确认", "是否执行?" not in screen, repr(screen[-200:]))
+# 新样式里硬墙与普通确认共用"是否执行?"这句提问,只能靠括号里的口径区分:
+# 普通确认是 "(y 或 yes…)",硬墙是 "(必须逐字 yes…)"。
+ck("硬墙 yes 后**没有**第二道普通确认", "y 或 yes" not in screen, repr(screen[-200:]))
+# 2026-12 用户要求:命令正文由上一行横幅 `⏺ shell · …` 负责,确认块里不再摊一遍。
+ck("确认块不再回显命令正文", "命令:" not in screen, repr(screen[-200:]))
 ck("硬墙 yes 后不再调审批器", _calls["auth"] == 0, str(_calls["auth"]))
 
 # ---- 2) 硬墙不进会话缓存:同一条再来一次仍要问 ----
@@ -101,7 +105,7 @@ try:
     out2, screen2 = run("printf 'HDRUN2\\n'", [])
 finally:
     hardwall.detail = _real_detail
-ck("硬墙命令第二次仍需人确认(不缓存)", "确需执行?必须输入 yes" in screen2, repr(screen2[-160:]))
+ck("硬墙命令第二次仍需人确认(不缓存)", "必须逐字 yes" in screen2, repr(screen2[-160:]))
 ck("未确认则拒绝(回传里写明未执行)",
    out2.startswith("用户拒绝执行高危命令"), repr(out2[:60]))
 
@@ -110,7 +114,7 @@ _calls["auth"] = 0
 cmd = "printf 'ONE\\n'"
 out3, screen3 = run(cmd, ["y\n"])
 ck("普通命令人工批准后执行", "ONE" in out3, repr(out3[:80]))
-ck("首次批准时确实问了", "是否执行?" in screen3, repr(screen3[-160:]))
+ck("首次批准时确实问了", "y 或 yes" in screen3, repr(screen3[-160:]))
 _n_first = _calls["auth"]
 out4, screen4 = run(cmd, [])           # 没有可读输入:若再问就等于拒绝
 ck("同一命令第二次不再问人", "是否执行?" not in screen4, repr(screen4[-200:]))
