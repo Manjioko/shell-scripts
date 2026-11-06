@@ -153,15 +153,15 @@ ck("正文渲染非空", bool(body.strip()), repr(body)[:60])
 ck("正文不是整段灰(否则 A/B 全绿也没用)", not ANSI.sub("", body).strip() == "" and
    (GREY not in body or "\x1b[0m" in body), repr(body)[:120])
 
-print("=== 4. 硬墙拒绝:给理由、不给命令正文 ===")
+print("=== 4. 硬墙/终审拒绝的源码级约束(auto 拒绝的输出行为见第 10 节)===")
 import wchat_py.toolrun as TR  # noqa: E402
 
 SRC = open(os.path.join(REPO, "wchat_py", "toolrun.py"), encoding="utf-8").read()
 AUTODENY = SRC[SRC.index("if _r:"):SRC.index("# 非 auto:")]
-ck("auto 硬墙提示里出现的是理由变量 _m", "dim(_m" in AUTODENY, AUTODENY[:400])
-ck("auto 硬墙提示不再拼命令正文", "_one = (cmd or \"\")" not in AUTODENY
-   and "% (_r, _one)" not in AUTODENY, AUTODENY[:400])
-ck("硬墙拒绝文案仍是灰的", "GREY" in AUTODENY, AUTODENY[:400])
+ck("auto 硬墙拒绝走统一拒绝行(reject_line),不手写 ANSI",
+   "reject_line" in AUTODENY and "\\033[1;31m" not in AUTODENY, AUTODENY[:400])
+ck("auto 硬墙拒绝只传 mark,不传话术",
+   "mark_of" in AUTODENY and "dim(_m" not in AUTODENY, AUTODENY[:400])
 
 FINALDENY = SRC[SRC.index("elif _v == \"N\":"):SRC.index("else:\n                    # \"无判定\"")]
 ck("终审拒绝提示带理由 _rs", "_rs" in FINALDENY, FINALDENY[:300])
@@ -405,12 +405,14 @@ class _In:
         return self.ans + "\n"
 
 
-def _confirm_out(title, mark="", strict=True, ans="yes", ask="是否执行?"):
+def _confirm_out(title, mark="", strict=True, ans="yes", ask="是否执行?",
+                 default_yes=False, no_word="拒绝"):
     buf = _io.StringIO()
     oi, oo = sys.stdin, sys.stdout
     sys.stdin, sys.stdout = _In(ans), buf
     try:
-        ok = R4.confirm_block(title, mark=mark, strict=strict, ask=ask)
+        ok = R4.confirm_block(title, mark=mark, strict=strict, ask=ask,
+                              default_yes=default_yes, no_word=no_word)
     finally:
         sys.stdin, sys.stdout = oi, oo
     return ok, buf.getvalue()
@@ -478,6 +480,78 @@ finally:
     sys.stdin, sys.stdout = _oi, _oo
 ck("Ctrl+C 在确认块里当拒绝,不吐 traceback", _kb is False and _kb_exc is None,
    repr(_kb_exc))
+
+print("=== 10. auto 硬墙拒绝的输出行为(不扒源码,直接看字节)===")
+import tempfile as _tf  # noqa: E402
+import wchat_py.hardwall as HW  # noqa: E402
+
+_MSG10 = ("写入/删除主目录下的配置文件或凭据目录被禁止(持久改变环境且不可回滚)。"
+          "替代:把配置写进工作目录内的文件,或把内容打印出来交给用户自行放置(命中: cp )")
+_real_hd = HW.detail
+_buf10 = _io.StringIO()
+_o10, _i10 = sys.stdout, sys.stdin
+sys.stdout, sys.stdin = _buf10, _io.StringIO("")
+try:
+    with _Env(AUTO_MODE="full", AUTO_AUDIT_LOG=os.path.join(_tf.mkdtemp(), "a.log")):
+        HW.detail = lambda c, auto=False: ("H5", "", _MSG10)
+        try:
+            _ret10 = TR._run_tool("run_shell_command",
+                                  _json.dumps({"command": "cp /tmp/a ~/.ct/x"}))
+        finally:
+            HW.detail = _real_hd
+finally:
+    sys.stdout, sys.stdin = _o10, _i10
+_s10 = _buf10.getvalue()
+_pl10 = [ANSI.sub("", x) for x in text_lines(_s10)]
+ck("auto 拒绝给出规则号", any("H5" in x for x in _pl10), repr(_pl10))
+ck("auto 拒绝给出命中片段", any("命中: cp" in x for x in _pl10), repr(_pl10))
+ck("auto 拒绝不上屏处置话术(它给模型看)", "替代" not in _s10 and "不可回滚" not in _s10,
+   repr(_s10)[:300])
+ck("auto 拒绝不回显命令正文", "/tmp/a" not in _s10, repr(_s10)[:300])
+ck("auto 拒绝用统一前缀且是灰的", R3.STATUS_PREFIX in _s10 and GREY in _s10,
+   repr(_s10)[:200])
+ck("auto 拒绝仍把话术交给模型(替代建议没丢)", "替代" in _ret10, repr(_ret10)[:200])
+ck("auto 拒绝只有一行(不摊成两段)", len(_pl10) == 1, repr(_pl10))
+
+print("=== 11. 所有 yes/no 提问共用一种语法 ===")
+# 用户要求:提示文本/提示输入样式统一。以前屏幕上有五种写法:
+#   `[y/N]`、`[Y/n]`、`(y/N)`、`(y 或 yes,n/回车 = 取消)`、`(必须逐字 yes,…)`。
+# 现在只有三种口径,且都由 confirm_block 生成:
+_okA, _sA = _confirm_out("普通确认", strict=False)
+_okB, _sB = _confirm_out("严格确认", strict=True)
+_okC, _sC = _confirm_out("默认是确认", strict=False, default_yes=True)
+ck("普通口径写 'y 或 yes'", "y 或 yes" in _sA, repr(_sA))
+ck("严格口径写 '必须逐字 yes'", "必须逐字 yes" in _sB, repr(_sB))
+ck("默认是口径写 'n/回车 = 是'", "n/回车 = 是" in _sC, repr(_sC))
+ck("默认是口径下回车算批准",
+   _confirm_out("x", strict=False, default_yes=True, ans="")[0], "")
+ck("默认是口径下打 n 不算批准",
+   not _confirm_out("x", strict=False, default_yes=True, ans="n")[0], "")
+for _nm, _sx in (("普通", _sA), ("严格", _sB), ("默认是", _sC)):
+    ck("%s口径的提问行也用统一前缀" % _nm, R3.STATUS_PREFIX in _sx, repr(_sx))
+
+# 源码级兜底:这几个文件里不许再出现 `[y/N]` / `[Y/n]` / `(y/N)` 这类另起炉灶的写法。
+_LEGACY = re.compile(r"\[y/N\]|\[Y/n\]|\(y/N\)|是否保存该技能|退出前保存对话\?")
+for _f in ("cli.py", "repl.py", "mcp_boot.py", "mcp_cmd.py", "skillinstall.py",
+           "approve.py", "toolrun.py"):
+    _src = open(os.path.join(REPO, "wchat_py", _f), encoding="utf-8").read()
+    _hits = [x for x in _LEGACY.findall(_src)]
+    ck("%s 里没有遗留的 y/N 式提问" % _f, not _hits, str(_hits))
+
+# 提问动词必须贴切:默认的 `是否执行` 只配 shell 执行。别的动作(保存/授权/安装/
+# 写入/放行)若照抄默认值,屏幕上就是"退出前保存对话 … 是否执行?",读着像问错了。
+_VERBS = {
+    "cli.py": ('ask="是否保存"',),
+    "repl.py": ('ask="是否保存"',),
+    "mcp_boot.py": ('ask="是否授权"',),
+    "skillinstall.py": ('ask="是否继续"',),
+    "mcp_cmd.py": ('ask="是否添加"', 'ask="是否写入"'),
+    "approve.py": ('ask="是否放行"',),
+}
+for _f, _want in _VERBS.items():
+    _src = open(os.path.join(REPO, "wchat_py", _f), encoding="utf-8").read()
+    for _w in _want:
+        ck("%s 的提问动词贴切(%s)" % (_f, _w), _w in _src, "")
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

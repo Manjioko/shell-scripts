@@ -131,12 +131,10 @@ def _path_guard(path, mode):
         from wchat_py import audit as _au
         _au.record(os.environ.get("AUTO_AUDIT_LOG", ""), "path", rule=rule,
                    decision="auto_deny", path=path)
-        # 拒绝只给理由(规则号 + 说明),不回显路径正文;非正文统一灰化。
-        # 前缀与工具状态行同源(render.STATUS_PREFIX),不在这里手写第二份。
-        from wchat_py.render import STATUS_PREFIX as _SP, dim_after as _dim_after
-        sys.stdout.write("\033[2m" + _SP + _dim_after(_SP, "⛔ 越界%s被硬墙拒绝(%s)" % (_act, rule))
-                         + "\033[0m\n")
-        sys.stdout.flush()
+        # 拒绝只给"哪条规则 + 命中的路径",不回显处置建议(那是给模型的)。
+        # 与硬墙拒绝、人工确认块同一个形状(render.reject_line)。
+        from wchat_py.render import reject_line as _reject
+        _reject("⛔ 越界%s被硬墙拒绝(%s)" % (_act, rule), mark=path)
 
     if is_cred:
         if auto:
@@ -147,7 +145,7 @@ def _path_guard(path, mode):
         # 去掉路径人就不知道该放行什么。所以路径进"命中"。
         from wchat_py.render import confirm_block
         if not confirm_block("高危路径(不可%s)" % _act, mark=path,
-                             strict=True, ask="是否放行?"):
+                             strict=True, ask="是否放行"):
             return "用户拒绝访问: %s" % path
         return None
     if auto:
@@ -163,13 +161,10 @@ def _path_guard(path, mode):
         if _m == mode or (_m == "rw" and mode == "r"):
             if under(p, _base):
                 return None
-    from wchat_py.render import confirm_block
+    from wchat_py.render import confirm_block, reject_line
     if not confirm_block("工作目录外%s" % _act, mark=path,
-                         strict=False, ask="是否放行?"):
-        from wchat_py.render import STATUS_PREFIX as _SP2, dim_after as _dim_after
-        sys.stdout.write("\033[2m" + _SP2 + _dim_after(_SP2, "⛔ 用户拒绝%s: %s" % (_act, path))
-                         + "\033[0m\n")
-        sys.stdout.flush()
+                         strict=False, ask="是否放行"):
+        reject_line("⛔ 用户拒绝%s" % _act, mark=path)
         return "用户拒绝访问工作目录外文件: %s" % path
     # 记账要在**拿到许可之后**,而且记的是实际被问的那条路径(不是 key:
     # 旧实现这里写的是未定义变量 `key`,NameError 一抛,授权永远记不上,

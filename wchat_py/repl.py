@@ -272,16 +272,8 @@ def _default_meta(action, arg, session=None):
         inp_msg(_body)
         inp_msg('────────────────────────')
         if sys.stdin.isatty():
-            sys.stdout.write("\033[2m│\033[0m 是否保存该技能?(y 或 yes,n/回车 = 取消): ")
-            sys.stdout.flush()
-            try:
-                _ans = (sys.stdin.readline() or "").strip().lower()
-            except KeyboardInterrupt:
-                _ans = ""
-            except Exception:
-                _ans = ""
-            sys.stdout.write("\n"); sys.stdout.flush()
-            if _ans not in ("y", "yes"):
+            from wchat_py.render import confirm_block
+            if not confirm_block("保存该技能", ask="是否保存", no_word="取消"):
                 inp_msg("已取消")
                 return True
         _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(

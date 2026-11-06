@@ -574,15 +574,15 @@ def install_one(info, spec, commit="", force=False, dry_run=False):
 
 
 # ─────────────────────────────────────────────────────────── CLI
-def _ask(question):
+def _ask(question, ask="是否继续"):
+    """yes/no 提问(装技能)。统一走 render.confirm_block,不再自带自己的语法。
+
+    非 tty(管道/CI)一律当"否" —— fail-closed,不能因为读不到人就把东西装进去。
+    """
     if not sys.stdin.isatty():
         return False
-    sys.stdout.write(question + " (y/N): ")
-    sys.stdout.flush()
-    try:
-        return (sys.stdin.readline() or "").strip().lower() in ("y", "yes")
-    except (KeyboardInterrupt, OSError):
-        return False
+    from wchat_py.render import confirm_block
+    return confirm_block(question.rstrip("?？"), ask=ask)
 
 
 def cmd_add(argv):
@@ -735,4 +735,3 @@ def main(argv):
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

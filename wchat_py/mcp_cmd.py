@@ -272,7 +272,8 @@ def _interactive(name_hint=""):
     desc = _ask("一句用途说明(会进模型看到的清单,可空):", "").strip()
     if desc:
         entry["description"] = desc
-    if _ask("要加环境变量吗?[y/N]", "").strip().lower() in ("y", "yes"):
+    from wchat_py.render import confirm_block
+    if confirm_block("要加环境变量吗", ask="是否添加"):
         _out("  一行一个 KEY = 值;值请写 ${VAR} 引用你的环境变量,**不要粘明文密钥**")
         inp = _ask("  (如 TOKEN=${GITHUB_TOKEN}):", "").strip()
         env = []
@@ -436,7 +437,8 @@ def _do_add(argv):
         _out("--dry-run:没有写入。")
         return 0
     if not o["yes"] and sys.stdin.isatty():
-        if _ask("写入这份清单? [y/N]", "").strip().lower() not in ("y", "yes"):
+        from wchat_py.render import confirm_block
+        if not confirm_block("写入这份清单", ask="是否写入", no_word="取消"):
             _out("已取消,什么都没写。")
             return 1
 

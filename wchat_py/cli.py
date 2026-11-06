@@ -993,15 +993,11 @@ def main(argv):
                     return
                 _do_save = True
                 if sys.stdin.isatty():
-                    sys.stdout.write("│ 退出前保存对话? [Y/n] "); sys.stdout.flush()
-                    try:
-                        _ans = (sys.stdin.readline() or "").strip()
-                    except KeyboardInterrupt:
-                        _ans = "N"
-                    except Exception:
-                        _ans = ""
-                    sys.stdout.write("\n"); sys.stdout.flush()
-                    if _ans[:1] in ("N", "n"):
+                    # 默认保存:回车 = 是,只有明确打 n/no 才不保存(与 master 一致)。
+                    # 提示语必须留"保存对话"四个字 —— e2e 探针靠它判断该答 n 了。
+                    from wchat_py.render import confirm_block
+                    if not confirm_block("退出前保存对话", default_yes=True,
+                                         ask="是否保存", no_word="不保存"):
                         sys.stdout.write("未保存对话\n"); sys.stdout.flush()
                         _do_save = False
                 if not _do_save:

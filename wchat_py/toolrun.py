@@ -638,12 +638,12 @@ def _run_tool(name, args_json):
             sys.stderr.write("TRACE hd r=%r s=%r m=%.30r\n" % (_r, _s, _m)); sys.stderr.flush()
         if _r:
             if _auto:
-                # 屏幕上只给**拒绝理由**,不再回显命令正文:
-                # 用户明确说过两个问题 —— ①内容被摊开(画面乱) ②看不到理由。
-                # 原来这行是 `⛔ 硬墙拒绝(H1):<整条命令>`,把 _m(理由) 丢了;
-                # 现在调过来,并按非正文统一灰化(与思考同色)。
-                sys.stdout.write(" %s⛔ 硬墙拒绝(%s):%s%s\n"
-                                 % (GREY, _r, dim(_m or "未给出理由", 0), ZERO))
+                # 屏幕上只给"哪条规则 + 命中什么":用户明确说过两个问题 ——
+                # ①内容被摊开(画面乱) ②看不到依据。命令正文由上面那行 `⏺ shell`
+                # 横幅负责,处置话术是**给模型的**(走下面的返回值),都不上屏。
+                # 形状与人工确认块一致(auto 只是没有"等你回答"那一行)。
+                from wchat_py.render import reject_line as _reject, mark_of as _mark2
+                _reject("⛔ 硬墙拒绝(规则 %s)" % _r, mark=_mark2(_m))
                 _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                               rule=_r, verdict="auto_deny", cmd=cmd)
                 return ("[硬墙 %s] %s" % (_r, _m))

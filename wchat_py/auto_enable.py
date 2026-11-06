@@ -99,7 +99,14 @@ def enable(tier):
     sys.stdout.flush()
 
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") != "1":
-        w("\n\033[1;31m  开启后敏感权限不再逐次询问你。确认输入大写 AUTO(其他任意输入 = 关闭 auto):\033[0m ")
+        # 与其它确认块同一个形状:`└─` + 红标题 + 灰提问。
+        # 这一问的答案不是 yes 而是大写 AUTO —— 那是**故意**的:开启 auto 之后
+        # 敏感权限不再逐次询问,用它确保人是清醒地、主动地打下去的。
+        from wchat_py.render import GREY, RED, STATUS_PREFIX, ZERO
+        w("\n%s%s%s开启 auto:敏感权限不再逐次询问你%s\n"
+          % (GREY, STATUS_PREFIX, RED, ZERO))
+        w("%s%s请输入大写 AUTO 确认(其他任意输入 = 关闭 auto): %s"
+          % (GREY, STATUS_PREFIX, ZERO))
         sys.stdout.flush()
         try:
             ans = (sys.stdin.readline() or "").strip()

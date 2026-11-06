@@ -490,14 +490,9 @@ def _dispatch(name, args_json):
         granted = set((os.environ.get("MCP_GRANTED") or "").split())
         if os.environ.get("AUTO_MODE") not in ("full", "sandbox") and server not in granted:
             if os.environ.get("MCP_GRANT_MODE") == "ask" and sys.stdin.isatty():
-                sys.stdout.write("⚠ 首次使用 MCP server『%s』,授权本会话? [y/N] " % server)
-                sys.stdout.flush()
-                try:
-                    ans = (sys.stdin.readline() or "").strip().lower()
-                except Exception:
-                    ans = ""
-                sys.stdout.write("\n"); sys.stdout.flush()
-                if ans not in ("y", "yes"):
+                from wchat_py.render import confirm_block
+                if not confirm_block("首次使用 MCP server『%s』,授权本会话" % server,
+                                     ask="是否授权"):
                     audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "mcp",
                                  server=server, tool=tool, decision="deny", reason="human_no")
                     return "用户未授权 MCP server '%s'" % server

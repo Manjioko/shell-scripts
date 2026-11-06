@@ -392,38 +392,66 @@ def mark_of(text):
     return m.group(1).strip() if m else ""
 
 
-def confirm_block(title, mark="", strict=False, ask="是否执行?"):
+def _titled_line(title, mark=""):
+    """`   └─ <红标题>[,命中: <片段>]` —— 拒绝提示与确认块的标题行共用。
+
+    `mark` 超宽时按**实测**剩余宽度截断:折行会把 `└─` 顶到第 0 列,
+    看起来像从上一段输出里漏出来的(路径类 mark 很容易超宽)。
+    """
+    mark = " ".join(str(mark or "").split())
+    head = "%s%s%s%s%s" % (GREY, STATUS_PREFIX, RED, title, ZERO)
+    if not mark:
+        return head
+    seg = ",命中: "
+    avail = max(8, term_cols() - display_width(STATUS_PREFIX)
+                - display_width(title) - display_width(seg) - 1)
+    if display_width(mark) > avail:
+        mark = _fit(mark, max(1, avail - 1)) + "…"
+    return head + "%s%s%s%s" % (GREY, seg, mark, ZERO)
+
+
+def reject_line(title, mark=""):
+    """打一行拒绝提示(**没有提问**,程序已直接拒,不等人回答)。
+
+    auto 档的硬墙拒绝、路径越界拒绝走这里。形状与 `confirm_block` 的标题行
+    完全一样 —— 用户无论在人机对话还是无人值守下,看到的是同一种提示。
+    **不印处置建议**:那是给模型的,走工具返回值。
+    """
+    sys.stdout.write("\033[2K" + _titled_line(title, mark) + "\n")
+    sys.stdout.flush()
+
+
+def confirm_block(title, mark="", strict=False, ask="是否执行",
+                  default_yes=False, no_word="拒绝"):
     """打印一条交互确认块并读入答案,返回是否批准。
 
-    五处调用(普通审批 / 硬墙升级 / read 档转人工 / 高危路径 / 工作目录外访问)
-    共用这一份 —— 文案散在各处手写,迟早出现"有的带 └─ 有的不带"。
+    **所有 yes/no 提问都走这一份**(普通审批 / 硬墙升级 / read 档转人工 /
+    高危路径 / 工作目录外访问 / 保存对话 / 保存技能 / MCP 授权 / 装技能 / 写清单)。
+    以前是五套语法(`[y/N]`、`[Y/n]`、`(y/N)`、`(y 或 yes,n/回车 = 取消)`、`⚠ …?`),
+    同一句"要不要"在不同地方长得不一样,用户没法形成肌肉记忆。
 
     `mark` 是"命中了什么"(规则片段 / 目标路径)。**没有"原因"参数**:
     给人看的是"哪条规则 + 命中什么",处置建议是给模型的,走返回值。
     路径类确认要把路径传进 `mark` —— 它没有上一行 `⏺` 横幅可参照,
     不给出路径人就不知道该放行哪个文件。
 
-    `strict=True` 必须**逐字** `yes`(硬墙口径:输 y 不算);否则 `y`/`yes` 都算批准。
-    提问行如实反映这一点,不为了文案整齐把"必须逐字 yes"写成"y 或 yes"
-    —— 那会让人打了 y 才发现被拒。
+    回答口径由参数决定,**提问行如实写出**,不为了文案整齐而说谎:
+      · `strict=True`   —— 必须**逐字** `yes`(硬墙口径:输 y 不算)
+      · `default_yes=True` —— 回车即"是"(`Y/n` 语义,如"退出前保存对话")
+      · 默认            —— `y`/`yes` 批准,回车是"否"
+    `no_word` 只是把"否"换个更贴切的说法(取消 / 不保存),不改判定。
     """
     mark = " ".join(str(mark or "").split())
-    head = "%s%s%s%s%s" % (GREY, STATUS_PREFIX, RED, title, ZERO)
-    if mark:
-        seg = ",命中: "
-        # 长路径(如 /Users/…/very/deep/f.txt)必须按实测宽度截,否则折行后
-        # `└─` 会被顶到第 0 列,看起来像从上一段输出里漏出来的。
-        avail = max(8, term_cols() - display_width(STATUS_PREFIX)
-                    - display_width(title) - display_width(seg) - 1)
-        if display_width(mark) > avail:
-            mark = _fit(mark, max(1, avail - 1)) + "…"
-        line = head + "%s%s%s%s" % (GREY, seg, mark, ZERO)
-    else:
-        line = head
-    sys.stdout.write("\033[2K" + line + "\n")
+    sys.stdout.write("\033[2K" + _titled_line(title, mark) + "\n")
 
-    tail = ("(必须逐字 yes,n/回车 = 拒绝): " if strict
-            else "(y 或 yes,n/回车 = 拒绝): ")
+    if strict:
+        tail = "(必须逐字 yes,n/回车 = %s): " % no_word
+    elif default_yes:
+        tail = "(Y 或 yes,n/回车 = 是): "
+    else:
+        tail = "(y 或 yes,n/回车 = %s): " % no_word
+    # 动词统一收口:调用方写 "是否放行?" 或 "是否放行" 都得到同一个形状。
+    ask = str(ask or "是否执行").strip().rstrip("?？")
     # 提问文字灰,但**行末就复位**:否则用户敲的 yes 会继承灰色回显。
     sys.stdout.write("%s%s%s%s%s" % (GREY, STATUS_PREFIX, ask, tail, ZERO))
     sys.stdout.flush()
@@ -437,7 +465,12 @@ def confirm_block(title, mark="", strict=False, ask="是否执行?"):
     except Exception:
         ans = ""
     sys.stdout.write("\n"); sys.stdout.flush()
-    return ans == "yes" if strict else ans.lower() in ("y", "yes")
+    if strict:
+        return ans == "yes"
+    if default_yes:
+        # 回车(=空)算"是";明确打 n/no 才算"否"。
+        return ans == "" or ans.lower() in ("y", "yes")
+    return ans.lower() in ("y", "yes")
 
 
 def args_preview(args_json):
