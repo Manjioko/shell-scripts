@@ -29,9 +29,11 @@
 "安装第三方代码的任意依赖图",而后者没有任何人看过。
 
 用法:
-    wchat skills add <来源> [--name N] [--ref R] [--subdir D] [--dry-run] [--force] [--yes]
+    wchat skills add <来源> [--name N] [--ref R] [--subdir D]
+                           [--skill A,B] [--all] [--dry-run] [--force] [--yes]
     wchat skills remove <名字>
 来源形态:`owner/repo` / `https://…` / `https://…/tree/ref/sub` / 本地目录 / .zip / .tar.gz
+多技能来源:--skill 选装若干、--all 全装、--subdir 只装一类,或不加选择器交互弹菜单。
 """
 
 from __future__ import annotations
@@ -251,8 +253,12 @@ def discover(root):
     """在一个仓库/目录里找出所有技能目录。返回 [(目录, 名字提示)]。
 
     顺序按"明确性"从高到低,并且**去重**(同一份 SKILL.md 只收一次):
-      1. `.claude-plugin/marketplace.json` 里 plugins[].source 指的目录;
-      2. `skills/*/`;3. `.claude/skills/*/`;4. 根 `SKILL.md`(单技能仓库)。
+      1. `.claude-plugin/marketplace.json` 里 plugins[] 的 `skills` **显式列表**,
+         以及 `source` 指的目录;
+      2. `skills/`(允许一层分类分组,如 `skills/<分类>/<技能>/SKILL.md`);
+      3. `.claude/skills/`;4. 根 `SKILL.md`(单技能仓库);
+      5. 兜底:以上都没命中时,把 root 自身当技能集合再扫一遍
+         (让 `--subdir <含技能的子目录>` 也能工作,报错文案就是这么建议的)。
     为什么必须去重:Auto-Redbook-Skills 那种仓库里,根 `SKILL.md` 与
     `skills/xhs-note-creator/SKILL.md`(软链)是**同一个文件**,不去重会装两遍。
     """
@@ -281,15 +287,23 @@ def discover(root):
                 pass
         found.append((base, os.path.basename(os.path.normpath(d))))
 
-    def scan_skills_dir(base):
+    def scan_skills_dir(base, _depth=0):
         try:
             names = sorted(os.listdir(base))
         except OSError:
             return
         for n in names:
+            # 跳过隐藏目录(.git/.claude-plugin/…)与依赖目录:它们既不是技能,
+            # 也不是"分类分组",不排除会让候选里混进 .git 之类的垃圾。
+            if n.startswith(".") or n in ("node_modules", "__pycache__"):
+                continue
             p = os.path.join(base, n)
-            if os.path.isdir(p) and _is_skill_dir(p):
-                add(p)
+            if not os.path.isdir(p):
+                continue
+            if _is_skill_dir(p):
+                add(p)                 # 命中技能;它的子目录是 assets/scripts,不再深入
+            elif _depth < 2:           # 多下钻一层,兼容 skills/<分类>/<技能> 布局
+                scan_skills_dir(p, _depth + 1)
 
     mk = os.path.join(root, ".claude-plugin", "marketplace.json")
     if os.path.isfile(mk):
@@ -297,12 +311,32 @@ def discover(root):
             with open(mk, encoding="utf-8") as fh:
                 data = json.load(fh) or {}
             for plug in data.get("plugins") or []:
-                src = plug.get("source") if isinstance(plug, dict) else None
-                if not isinstance(src, str):
+                if not isinstance(plug, dict):
                     continue
-                base = os.path.realpath(os.path.join(root, src))
+                src = plug.get("source")
+                if isinstance(src, str):
+                    base = os.path.realpath(os.path.join(root, src))
+                elif src is None:
+                    base = root
+                else:
+                    continue          # source 是 git-subdir 等结构:本地解析不了,跳过
                 if not (base == root or base.startswith(root + os.sep)):
                     continue          # 清单里指到仓库外:忽略,不跟
+                # 标准字段 plugins[].skills:显式列出每个技能目录(相对 base)。
+                # 旧代码只认 source、不认这个数组,于是 xiaohongshu-skills 这类把
+                # 139 个技能路径写进 skills 的仓库被误判成"没有技能"。补上它。
+                listed = plug.get("skills")
+                if isinstance(listed, list):
+                    for sp in listed:
+                        if not isinstance(sp, str):
+                            continue
+                        d = os.path.realpath(os.path.join(base, sp))
+                        if not (d == root or d.startswith(root + os.sep)):
+                            continue  # 指到仓库外:忽略
+                        if _is_skill_dir(d):
+                            add(d)
+                        else:
+                            scan_skills_dir(d)  # 条目本身是分组目录时继续往下找
                 scan_skills_dir(os.path.join(base, "skills"))
                 if _is_skill_dir(base):
                     add(base)
@@ -313,6 +347,11 @@ def discover(root):
     scan_skills_dir(os.path.join(root, ".claude", "skills"))
     if _is_skill_dir(root):
         add(root)
+    # 兜底:标准位置一个都没命中时,把 root 自身当技能集合再扫一遍。目的有二:
+    #   · `--subdir <某个含技能的子目录>` 能工作(报错文案就是这么建议的);
+    #   · 兼容 skills/<分类>/<技能> 这种"多一层分组"、且没写 marketplace 的仓库。
+    if not found:
+        scan_skills_dir(root)
     return found
 
 
@@ -585,22 +624,244 @@ def _ask(question, ask="是否继续"):
     return confirm_block(question.rstrip("?？"), ask=ask)
 
 
+# ── 多技能:选出要装哪些(菜单 / --skill / --all)────────────────────
+def _relposix(path, root):
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        rel = path
+    return rel.replace(os.sep, "/")
+
+
+def _skill_label(base, root):
+    """给人看 / 给 --skill 用的标签:去掉开头的 `skills/`,如 `01-内容创作/audio-processing`。"""
+    rp = _relposix(base, root)
+    if rp.startswith("skills/"):
+        rp = rp[len("skills/"):]
+    return rp
+
+
+def _parse_selection(line, idx):
+    """解析菜单输入:`all`/`*` 全选,`1,3-5` 逗号/范围。返回 [(dir,name)];非法抛 ValueError。"""
+    s = line.strip()
+    if not s:
+        return []
+    if s.lower() in ("all", "*", "全部"):
+        return list(idx.values())
+    picked = []
+    for part in re.split(r"[\s,]+", s):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[-~]\s*(\d+)", part)
+        if m:
+            a, b = int(m.group(1)), int(m.group(2))
+            if a > b:
+                a, b = b, a
+            rng = range(a, b + 1)
+        elif part.isdigit():
+            rng = [int(part)]
+        else:
+            raise ValueError("看不懂的选择 %r" % part)
+        for k in rng:
+            if k not in idx:
+                raise ValueError("编号 %d 超出范围(1-%d)" % (k, len(idx)))
+            picked.append(idx[k])
+    out, seen = [], set()
+    for c in picked:
+        if id(c) not in seen:
+            seen.add(id(c))
+            out.append(c)
+    return out
+
+
+def _menu_choose(cands, root):
+    """交互式按编号选技能(tty 专用)。返回选中的 [(dir,name)];空行取消=[];非 tty=None。"""
+    if not sys.stdin.isatty():
+        return None
+    idx, groups, order = {}, {}, []
+    for c in cands:
+        label = _skill_label(c[0], root)
+        cat, _, leaf = label.rpartition("/")
+        cat = cat or "(根目录)"
+        if cat not in groups:
+            groups[cat] = []
+            order.append(cat)
+        num = len(idx) + 1
+        idx[num] = c
+        groups[cat].append((num, leaf or label))
+    sys.stdout.write(
+        "这个来源里有 %d 个技能。技能会常驻系统提示,启动时默认只注入最新 %s 个"
+        "(SKILL_MAX_INJECT)。装哪些?\n" % (len(idx), os.environ.get("SKILL_MAX_INJECT", "30")))
+    for cat in order:
+        sys.stdout.write("  [%s]\n" % cat)
+        for num, leaf in groups[cat]:
+            sys.stdout.write("    %4d) %s\n" % (num, leaf))
+    sys.stdout.write("输入编号(空格或逗号分隔,支持 1-5 范围)、all 装全部、直接回车取消: ")
+    sys.stdout.flush()
+    for _ in range(3):
+        try:
+            line = (sys.stdin.readline() or "").strip()
+        except (KeyboardInterrupt, EOFError):
+            line = ""
+        if not line:
+            sys.stdout.write("\n")
+            return []
+        try:
+            sel = _parse_selection(line, idx)
+        except ValueError as e:
+            sys.stdout.write("  ✗ %s,请重输(回车取消): " % e)
+            sys.stdout.flush()
+            continue
+        sys.stdout.write("\n")
+        return sel
+    sys.stdout.write("\n")
+    return []
+
+
+def _match_skills(tokens, cands, root):
+    """把 `--skill` 名字解析成候选。支持 完整相对路径 / `分类/名字` / 唯一 basename。
+
+    重名(本仓库就有 `competitor-analysis`、`customer-service` 跨分类重名)必须报歧义,
+    不能静默挑一个 —— 那会让用户以为装的是另一类里的同名技能。
+    """
+    out, seen = [], set()
+    for tok in tokens:
+        t = tok.strip().replace("\\", "/").strip("/")
+        if t.startswith("./"):
+            t = t[2:]
+        hit = []
+        for c in cands:
+            label = _skill_label(c[0], root)          # 01-内容创作/audio-processing
+            bn = os.path.basename(os.path.normpath(c[0]))
+            full = _relposix(c[0], root)              # skills/01-内容创作/audio-processing
+            if t in (label, bn, full) or label.endswith("/" + t) or full.endswith("/" + t):
+                hit.append(c)
+        if not hit:
+            raise SkillError(
+                "--skill 里找不到技能 %r。先不带 --skill 跑一次,可看到全部候选名" % tok)
+        if len(hit) > 1:
+            raise SkillError(
+                "--skill %r 匹配到多个技能,请用带分类的路径区分:\n%s"
+                % (tok, "\n".join("    " + _skill_label(c[0], root) for c in hit)))
+        c = hit[0]
+        if id(c) not in seen:
+            seen.add(id(c))
+            out.append(c)
+    return out
+
+
+def _install_many(chosen, spec, commit, root, excludes, force, dry, yes):
+    """多技能:逐个校验 → 汇总预览 → 确认一次 → 逐个落盘(单个失败不影响其余)。
+
+    返回 ("many", "", None) 表示流程走完;取消 / 全不合格时返回 (None, "", None)。
+    """
+    valid, failed = [], []
+    for c in chosen:
+        label = _skill_label(c[0], root)
+        try:
+            info = inspect_skill(c[0], root, excludes=excludes)
+        except SkillError as e:
+            failed.append((label, str(e)))
+            continue
+        valid.append((label, c, info))
+
+    # 同一批里两个技能若落到同一个 <SKILLS>/<name>,后一个会覆盖前一个 —— 提前揪出来。
+    used, dedup = {}, []
+    for label, c, info in valid:
+        nm = info["name"]
+        if nm in used:
+            failed.append((label, "与 %s 的目标名 %s 重名,已跳过(可单独用 --name 装)"
+                           % (used[nm], nm)))
+            continue
+        used[nm] = label
+        dedup.append((label, c, info))
+    valid = dedup
+
+    if not valid:
+        raise SkillError("选中的技能全部未通过校验:\n%s"
+                         % "\n".join("    %s:%s" % (l, m) for l, m in failed))
+
+    try:
+        mi = int(os.environ.get("SKILL_MAX_INJECT", "30"))
+    except (TypeError, ValueError):
+        mi = 30
+    tot_files = sum(i["count"] for _, _, i in valid)
+    tot_bytes = sum(i["bytes"] for _, _, i in valid)
+    sys.stdout.write("\n来源: %s  %s\n本次安装 %d 个技能(共 %d 文件 / %.1f MB):\n"
+                     % (spec["url"] + ("#" + spec["ref"] if spec.get("ref") else ""),
+                        ("· commit " + commit) if commit else "",
+                        len(valid), tot_files, tot_bytes / 1048576.0))
+    deps_all, trunc = set(), 0
+    for label, _c, info in valid:
+        line = "  · %-44s %4d 文件 / %5.1f MB" % (
+            label, info["count"], info["bytes"] / 1048576.0)
+        if info["deps"]:
+            line += "  依赖:" + ",".join(info["deps"])
+            deps_all.update(info["deps"])
+        if info["desc_truncated"]:
+            trunc += 1
+        sys.stdout.write(line + "\n")
+    for label, msg in failed:
+        sys.stdout.write("  ✗ %-44s 跳过:%s\n" % (label, msg))
+    if trunc:
+        sys.stdout.write("⚠ %d 个技能的 description 超出 SKILL_DESC_MAX,注入时尾部会被截断\n"
+                         % trunc)
+    if deps_all:
+        sys.stdout.write("⚠ 检测到依赖: %s —— 不会自动安装,装完请自己跑一次\n"
+                         % ", ".join(sorted(deps_all)))
+    if len(valid) > mi:
+        # 关键诚实点:装进去 ≠ 生效。scan_skills 只注入最新 max_inject 个。
+        sys.stdout.write(
+            "⚠ 你选了 %d 个,但启动时只注入最新 %d 个(SKILL_MAX_INJECT=%d),"
+            "其余不会出现在可用技能列表,模型也就用不到。\n"
+            "   要全部生效:export SKILL_MAX_INJECT=%d(会增加系统提示体积/成本)\n"
+            % (len(valid), mi, mi, len(valid)))
+
+    if dry:
+        return "many", "", None
+    if not yes:
+        if not _ask("安装这 %d 个技能?" % len(valid)):
+            sys.stdout.write("已取消,未改动任何文件\n")
+            return None, "", None
+
+    ok, bad = [], []
+    for label, _c, info in valid:
+        try:
+            dest, backup = install_one(info, spec, commit, force=force, dry_run=False)
+            ok.append((label, dest, backup))
+        except SkillError as e:
+            bad.append((label, str(e)))
+        except Exception as e:
+            bad.append((label, "%s: %s" % (type(e).__name__, e)))
+    sys.stdout.write("\n✅ 已安装 %d 个:\n" % len(ok))
+    for label, dest, backup in ok:
+        sys.stdout.write("  · %s -> %s%s\n"
+                         % (label, dest, ("(旧版已备份 %s)" % backup) if backup else ""))
+    if bad:
+        sys.stdout.write("⚠ 跳过 %d 个:\n" % len(bad))
+        for label, msg in bad:
+            sys.stdout.write("  · %s:%s\n" % (label, msg))
+    return "many", "", None
+
+
 def cmd_add(argv):
     src = ""
     name_override = ref_override = subdir_override = ""
-    excludes = []
-    dry = force = yes = False
+    excludes, skill_sel = [], []
+    dry = force = yes = all_flag = False
     i = 0
     while i < len(argv):
         a = argv[i]
         if a in ("-h", "--help"):
             sys.stdout.write(
                 "用法: wchat skills add <来源> [--name N] [--ref R] [--subdir D]"
-                " [--dry-run] [--force] [--yes]\n"
+                " [--skill A,B] [--all] [--dry-run] [--force] [--yes]\n"
                 "  来源: owner/repo | https://host/o/r[/tree/分支/子目录] | 本地目录 | .zip/.tar.gz\n"
                 "  --dry-run  只打印计划,不落盘\n"
                 "  --exclude  逗号分隔的相对路径,安装时跳过(如 demos,docs)\n"
-                "  --name     指定安装后的名字(也能救回 frontmatter 里不合法的名字)\n"
+                "  --name     指定安装后的名字(只能用于单个技能;能救回不合法的名字)\n"
+                "  --skill    只装这些技能(逗号分隔,用 分类/名字 或唯一名字),可多次给\n"
+                "  --all      装来源里的全部技能(数量多时留意上下文预算 SKILL_MAX_INJECT)\n"
                 "  --force    已存在时覆盖(旧目录改名为 .bak-<名字>-<时间戳>,不删除)\n")
             return 0
         elif a == "--name" and i + 1 < len(argv):
@@ -609,6 +870,10 @@ def cmd_add(argv):
             ref_override = argv[i + 1]; i += 2; continue
         elif a == "--subdir" and i + 1 < len(argv):
             subdir_override = argv[i + 1]; i += 2; continue
+        elif a == "--skill" and i + 1 < len(argv):
+            skill_sel += [x for x in re.split(r"[\s,]+", argv[i + 1]) if x.strip()]
+            i += 2
+            continue
         elif a == "--exclude" and i + 1 < len(argv):
             excludes += [x for x in argv[i + 1].split(",") if x.strip()]
             i += 2
@@ -617,6 +882,8 @@ def cmd_add(argv):
             dry = True
         elif a == "--force":
             force = True
+        elif a == "--all":
+            all_flag = True
         elif a == "--yes" or a == "-y":
             yes = True
         elif not src:
@@ -627,6 +894,9 @@ def cmd_add(argv):
     if not src:
         sys.stderr.write("用法: wchat skills add <owner/repo | URL | 本地目录>\n")
         return 2
+    if all_flag and skill_sel:
+        sys.stderr.write("❌ --all 与 --skill 不能同时用(二选一)\n")
+        return 2
     tmpdir = tempfile.mkdtemp(prefix="wchat_skill_add_")
     try:
         try:
@@ -636,6 +906,7 @@ def cmd_add(argv):
             if subdir_override:
                 spec["subdir"] = subdir_override
             root, meta = fetch_source(spec, tmpdir)
+            commit = meta.get("commit", "")
             if spec.get("subdir"):
                 root = os.path.realpath(os.path.join(root, spec["subdir"]))
                 if not os.path.isdir(root):
@@ -648,25 +919,57 @@ def cmd_add(argv):
                     ".claude/skills/*/SKILL.md、根 SKILL.md。\n"
                     "  → 如果技能在某个子目录里,请加 --subdir <子目录>\n"
                     "  → 目录开头:%s" % ", ".join(sorted(os.listdir(root))[:12]))
-            if len(cands) > 1:
-                # 一次只装一个:技能是**常驻上下文**的,批量塞进去等于给注意力加税。
-                # 也不做"顺手全装"的便利 —— 那样用户永远不知道自己装了哪些。
-                raise SkillError(
-                    "这个来源里有 %d 个技能,一次只装一个(避免把一堆不相干的技能"
-                    "塞进常驻上下文):\n%s\n  → 请加 --subdir <子目录> 指定其中一个"
-                    % (len(cands), "\n".join("    %s" % c[0] for c in cands)))
-            info = inspect_skill(cands[0][0], root, excludes=excludes,
-                                 name_override=name_override)
-            sys.stdout.write(plan(spec, info, meta.get("commit", "")) + "\n")
-            if info["desc_truncated"]:
-                sys.stdout.write("⚠ description 超出预算:注入时会从尾巴砍,"
-                                 "请把最可能被搜到的词放前 30 个字\n")
-            if not yes and not dry:
-                if not _ask("继续安装?"):
+
+            # ── 决定装哪些:--all / --skill / 单技能 / 交互菜单 ──
+            if all_flag:
+                chosen = list(cands)
+            elif skill_sel:
+                chosen = _match_skills(skill_sel, cands, root)
+            elif len(cands) == 1:
+                chosen = cands
+            else:
+                chosen = None
+                if not yes and not dry:      # 交互才弹菜单;--yes/--dry-run 属脚本场景,不猜
+                    chosen = _menu_choose(cands, root)
+                if chosen is None:
+                    bycat = {}
+                    for c in cands:
+                        cat = _skill_label(c[0], root).rpartition("/")[0] or "(根目录)"
+                        bycat[cat] = bycat.get(cat, 0) + 1
+                    summary = ", ".join("%s %d 个" % (k, bycat[k]) for k in bycat)
+                    raise SkillError(
+                        "这个来源里有 %d 个技能(%s),装哪些请明确指定:\n"
+                        "  · --all               全部(注意:启动时默认只注入最新 %s 个)\n"
+                        "  · --skill 名1,名2      按名选(重名可用 分类/名字 区分)\n"
+                        "  · --subdir <分类目录>  只装某一类\n"
+                        "  · 直接交互运行(别在脚本里加 --yes)会弹出编号菜单\n"
+                        "候选(前 20 个):\n%s"
+                        % (len(cands), summary, os.environ.get("SKILL_MAX_INJECT", "30"),
+                           "\n".join("    " + _skill_label(c[0], root) for c in cands[:20])))
+                if not chosen:
                     sys.stdout.write("已取消,未改动任何文件\n")
                     return 0
-            dest, backup = install_one(info, spec, meta.get("commit", ""),
-                                       force=force, dry_run=dry)
+
+            if len(chosen) > 1 and name_override:
+                raise SkillError("--name 只能用于单个技能;要装多个请去掉 --name")
+
+            if len(chosen) == 1:
+                info = inspect_skill(chosen[0][0], root, excludes=excludes,
+                                     name_override=name_override)
+                sys.stdout.write(plan(spec, info, commit) + "\n")
+                if info["desc_truncated"]:
+                    sys.stdout.write("⚠ description 超出预算:注入时会从尾巴砍,"
+                                     "请把最可能被搜到的词放前 30 个字\n")
+                if not yes and not dry:
+                    if not _ask("继续安装?"):
+                        sys.stdout.write("已取消,未改动任何文件\n")
+                        return 0
+                dest, backup = install_one(info, spec, commit, force=force, dry_run=dry)
+            else:
+                dest, backup, info = _install_many(
+                    chosen, spec, commit, root, excludes, force, dry, yes)
+                if dest is None:             # 取消 / 全部不合格
+                    return 0
         except SkillError as e:
             sys.stderr.write("❌ %s\n" % e)
             return 1
@@ -680,12 +983,13 @@ def cmd_add(argv):
     if dry:
         sys.stdout.write("(dry-run)未落盘。去掉 --dry-run 才会真正安装。\n")
         return 0
-    sys.stdout.write("✅ 已安装: %s\n" % dest)
-    if backup:
-        sys.stdout.write("   旧版本已备份为: %s(未删除)\n" % backup)
-    if info["deps"]:
-        sys.stdout.write("⚠ 依赖还没装 —— 按上面那两行命令自己跑一次,"
-                         "然后新开会话确认它能被触发。\n")
+    if len(chosen) == 1:
+        sys.stdout.write("✅ 已安装: %s\n" % dest)
+        if backup:
+            sys.stdout.write("   旧版本已备份为: %s(未删除)\n" % backup)
+        if info["deps"]:
+            sys.stdout.write("⚠ 依赖还没装 —— 按上面那两行命令自己跑一次,"
+                             "然后新开会话确认它能被触发。\n")
     sys.stdout.write("   验证: 新开一个会话,用自然说法问一句,看它是否出现在可用技能列表里\n")
     return 0
 

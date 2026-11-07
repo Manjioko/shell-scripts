@@ -377,7 +377,8 @@ def cmd_skills(argv):
                          "  默认:列出 ~/.ct/skills 里的技能与来源\n"
                          "  --seed:把随包技能补进 ~/.ct/skills(只补缺,不覆盖)\n"
                          "  add <来源>:安装第三方技能(owner/repo、URL、本地目录、压缩包);\n"
-                         "              装之前会把来源/文件/依赖摊开给你看,默认不装\n"
+                         "              多技能来源用 --skill 名1,名2 选装、--all 全装,\n"
+                         "              或直接交互运行弹编号菜单;装前会摊开预览,默认不装\n"
                          "  remove <名字>:移出技能(进 .trash/,不删除)\n")
         return 0
     rows = skills_status()

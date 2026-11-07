@@ -106,6 +106,27 @@ cands = SI.discover(r_link)
 ck("软链式技能被认出且只认一次(同一份 SKILL.md 不重复)",
    len(cands) == 1 and os.path.realpath(cands[0][0]) == os.path.realpath(r_link),
    repr(cands))
+# 1e 分类分组布局:skills/<分类>/<技能>/SKILL.md(xiaohongshu-skills 那种)
+r_cat = os.path.join(W, "r_cat")
+mk_skill(os.path.join(r_cat, "skills", "01-内容创作", "aa"), "aa")
+mk_skill(os.path.join(r_cat, "skills", "02-账号运营", "bb"), "bb")
+cands = SI.discover(r_cat)
+ck("skills/<分类>/<技能> 多一层分组也能发现",
+   sorted(os.path.basename(c[0]) for c in cands) == ["aa", "bb"], repr(cands))
+ck("--subdir 指到分类目录能发现其下技能",
+   sorted(os.path.basename(c[0])
+          for c in SI.discover(os.path.join(r_cat, "skills", "01-内容创作"))) == ["aa"])
+# 1f marketplace.json 的 skills 显式数组(标准字段,旧代码只认 source 漏读它)
+r_arr = os.path.join(W, "r_arr")
+mk_skill(os.path.join(r_arr, "weird", "dd"), "dd")
+mk_skill(os.path.join(r_arr, "weird", "ee"), "ee")
+os.makedirs(os.path.join(r_arr, ".claude-plugin"), exist_ok=True)
+with open(os.path.join(r_arr, ".claude-plugin", "marketplace.json"), "w") as fh:
+    json.dump({"plugins": [{"name": "p", "source": "./",
+                            "skills": ["./weird/dd", "./weird/ee"]}]}, fh)
+cands = SI.discover(r_arr)
+ck("marketplace.json 的 plugins[].skills 数组被解析(旧代码漏读 → 误报'没找到技能')",
+   sorted(os.path.basename(c[0]) for c in cands) == ["dd", "ee"], repr(cands))
 
 print("=== 2. 校验:不合格的必须在落盘前拒掉 ===")
 bad = os.path.join(W, "bad_nodesc")
@@ -250,8 +271,60 @@ except SI.SkillError as e:
 rc, out = run(["add", r_multi, "--yes"])
 ck("多技能仓库不给 --subdir 时报错并列出候选", rc != 0 and "aa" in out and "--subdir" in out,
    out[-300:])
+# 分类分组布局:--subdir 指到分类目录(其下只有一个技能)应能装上
+r_catone = os.path.join(W, "r_catone")
+mk_skill(os.path.join(r_catone, "skills", "01-内容创作", "solo"), "solo")
+rc, out = run(["add", r_catone, "--subdir", os.path.join("skills", "01-内容创作"), "--yes"])
+ck("--subdir 指到分类目录可装上其唯一技能(嵌套布局不再'没找到技能')",
+   rc == 0 and os.path.isfile(os.path.join(SKILLS, "solo", "SKILL.md")), out[-240:])
+
+print("=== 8. 多技能选择:--skill / --all / 重名歧义 / 上下文预算 ===")
+# --skill 精确选一个(其余不装)
+r_sel = os.path.join(W, "r_sel")
+mk_skill(os.path.join(r_sel, "skills", "c1", "alpha"), "alpha")
+mk_skill(os.path.join(r_sel, "skills", "c1", "beta"), "beta")
+rc, out = run(["add", r_sel, "--skill", "alpha", "--yes"])
+ck("--skill 精确选一个安装(其余不装)",
+   rc == 0 and os.path.isfile(os.path.join(SKILLS, "alpha", "SKILL.md"))
+   and not os.path.exists(os.path.join(SKILLS, "beta")), out[-240:])
+# --all 一次装全部
+r_all = os.path.join(W, "r_all")
+mk_skill(os.path.join(r_all, "skills", "c2", "gamma"), "gamma")
+mk_skill(os.path.join(r_all, "skills", "c2", "delta"), "delta")
+rc, out = run(["add", r_all, "--all", "--yes"])
+ck("--all 一次装全部",
+   rc == 0 and os.path.isfile(os.path.join(SKILLS, "gamma", "SKILL.md"))
+   and os.path.isfile(os.path.join(SKILLS, "delta", "SKILL.md")), out[-240:])
+# --all 超过 SKILL_MAX_INJECT 要明说"装进去≠生效"
+os.environ["SKILL_MAX_INJECT"] = "1"
+r_budget = os.path.join(W, "r_budget")
+mk_skill(os.path.join(r_budget, "skills", "c2", "e1"), "e1")
+mk_skill(os.path.join(r_budget, "skills", "c2", "e2"), "e2")
+rc, out = run(["add", r_budget, "--all", "--yes"])
+ck("超过 SKILL_MAX_INJECT 时提示'只注入最新 N 个'(装≠生效)",
+   rc == 0 and "SKILL_MAX_INJECT" in out and "只注入" in out, out[-260:])
+del os.environ["SKILL_MAX_INJECT"]
+# 重名 basename:必须报歧义,不能静默选错
+r_amb = os.path.join(W, "r_amb")
+mk_skill(os.path.join(r_amb, "skills", "c3", "dup"), "dup3")
+mk_skill(os.path.join(r_amb, "skills", "c4", "dup"), "dup4")
+rc, out = run(["add", r_amb, "--skill", "dup", "--yes"])
+ck("--skill 遇重名 basename 报歧义(不静默选错)", rc != 0 and "多个" in out, out[-200:])
+# --skill 找不到要报错
+rc, out = run(["add", r_sel, "--skill", "nosuch", "--yes"])
+ck("--skill 找不到时明确报错", rc != 0 and "找不到" in out, out[-200:])
+# --all 与 --skill 互斥
+rc, out = run(["add", r_sel, "--all", "--skill", "alpha", "--yes"])
+ck("--all 与 --skill 互斥报错", rc != 0 and "二选一" in out, out[-200:])
+# 选中的全部不合格(缺 description)→ 失败码,不能假装成功
+r_badsel = os.path.join(W, "r_badsel")
+for nm in ("x1", "x2"):
+    os.makedirs(os.path.join(r_badsel, "skills", nm), exist_ok=True)
+    open(os.path.join(r_badsel, "skills", nm, "SKILL.md"), "w").write(
+        "---\nname: %s\n---\n\nbody\n" % nm)  # 无 description
+rc, out = run(["add", r_badsel, "--all", "--yes"])
+ck("选中的全部不合格 → rc≠0 且指出原因", rc != 0 and "未通过校验" in out, out[-200:])
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 shutil.rmtree(W, ignore_errors=True)
 sys.exit(0 if F == 0 else 1)
-
