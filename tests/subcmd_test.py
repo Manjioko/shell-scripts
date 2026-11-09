@@ -188,6 +188,33 @@ ck("-mcp 首跑:探测前清单已就位(顺序锁)",
    "BEFORE= False" in _r.stdout and "AFTER= True" in _r.stdout,
    (_r.stdout + _r.stderr)[:300])
 
+# 会话内 `-mcp`(repl → enable_now)是**另一条**入口,曾经漏了"先补清单"这一步。
+# 现场:老用户升级后第一次开会话(清单还在老位置 `~/.mcporter/`),在会话里敲 `-mcp`
+# 得到"清单里没有任何 server,先 wchat mcp add" —— 而它本可以自动补上,用户以为 MCP 坏了。
+# 这条断言不许退化成"只测启动路径":enable_now 必须自己保证清单就位。
+d = fresh()
+_code = (
+    "import os, sys\n"
+    "sys.path.insert(0, %r)\n"
+    "os.environ['WCHAT_NO_SETUP'] = '1'\n"
+    "from wchat_py import mcp_bridge as mb, mcp_boot, seed\n"
+    "mb.list_json = lambda timeout=None: ([], 'stub')\n"
+    "mb.sock_state = lambda: 2\n"
+    "print('BEFORE=', os.path.exists(seed.mcp_dest()))\n"
+    "mcp_boot._probe = lambda explicit=False: (True, '')\n"
+    "ok, msg = mcp_boot.enable_now('', surface=False)\n"
+    "print('OK=', ok)\n"
+    "print('AFTER=', os.path.exists(seed.mcp_dest()))\n"
+    "print('SERVERS=', ','.join(mb.config_servers()))\n" % REPO)
+_r = subprocess.run([sys.executable, "-c", _code], capture_output=True, text=True,
+                    env=dict(os.environ, CT_HOME=os.environ["CT_HOME"]))
+_out = _r.stdout
+ck("会话内 -mcp 首跑:enable_now 自己补清单(不靠调用方)",
+   "BEFORE= False" in _out and "AFTER= True" in _out and "OK= True" in _out,
+   (_out + _r.stderr)[:400])
+ck("会话内 -mcp 补出来的清单真有 server(不是空壳)",
+   "SERVERS= chrome" in _out, _out[:300])
+
 # ---------------- 3) 技能只补缺、不覆盖 ----------------
 print("=== 3. skills 子命令 ===")
 d = fresh()

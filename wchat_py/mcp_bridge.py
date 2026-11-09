@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 
 PKG = os.environ.get("MCP_PKG", "mcporter@0.14.1")
 LAUNCHER = os.environ.get("MCP_LAUNCHER", "npx")
@@ -91,7 +92,9 @@ def _base_specs():
                            "required": ["server", "tool"]}}},
         {"type": "function", "function": {
             "name": "mcp_call",
-            "description": "调用一个 MCP 工具并取回结果。args 须符合该工具参数结构。",
+            "description": "调用一个 MCP 工具并取回结果。args 须符合该工具参数结构。"
+                           "截图/渲染类工具返回的图片会直接作为图片交给你的眼睛(占 image token);"
+                           "其他工具若返回图片,只落盘并给出确切路径,需要看时用 read_image 读它。",
             "parameters": {"type": "object",
                            "properties": {"server": {"type": "string"},
                                           "tool": {"type": "string"},
@@ -450,17 +453,124 @@ def schema(server, tool, timeout=60):
     return out.strip() or (err or "(无 schema 输出)")
 
 
+# ---------------------------------------------------------------- 图片块落地/交给模型
+# 为什么要有这一段(2026-11 用户实测):
+#   chrome 的 take_screenshot 返回的是 MCP `image` 内容块(base64)。旧实现只挑
+#   `type == "text"` 的块,**image 块只数个数、内容整个扔掉** —— 于是模型对截图是瞎的:
+#   不占一个 image token,却也看不到任何画面,只会照着文字说"截图成功捕获"。
+#   更糟的是那句话自相矛盾:"已保存到 (未配置 MCP_SAVE_IMAGES,图片未落盘)"。
+#
+# 现在:图片块**落盘**(拿到确切路径,模型不会再靠猜文件名)+ 按策略决定是否**直通**给模型。
+# 直通走的是与 `-img` / `read_image` **完全同一条**通道(`imgstate.register_image_url`
+#   → `[[IMGREF:ref]]` → `request.expand_refs` 展开成 image_url),所以图片回收/♻ 记账
+#   也自动复用,不需要第二套逻辑。
+_SCREENSHOT_HINTS = ("screenshot", "capture", "render")
+
+
+def _want_inline_images(tool):
+    """这一轮要不要把图片块真的交给模型(直通 = 花 image token)。
+
+    `MCP_IMAGES`:`auto`(默认)/ `on` / `off`。
+    默认 auto 只对**截屏/渲染类**工具直通:浏览器自动化循环里每步都回图会烧掉巨额
+    token,而模型通常只需要 a11y 文本;它真要看图会明说。
+    """
+    mode = (os.environ.get("MCP_IMAGES") or "auto").strip().lower()
+    if mode in ("0", "off", "no", "never", "false"):
+        return False
+    if mode in ("1", "on", "yes", "always", "true"):
+        return True
+    name = (tool or "").lower()
+    return any(h in name for h in _SCREENSHOT_HINTS)
+
+
+def _img_dir_for_write():
+    """图片落盘目录:`MCP_SAVE_IMAGES` 优先,否则本进程的临时目录(会话内可复读)。
+
+    为什么给默认目录而不是"没配就不落":不落盘 = 模型事后想看也没有东西可读,
+    而用户看到的只是"没落盘"。临时目录由系统回收,不需要我们清理。
+    """
+    d = os.environ.get("MCP_SAVE_IMAGES") or ""
+    if not d:
+        d = os.path.join(tempfile.gettempdir(), "wchat-mcp-images", str(os.getpid()))
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _ext_for_mime(mime):
+    m = (mime or "").split(";", 1)[0].strip().lower()
+    return {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+            "image/webp": ".webp", "image/gif": ".gif", "image/bmp": ".bmp"}.get(m, ".bin")
+
+
+def _write_image_block(block, out_dir, index, ts):
+    """把一个 MCP image 块写到磁盘,返回路径;失败返回空串。"""
+    import base64
+    data = block.get("data")
+    if not data:
+        return ""
+    try:
+        raw = base64.b64decode(data)
+    except Exception:
+        return ""
+    ext = _ext_for_mime(block.get("mimeType"))
+    base = os.path.join(out_dir, "mcp-image-%d-%d" % (ts, index))
+    path = base + ext
+    n = 2
+    while os.path.exists(path):
+        path = "%s-%d%s" % (base, n, ext)
+        n += 1
+    try:
+        with open(path, "wb") as f:
+            f.write(raw)
+    except OSError:
+        return ""
+    return path
+
+
+def _attach_images(server, tool, blocks):
+    """落盘 + (按策略)登记为可直通图片。返回 (直通的 ref 列表, 落盘路径列表, 尺寸说明)。"""
+    from wchat_py import img as _img
+    from wchat_py.imgstate import register_image_url
+    try:
+        maxside = int(os.environ.get("IMG_INLINE_MAX_SIDE") or 2048)
+    except ValueError:
+        maxside = 2048
+    try:
+        cap = int(os.environ.get("MCP_IMAGES_MAX") or 4)
+    except ValueError:
+        cap = 4
+    inline = _want_inline_images(tool)
+    paths, refs, notes = [], [], []
+    import time as _t
+    ts = int(_t.time())
+    for i, b in enumerate(blocks, 1):
+        if inline and len(refs) >= cap:
+            notes.append("超出单次上限 %d,其余未直通" % cap)
+            inline = False
+        path = _write_image_block(b, _img_dir_for_write(), i, ts)
+        if not path:
+            notes.append("第 %d 张写盘失败" % i)
+            continue
+        paths.append(path)
+        if not inline:
+            continue
+        try:
+            url, _mime, orig, actual = _img.load_data_url(path, maxside)
+        except Exception:
+            url, orig, actual = path, 0, 0
+        if not url.startswith("data:"):
+            notes.append("第 %d 张读成图片失败(只有路径)" % i)
+            continue
+        refs.append(register_image_url(path, url, actual))
+        if orig and actual and actual < orig:
+            notes.append("第 %d 张已缩到 %dpx" % (i, actual))
+    return refs, paths, notes
+
+
 def call(server, tool, args, timeout=120):
     aj = json.dumps(args or {}, ensure_ascii=False)
     argv = [LAUNCHER, "-y", PKG, "call", "%s.%s" % (server, tool),
             "--args", aj, "--output", "json", "--timeout", str(int(timeout * 1000))]
-    _img_dir = os.environ.get("MCP_SAVE_IMAGES", "")
-    if _img_dir:
-        try:
-            os.makedirs(_img_dir, exist_ok=True)
-            argv += ["--save-images", _img_dir]
-        except OSError:
-            pass
     out, err = _run(argv, timeout=timeout + 15)
     if out is None:
         return "错误:MCP 调用失败: %s" % err
@@ -468,12 +578,30 @@ def call(server, tool, args, timeout=120):
         d = json.loads(out)
     except ValueError:
         return out.strip() or (err or "(无输出)")
-    texts = [c.get("text", "") for c in (d.get("content") or []) if c.get("type") == "text"]
+    content = d.get("content") or []
+    texts = [c.get("text", "") for c in content if c.get("type") == "text"]
     res = "\n".join(texts) if texts else json.dumps(d, ensure_ascii=False)
-    nimg = len([c for c in (d.get("content") or []) if c.get("type") == "image"])
-    if nimg:
-        res += "\n(返回含 %d 个图片块,已保存到 %s;要看图请调用 read_image 读该目录下路径)" % (
-            nimg, _img_dir or "(未配置 MCP_SAVE_IMAGES,图片未落盘)")
+    blocks = [c for c in content if c.get("type") == "image"]
+    if blocks:
+        refs, paths, notes = _attach_images(server, tool, blocks)
+        if refs:
+            from wchat_py.imgstate import imgjson_parts  # noqa: F401  (保持同一处出口)
+            _txt = "%s\n(截图已交给主模型:%d 张%s)" % (
+                res, len(refs), (";" + ";".join(notes)) if notes else "")
+            if d.get("isError"):
+                return "错误(MCP isError): %s" % _txt
+            return "IMGJSON:" + json.dumps(
+                {"refs": refs, "text": _txt}, ensure_ascii=False)
+        # 没直通:如实说清"有几张、在哪",别再把它说成已保存又没落盘。
+        # 路径**单独成行且不带任何后缀**:模型要把它原样交给 read_image,紧跟一个 `)`
+        # 就会变成不存在的路径(实测被自己的格式坑了一次)。
+        res += ("\n(另有 %d 个图片块已落盘,但**未**随本次结果交给模型"
+                "(要看得花 image token)。路径:\n%s%s\n"
+                "  · 要看:直接说\"看图\",我用 read_image 读上面路径;"
+                "或设 MCP_IMAGES=on 让截图类结果自动回图)"
+                % (len(blocks),
+                   "\n".join("  " + p for p in paths) if paths else "  (写盘失败)",
+                   ("\n  附注:" + ";".join(notes)) if notes else ""))
     if d.get("isError"):
         return "错误(MCP isError): %s" % res
     return res

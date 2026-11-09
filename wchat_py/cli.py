@@ -819,20 +819,13 @@ def run_turn(content, model="", max_rounds=None):
             sys.stdout.flush()
             out = _run_tool(tc.get("name") or "", tc.get("arguments") or "{}")
             sys.stdout.write("\n"); sys.stdout.flush()
-            if isinstance(out, str) and out.startswith("IMGJSON:"):
-                import json as _j
-                try:
-                    _d = _j.loads(out[len("IMGJSON:"):])
-                except ValueError:
-                    _d = None
-                if _d:
-                    _ref = _d.get("ref") or ""
-                    _txt = _d.get("text", "图片已读取")
-                    if _ref:
-                        _txt += "\n[[IMGREF:%s]]" % _ref
-                    msgs.append({"role": "tool", "content": _txt,
-                                 "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
-                    continue
+            from wchat_py.imgstate import imgjson_parts as _ijp, with_markers as _iwm
+            _img = _ijp(out)
+            if _img:
+                _txt, _refs = _img
+                msgs.append({"role": "tool", "content": _iwm(_txt, _refs),
+                             "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
+                continue
             msgs.append({"role": "tool", "content": out,
                          "tool_call_id": tc.get("id") or ("call_%d" % tcs.index(tc))})
     sys.stdout.write(box.close()); sys.stdout.flush()

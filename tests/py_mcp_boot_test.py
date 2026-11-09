@@ -531,6 +531,68 @@ print("STOP_CALLS=", n["c"])
 ck("重复清理只停一次 daemon(信号 + atexit 可能都触发)",
    "STOP_CALLS= 1" in out, out.strip())
 
+print("=== 18b. 退出必须**每条分支都说话**(静默的清理与没清理无法区分) ===")
+# 现场:用户退出 `-mcp` 会话后一个字都没看到(daemon 是 3 天前留下的孤儿,不归本会话),
+# 只能怀疑"是不是没关干净"。静默不是"没事",是把判断成本推给用户。
+_, _o, _e = py("""
+os.environ["MCP_ENABLE"] = "1"
+mb.sock_state = lambda: 0
+mcp_boot.daemon_pid = lambda: 4321
+mcp_boot._OWN[0] = False          # 不是本会话拉起的
+mcp_boot._STOPPED[0] = False
+mcp_boot._atexit_stop()
+""")
+ck("非本会话拉起的 daemon:明说没停 + 给手工命令",
+   "daemon 未停止" in _e and "不是本会话启动的" in _e and "daemon stop" in _e, _e.strip())
+ck("  · 带上 pid(用户能自己认领/清理)", "4321" in _e, _e.strip())
+
+_, _o, _e = py("""
+os.environ["MCP_ENABLE"] = "1"
+mb.sock_state = lambda: 0
+mb.daemon_stop = lambda timeout=20: True
+mcp_boot._OWN[0] = True
+# 账本只保留**活着**的 pid(_owners_read 会过滤),1 号进程(lanuchd/init)必定在
+mcp_boot._owners_write([(1, 0)])
+mcp_boot._STOPPED[0] = False
+mcp_boot._atexit_stop()
+""")
+ck("另有会话在用时:明说没停 + 几个会话 + pid", "daemon 未停止" in _e and "仍在用" in _e and "1" in _e, _e.strip())
+
+_, _o, _e = py("""
+os.environ["MCP_ENABLE"] = "1"
+mb.sock_state = lambda: 2          # 已不在
+mcp_boot._OWN[0] = True
+mcp_boot._owners_write([])
+mcp_boot._STOPPED[0] = False
+mcp_boot._atexit_stop()
+""")
+ck("daemon 已不在时也说一句(别让用户以为被静默吞了)", "已不在" in _e, _e.strip())
+
+_, _o, _e = py("""
+os.environ["MCP_ENABLE"] = "0"     # 本会话没用 MCP
+mb.sock_state = lambda: 0
+mcp_boot._OWN[0] = False
+mcp_boot._STOPPED[0] = False
+mcp_boot._atexit_stop()
+""")
+ck("本会话没开 MCP 时**闭嘴**(不制造噪音)", _e.strip() == "", repr(_e))
+
+print("=== 18c. _alive 必须把『无权发信号』算活着(否则账本保护失效) ===")
+# 顺序要点:判存活是为了保护"别的会话还在用 daemon"。把 EPERM 判成死 ⇒ 账本行被清 ⇒
+# 保护失效 ⇒ 可能掐掉别人的 MCP。实测触发点:os.kill(1, 0) 在非 root 下抛 PermissionError。
+_, out, _ = py("""
+print("PID1=", mcp_boot._alive(1))
+print("SELF=", mcp_boot._alive(os.getpid()))
+print("NOPE=", mcp_boot._alive(999999))
+mcp_boot._owners_write([(1, 0)])
+print("ROWS=", len(mcp_boot._owners_read()))
+""")
+ck("pid 1(存在但无权发信号)判为活着", "PID1= True" in out, out.strip())
+ck("自己的 pid 活跃", "SELF= True" in out, out.strip())
+ck("不存在的 pid 判死", "NOPE= False" in out, out.strip())
+ck("账本不会把无权发信号的会话当残留清掉", "ROWS= 1" in out, out.strip())
+
+
 print("=== 19. 子进程环境必须最小且稳定(连接复用的根因)===")
 # 2026-11 用户实测:mcporter 把**整套环境变量**算进 daemon 的连接身份 ——
 # 同一 cwd、同一清单,只改一个环境变量,连接数就整套翻倍且永不回收:
@@ -588,6 +650,90 @@ ck("有一次性迁移,给已装机的旧清单补上(seed 只补缺不覆盖,�
    "def migrate_chrome_profile" in _src_seed, "")
 ck("迁移是文本级插入,不重写整份文件(否则整份 diff)",
    "_insert_args_item" in _src_seed, "")
+
+print("=== 21. MCP 返回的图片块必须真交给模型(不是丢掉、也不是只说'已保存')===")
+# 现场(2026-11 用户实测):chrome take_screenshot 返回 image 内容块,旧实现只挑 text 块,
+# image 块**只数个数、内容扔掉** —— 模型对截图是瞎的(0 image token、0 画面),
+# 却还会说"截图成功捕获";提示语本身自相矛盾("已保存到 (未配置…未落盘)")。
+_, out, _ = py("""
+import base64, io
+try:
+    from PIL import Image
+    b = io.BytesIO(); Image.new("RGB", (2400, 1350), (200, 30, 30)).save(b, "PNG")
+    png = base64.b64encode(b.getvalue()).decode()
+    HAS_PIL = True
+except Exception:
+    png = base64.b64encode(b"not-a-real-png").decode()
+    HAS_PIL = False
+def resp(n=1, txt="Screenshot captured"):
+    return {"content": [{"type": "text", "text": txt}] +
+            [{"type": "image", "mimeType": "image/png", "data": png} for _ in range(n)]}
+mb._run = lambda argv, timeout=None: (json.dumps(resp()), None)
+os.environ.pop("MCP_SAVE_IMAGES", None); os.environ.pop("MCP_IMAGES", None)
+os.environ.pop("MCP_IMAGES_MAX", None)
+from wchat_py import imgstate
+
+# A) 截屏类工具 → 直通(IMGJSON + 引用号),走与 -img 同一条通道
+imgstate.reset_image_refs()
+o = mb.call("chrome", "take_screenshot", {}, timeout=5)
+print("A_IS_IMGJSON=", o.startswith("IMGJSON:"))
+print("A_REFS=", len(json.loads(o[8:]).get("refs") or []) if o.startswith("IMGJSON:") else 0)
+print("A_URL_OK=", any(v.startswith("data:image/") for v in imgstate._IMG_URLS.values()))
+print("A_HAS_PIL=", HAS_PIL)
+
+# B) 普通工具 → 不直通,但**落盘并给确切路径**(不能只说目录让模型猜文件名)
+o = mb.call("chrome", "list_pages", {}, timeout=5)
+print("B_IS_IMGJSON=", o.startswith("IMGJSON:"))
+_paths = [w for w in o.split() if "mcp-image" in w]
+print("B_PATH_EXISTS=", bool(_paths) and all(os.path.exists(p) for p in _paths))
+print("B_NO_CONTRADICTION=", not ("已保存到" in o and "未落盘" in o))
+print("B_SAYS_TOKEN=", "image token" in o)
+
+# C) 强制直通 / 强制不直通
+os.environ["MCP_IMAGES"] = "on"
+imgstate.reset_image_refs()
+print("C_ON=", mb.call("chrome", "list_pages", {}, timeout=5).startswith("IMGJSON:"))
+os.environ["MCP_IMAGES"] = "off"
+imgstate.reset_image_refs()
+print("C_OFF=", mb.call("chrome", "take_screenshot", {}, timeout=5).startswith("IMGJSON:"))
+os.environ.pop("MCP_IMAGES", None)
+
+# D) 单次上限:4 张图、上限 2 → 只直通 2 张
+os.environ["MCP_IMAGES_MAX"] = "2"
+os.environ["MCP_IMAGES"] = "on"
+imgstate.reset_image_refs()
+mb._run = lambda argv, timeout=None: (json.dumps(resp(n=4)), None)
+o = mb.call("chrome", "take_screenshot", {}, timeout=5)
+print("D_REFS=", len(json.loads(o[8:]).get("refs") or []) if o.startswith("IMGJSON:") else -1)
+os.environ.pop("MCP_IMAGES_MAX", None); os.environ.pop("MCP_IMAGES", None)
+
+# E) 展开成真正的 image_url 部件(与 read_image 同一条下游)
+from wchat_py import request as _rq
+imgstate.reset_image_refs()
+mb._run = lambda argv, timeout=None: (json.dumps(resp()), None)
+o = mb.call("chrome", "take_screenshot", {}, timeout=5)
+_d = json.loads(o[8:])
+_ref_map = {k: {"url": v} for k, v in imgstate._IMG_URLS.items()}
+_msgs = [{"role": "tool", "tool_call_id": "c1",
+          "content": imgstate.with_markers(_d.get("text", ""), _d.get("refs") or [])}]
+_exp = _rq.expand_refs(_msgs, _ref_map, "已回收", "重读")
+_parts = _exp[0]["content"] if isinstance(_exp[0]["content"], list) else []
+print("E_TYPES=", ",".join(p.get("type", "") for p in _parts))
+print("E_NO_MARKER=", "IMGREF" not in json.dumps(_parts, ensure_ascii=False))
+""")
+ck("截屏类工具的结果是 IMGJSON(图片真交给模型)",
+   "A_IS_IMGJSON= True" in out and "A_REFS= 1" in out, out.strip()[:400])
+ck("图片进了 data URL 账本(不是空引用)", "A_URL_OK= True" in out, out.strip()[:400])
+ck("普通工具的图片不直通(省 token)", "B_IS_IMGJSON= False" in out, out.strip()[:400])
+ck("但会落盘,而且路径真实存在", "B_PATH_EXISTS= True" in out, out.strip()[:400])
+ck("不再说'已保存到…未落盘'这种自相矛盾的话", "B_NO_CONTRADICTION= True" in out, out.strip()[:400])
+ck("明说要花 image token(用户能预期成本)", "B_SAYS_TOKEN= True" in out, out.strip()[:400])
+ck("MCP_IMAGES=on 强制直通", "C_ON= True" in out, out.strip()[:400])
+ck("MCP_IMAGES=off 强制不直通", "C_OFF= False" in out, out.strip()[:400])
+ck("单次直通有上限(MCP_IMAGES_MAX)", "D_REFS= 2" in out, out.strip()[:400])
+ck("下游展开成 image_url + text 两级部件(与 read_image 同路)",
+   "E_TYPES= image_url,text" in out, out.strip()[:400])
+ck("展开后不留 [[IMGREF]] 标记", "E_NO_MARKER= True" in out, out.strip()[:400])
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

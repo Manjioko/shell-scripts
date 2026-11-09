@@ -44,3 +44,34 @@ def reset_image_refs():
 # 兼容别名:历史上有代码(与测试)按 `_register_image_url` 这个名字取,实现只此一份。
 _register_image_url = register_image_url
 _reset_image_refs = reset_image_refs
+
+
+def imgjson_parts(out):
+    """解工具返回的 `IMGJSON:` 串 → (文本, [ref…]);不是这种返回则 None。
+
+    **为什么要收成一个函数**:`cli.run_turn` 与 `session.orchestrate` 各有一份同样的
+    解析逻辑(历史原因),加"一次返回多张图"(`refs`)时必然漏一处 —— 漏的那一处会把
+    整个 IMGJSON 当普通文本塞给模型,图片永远不出现,而且不报错。与"三处必须同源"
+    是同一条教训(见 mcp_boot._install_patches 的注释)。
+    """
+    if not isinstance(out, str) or not out.startswith("IMGJSON:"):
+        return None
+    import json as _json
+    try:
+        d = _json.loads(out[len("IMGJSON:"):])
+    except ValueError:
+        return None
+    if not isinstance(d, dict):
+        return None
+    refs = d.get("refs")
+    if not isinstance(refs, list):
+        refs = [d.get("ref")] if d.get("ref") else []
+    refs = [r for r in refs if isinstance(r, str) and r]
+    return (d.get("text") or "图片已读取"), refs
+
+
+def with_markers(text, refs):
+    """把引用号拼成正文里的 `[[IMGREF:…]]` 标记(下游 request.expand_refs 展开)。"""
+    if not refs:
+        return text
+    return text + "\n" + "\n".join("[[IMGREF:%s]]" % r for r in refs)

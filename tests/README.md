@@ -1039,3 +1039,94 @@
 > 实测:标题+引导语 **+141 字节**(9 条清单 1617 → 1758,≈+8.7%),换来消除悬空引用;
 > 存盘时 system 从 4962 → 28 字节(技能清单 + 记忆索引都不随历史走)。
 > 变异:把标题换成空串 → 4 条红;把剥离改成 `pass` → 6 条红(两次都复原并核对 sha)。
+
+---
+
+## 会话内 `-mcp` 漏补清单(老用户升级后第一次开会话必踩)
+
+> **现象**:升级后第一次开 `./wchat`(裸启动、惰性模式),在会话里敲 `-mcp`,得到
+> `⚠ 清单里没有任何 server(/Users/xxx/.ct/mcporter.json),先 wchat mcp add 或编辑该文件。`
+> —— 而同一台机器上 `wchat mcp` 明明显示有 4 个 server。用户据此认为"MCP 坏了/模型不能自主调"。
+>
+> **根因**:补清单(`_ensure_manifest_and_migrate()`)**只写在启动路径**里
+> (`mcp_boot.install()` 的 `-mcp` 分支)。会话内的 `-mcp` 走的是 `repl.mcp_on` →
+> `mcp_boot.enable_now()`,**直接调用、没有这一步**。老用户升级后清单还在老位置
+> `~/.mcporter/`,`~/.ct/mcporter.json` 尚未生成,于是 `config_servers()` 返回空。
+> 实测复现:空 `CT_HOME` 下 `enable_now()` 直接报没有 server;先 ensure 则一切正常。
+>
+> **修法**:把 ensure 收进 `enable_now()` 自己(单一职责 —— 谁要探测谁负责保证清单就位,
+> 不依赖调用方),幂等所以启动路径那次重复调用无副作用。顺带把"没有 server"的文案分三态:
+> 文件在但 server 为空 / 文件不在但模板在(补不出来) / 文件不在且**模板也缺**(安装包不完整,
+> 该 reinstall)—— 以前一律说"先 wchat mcp add",在模板缺失时是错误指引。
+>
+> **基线**:子命令 **42 → 44/44**(+2:会话内 enable_now 自己补清单、补出来的清单真有 server)。
+> 变异:去掉 `enable_now` 里的 ensure → 2 红(实跑,复原后核对 sha)。
+>
+> **另一层(不是 bug,是设计)**:裸启动时 `mcp_*` 工具是否登记,取决于
+> `~/.ct/mcp/.enabled` 标记(`_lazy_armed()`),语义是"这台机器成功用过 MCP"。
+> 从没成功过 → 不登记(省每请求约 300 tokens);成功探测或 `wchat mcp add` 后永久生效。
+> 所以升级后想要"裸启动也能自主调 MCP",必须先成功跑一次 `wchat -mcp`。
+
+---
+
+## 退出时静默 + `_alive` 把 EPERM 判成死(两个同族清理缺口)
+
+> **现象(用户实测)**:`./wchat -mcp` 探测成功(4 个 server 全可用),`-q` 退出后
+> **一个字都没有** —— 不像往常那样提示"daemon 已随本会话优雅停止"。用户只能怀疑
+> "是不是没关干净"。
+>
+> **根因 1(静默)**:`_atexit_stop()` 只有"本会话停了 daemon"这一支打印,其余三支
+> (不是本会话拉起的 / 另有会话在用 / daemon 已不在)全部静默 `return`。
+> 实测那个 daemon 是 **3 天 16 小时前**留下的孤儿(pid 75955,PPID=1),
+> `daemon.owner` 标记已不存在 ⇒ `reap_orphan_daemon()` 只肯回 `("none","没有归属标记")`
+> ⇒ `_OWN=False` ⇒ 静默。**逻辑上"不该杀"是对的**(socket 全机一个,别家程序可能在用),
+> 但"不说"是错的:静默的清理和没清理在屏幕上无法区分。
+>
+> **根因 2(EPERM)**:`_alive()` 用 `os.kill(pid, 0)` 判存活,`except OSError: return False`
+> —— 而**非 root 对 pid 1 发信号抛的是 PermissionError**(OSError 子类)。
+> 于是"存在但无权发信号"被判成"死了":账本里别的用户的会话行会被当残留清掉,
+> "还有人用就别停 daemon"的保护随之失效,可能掐掉别人的 MCP。实测:`_alive(1)` 曾是 False。
+>
+> **修法**:① `_atexit_stop` 每条分支都说话(本会话没开 MCP 时仍然闭嘴,不制造噪音),
+> 非本会话拉起时带上 pid 与手工 stop 命令;② `_alive` 分开捕 `PermissionError`(活着)
+> 与 `ProcessLookupError`(死了)。
+>
+> **基线**:MCP启动 **80 → 89/89**(+5 退出四分支各说一句 + 没开 MCP 时闭嘴,
+> +4 `_alive` 的 pid1/self/不存在/账本保留)。
+> 变异:非本会话分支改 `if False` → 2 红;`PermissionError` 改 `ZeroDivisionError` → 3 红
+> (都实跑,复原后核对 sha)。
+>
+> **留下未做**:没有 `daemon.owner` 标记的历史孤儿仍然**不会**被自动收割(按设计不误杀)。
+> 那台机器上就有一个 3d16h 的孤儿在跑;清它得手工 `npx -y mcporter@x.y.z daemon stop`。
+---
+
+## MCP 截图对模型是瞎的(image 内容块被整段丢弃)
+
+> **现象(用户实测)**:让模型用 chrome MCP 开网页并截图,它回"截图成功捕获当前视口画面"。
+> 追问"是不是把图片喂给模型了"才暴露:**不占一个 image token,模型也看不见任何画面**
+> —— 两头皆空。提示语还是自相矛盾的:`已保存到 (未配置 MCP_SAVE_IMAGES,图片未落盘)`。
+>
+> **根因**:`mcp_bridge.call()` 只挑 `type == "text"` 的内容块,`type == "image"` 的
+> **只数个数、内容整个扔掉**(`nimg = len([...])`,`data` 从未使用)。而 chrome 的
+> `take_screenshot` 返回的正是 image 块(base64)。所以"截图"这个动作对模型毫无意义。
+> 附带:`--save-images` 由 mcporter 自己落盘,它把路径打到 **stderr**,而 `_run()` 成功时
+> 丢掉 stderr ⇒ 即使配了目录,模型也只拿到一句"已保存到 <目录>",猜不到文件名。
+>
+> **修法**:图片块**自己解码落盘**(拿到确切路径)+ 按策略**直通**给模型。
+> 直通走与 `-img`/`read_image` **完全同一条**通道(`imgstate.register_image_url` →
+> `[[IMGREF:ref]]` → `request.expand_refs`),所以回收/♻ 记账自动复用,不是第二套逻辑。
+> 策略 `MCP_IMAGES`:`auto`(默认,只对名字含 screenshot/capture/render 的工具直通)
+> / `on` / `off`;单次上限 `MCP_IMAGES_MAX`(默认 4)。其余图片落盘到
+> `MCP_SAVE_IMAGES`,未配则本进程临时目录,并把**裸路径单独成行**交给模型。
+> 顺手把 `cli.run_turn` 与 `session.orchestrate` 里两份相同的 `IMGJSON:` 解析收进
+> `imgstate.imgjson_parts/with_markers` —— 加"一次多图"(`refs`)时漏一处就会把 IMGJSON
+> 当普通文本塞给模型,图片永不出现且不报错。
+>
+> **基线**:MCP启动 **89 → 100/100**(+11:截屏类直通/进 data URL 账本/普通工具不直通/
+> 路径真实存在/无自相矛盾/明说 token 成本/on/off/上限/展开成 image_url/无标记残留)。
+> 变异:图片块置空 → 8 红;auto 改一律直通 → 3 红;上限判断改 False → 1 红
+> (都实跑,复原后核对 sha)。连带 `inline_image` 298/298、`MCP通道` 133/133、`请求建体` 30/30。
+>
+> **成本事实**(别被"免费"骗了):真看一张 1280×720 截图 ≈ 1.1k image token,
+> 1920×1080 ≈ 1.8k。本机 `~/.ct/usage/calls.jsonl*` 8088 条请求的 `image` 字段全是 0
+> —— 也就是说在这次修之前,这台机器上从没有一张图真进过上下文。

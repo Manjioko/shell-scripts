@@ -79,6 +79,14 @@ def _alive(pid):
     try:
         os.kill(int(pid), 0)
         return True
+    except PermissionError:
+        # 进程存在,只是不归我发信号(别的用户的会话/系统进程)。
+        # 以前这里落到 `except OSError` 判成"死了" —— 后果是账本里那一行被当成
+        # 残留清掉,于是"还有人用就别停 daemon"的保护失效,可能掐掉别人的 MCP。
+        # 实测:os.kill(1, 0) 在非 root 下抛 PermissionError。
+        return True
+    except ProcessLookupError:
+        return False
     except OSError:
         return False
     except (TypeError, ValueError):
@@ -592,6 +600,11 @@ def _surface(srv, err=None):
 _STOPPED = [False]
 
 
+def _say(msg):
+    sys.stderr.write(msg)
+    sys.stderr.flush()
+
+
 def _atexit_stop():
     """清理本会话的痕迹:账本、必要时停 daemon。
 
@@ -600,26 +613,45 @@ def _atexit_stop():
       · `kill -9` / OOM / 崩溃 → **什么都拦不住**,只能靠下次启动时 `reap_orphan_daemon()`;
       · 机器重启 → 进程自然没了,但 `~/.mcporter/daemon/` 会留下陈旧 socket 与账本,
         `sock_state()` 判为"陈旧连不上"(返回 1),不会被当成活 daemon。
+
+    **每条分支都要说话**(2026-11 用户实测):以前只有"本会话停了 daemon"这一支打印,
+    其余三支静默返回。用户退出 `-mcp` 会话后看到一个字的交代都没有,只能怀疑"是不是
+    没清理干净/是不是漏关了什么"。静默的清理和没清理在屏幕上无法区分 —— 这比少停一个
+    daemon 更糟,因为它把判断成本推给了用户。
     """
     if _STOPPED[0]:
         return
     _STOPPED[0] = True
     from wchat_py import mcp_bridge as mb
+    _mcp_on = os.environ.get("MCP_ENABLE") == "1"
     rows = _release_daemon()
     if not _OWN[0]:
+        # 不是本会话拉起的 daemon。**绝不停**:socket 全机一个,别家程序(Claude Desktop
+        # 等)或另一个 wchat 会话可能正在用,旧版就是在这里把别人的 MCP 掐死的。
+        # 但要如实说一句,并给出想停时的命令。
+        if _mcp_on and mb.sock_state() == 0:
+            _pid = daemon_pid()
+            _say("  [mcp] daemon 未停止:它不是本会话启动的(%s),可能还有别的会话或程序在用\n"
+                 "        确实要停: npx -y %s daemon stop\n"
+                 % (("pid %d" % _pid) if _pid else "已有实例", mb.PKG))
         return
     if rows:
-        return          # 还有别的 wchat 会话在用:绝不停(旧版就是这里把别人的 MCP 掐死的)
+        # 还有别的 wchat 会话在用:绝不停(旧版就是这里把别人的 MCP 掐死的)
+        if _mcp_on:
+            _say("  [mcp] daemon 未停止:另有 %d 个 wchat 会话仍在用(pid %s)\n"
+                 % (len(rows), ", ".join(str(r[0]) for r in rows)))
+        return
     if mb.sock_state() != 0:
         _forget_daemon_owner()
+        if _mcp_on:
+            _say("  [mcp] daemon 已不在(自己退了或已被停),本会话账本已清\n")
         return
     if mb.daemon_stop():
         _forget_daemon_owner()
-        sys.stderr.write("  [mcp] daemon 已随本会话优雅停止(它忙时会自己拒绝,那种情况会保留)\n")
+        _say("  [mcp] daemon 已随本会话优雅停止(它忙时会自己拒绝,那种情况会保留)\n")
     else:
-        sys.stderr.write("  [mcp] daemon 未停止(可能仍有活跃调用)。手工: npx -y %s daemon stop\n"
-                         % mb.PKG)
-    sys.stderr.flush()
+        _say("  [mcp] daemon 未停止(可能仍有活跃调用)。手工: npx -y %s daemon stop\n"
+             % mb.PKG)
 
 
 # ------------------------------------------------------------------ 孤儿 daemon 治理
@@ -778,6 +810,29 @@ def _on_term(signum, frame):
 
 
 # ------------------------------------------------------------------ 显式启用(会话内也可调用)
+def _no_server_hint(mb):
+    """清单已尽力补齐、仍然没有 server 时,给一句**能指导下一步**的话。
+
+    为什么要分情况:以前一律说"先 `wchat mcp add` 或编辑该文件"。可是当随包模板
+    缺失(装包不完整)时,那句会把人指向一个无效动作 —— 用户以为是自己没配,真因在安装包。
+    """
+    p = mb.config_path()
+    if os.path.isfile(p):
+        return ("清单 %s 里没有任何 server,先 `wchat mcp add` 或编辑该文件。"
+                % p)
+    try:
+        from wchat_py import seed as _seed
+        tpl = _seed.mcp_template()
+    except Exception:
+        tpl = ""
+    if tpl and os.path.isfile(tpl):
+        return ("清单 %s 不存在,而且从随包模板(%s)也补不出来"
+                "(目录不可写?),先 `wchat mcp add` 或手工建一份。" % (p, tpl))
+    return ("清单 %s 不存在,而且**随包模板也缺失**(%s)。"
+            "这是安装包不完整 —— 重装本包(brew reinstall wchat)后再试。"
+            % (p, tpl or "?"))
+
+
 def enable_now(only="", surface=True):
     """当场探测并暴露面。返回 (ok, 给用户的一句话)。
 
@@ -792,11 +847,21 @@ def enable_now(only="", surface=True):
         os.environ["MCP_ONLY"] = only.replace(",", " ").strip()
     _install_patches()
 
+    # 清单必须由**本函数自己**保证就位,不能靠调用方:
+    #   启动路径(`install()`)调了 `_ensure_manifest_and_migrate()`,会话内的 `-mcp`
+    #   (`repl.mcp_on`)却是**直接**调本函数 —— 少这一步的后果是:老用户升级后第一次
+    #   开会话(那时 `~/.ct/mcporter.json` 还没生成,清单还在老位置 `~/.mcporter/`),
+    #   在会话里敲 `-mcp` 会得到"清单里没有任何 server,先 wchat mcp add 或编辑该文件"
+    #   —— 而它本可以从老位置复制或从随包模板生成。用户于是认为 MCP 坏了。
+    #   实测复现:`CT_HOME` 指向空目录 → enable_now 直接报没有 server;先 ensure 则正常。
+    # 幂等(目标已存在就什么都不做),所以启动路径那次重复调用无副作用。
+    _ensure_manifest_and_migrate()
+
     names = mb.config_servers()
     if not names:
         os.environ["MCP_ENABLE"] = "0"
         os.environ["MCP_STATE"] = "off"
-        return False, "清单里没有任何 server(%s),先 `wchat mcp add` 或编辑该文件。" % mb.config_path()
+        return False, _no_server_hint(mb)
 
     # 探测前先把"要开始了"说出来:旧版从敲回车到探测结束终端一个字都没有,
     # 8.9s 全静默(真实冷启动是分钟级),用户只会认为程序挂了。
