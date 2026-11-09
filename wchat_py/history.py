@@ -1,6 +1,9 @@
 """history —— 历史存档里的**纯 JSON 变换**(迁移自 wchat.sh 的 save_history/get_history)。
 
 只摘"消息结构的变形"这两段,上屏/文件名清洗/全局赋值/文件 IO 全留 bash:
+  · `strip_injected`    —— system 注入段(技能/记忆/auto/MCP)的统一剥离口。`pack`(bash
+                            存盘路)与 `session.save_history`(Python 存盘路)共用它,
+                            免得"两条存盘路各剥各的,其中一条忘了剥";
   · `pack`              —— 存盘前把 messages 包成存档对象,并**剥掉 system 里的注入段**
                            (技能/auto/MCP 清单不随历史存档,加载时重新注入最新列表);
   · `drop_orphan_tools` —— 加载时剔除"孤儿 tool"(前一条不是含其 tool_call_id 的
@@ -23,6 +26,27 @@ import sys
 from . import _contract
 
 
+def strip_injected(msgs, marks):
+    """就地剥掉 system 里从各标记起往后的注入段,返回同一个 list。
+
+    口径与 bash `.[0].content | split($mark)[0]` 一致:每刀取**第一次出现之前**的部分
+    (标记不在则原样)。给成注入顺序最直观,但顺序不影响结果 —— 先出现的标记会把
+    它后面的整段(含后面的标记)一起切掉。
+
+    为什么剥:`SKILLS_MARK`/`MEMORY_MARK` 段是**每次会话按当时的磁盘状态重建**的实时内容,
+    跟着历史存档走只会在文件里留下一份过期副本。加载历史时 system 整体重建(见 repl 的
+    "始终刷新 system"),所以剥掉不丢信息,只少让一份 1.6KB 的旧清单躺在每个存档里。
+    """
+    if msgs and isinstance(msgs[0], dict):
+        c = msgs[0].get("content")
+        if isinstance(c, str):
+            for mk in marks or ():
+                if mk:
+                    c = c.split(mk)[0]
+            msgs[0]["content"] = c.rstrip("\n")
+    return msgs
+
+
 def pack(messages_json: str, model: str, thinking: str,
          mark: str, mark2: str, mark3: str) -> str:
     """存盘对象:`{model, messages(已剥注入段), thinking:{type}, reasoning_effort, stream}`。
@@ -32,13 +56,7 @@ def pack(messages_json: str, model: str, thinking: str,
     加载这份历史,system 里还写着"当前处于 auto 模式"。
     """
     msgs = json.loads(messages_json)
-    if msgs:
-        c = msgs[0].get("content")
-        if isinstance(c, str):
-            for mk in (mark, mark2, mark3):
-                if mk:
-                    c = c.split(mk)[0]
-            msgs[0]["content"] = c
+    strip_injected(msgs, (mark, mark2, mark3))
     obj = {
         "model": model,
         "messages": msgs,

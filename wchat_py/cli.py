@@ -666,12 +666,7 @@ def _system_prompt_text():
         pass
     try:
         from wchat_py import skill as _sk
-        _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
-            os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct"), "skills")
-        _extra = _sk.scan_skills(_sd,
-                                 os.environ.get("SKILL_MAX_INJECT", "30"),
-                                 os.environ.get("SKILL_DESC_MAX", "200"),
-                                 os.environ.get("SKILLS_DIR_EXTERNAL", "0"))
+        _extra = _sk.injection()
         if _extra:
             base += "\n\n" + _extra
     except Exception:
@@ -963,19 +958,10 @@ def main(argv):
         from wchat_py.session import Session, seed_system
         from wchat_py.repl import run_repl, session_text_handler
         _s = Session.from_env()
-        _extra = ""
-        try:
-            from wchat_py import skill as _skill
-            _sd = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
-                os.environ.get("HOME", ""), "." + "c" + "t", "skills")
-            _r = _skill.scan_skills(_sd,
-                                    os.environ.get("SKILL_MAX_INJECT", "30"),
-                                    os.environ.get("SKILL_DESC_MAX", "200"),
-                                    os.environ.get("SKILLS_DIR_EXTERNAL", "0"))
-            _extra = _r if isinstance(_r, str) else ""
-        except Exception:
-            _extra = ""
-        seed_system(_s, extra=_extra)
+        # system 只由 `_system_prompt_text()` 一处构建:技能清单(含标题)/项目记忆/MCP
+        # 三段都在里面。以前这里复制了一份 `scan_skills` 调用,后果是 REPL 启动的 system
+        # **既没有标题也没有记忆段** —— 与单轮路径两副面孔。
+        seed_system(_s, base=_system_prompt_text(), append_mcp=False)
         if not getattr(_s, "model", ""):
             _s.model = os.environ.get("FLASH_MODEL", "") or os.environ.get("WCHAT_MODEL", "")
         from wchat_py.repl import _default_meta as _dm

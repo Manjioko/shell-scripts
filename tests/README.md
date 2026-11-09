@@ -1008,3 +1008,34 @@
 >
 > **3. 失败时完整日志会留在 `/tmp/wchat_gate_fail_<名字>.log`。**
 > 以前只 tail 3 行,偶发红的时候尾巴里全是 `ok`,根本看不到是哪条断言的错。
+
+---
+
+## 技能清单标题丢失修复(技能/记忆注入段 + 存盘剥离)
+
+> **现象**:`wchat -msgs` 里 system 是 `You are a helpful assistant.` 后面直接跟一串裸的
+> `- 技能名: 描述`,没有标题。模型读到的 `read_skill` 工具描述里写着"当任务与系统提示中
+> **「可用技能列表」**的某个技能描述匹配时…",而 system 里根本没有这个标题 ——
+> **悬空引用**;同时这串列表既无归属也无"这是摘要不是正文"的说明,与紧邻的记忆段
+> (有 `## 项目记忆` + 边界声明)形状不一致。
+>
+> **根因**:迁移到 Python 时丢了 bash 的 `SKILLS_MARK = "## 可用技能(Skills)"`
+> (旧实现 `inject_skills` 会在清单前拼这个标记,`save_history` 再按它剥离)。
+> 更糟的是**system 有三处构建点**(`cli._system_prompt_text`、REPL 启动的
+> `seed_system(extra=…)`、`repl` 切历史时的刷新),前两处各调各的 `scan_skills`,
+> 所以 REPL 启动的 system **既没有标题、也没有记忆段**(交互式里记忆其实一直不可见)。
+>
+> **做法**(单一职责,不复制第三份):
+> 1. `skill.SKILLS_MARK` + `skill.injection()` —— 标题(`## 可用技能列表(Skills,已列 N 个)`)
+>    + 一句"这是摘要不是正文,匹配时先 read_skill 读全文"。`scan_skills` 保持纯裸列表不清。
+> 2. `memory.MEMORY_MARK` —— 与注入串里那行标题共用同一常量。
+> 3. `history.strip_injected(msgs, marks)` —— 剥离口唯一实现,`pack`(bash 存盘路)与
+>    `session.save_history`(Python 存盘路)共用,修掉"Python 存盘路从不剥离"的回归。
+> 4. CLI 两处注入点收口到 `injection()`;REPL 启动改为 `seed_system(base=_system_prompt_text(),
+>    append_mcp=False)`(避免 MCP 段被追加两遍)。
+>
+> **基线**:`技能解析` 18 → **25/25**;`历史存档名` 14 → **22/22**;`项目记忆` **47/47**;
+> `历史变换` **27/27**;`MCP启动` 80/80;全表 569/569 不变(bash 源码未动)。
+> 实测:标题+引导语 **+141 字节**(9 条清单 1617 → 1758,≈+8.7%),换来消除悬空引用;
+> 存盘时 system 从 4962 → 28 字节(技能清单 + 记忆索引都不随历史走)。
+> 变异:把标题换成空串 → 4 条红;把剥离改成 `pass` → 6 条红(两次都复原并核对 sha)。

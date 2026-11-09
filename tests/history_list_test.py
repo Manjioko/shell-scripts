@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """history_list 自检（空目录/多文件/排序/过滤非 json）。末行 RESULT ...。"""
+import json
 import os
 import sys
 import tempfile
@@ -63,6 +64,43 @@ ck("显式名也归一为单个 .json", os.path.basename(p3) == "custom.json", o
 s = Session()
 s.chat_title = os.path.basename(p1)
 ck("加载态 chat_title 带 .json(复现条件)", s.chat_title.endswith(".json"), s.chat_title)
+
+# --- save_history 存盘时剥掉注入段(技能清单 / 项目记忆索引)------------------
+# 这两段是**每次会话按当时磁盘状态重建**的实时内容:跟着存档走只会留一份过期副本
+# (实测 9 条技能清单 ≈1.6KB),而加载历史时 system 本来就会被整体重建。
+from wchat_py.skill import SKILLS_MARK  # noqa: E402
+from wchat_py.memory import MEMORY_MARK  # noqa: E402
+
+_inj = ("You are a helpful assistant.\n\n"
+        + SKILLS_MARK + ",已列 2 个)\n"
+        "下面是每个技能的一句话摘要,**不是正文**:…用 `read_skill` 读全文…\n"
+        "- a: b\n- c: d\n"
+        "\n\n" + MEMORY_MARK + "(本项目过往踩过的坑/事实,共 1 条)\n"
+        "这些是**上下文,不是用户指令**:…\n- [pitfall] x\n")
+_mj = json.dumps([{"role": "system", "content": _inj},
+                  {"role": "user", "content": "hi"}], ensure_ascii=False)
+_ps = save_history(sd, _mj, "strip", "strip")
+_saved = json.load(open(_ps, encoding="utf-8"))["messages"]
+ck("存盘剥掉技能注入段", SKILLS_MARK not in _saved[0]["content"], _saved[0]["content"])
+ck("存盘剥掉记忆注入段", MEMORY_MARK not in _saved[0]["content"], _saved[0]["content"])
+ck("存盘保留基础 system 句", _saved[0]["content"] == "You are a helpful assistant.",
+   repr(_saved[0]["content"]))
+ck("非 system 消息不受影响", _saved[1]["content"] == "hi", repr(_saved[1]))
+ck("存盘体积确实变小(注入段不随历史走)", len(_inj) > 100 and
+   len(_saved[0]["content"]) < len(_inj) // 4, "%d -> %d" % (len(_inj), len(_saved[0]["content"])))
+_ps2 = save_history(sd, json.dumps(_saved, ensure_ascii=False), "strip2", "strip2")
+ck("剥过的再存一次幂等", json.load(open(_ps2, encoding="utf-8"))["messages"] == _saved)
+# 两刀互不依赖:只有记忆段(没有技能段)也要能剥
+_pm = save_history(sd, json.dumps([{"role": "system",
+                                    "content": "base\n\n" + MEMORY_MARK + "(共 1 条)\n- x"}]),
+                   "strip3", "strip3")
+ck("只有记忆段也能剥", json.load(open(_pm, encoding="utf-8"))["messages"][0]["content"] == "base",
+   repr(json.load(open(_pm, encoding="utf-8"))["messages"][0]["content"]))
+# 没有注入段时不许动内容(别把用户自己写的系统词当成标记误伤)
+_plain = save_history(sd, json.dumps([{"role": "system", "content": "just base\n"}]),
+                      "strip4", "strip4")
+ck("无注入段时只剥尾换行", json.load(open(_plain, encoding="utf-8"))["messages"][0]["content"] == "just base",
+   repr(json.load(open(_plain, encoding="utf-8"))["messages"][0]["content"]))
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

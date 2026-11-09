@@ -151,11 +151,25 @@ def save_history(history_dir, messages_json, name, title=""):
 
     name/title 任给其一即可:name(WCHAT_HISTORY_NAME)优先,否则用 title;
     无论哪来源都过 `_sanitize_name`,保证落盘名只有一个 `.json` 后缀。
+
+    存盘前先剥 `system` 里的注入段(技能清单 / 项目记忆索引):它们是**每次会话按当时
+    磁盘状态重建**的实时内容,跟着存档走只会留一份过期副本(实测技能清单 9 条约 1.6KB)。
+    加载历史时 `system` 本来就会被整体重建,所以剥掉不丢信息。剥离口在
+    `history.strip_injected`,与 bash 存盘路(`history pack`)共用,避免两条路剥法漂移。
     """
     from wchat_py import msgstore
+    from wchat_py import history as _hist
     name = history_name(name or title)
     path = os.path.join(history_dir, name)
-    msgstore.save_doc(path, {"messages": messages_list(messages_json), "title": title})
+    msgs = messages_list(messages_json)
+    try:
+        from wchat_py.skill import SKILLS_MARK
+        from wchat_py.memory import MEMORY_MARK
+        _marks = (SKILLS_MARK, MEMORY_MARK)
+    except Exception:            # 组件缺失时宁可少剥,也不能存不下来
+        _marks = ()
+    _hist.strip_injected(msgs, _marks)
+    msgstore.save_doc(path, {"messages": msgs, "title": title})
     return path
 
 
@@ -413,10 +427,14 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
     return text
 
 
-def seed_system(s, base="You are a helpful assistant.", extra=""):
-    """用 system 消息初始化会话(新会话/刷新注入时用)。extra 可为技能清单文本。"""
+def seed_system(s, base="You are a helpful assistant.", extra="", append_mcp=True):
+    """用 system 消息初始化会话(新会话/刷新注入时用)。extra 可为技能清单文本。
+
+    `append_mcp=False` 用于"base 已经是完整 system"(如 `cli._system_prompt_text()`,
+    它自己就带了 MCP 段):否则 MCP 清单会被追加两遍,而且两份内容不一致。
+    """
     text = base + (("\n\n" + extra) if extra else "")
-    _mcp = os.environ.get("MCP_MANIFEST", "")
+    _mcp = os.environ.get("MCP_MANIFEST", "") if append_mcp else ""
     if _mcp:
         text += "\n\n" + _mcp
     s.messages_json = json.dumps([{"role": "system", "content": text}], ensure_ascii=False)

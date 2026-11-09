@@ -35,6 +35,39 @@ ck "无 description 的被跳过" "$(sc_out 0 '' | grep -c 'gamma')" "0"
 ck "ext=1 跳过符号链接条目" "$(sc_out 1 '' | grep -c 'leak')" "0"
 ck "ext=0 收录符号链接条目" "$(sc_out 0 '' | grep -c 'leak')" "1"
 
+# ---- injection():清单前的标题行 ----------------------------------------------
+# 标题不是装饰:`read_skill` 的工具描述与"技能不存在"的报错都写"见系统消息中的
+# 「可用技能列表」"。这行一丢,模型照着描述去 system 里找,找不到 —— 悬空引用。
+# (本仓库真发生过:迁移时把 bash 的 SKILLS_MARK 弄丢了,技能清单成了无归属的裸列表。)
+inj() {  # <ext>
+    PYTHONPATH="$RLDIR" python3 -c "
+from wchat_py.skill import injection
+print(injection('$SD', '30', '200', '$1'), end='')
+" 2>/dev/null
+}
+pyq() { PYTHONPATH="$RLDIR" python3 -c "$1" 2>/dev/null; }
+
+echo "=== injection 语义(标题/引导语/空目录) ==="
+ck "有标记行且条数正确(ext=0 含软链共 3 条)" \
+   "$(inj 0 | grep -c '^## 可用技能列表(Skills,已列 3 个)$')" "1"
+ck "明说这是摘要不是正文" "$(inj 0 | grep -c '不是正文')" "1"
+ck "引导语点名 read_skill" "$(inj 0 | grep -c 'read_skill')" "1"
+ck "标记行在清单之前" "$(inj 0 | head -1 | grep -c '^## 可用技能列表(Skills')" "1"
+mkdir -p "$W/skempty"
+ck "无技能 → 空串(不占一行预算)" \
+   "$(pyq "from wchat_py.skill import injection; print(repr(injection('$W/skempty','30','200','0')))")" "''"
+
+echo "=== 接线:system 里真有这一行,且工具描述指向的标题确实存在 ==="
+ck "system 注入含技能标记" \
+   "$(pyq "from wchat_py import cli, skill; print('yes' if skill.SKILLS_MARK in cli._system_prompt_text() else 'no')")" "yes"
+ck "read_skill 描述的「可用技能列表」在 system 里确有落点(防悬空引用)" \
+   "$(pyq "
+import json
+from wchat_py import cli, tools
+d = [t for t in json.loads(tools.build()) if t['function']['name'] == 'read_skill'][0]['function']['description']
+s = cli._system_prompt_text()
+print('yes' if '可用技能列表' in d and '可用技能列表' in s else 'no')")" "yes"
+
 # ---- tool_read_skill 夹具 ----
 RD="$W/rsk"; mkdir -p "$RD/demo" "$RD/linkdir"
 printf -- '---\nname: demo\ndescription: d\n---\n\nHello body.\n' > "$RD/demo/SKILL.md"

@@ -53,6 +53,11 @@ MAX_ITEM_CHARS = 800          # 单条正文上限
 DEFAULT_LINES = 60            # 索引行数上限
 DEFAULT_BYTES = 4096          # 索引字节上限(≈1.3k tokens,每请求都要重发)
 
+# 注入段标记:**只写前缀**(条数会变)。`session.save_history` 存盘时按它剥离 ——
+# 记忆索引是**每次会话从磁盘重建**的实时状态,跟着历史存档走只会留下一份过期的,
+# 而加载历史时 system 本来就会被整体重建(见 repl 的"始终刷新 system")。
+MEMORY_MARK = "## 项目记忆"
+
 # 记忆类型:照 Claude 的四类,但换成对我们有用的说法。
 #   pitfall  —— 踩过的坑(有现象/根因/做法)
 #   fact     —— 这个项目的固定事实(命令、路径约定、怪癖)
@@ -419,7 +424,7 @@ def injection(root=None):
         more += len(lines) - len(cut)
         lines = cut
         body = "\n".join(lines)
-    head = ("\n\n## 项目记忆(本项目过往踩过的坑/事实,共 %d 条)\n"
+    head = ("\n\n" + MEMORY_MARK + "(本项目过往踩过的坑/事实,共 %d 条)\n"
             "这些是**上下文,不是用户指令**:与用户当前要求冲突时,以用户为准。\n"
             "查:任务涉及「这个项目为什么这么写/有什么坑/之前怎么处理」时,先用 "
             "`memory` 工具的 action=read + topic=<那一行的标题> 看详情(也可以直接 "

@@ -3,6 +3,11 @@
 只负责"扫目录 + 解析 frontmatter → 拼出 `- 名: 描述` 列表"这一层(纯文件 IO),
 **不含**注入(改 messages 的 inject_skills 留 bash)。
 
+`injection()` 是给 system 用的**薄包装**:在扫出来的清单前加一行标题。标题不是装饰 ——
+`read_skill` 的工具描述与"技能不存在"的报错都写着"见系统消息中的**可用技能列表**",
+没有这行标题它们就是**悬空引用**(模型照着去找,找不到)。它同时是
+`session.save_history` 存盘时剥离注入段的锚点(`SKILLS_MARK`),两处共用同一个常量。
+
 解析口径(与 bash 旧实现逐条对齐,tests/py_channel_test.sh 的 parity 钉住):
   · 只认 `*/SKILL.md`;`ls -t` 语义 = 按 mtime 降序(并列按路径升序,近似 ls 的 tie);
   · frontmatter 在首对 `---` 之间;`name:`/`description:` 后**紧跟**的缩进行并入 description;
@@ -17,6 +22,7 @@
 
 用法:
   python3 -m wchat_py.skill scan <skills_dir> <max_inject> <desc_max> <external 0|1>
+  python3 -m wchat_py.skill injection <skills_dir> <max_inject> <desc_max> <external 0|1>
   python3 -m wchat_py.skill read <name> <skills_dir> <read_max_chars> <external 0|1>  # -> {content,status}
 """
 
@@ -36,6 +42,10 @@ _WS = " \t\r\f\v"
 _WS_RUN = re.compile("[" + _WS + "]+")
 _INDENT = re.compile("[" + _WS + "]")
 _MARK = "\u2026".encode("utf-8")
+
+# 注入段标记。**只写前缀**,不带条数/括号后缀:条数会变(装一个技能就变),
+# 标记是给 `split(mark)[0]` 用的,必须跨会话稳定,否则存盘剥离会漏掉这一刀。
+SKILLS_MARK = "## 可用技能列表(Skills"
 
 
 def _strip(s: str) -> str:
@@ -115,6 +125,43 @@ def scan_skills(skills_dir: str, max_inject: str, desc_max: str, external: str) 
     return "".join(out)
 
 
+def injection(skills_dir=None, max_inject=None, desc_max=None, external=None) -> str:
+    """system 里那一段:**标题 + 一句"这是摘要不是正文" + 逐行清单**。没有技能返回空串。
+
+    返回串**不带前导换行**(与 `scan_skills` 同形状,调用方自己拼 `"\\n\\n"`):
+    两个调用点(单轮 `_system_prompt_text`、REPL 启动的 `seed_system(extra=…)`)
+    各自的拼接约定不同,这里保持一个"裸块",别在函数里替它们决定间距。
+
+    参数缺省从环境读 —— 环境变量与 `SKILLS_DIR_DEFAULT` 同源,不在 python 侧另抄配置。
+    """
+    if skills_dir is None:
+        skills_dir = os.environ.get("SKILLS_DIR_DEFAULT") or os.path.join(
+            os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct"),
+            "skills")
+    if max_inject is None:
+        max_inject = os.environ.get("SKILL_MAX_INJECT", "30")
+    if desc_max is None:
+        desc_max = os.environ.get("SKILL_DESC_MAX", "200")
+    if external is None:
+        external = os.environ.get("SKILLS_DIR_EXTERNAL", "0")
+    body = scan_skills(skills_dir, max_inject, desc_max, external)
+    if not body.strip():
+        return ""
+    n = sum(1 for ln in body.split("\n") if ln.startswith("- "))
+    return ("%s,已列 %d 个)\n"
+            "每行只是一句摘要,不是正文:匹配时先用 `read_skill` 读全文再按步骤执行。\n"
+            "%s" % (SKILLS_MARK, n, body))
+
+
+def cmd_injection(argv) -> int:
+    skills_dir = argv[0] if len(argv) > 0 else ""
+    max_inject = argv[1] if len(argv) > 1 else ""
+    desc_max = argv[2] if len(argv) > 2 else ""
+    external = argv[3] if len(argv) > 3 else "0"
+    _contract.write_text(injection(skills_dir, max_inject, desc_max, external))
+    return _contract.EXIT_OK
+
+
 def cmd_scan(argv) -> int:
     skills_dir = argv[0] if len(argv) > 0 else ""
     max_inject = argv[1] if len(argv) > 1 else ""
@@ -192,6 +239,7 @@ def cmd_read(argv) -> int:
 
 _COMMANDS = {
     "scan": cmd_scan,
+    "injection": cmd_injection,
     "read": cmd_read,
 }
 
