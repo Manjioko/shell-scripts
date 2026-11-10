@@ -1,9 +1,9 @@
 class Wchat < Formula
   desc "Terminal AI assistant (Python, bundled venv)"
   homepage "https://github.com/Manjioko/shell-scripts"
-  url "https://github.com/Manjioko/shell-scripts/releases/download/v0.3.9/wchat-0.3.9.tar.gz"
-  sha256 "68e617f73c574eeb005532c81406f3cc0f560fbd226af0617b015d6fb9dab9da"
-  version "0.3.9"
+  url "https://github.com/Manjioko/shell-scripts/releases/download/v0.4.0/wchat-0.4.0.tar.gz"
+  sha256 "b908ac8e74ff8775f05c8e7f25c4bcc25af00aa8bed0f7e3364e8ee8781da3a8"
+  version "0.4.0"
   license "MIT"
 
   depends_on "python@3.12"
@@ -24,9 +24,7 @@ class Wchat < Formula
     system py, "-m", "venv", venv
     system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
            "--no-warn-script-location", "-r", libexec/"requirements.txt"
-    # 可选:文档转换(.docx/.pdf→Markdown,markitdown)。**装不上不算失败** ——
-    # 有些平台没有 markitdown/onnxruntime 的 wheel;缺了只是 read_file 读文档时走
-    # "未启用"提示,主功能不受影响。
+    # 可选:文档转换(.docx/.pdf→Markdown,markitdown)。装不上不算失败。
     begin
       system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
              "--no-warn-script-location", "-r", libexec/"requirements-doc.txt"
