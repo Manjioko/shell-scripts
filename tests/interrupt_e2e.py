@@ -8,7 +8,8 @@
   1. 中断后进程**还活着**(不是 rc≠0 退出);
   2. 输出里有"已中断"提示,且**没有 Traceback**(父子两侧都不许刷栈);
   3. 中断后还能继续用:再发一句能得到新回复;
-  4. 被打断的那一轮**没有把 assistant 消息写进上下文**(用户那句保留);
+  4. 被打断的那一轮**已完成的部分被保留进上下文**(保留语义),且**无孤儿 tool 消息**;
+     用户那句保留,后续那句能接着用这份上下文。
   5. -q 能正常退出 rc=0。
 
 ⚠ 必须用 `pty.fork()`:Ctrl+C 不是"往 master 写一个 \x03 字节"就行 —— tty 行规程
@@ -202,11 +203,15 @@ except OSError:
 mains = [r for r in recs if r.get("kind") == "main"]
 ck("两次请求都到达网关", len(mains) >= 2, str(len(mains)))
 if len(mains) >= 2:
-    # 中断那轮的 assistant 若不丢弃,第二轮会多带一条 → +2;正确应只有 +1(用户第二句)
-    ck("被打断的 assistant 未写入上下文",
-       mains[1]["n_messages"] == mains[0]["n_messages"] + 1,
+    # 保留语义(本改动):被打断那轮**已完成的部分保留**。本场景中断发生在慢速正文流式途中,
+    # 已流出至少一片正文 → 作为一条无 tool_calls 的 assistant 消息保留。
+    # 第二轮 n_messages = 第一轮 + 用户第二句(+1) + 保留的半截 assistant(+1) = +2。
+    # (旧语义是"整轮丢弃"→ +1;本次改动就是要它变成 +2,即不再白扔已产出的上下文。)
+    ck("被打断那轮已完成部分被保留(+2:用户句+半截 assistant)",
+       mains[1]["n_messages"] == mains[0]["n_messages"] + 2,
        "first=%s second=%s" % (mains[0]["n_messages"], mains[1]["n_messages"]))
-    ck("每轮无孤儿 tool 消息", all(r.get("orphan_tools", 0) == 0 for r in mains),
+    ck("每轮无孤儿 tool 消息(半截/未执行的 tool_calls 绝不落库)",
+       all(r.get("orphan_tools", 0) == 0 for r in mains),
        str([r.get("orphan_tools") for r in mains]))
 
 stub.terminate()

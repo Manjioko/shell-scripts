@@ -383,7 +383,11 @@ def _default_meta(action, arg, session=None):
         sys.stdout.write("\033[H\033[2J"); sys.stdout.flush()
         inp_msg("✅ 已开始新会话")
         return True
-    sys.stdout.write("[元命令 %s] 尚未在 Python 主循环实现(仍在 bash)\n" % action)
+    # 兜底:目前 cmdline.classify 能产出的动作**全部**在 _default_meta 有分支
+    # (外加 quit 由 run_repl_loop 处理),所以这行实际是死代码。保留它作为安全网:
+    # 将来给 classify 新增动作却忘了在这里补分支时,至少会大声说一句,而不是静默吞掉。
+    sys.stdout.write("[元命令 %s] 无对应处理(若刚给 cmdline.classify 新增了动作,请在 _default_meta 补分支)\n"
+                     % action)
     return True
 
 
@@ -437,9 +441,9 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
 
     write_final=False 时不在末尾整段输出（正文已由 call_llm 的 on_text 流式画过）。
     on_final(r) 若给：编排结束后调用（用于关流箱 + markdown 渲染）。
-    on_abort() 若给：Ctrl+C 打断本轮时调用（关流箱 + 丢弃半截输出的提示）；不给则
-    直接打印与 master 同款提示。**打断不是错误**：本轮 assistant 输出整体丢弃，
-    用户那句已写入，回到输入框等用户补充后重发。
+    on_abort(exc) 若给：Ctrl+C 打断本轮时调用（收口流箱 + 提示"已保留"，exc 是 Aborted）；
+    不给则打印与 master 同款但**保留**语义的提示。**打断不是错误**：本轮已完成的工具轮
+    与临中断前流出的半截正文都保留在上下文里（不再整轮丢弃），用户补充后可直接接着跑。
     Session 跨轮持久（messages 累积），这是 REPL 与 ask_ai 编排的接线点。
     """
     from wchat_py.session import orchestrate, Aborted
@@ -454,11 +458,12 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
                 pass
         try:
             r = orchestrate(session, text, call_llm, run_tool)
-        except Aborted:
+        except Aborted as _ab:
             if on_abort is not None:
-                on_abort()
+                on_abort(_ab)
             else:
-                out.write("\n⏹ 已中断,本轮输出已丢弃(-q 可退出)\n\n")
+                out.write("\n⏹ 已中断。本轮已完成的部分已保留 %d 条,可直接补充后继续(-q 可退出)\n\n"
+                          % getattr(_ab, "kept_msgs", 0))
                 out.flush()
             return
         if on_final is not None:
@@ -511,7 +516,7 @@ def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
             try:
                 on_text(arg)
             except KeyboardInterrupt:
-                sys.stdout.write("\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n\n")
+                sys.stdout.write("\n\033[2m⏹ 已中断(-q 可退出)\033[0m\n\n")
                 sys.stdout.flush()
                 continue
         else:

@@ -342,9 +342,11 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
             except OSError:
                 pass
     if _LLM_ABORT:
-        # 本轮输出整体丢弃:由 orchestrate 回滚 messages 并让 REPL 打印"已中断"
+        # 保留语义:把已流出的半截正文与半截 tool_calls 一起带出去。
+        # orchestrate 只保留正文(作为无 tool_calls 的 assistant 消息),tool_calls 丢弃——
+        # 半截/未执行的 tool_calls 落库会造成孤儿,下一轮请求被网关 400。
         from wchat_py.session import Aborted
-        raise Aborted()
+        raise Aborted(text=text or "", tool_calls=tcs or [])
     for _s in tcs:
         _s.pop("_i", None)
     return "".join(text), tcs, err
@@ -1056,12 +1058,19 @@ def main(argv):
                 sys.stdout.write("\n"); sys.stdout.flush()
                 return out
 
-            def _abort():
-                # 关箱并丢弃半截正文/思考(本轮输出整体不渲染,与 master 一致)
+            def _abort(exc=None):
+                # 保留语义:关箱收口,但**不再丢弃**已产出的半截正文——把它正式落屏。
+                # (它已经作为一条无 tool_calls 的 assistant 消息写进上下文,见 session.orchestrate;
+                #  这里落屏是为了让用户看到"停在哪、已保留到哪",别出现"屏上没了但上下文还在"的割裂。)
                 sys.stdout.write(_box.close()); sys.stdout.flush()
+                _partial = (getattr(exc, "text", "") or "").rstrip()
+                if _partial:
+                    sys.stdout.write("\033[2m(已中断,以下为已产出的部分,已一并保留在上下文)\033[0m\n")
+                    sys.stdout.write(_partial + "\n")
                 _reason_acc.clear()
                 _text_acc.clear()
-                sys.stdout.write("\n\033[2m⏹ 已中断,本轮输出已丢弃(-q 可退出)\033[0m\n\n")
+                _kept = getattr(exc, "kept_msgs", 0)
+                sys.stdout.write("\n\033[2m⏹ 已中断。本轮已完成的部分已保留 %d 条,可直接补充后继续(-q 可退出)\033[0m\n\n" % _kept)
                 sys.stdout.flush()
                 _sync_runtime(_s)
 

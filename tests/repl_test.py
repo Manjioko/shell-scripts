@@ -36,7 +36,7 @@ rc2 = run_repl(stream2, lambda t: texts2.append(t),
                lambda a, g: False)
 ck("meta 返回False即停", texts2 == ["a"], repr(texts2))
 
-# 3) 无 handler 时默认占位不崩
+# 3) 无 handler 时走 _default_meta 真实现:-skill 已落地(空对话给提示),占位兜底已无活路
 out = io.StringIO()
 old = sys.stdout
 sys.stdout = out
@@ -44,7 +44,7 @@ try:
     run_repl(io.StringIO("-skill\n"), lambda t: None)
 finally:
     sys.stdout = old
-ck("默认 meta 打占位", "skill_save" in out.getvalue(), repr(out.getvalue()))
+ck("-skill 默认handler走真实现(空对话提示)", "当前对话为空" in out.getvalue(), repr(out.getvalue()))
 
 # 4) -h 默认 handler 调 cli.help_user（真打印，非占位）
 out2 = io.StringIO()

@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
                                auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto,
-                               record_allow, record_deny, make_checkpoint)  # noqa: E402
+                               record_allow, record_deny, make_checkpoint, Aborted)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -136,6 +136,85 @@ ck("tool 配对 id", _ml[2]["tool_call_id"] == _ml[1]["tool_calls"][0]["id"] == 
 ck("tool 结果内容", _ml[2]["content"] == "OUT")
 ck("msg_count=4", oc.msg_count == 4)
 
+
+# ── orchestrate: Ctrl+C 保留语义(建议1)──────────────────────────────────────
+# 旧语义是"中断即整轮回滚":已经跑完的工具轮(读进来的长上下文)和临中断前流出的半截正文
+# 全被丢掉,下一句重发要**再跑一遍工具、再付一次全量输入**。新语义只丢"没跑完的那部分",
+# 已完成工具轮 + 半截正文都保留;半截/未执行的 tool_calls 仍不落库(否则下一轮 400)。
+
+def _orphans(ms):
+    declared, n = set(), 0
+    for m in ms:
+        if m.get("role") == "assistant":
+            for tc in (m.get("tool_calls") or []):
+                declared.add(tc.get("id"))
+        elif m.get("role") == "tool":
+            if m.get("tool_call_id") not in declared:
+                n += 1
+    return n
+
+
+# A: 跑完一轮工具后,第二轮流到一半被打断(带半截正文 + 一个半截 tool_call)
+oa = Session()
+_sA = {"n": 0}
+
+
+def _cl_A(m):
+    _sA["n"] += 1
+    if _sA["n"] == 1:
+        return "", [{"id": "c1", "name": "list_dir", "arguments": "{}"}], None
+    raise Aborted(text="半截回答", tool_calls=[{"id": "c2", "name": "read_file", "arguments": "{}"}])
+
+
+try:
+    orchestrate(oa, "开始", _cl_A, lambda n, a: "TOOLOUT")
+    ck("A 应抛出 Aborted", False)
+except Aborted as _eA:
+    _mA = messages_list(oa.messages_json)
+    ck("A 角色序列(工具轮保留+半截assistant)", [m["role"] for m in _mA] == ["user", "assistant", "tool", "assistant"], str([m["role"] for m in _mA]))
+    ck("A 工具结果保留(上下文没白扔)", _mA[2]["content"] == "TOOLOUT" and _mA[2]["tool_call_id"] == "c1", repr(_mA[2]))
+    ck("A 半截正文保留", _mA[-1]["content"] == "半截回答", repr(_mA[-1]))
+    ck("A 半截assistant无tool_calls", not _mA[-1].get("tool_calls"), repr(_mA[-1]))
+    ck("A 半截tool_call未落库(无孤儿)", _orphans(_mA) == 0, str(_mA))
+    ck("A kept_msgs=3", _eA.kept_msgs == 3, str(_eA.kept_msgs))
+    ck("A msg_count=4", oa.msg_count == 4, str(oa.msg_count))
+
+# B: 同样跑完一轮工具,但第二轮**没有**流出正文就断 → 只保留工具轮,不追加空 assistant
+ob = Session()
+_sB = {"n": 0}
+
+
+def _cl_B(m):
+    _sB["n"] += 1
+    if _sB["n"] == 1:
+        return "", [{"id": "c1", "name": "list_dir", "arguments": "{}"}], None
+    raise Aborted()
+
+
+try:
+    orchestrate(ob, "开始", _cl_B, lambda n, a: "TOOLOUT")
+    ck("B 应抛出 Aborted", False)
+except Aborted as _eB:
+    _mB = messages_list(ob.messages_json)
+    ck("B 空半截不落地(只保留工具轮)", [m["role"] for m in _mB] == ["user", "assistant", "tool"], str([m["role"] for m in _mB]))
+    ck("B kept_msgs=2", _eB.kept_msgs == 2, str(_eB.kept_msgs))
+
+# C: 第一轮就断(什么都还没完成)→ 用户句 + 半截正文,别凭空补空 assistant
+oc2 = Session()
+
+
+def _cl_C(m):
+    raise Aborted(text="半句")
+
+
+try:
+    orchestrate(oc2, "开始", _cl_C, lambda n, a: "")
+    ck("C 应抛出 Aborted", False)
+except Aborted as _eC:
+    _mC = messages_list(oc2.messages_json)
+    ck("C 首轮即断:用户句 + 半截assistant", [m["role"] for m in _mC] == ["user", "assistant"], str([m["role"] for m in _mC]))
+    ck("C kept_msgs=1", _eC.kept_msgs == 1, str(_eC.kept_msgs))
+
 # seed_system
 sd = Session()
 t = seed_system(sd, "BASE", "SKILLS")
@@ -168,7 +247,12 @@ _ck_repo = make_checkpoint(al, os.path.dirname(os.path.dirname(os.path.abspath(_
 ck("git 仓回滚点 git@", _ck_repo.startswith("git@"), _ck_repo)
 ck("非 git 回滚点空", make_checkpoint(al, tempfile.mkdtemp()) == "")
 
-# 图片部件
+# 图片部件:会话层只存 [[IMGREF:id]] 标记;真正的 image_url 部件在**请求建体时**
+# 由 request.expand_refs 用 ref_map 展开(见 request.resolve_inputs)。分两段断言,
+# 避免退回到"在会话层要求 list"的旧写法(那会把图片正常工作误判成退化)。
+import re as _re
+from wchat_py import request as _req, imgstate as _imgstate
+
 _img = os.path.join(tempfile.mkdtemp(), "a.png")
 open(_img, "wb").write(b"\x89PNG\r\n")
 _si = Session()
@@ -183,9 +267,16 @@ def _cl_img(m):
 
 orchestrate(_si, "看看图", _cl_img, lambda n, a: "")
 _um = _cap["msgs"][-1]
-ck("图片 user content 是部件数组", isinstance(_um["content"], list), str(type(_um["content"])))
-_imgs = [p for p in _um["content"] if p.get("type") == "image_url"]
-ck("含 image_url data:image/png", bool(_imgs) and _imgs[0]["image_url"]["url"].startswith("data:image/png"), str(_imgs)[:80])
+ck("会话层 user content 是字符串(只放标记)", isinstance(_um["content"], str), str(type(_um["content"])))
+_ref_ids = _re.findall(r"\[\[IMGREF:([A-Za-z0-9_]+)\]\]", str(_um["content"]))
+ck("会话层含 IMGREF 标记", len(_ref_ids) == 1, repr(_um["content"])[:120])
+_ref_map = {i: {"url": _imgstate._IMG_URLS.get(i, "")} for i in _ref_ids}
+_ue = _req.expand_refs(_cap["msgs"], _ref_map, "<gone>", "<hint>")[-1]["content"]
+ck("请求层 content 是部件数组", isinstance(_ue, list), str(type(_ue)))
+_imgs = [p for p in _ue if isinstance(p, dict) and p.get("type") == "image_url"]
+ck("请求层含 image_url data:image/png",
+   bool(_imgs) and _imgs[0]["image_url"]["url"].startswith("data:image/png"),
+   str(_imgs)[:80])
 ck("图片消费后清空", _si.input_images == [])
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))

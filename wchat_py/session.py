@@ -255,11 +255,23 @@ def add_image(s, path):
 
 
 class Aborted(Exception):
-    """用户 Ctrl+C 打断本轮输出(与 master 的 ask_ai 返回 130 同义)。
+    """用户 Ctrl+C 打断本轮输出(Ctrl+C 打断本轮,回输入框等补充)。
 
-    与普通异常的区别在语义而不在类型:**本轮 assistant 输出整体丢弃**,但用户那句
-    已经写进 messages(用户能看到自己说过什么,便于补充后重发)。
+    **保留语义**(现状):本轮**已完成的工具轮不丢弃**、已流出但尚未落库的半截正文也保留,
+    只是这一轮没跑完。理由:中断大多发生在"想补充一句"时,而前面几轮工具读进来的长上下文
+    (文件正文、命令输出)若丢掉,下一句重发就得**再跑一遍工具、再付一次全量输入**,白烧 token。
+
+    携带字段:
+      · text      —— 中止时已流出、但还没写进 messages 的半截正文(由 cli._call_llm 附上);
+      · tool_calls—— 中止时的半截工具调用(**绝不落库**,孤儿 tool_calls 会让下一轮 400);
+      · kept_msgs —— 由 orchestrate 回填:本次保留了多少条消息(供上层提示"保留了什么")。
     """
+
+    def __init__(self, text="", tool_calls=None):
+        super().__init__("aborted")
+        self.text = text or ""
+        self.tool_calls = tool_calls or []
+        self.kept_msgs = 0
 
 
 def orchestrate_turn(session, content, llm):
@@ -368,10 +380,23 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
             pass
         try:
             text, tcs, err = call_llm(msgs)
-        except Aborted:
-            del msgs[_n_user:]
+        except Aborted as _ab:
+            # 保留语义:**不删** msgs[_n_user:]。这里已有的都是**完整配对**的工具轮
+            # (assistant(tool_calls) 后紧跟对应数量的 tool 结果),删掉等于下一句重发时
+            # 再跑一遍工具、再付一次全量输入。中止那一次 call_llm 尚未往 msgs 追加任何东西,
+            # 所以此刻 msgs 本身就停在"上一个完整状态",合法。
+            # 已流出但未落库的半截正文,作为一条**无 tool_calls** 的 assistant 消息保留,
+            # 让模型能接着补;而半截/未执行的 tool_calls **绝不落地**——孤儿 tool_calls
+            # 会让下一轮请求被网关 400。
+            _partial = getattr(_ab, "text", "") or ""
+            if _partial.strip():
+                msgs.append({"role": "assistant", "content": _partial})
             session.messages_json = json.dumps(msgs, ensure_ascii=False)
             session.msg_count = len(msgs)
+            try:
+                _ab.kept_msgs = len(msgs) - _n_user
+            except Exception:
+                pass
             raise
         if err:
             # 请求失败自愈(对齐 master retry_after_compact):判定是上下文越界就
