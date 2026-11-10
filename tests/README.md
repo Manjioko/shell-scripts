@@ -1130,3 +1130,36 @@
 > **成本事实**(别被"免费"骗了):真看一张 1280×720 截图 ≈ 1.1k image token,
 > 1920×1080 ≈ 1.8k。本机 `~/.ct/usage/calls.jsonl*` 8088 条请求的 `image` 字段全是 0
 > —— 也就是说在这次修之前,这台机器上从没有一张图真进过上下文。
+
+---
+
+## PDF/Word 读取的两个实测问题(Ctrl-F 不读内容 + 字体警告刷屏)
+
+> **现象(用户实测,0.4.0)**:Ctrl-F 选一个 PDF,`❯` 显示 `📋 [文件] <path>`,
+> 但模型仍要自己 `read_file` 一遍才读到;而且读取过程刷了 **71 行**
+> `Could not get FontBBox from font descriptor because None cannot be parsed as 4 floats`。
+>
+> **问题 1 根因(是设计,不是 bug)**:`parse_placeholders` 的 `📋 [文件]` 分支只把
+> 占位符换成"请先调用 read_file 工具读取"——即"文本/文档传路径,由模型按需读"。
+> 图片会自动转述,文本不会。功能上能读到(模型 read_file 成功了),但多一轮往返,
+> 且与"我从选择器里选了个文件 = 交给你了"的直觉不符。
+> **修法**:`_autoread_block()` —— 小文件直接读进上下文(含 .pdf/.docx 转 Markdown),
+> 超过 `FILE_AUTOREAD_MAX`(默认 32000 字节/字符)才退回"给路径 + 分页 read_file";
+> 转换失败/未装 markitdown 时把**失败说明直接注入**(比让模型再踩一次同样的坑强)。
+>
+> **问题 2 根因(真 bug)**:pdfminer 对缺 `FontBBox` 的字体,`log.warning` 每个字形刷一条。
+> 它走 logging(模块级 logger、无自有 handler、靠 lastResort 落到 stderr),
+> 于是 673KB 的需求文档刷 71 行把终端淹掉。这条警告对"能否读到文字"零影响
+> (FontBBox 只用于版面坐标,解析失败就退 0)。
+> **修法**:`docread._quiet_pdf_warnings()` 上下文管理器,转换期间把 `pdfminer*` 的
+> logger 压到 ERROR,`finally` 逐级恢复。
+>
+> **基线**:`文档读取` 降级档(无 markitdown)**21/21**、真实档(brew venv)**33/33**
+> (+9:pdfminer 压制/恢复、小文本注入、不再要求 read_file、超限退回、大文件不进上下文、
+> PDF 直接附带、PDF 不要求 read_file、未装时给说明、图片占位符不受影响)。
+> 变异:`_quiet_pdf_warnings` 置空 → 1 红;`_autoread_block` 退回只给路径 → 5 红
+> (都实跑,复原后核对 sha)。全量 `run=77 pass=77 fail=0`。
+>
+> ⚠ 注意:`文档读取` 闸门在 `run_gates` 里用宿主 `python3` 跑,没装 markitdown 时
+> **真实转换那 12 条会 `-- 跳过`**(不计入总数)。要跑真实档必须用 brew venv 的
+> python:`/opt/homebrew/Cellar/wchat/*/libexec/venv/bin/python3 tests/docread_test.py`。

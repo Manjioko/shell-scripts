@@ -396,6 +396,60 @@ _PLACE_FILE = "📋 [文件] "
 _PLACE_SKIP = "📋 [跳过] "
 
 
+def _autoread_limit():
+    """Ctrl-F/@ 选中文件后"直接读进上下文"的上限(字节/字符)。超了退回按需 read_file。"""
+    try:
+        v = int(os.environ.get("FILE_AUTOREAD_MAX") or 32000)
+        return v if v > 0 else 32000
+    except ValueError:
+        return 32000
+
+
+def _autoread_block(p):
+    """把用户选中的文件**直接读成一段可注入的文本**;读不了/太大就退回"给路径"。
+
+    为什么默认直接读:用户从系统选择器里选中一个文件,直觉是"这个文件已经交给你了"。
+    再让模型自己跑一轮 read_file,既慢又多一次往返,而且模型可能先猜错用途。
+    上下文预算靠 `FILE_AUTOREAD_MAX` 兜底:超过上限**不**硬塞,而是退回"给路径 + 让它
+    分页读",并在提示里写明总量与原因(否则模型不知道"为什么没给我内容")。
+
+    文档(.pdf/.docx)在这里就可能触发一次转换(有 ~/.ct/cache/doc 缓存,第二次很快);
+    转换失败/未装 markitdown 时把**失败说明直接注入** —— 比让模型再踩一次同样的坑强。
+    """
+    from wchat_py import docread
+    lim = _autoread_limit()
+    if docread.is_legacy_word(p):
+        return "(用户选择了文件: %s)\n%s" % (p, docread.legacy_hint(p))
+    if docread.is_doc(p):
+        base = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+        st, text, _md = docread.convert(p, os.path.join(base, "cache", "doc"))
+        if st != "ok":
+            return "(用户选择了文件: %s)\n%s" % (p, text)
+        if len(text) <= lim:
+            return ("(用户通过 @ 选择了文件: %s(已自动转成 Markdown,%d 字符);"
+                    "以下是它的内容:\n%s\n[文件内容结束] 无需再调用 read_file。)") % (
+                        p, len(text), text)
+        return ("(用户通过 @ 选择了文件: %s(已转成 Markdown,共 %d 字符,超过自动读取上限 %d)。"
+                "请用 read_file 工具分页读取(可带 offset),不要凭猜测回答。)" % (
+                    p, len(text), lim))
+    try:
+        with open(p, "rb") as f:
+            data = f.read(lim + 1)
+    except OSError as e:
+        return "(用户选择了文件: %s,但读取失败: %s。请告知用户。)" % (p, _one_line_err(e))
+    if len(data) > lim:
+        return ("(用户通过 @ 选择了文件: %s(超过自动读取上限 %d 字节)。"
+                "请用 read_file 工具分页读取(可带 offset),不要凭猜测回答。)" % (p, lim))
+    text = data.decode("utf-8", "replace")
+    return ("(用户通过 @ 选择了文件: %s;以下是它的内容:\n%s\n[文件内容结束] 无需再调用 read_file。)") % (
+        p, text)
+
+
+def _one_line_err(e):
+    s = (str(e) or "").strip()
+    return s.splitlines()[0] if s else repr(e)
+
+
 def parse_placeholders(text):
     """把 Ctrl-F/@ 带进来的占位行解析成授权 + 转述(等价 bash parse_placeholders)。
     返回 (新文本, 图片路径列表)。"""
@@ -414,8 +468,8 @@ def parse_placeholders(text):
             p = line[len(_PLACE_FILE):].strip()
             if os.path.isfile(p) and _is_text_file(p):
                 _grant_read(p)
-                out.append("(用户通过 @ 选择了文件: %s。该文件已获只读授权,如需查看内容,"
-                           "请先调用 read_file 工具读取,再回答用户问题。PDF/Word 会自动转成 Markdown。)" % p)
+                # 直接给内容(小文件),大文件/转换失败退回"给路径 + 分页读"。见 _autoread_block。
+                out.append(_autoread_block(p))
                 continue
         elif line.startswith(_PLACE_SKIP):
             p = line[len(_PLACE_SKIP):].strip()

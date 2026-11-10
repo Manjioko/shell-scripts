@@ -27,7 +27,9 @@ sips 是同一档"可选组件"哲学)。deb 等装不上的平台天然走"未�
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import logging
 import os
 
 DOC_EXTS = (".docx", ".pdf")
@@ -89,6 +91,35 @@ def _one_line(e):
     return s or repr(e)
 
 
+# pdfminer 的字体警告:"Could not get FontBBox from font descriptor because None
+# cannot be parsed as 4 floats" —— 它走 logging(模块级 `log = getLogger(__name__)`,
+# 没有自己的 handler,靠 lastResort 落到 stderr)。某些 PDF 的字体描述符缺 FontBBox 时
+# **每个字形刷一条**,实测一个 673KB 的需求文档刷了 71 行,把用户终端整个淹掉。
+# 这条警告对"能不能读到文字"毫无影响(FontBBox 只用于版面坐标,解析失败就退 0),
+# 而且同一句重复到根本没有信息量 —— 属于纯噪音,转换期间压到 ERROR。
+_QUIET_LOGGERS = ("pdfminer", "pdfminer.pdffont", "pdfminer.pdfinterp",
+                  "pdfminer.pdfpage", "pdfminer.pdfdocument", "pdfminer.psparser")
+
+
+@contextlib.contextmanager
+def _quiet_pdf_warnings():
+    """转换期间把 pdfminer 的 logger 压到 ERROR,退出时**逐个恢复**原级别。
+
+    只动 pdfminer 这一支,不碰 root / 别家 logger;用 finally 恢复,异常路径也不留副作用。
+    """
+    saved = {}
+    for n in _QUIET_LOGGERS:
+        lg = logging.getLogger(n)
+        saved[n] = lg.level
+        if lg.level < logging.ERROR:
+            lg.setLevel(logging.ERROR)
+    try:
+        yield
+    finally:
+        for n, lv in saved.items():
+            logging.getLogger(n).setLevel(lv)
+
+
 def convert(path, cache_dir=None):
     """把文档转成 markdown。返回 (status, text, md_file)。语义见模块 docstring。"""
     name = os.path.basename(path)
@@ -103,7 +134,8 @@ def convert(path, cache_dir=None):
             pass                       # 缓存读不了就当没缓存,重新转
     try:
         from markitdown import MarkItDown
-        res = MarkItDown(enable_plugins=False).convert_local(path)
+        with _quiet_pdf_warnings():
+            res = MarkItDown(enable_plugins=False).convert_local(path)
         md = getattr(res, "markdown", None)
         if md is None:
             md = getattr(res, "text_content", "") or ""

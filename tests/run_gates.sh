@@ -160,7 +160,7 @@ GATE_NAMES+=('文档读取')
 GATE_CMDS+=('python3 tests/docread_test.py')
 GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
-GATE_NOTE+=('docx/pdf→Markdown(read_file集成):类型判定/真实转换/扫描件判空/.doc给提示不吐乱码/未装markitdown降级/缓存命中')
+GATE_NOTE+=('docx/pdf→Markdown(read_file集成):类型判定/真实转换/扫描件判空/.doc给提示不吐乱码/未装markitdown降级/缓存命中/Ctrl-F自动读小文件/超限退回分页/pdfminer字体警告压制')
 
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——

@@ -113,5 +113,47 @@ else:
     _s, _c = rf(DOCX, "sample.docx")
     ck("read_file(docx) 未装时给'文档未转换'", "文档未转换" in _s and "markitdown" in _c, repr(_s))
 
+# ── 3) Ctrl-F 自动读 + pdfminer 字体警告压制 ────────────────────────────────
+# 现场(2026-11 用户实测):① Ctrl-F 选中的文件只传路径,模型还得自己 read_file 一遍;
+# ② 某些 PDF 的字体缺 FontBBox,pdfminer 每个字形刷一条 WARNING,673KB 文档刷了 71 行。
+print("=== 3. Ctrl-F 自动读(小文件直接给内容)与 pdfminer 日志压制 ===")
+import logging as _logging                                          # noqa: E402
+from wchat_py import repl as _repl                                  # noqa: E402
+
+_before = _logging.getLogger("pdfminer").level
+with docread._quiet_pdf_warnings():
+    _during = _logging.getLogger("pdfminer").level
+_after = _logging.getLogger("pdfminer").level
+ck("转换期间把 pdfminer 压到 ERROR(否则字体警告刷屏)", _during >= _logging.ERROR, str(_during))
+ck("退出后逐级恢复正常(不在全局留副作用)", _after == _before, "%s vs %s" % (_after, _before))
+
+_tmp = tempfile.mkdtemp()
+os.environ["CT_HOME"] = _tmp
+_small = os.path.join(_tmp, "s.txt")
+open(_small, "w", encoding="utf-8").write("第一行内容\n第二行内容\n")
+_o, _i = _repl.parse_placeholders("📋 [文件] " + _small + "\u200b\n问题")
+ck("Ctrl-F 小文本直接注入内容", "第一行内容" in _o and "第二行内容" in _o, repr(_o[:60]))
+ck("Ctrl-F 小文本不再要求模型 read_file(省一轮往返)",
+   "请先调用 read_file" not in _o and "无需再调用" in _o, repr(_o[-40:]))
+
+_big = os.path.join(_tmp, "b.txt")
+open(_big, "w", encoding="utf-8").write("x" * 40000)
+_o, _i = _repl.parse_placeholders("📋 [文件] " + _big + "\u200b\n问题")
+ck("超过 FILE_AUTOREAD_MAX 退回分页提示", "read_file" in _o and "超过自动读取上限" in _o, repr(_o[:60]))
+ck("大文件不把整段内容塞进上下文", "x" * 100 not in _o)
+
+_o, _i = _repl.parse_placeholders("📋 [文件] " + PDF + "\u200b\n这文件说什么")
+if docread.available():
+    ck("Ctrl-F 选 PDF 直接附带内容", "PDF Test Content 2024" in _o, repr(_o[:80]))
+    ck("Ctrl-F 选 PDF 不要求再 read_file", "请先调用 read_file" not in _o, repr(_o[:40]))
+else:
+    ck("未装 markitdown:给出未安装说明(不是让模型白读一次)", "未安装" in _o, repr(_o[:80]))
+
+# 图片占位符不能受影响(仍走转述通道,不进文本)
+_img = os.path.join(_tmp, "a.png")
+open(_img, "wb").write(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+_ot, _im = _repl.parse_placeholders("📋 [图片] " + _img + "\u200b\n看图")
+ck("图片占位符仍走转述(文本里不留路径)", _img not in _ot and _im == [_img], "%r %r" % (_ot, _im))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
