@@ -21,9 +21,10 @@ version 都从它读,避免"包是 0.3.0、Formula 还写 0.2.0"这种对不上�
 """
 __version__ = "0.3.9"
 
-# 最低 Python 版本(major, minor)。代码在 3.9 上实测可用(全包 compileall + 各子命令),
-# 所以下限是 3.9,而不是 brew 依赖的 3.12:下限说"能跑",brew 说"我们发布/测试的是哪个"。
-# ⚠ 用 3.10+ 语法(match、isinstance 里的 `X | Y`)之前先抬这个数,否则仓库直跑会在
-# 一个跟语法毫不相干的报错位置上炸。
-MIN_PYTHON = (3, 9)
-
+# 最低 Python 版本(major, minor)。
+# 2026:下限由 3.9 抬到 3.10 —— 唯一的硬驱动是**文档读取**(.docx/.pdf→Markdown 用
+# markitdown,它 requires_python >=3.10)。历史上下限锁 3.9 只是因为开发机默认 3.9;
+# 而 wchat 实际经 brew 用固定版本 Python(Formula 用 python@3.12)运行,不依赖用户默认
+# 解释器,所以抬这一档没有兼容负担。抬到 3.10 后仓库直跑也允许用 3.10+ 语法
+# (match、isinstance 里的 `X | Y`)。
+MIN_PYTHON = (3, 10)

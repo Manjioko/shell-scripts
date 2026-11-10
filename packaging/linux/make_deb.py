@@ -48,7 +48,7 @@ Version: {ver}
 Section: utils
 Priority: optional
 Architecture: {arch}
-Depends: python3 (>= 3.9), python3-venv, ca-certificates
+Depends: python3 (>= 3.10), python3-venv, ca-certificates
 Recommends: git, curl, jq
 Installed-Size: {size}
 Maintainer: wchat maintainers <noreply@example.com>

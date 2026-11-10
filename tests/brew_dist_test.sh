@@ -193,7 +193,7 @@ done <"$CFGLIST"
 ck "Formula 装期建 venv" "$([ "$(grep -c 'venv' "$FML")" -ge 3 ] && echo y)" y
 ck "Formula 用 opt_libexec/bin/python(不用不存在的 opt_bin/python3)" \
    "$([ "$(grep -c 'opt_libexec' "$FML")" -ge 1 ] && [ "$(grep -c 'opt_bin' "$FML")" -eq 0 ] && echo y)" y
-ck "Formula 装期 pip install requirements" "$(grep -c 'bin/pip' "$FML")" 1
+ck "Formula 装期 pip install(基础 requirements + 可选文档 requirements)" "$(grep -c 'bin/pip' "$FML")" 2
 ck "Formula 的 test 不靠运行时自举" "$(grep -c 'WCHAT_NO_BOOTSTRAP' "$FML")" 0
 ck "bin/wchat 用 venv(2 处: wchat + ctmodel)" "$(grep -c 'venv}/bin/python' "$FML")" 2
 

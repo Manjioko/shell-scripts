@@ -61,6 +61,10 @@ env = dict(os.environ,
            PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""),
            CT_HOME=os.path.join(d, "ct"),
            WCHAT_HISTORY_DIR=os.path.join(d, "hist"),
+           # 本闸门测的是 Ctrl-C 打断行为,不是运行时自举。floor 抬到 3.10 后,若宿主 python
+           # 是 3.9,跑真 wchat 入口会触发 bootstrap 去建 3.12 venv(与本题无关且拖慢/失败)。
+           # 关掉自举,让 repl 直接用宿主解释器跑(产品代码仍兼容 3.9),专注验证中断语义。
+           WCHAT_NO_BOOTSTRAP="1",
            TERM="xterm-256color")
 for k in ("AUTO_MODE", "WCHAT_AUTO_MODE", "MAX_TOOL_ROUNDS", "WCHAT_MODEL", "WCHAT_THINKING"):
     env.pop(k, None)

@@ -1,0 +1,11 @@
+# 文档读取的**可选**依赖(.docx / .pdf → Markdown,经 read_file 工具)。
+#
+# 为什么不并进 requirements.txt:markitdown 基础依赖含 magika → onnxruntime(重,且
+# linux aarch64 没有 wheel)。放进基础依赖会让 deb / CI 在那些平台上直接装不上,
+# 从而拖垮**整个** venv。所以这里单列,由 bootstrap/Formula **尽力安装**:
+#   · macOS arm64(brew 主形态):有 wheel,开箱可用;
+#   · 装不上的平台:read_file 读文档时返回"未启用文档能力"的可行动提示,主功能不受影响。
+#
+# 需要 Python 3.10+(markitdown 的 requires_python)。
+markitdown[pdf,docx]>=0.1.9,<0.2
+

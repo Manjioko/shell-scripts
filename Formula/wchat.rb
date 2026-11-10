@@ -9,7 +9,7 @@ class Wchat < Formula
   depends_on "python@3.12"
 
   def install
-    libexec.install "wchat", "wchat_py", "requirements.txt"
+    libexec.install "wchat", "wchat_py", "requirements.txt", "requirements-doc.txt"
     (libexec/"configs").install "configs/config.example"
     (libexec/"configs").install "configs/ctmodel.py"
     (libexec/"configs").install "configs/mcporter.example.json"
@@ -24,6 +24,13 @@ class Wchat < Formula
     system py, "-m", "venv", venv
     system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
            "--no-warn-script-location", "-r", libexec/"requirements.txt"
+    # 可选:文档转换(.docx/.pdf→Markdown,markitdown)。装不上不算失败。
+    begin
+      system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
+             "--no-warn-script-location", "-r", libexec/"requirements-doc.txt"
+    rescue => e
+      opoo "文档转换依赖安装失败(不影响主功能): #{e}"
+    end
     # 清掉 pip 缓存与 __pycache__,别让 Cellar 里塞一堆用不上的字节码
     rm_rf Dir[venv/"**/__pycache__"]
 

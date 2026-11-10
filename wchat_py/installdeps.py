@@ -73,8 +73,8 @@ def main():
     rc = 0
     o = detect_os()
     step("平台: %s · python3: %s" % (o, sys.executable))
-    if sys.version_info < (3, 9):
-        fail("需要 Python 3.9+,当前 %s" % sys.version.split()[0]); return 1
+    if sys.version_info < (3, 10):
+        fail("需要 Python 3.10+,当前 %s" % sys.version.split()[0]); return 1
 
     # Python 组件(输入框 / markdown / 图片缩放)
     if run([sys.executable, "-c", "import prompt_toolkit, rich, PIL"]) == 0:

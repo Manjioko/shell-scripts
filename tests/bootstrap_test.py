@@ -63,6 +63,13 @@ class Sandbox(object):
         # 就是这样)会三条断言全红,而产品行为完全正确。实测:Ubuntu 容器 28/31。
         self.saved_prefix = (sys.prefix, sys.base_prefix)
         sys.prefix = sys.base_prefix
+        # 把版本门暂时归零:Sandbox 各小节测的是 **venv 重建/健康判定**逻辑,与"运行本闸门
+        # 的解释器版本"无关。floor 抬到 3.10 后,若在 3.9 宿主上跑,ensure_runtime 的版本门
+        # (用真 os.execv,不经 _re_exec 打桩)会真的把本进程 exec 到 3.12,导致后续断言在
+        # 裸 3.12(无 openai)上跑而假红。归零后版本门永不触发,专注测它该测的东西
+        # (版本门本身由 §4/§6/§7 专测)。
+        self.saved_min = B.MIN_PY
+        B.MIN_PY = (0, 0)
         return self
 
     def __exit__(self, *a):
@@ -75,6 +82,8 @@ class Sandbox(object):
             setattr(B, name, fn)
         if getattr(self, "saved_prefix", None):
             sys.prefix, sys.base_prefix = self.saved_prefix
+        if getattr(self, "saved_min", None) is not None:
+            B.MIN_PY = self.saved_min
         shutil.rmtree(self.d, ignore_errors=True)
 
     def stub(self, name, fn):

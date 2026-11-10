@@ -15,7 +15,7 @@
 | 网络 | 首次运行需要 | 首次会建 venv 并 `pip install` 依赖（约 20–60 秒） |
 | 模型服务 | 一个 OpenAI 兼容端点 + API key | 见 §3 |
 
-代码本身兼容 **Python 3.9+**，但 Formula 固定用 `python@3.12`，避免撞系统自带 Python
+代码本身兼容 **Python 3.10+**，但 Formula 固定用 `python@3.12`，避免撞系统自带 Python
 的权限/包冲突问题。
 
 ---

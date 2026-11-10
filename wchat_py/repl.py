@@ -415,7 +415,7 @@ def parse_placeholders(text):
             if os.path.isfile(p) and _is_text_file(p):
                 _grant_read(p)
                 out.append("(用户通过 @ 选择了文件: %s。该文件已获只读授权,如需查看内容,"
-                           "请先调用 read_file 工具读取,再回答用户问题。)" % p)
+                           "请先调用 read_file 工具读取,再回答用户问题。PDF/Word 会自动转成 Markdown。)" % p)
                 continue
         elif line.startswith(_PLACE_SKIP):
             p = line[len(_PLACE_SKIP):].strip()
@@ -530,6 +530,9 @@ def run_repl(stream, on_text, on_meta=None, on_quit=None):
 
 
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+# 文档:二进制,但 read_file 内部会转成 Markdown 再读。@ 选择时也必须放行,
+# 否则会被下面的 \0 嗅探判成"非文本/跳过",模型就永远读不到 docx/pdf。
+_DOC_EXTS = (".docx", ".pdf")
 _TEXT_EXTS = (".txt", ".md", ".markdown", ".py", ".js", ".ts", ".json", ".yaml", ".yml",
               ".toml", ".ini", ".cfg", ".sh", ".bash", ".zsh", ".c", ".h", ".cpp", ".hpp",
               ".java", ".go", ".rs", ".rb", ".php", ".sql", ".html", ".css", ".xml", ".csv",
@@ -542,6 +545,9 @@ def _is_image(p):
 
 def _is_text_file(p):
     ext = os.path.splitext(p)[1].lower()
+    # 文档走转换通道:即使含 \0(docx 是 zip、pdf 是二进制)也放行,交给 read_file 转换。
+    if ext in _DOC_EXTS:
+        return os.path.isfile(p)
     try:
         with open(p, "rb") as f:
             chunk = f.read(4096)

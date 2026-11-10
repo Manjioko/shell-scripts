@@ -55,6 +55,31 @@ def read_file(resolved, display_path, offset, limit, read_max, work_root):
     if not os.path.isfile(resolved):
         return ("错误:文件不存在: %s(解析为 %s;工作根 %s)" % (display_path, resolved, work_root),
                 " ⛔ 文件不存在:%s" % resolved)
+    # 文档(.docx/.pdf):先转 Markdown 再复用下面同一套分页/行号。
+    # 转不了(未装 markitdown / 老式 .doc / 扫描件无文字 / 损坏)→ 返回可行动说明,
+    # **绝不把二进制当文本 decode** —— 否则模型读到一屏 \ufffd 乱码还以为读到了内容。
+    from wchat_py import docread
+    if docread.is_legacy_word(resolved):
+        return (docread.legacy_hint(resolved), " 📄 文档未转换(老式 .doc 已忽略):%s" % display_path)
+    if docread.is_doc(resolved):
+        base = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+        st, text, md_file = docread.convert(resolved, os.path.join(base, "cache", "doc"))
+        if st != "ok":
+            return (text, " 📄 文档未转换:%s" % display_path)
+        from wchat_py.filefmt import read_fmt
+        src = md_file
+        if not src:                       # 无缓存落盘时用临时文件承载,read_fmt 需一个路径
+            import tempfile
+            _fd, src = tempfile.mkstemp(prefix="wchat-doc-", suffix=".md")
+            with os.fdopen(_fd, "w", encoding="utf-8") as _f:
+                _f.write(text)
+        j = read_fmt(src, display_path, offset, limit, read_max)
+        _ret = j.get("returned")
+        _total = j.get("shown") or max(j["lines"], _ret or 0)
+        status = " 已读取 %s(%s 行·已转 Markdown)" % (display_path, _total)
+        if _ret is not None and _ret != _total:
+            status += "· 本次返回 %s 行" % _ret
+        return (j["content"], status)
     from wchat_py.filefmt import read_fmt
     j = read_fmt(resolved, display_path, offset, limit, read_max)
     _ret = j.get("returned")

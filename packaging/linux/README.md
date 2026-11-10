@@ -33,7 +33,7 @@ sh packaging/linux/run-as-user.sh tests/py_pathrule_test.sh   # 单道，看全�
 ## 已验证可用（Ubuntu 24.04 / aarch64 / Python 3.12.3 / bash 5.2.21）
 
 - `compileall` 全包通过；`import wchat_py.cli`；`wchat -h`；`_run.py filefmt read`；
-- `MIN_PYTHON` 判据 `(3,9)` 通过；
+- `MIN_PYTHON` 判据 `(3,10)` 通过；
 - 依赖全部用 manylinux wheel 装进 `/work/.venv`，**不需要编译**：
   `openai 2.54.0 / httpx 0.28.1 / pillow 13.0.0 / prompt_toolkit / rich`。
   这否掉了"发行版 python3-openai 版本对不上"这条顾虑 —— 自带 venv + wheel 是可行路线。

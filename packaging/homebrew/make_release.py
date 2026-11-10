@@ -26,7 +26,7 @@ import tarfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DIST = os.path.join(ROOT, "dist")
 FORMULA_DIR = os.path.join(ROOT, "packaging", "homebrew", "Formula")
-INCLUDE = ["wchat", "wchat_py", "requirements.txt",
+INCLUDE = ["wchat", "wchat_py", "requirements.txt", "requirements-doc.txt",
            "README.md", "docs/brew-package.md", "skills"]
 GITHUB_URL = "https://github.com/Manjioko/shell-scripts"
 CONFIG = os.path.join("configs", "config.example")
@@ -136,7 +136,7 @@ FORMULA = '''class Wchat < Formula
   depends_on "python@3.12"
 
   def install
-    libexec.install "wchat", "wchat_py", "requirements.txt"
+    libexec.install "wchat", "wchat_py", "requirements.txt", "requirements-doc.txt"
 __CONFIG_INSTALLS__
     (libexec/"doc").install "README.md" if File.exist?("README.md")
     (libexec/"doc").install Dir["docs/*.md"] if Dir.exist?("docs")
@@ -149,6 +149,13 @@ __CONFIG_INSTALLS__
     system py, "-m", "venv", venv
     system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
            "--no-warn-script-location", "-r", libexec/"requirements.txt"
+    # 可选:文档转换(.docx/.pdf→Markdown,markitdown)。装不上不算失败。
+    begin
+      system venv/"bin/pip", "install", "-q", "--disable-pip-version-check",
+             "--no-warn-script-location", "-r", libexec/"requirements-doc.txt"
+    rescue => e
+      opoo "文档转换依赖安装失败(不影响主功能): #{e}"
+    end
     # 清掉 pip 缓存与 __pycache__,别让 Cellar 里塞一堆用不上的字节码
     rm_rf Dir[venv/"**/__pycache__"]
 

@@ -13,8 +13,9 @@
 | 仓库直跑 `./wchat` | 内核读 shebang → PATH 上第一个 `python3`（本机可能是 CommandLineTools 的 3.9） | 参与 |
 | 自举建 `~/.ct/venv` | `bootstrap._base_python()` 挑选，**每个候选都要过 `_suitable()`** | 不参与 |
 
-- **下限** `MIN_PYTHON = (3, 9)`，唯一出处 `wchat_py/version.py`。用 3.10+ 语法（`match`、
-  `isinstance` 里的 `X | Y`）之前必须抬这个数。
+- **下限** `MIN_PYTHON = (3, 10)`，唯一出处 `wchat_py/version.py`。3.10 是为了文档读取
+  （markitdown 需 3.10+）；wchat 经 brew 用固定版本 Python 运行，不依赖用户默认解释器。
+  现在允许用 3.10+ 语法（`match`、`isinstance` 里的 `X | Y`）。
 - 低于下限时 `ensure_runtime()` **自动换一个合规解释器 re-exec**（不会硬着头皮跑），
   找不到就明说装哪个，不静默降级。
 - brew 那条路固定用 Formula 依赖的 `python@3.12`；`_runtime_fallback()` 在旧 Cellar 被删

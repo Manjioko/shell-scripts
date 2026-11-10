@@ -225,7 +225,7 @@ def _base_python():
     for _p in _pfxs:
         cands.extend(sorted(_glob.glob(os.path.join(
             _p, "opt", "python@3.*", "bin", "python3.*")), reverse=True))
-    for ver in ("3.13", "3.12", "3.11", "3.10", "3.9"):
+    for ver in ("3.13", "3.12", "3.11", "3.10"):
         cands.append(shutil.which("python" + ver))
     cands.extend([shutil.which("python3"), shutil.which("python")])
     for _p in _pfxs:
@@ -355,6 +355,18 @@ def _install(venv):
     if r.returncode != 0:
         _fail("依赖安装失败(pip rc=%s)" % r.returncode, venv)
         return False
+    # 可选:文档转换(.docx/.pdf→Markdown,靠 markitdown)。**尽力而为** —— 装不上
+    # (例如 aarch64 linux 没有 markitdown/onnxruntime wheel)不影响主功能,只是 read_file
+    # 读文档时走"未启用"提示。故意**不**把它的结果纳入成败/marker:否则这些平台每次启动
+    # 都会判"依赖不全"→删 venv 重建的死循环。
+    _docreq = os.path.join(_repo_root(), "requirements-doc.txt")
+    if os.path.isfile(_docreq):
+        _log("📦 安装文档转换依赖(可选,装不上不影响主功能)…")
+        try:
+            subprocess.run([py, "-m", "pip", "install", "-q", "-r", _docreq],
+                           timeout=_pip_timeout())
+        except (subprocess.TimeoutExpired, OSError):
+            pass
     try:
         with open(os.path.join(venv, _MARK), "w", encoding="utf-8") as f:
             f.write(_fingerprint())

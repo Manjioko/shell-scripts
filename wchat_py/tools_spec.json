@@ -3,7 +3,7 @@
             "type": "function",
             "function": {
                 "name": "read_file",
-                "description": "读取文件内容,返回带行号的文本。读取任何代码或文本文件时,优先使用本工具,不要用 cat 等 shell 命令。文件过大时自动截断并提示,此时应使用 offset/limit 参数分段读取。offset 为起始行号(从 1 开始,默认 1),limit 为读取行数(省略则读全文)。",
+                "description": "读取文件内容,返回带行号的文本。读取任何代码或文本文件时,优先使用本工具,不要用 cat 等 shell 命令。文件过大时自动截断并提示,此时应使用 offset/limit 参数分段读取。offset 为起始行号(从 1 开始,默认 1),limit 为读取行数(省略则读全文)。也支持 PDF/Word(.docx):会自动转成 Markdown 再按行号读取。",
                 "parameters": {
                     "type": "object",
                     "properties": {

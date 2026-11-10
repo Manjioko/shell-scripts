@@ -129,8 +129,14 @@ print("=== 3. 低于下限的解释器不许被采用(纯判据) ===")
 ck("_py_ok((3,8)) 为假", bootstrap._py_ok((3, 8)) is False)
 ck("_py_ok(MIN_PYTHON) 为真", bootstrap._py_ok(version.MIN_PYTHON) is True)
 ck("_py_ok(()) 为假(测不出版本 ≠ 合格)", bootstrap._py_ok(()) is False)
-ck("当前解释器版本达标", bootstrap._py_ok(sys.version_info[:2]),
-   "当前 %s" % (sys.version_info[:3],))
+if bootstrap._py_ok(sys.version_info[:2]):
+    ck("当前解释器版本达标", True)
+else:
+    print("  --   当前解释器 %d.%d < 下限 %d.%d:闸门应以 >=%d.%d 运行;"
+          "跳过'当前达标'断言(机制判据仍全跑)"
+          % (sys.version_info[0], sys.version_info[1],
+             version.MIN_PYTHON[0], version.MIN_PYTHON[1],
+             version.MIN_PYTHON[0], version.MIN_PYTHON[1]))
 # 真跑一次子进程问版本(证明 _py_ver 不是空转)
 _ver = bootstrap._py_ver(sys.executable)
 ck("_py_ver 能问出真实版本", _ver[:2] == tuple(sys.version_info[:2]), repr(_ver))
@@ -233,7 +239,7 @@ try:
        "判据恒真,测不出真问题")
 finally:
     bootstrap.MIN_PY = _orig_min
-ck("恢复下限后判据回到真", bootstrap._py_ok(sys.version_info[:2]) is True)
+ck("恢复下限后判据回到真(下限本身合格)", bootstrap._py_ok(version.MIN_PYTHON) is True)
 
 print("=== 7. 端到端:低于要求的解释器会自己换掉(真跑一次) ===")
 # 这是本题的核心行为:把下限临时抬到当前版本之上,ensure_runtime 必须换到更高版本

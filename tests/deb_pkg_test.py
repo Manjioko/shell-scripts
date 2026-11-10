@@ -49,7 +49,7 @@ for field in ("Package:", "Version:", "Architecture:", "Depends:", "Description:
 # python3-venv 不在 Depends 里 → postinst 那句 `python3 -m venv` 会失败,
 # 而报错是 ensurepip 的一行提示,很难第一眼看懂。
 ck("Depends 含 python3-venv", "python3-venv" in ctrl, ctrl[:300])
-ck("Depends 有 python3 版本下限", re.search(r"python3 \(>= 3\.9\)", ctrl) is not None, ctrl[:300])
+ck("Depends 有 python3 版本下限", re.search(r"python3 \(>= 3\.10\)", ctrl) is not None, ctrl[:300])
 
 print("=== 2. postinst:离线 + 幂等 + 失败要停 ===")
 post = SRC[SRC.index("POSTINST = "):SRC.index("PRERM = ")]
