@@ -146,14 +146,26 @@ def _deps_ok():
         return False
 
 
-def _fingerprint():
+def _req_hash():
+    """requirements.txt 的内容哈希(16 位)。依赖变一点,哈希就变 → 触发 venv 重建。"""
     req = os.path.join(_repo_root(), "requirements.txt")
     try:
         with open(req, "rb") as f:
-            h = hashlib.sha256(f.read()).hexdigest()[:16]
+            return hashlib.sha256(f.read()).hexdigest()[:16]
     except OSError:
-        h = "noreq"
-    return "%s-py%d.%d" % (h, sys.version_info.major, sys.version_info.minor)
+        return "noreq"
+
+
+def _fingerprint(pyver=None):
+    """`.ready` marker:requirements 哈希 + **目标解释器**版本。
+
+    pyver=(major,minor) 时按它算;None = 用当前解释器(默认,写 marker 时就是 venv 的版本)。
+    为什么要能指定:从一个旧解释器(如系统 3.9)判断"现成 venv 是否就绪"时,若仍用当前
+    进程的 3.9 去算,会永远和 venv 里写的 `py3.12` 对不上 —— 于是明明有可用 venv 却判
+    "没装好"、白白重建。见 `_ready_any_py()`。
+    """
+    maj, mi = pyver if pyver else (sys.version_info.major, sys.version_info.minor)
+    return "%s-py%d.%d" % (_req_hash(), maj, mi)
 
 
 def _venv_python(venv):
@@ -170,14 +182,42 @@ def _venv_ok(venv):
     return bool(py) and os.path.isfile(py) and os.access(py, os.X_OK)
 
 
-def _ready(venv):
+def _ready(venv, pyver=None):
     """marker 匹配 **且** venv 真的可用。只满足一半就重装,不许"以为装好了"。"""
     try:
         with open(os.path.join(venv, _MARK), encoding="utf-8") as f:
-            if f.read().strip() != _fingerprint():
+            if f.read().strip() != _fingerprint(pyver):
                 return False
     except OSError:
         return False
+    return _venv_ok(venv)
+
+
+def _ready_any_py(venv):
+    """从**任意**解释器(可能是低于下限的旧版本)判断现成 venv 是否可直接用。
+
+    与 `_ready()` 的区别:不按"当前进程的 python 版本"去比 marker,而是**读 marker 自己
+    记的 python 版本**(建 venv 时写的是 venv 的解释器版本),只要求它 >= MIN_PYTHON。
+    这样从系统 3.9 起 `./wchat` 也能认出"这台机器已有一个 3.12 的、依赖齐全的 venv",
+    直接换进去,而不必先跳到裸露的 brew python 再被二次换进 venv。不 spawn 子进程问版本。
+    """
+    try:
+        with open(os.path.join(venv, _MARK), encoding="utf-8") as f:
+            mk = f.read().strip()
+    except OSError:
+        return False
+    if "-py" not in mk:
+        return False
+    h, py = mk.rsplit("-py", 1)
+    if h != _req_hash():
+        return False                      # requirements 变了 → 不算就绪(要重建)
+    try:
+        a, b = py.split(".")[:2]
+        pv = (int(a), int(b))
+    except (ValueError, IndexError):
+        return False
+    if not _py_ok(pv):
+        return False                      # venv 是旧版本(< 下限)建的 → 不算就绪
     return _venv_ok(venv)
 
 
@@ -412,6 +452,25 @@ def _with_lock(fn):
                 pass
 
 
+def _switch_target():
+    """版本门要 re-exec 到的解释器。
+
+    优先**已就绪的 venv**(`~/.ct/venv`):它本身就是我们要的运行环境(版本达标 + 依赖
+    齐全)。这样仓库直跑 `./wchat` 从系统 3.9 只需**一跳**就进 venv,而不是先跳到裸露的
+    brew python、再被依赖检查二次换进 venv —— 白多一个解释器进程,而且日志写着"改用
+    brew python"实际却跑 venv,看着像逻辑错(用户实测指出)。
+
+    只有 venv 不在/不健康/marker 与当前 requirements 不符时,才退回 `_base_python()`
+    (裸露但版本达标的解释器),交给后面的通用路径去建/重建 venv。
+    `WCHAT_NO_VENV=1` 时一律走 base(测试用:要求"只用版本达标解释器、不碰 venv")。
+    """
+    if os.environ.get("WCHAT_NO_VENV") != "1":
+        venv = _venv_dir()
+        if _ready_any_py(venv):
+            return _venv_python(venv)
+    return _base_python()
+
+
 def ensure_runtime():
     if os.environ.get("WCHAT_NO_BOOTSTRAP") == "1":
         return
@@ -420,10 +479,21 @@ def ensure_runtime():
     # ① 版本先行:当前解释器低于 MIN_PYTHON 就不用它跑任何一个字节的业务代码,
     #    直接换一个合规的解释器 re-exec。这一步必须在依赖检查之前 —— 3.9 上
     #    "依赖齐全"和"能不能跑"是两件事,先按依赖判定会得到错误的结论。
-    if not _py_ok(sys.version_info[:2]):
-        _py = _base_python()
+    #
+    #    ⚠ 换完解释器**不能把整个自举判定为完成**。旧实现换完就置
+    #    WCHAT_BOOTSTRAPPED=1,于是新解释器进程在函数开头直接 return,连"依赖是否齐全"
+    #    都不看。真实事故:开发机 PATH 上 python3=3.9(带全套依赖)、brew 的 python@3.12
+    #    是裸的;`./wchat` 从 3.9 换到裸 3.12 后带着"没有 openai / prompt_toolkit"直接进
+    #    业务代码 —— 首屏只打一行 🔁 后输入框子进程因缺 prompt_toolkit 退出码 2、REPL 把
+    #    它当"空行提交"无限重启,表现为**卡死且 Ctrl+C 无效**。
+    #    正确语义:换解释器只解决"版本";依赖/venv 仍必须在本进程里继续保证。用独立的
+    #    WCHAT_PY_SWITCHED 只跳过"版本门"(否则 §7 这种把下限动态抬高的测试会把刚换好的
+    #    进程又逼去换甚至 _fail),依赖检查与建 venv 留给下面的通用路径。
+    if (os.environ.get("WCHAT_PY_SWITCHED") != "1"
+            and not _py_ok(sys.version_info[:2])):
+        _py = _switch_target()
         if _py and os.path.abspath(_py) != os.path.abspath(sys.executable or ""):
-            os.environ["WCHAT_BOOTSTRAPPED"] = "1"
+            os.environ["WCHAT_PY_SWITCHED"] = "1"
             _log("🔁 当前 Python %d.%d 低于要求(%d.%d),改用 %s"
                  % (sys.version_info[0], sys.version_info[1], MIN_PY[0], MIN_PY[1], _py))
             try:
@@ -437,6 +507,10 @@ def ensure_runtime():
     if sys.prefix != getattr(sys, "base_prefix", sys.prefix):
         return
     if _deps_ok() and os.environ.get("WCHAT_BOOTSTRAP_FORCE") != "1":
+        return
+    # 逃生口:调用方已自行保证依赖(测试 / 用户自管环境),跳过建 venv。与
+    # WCHAT_NO_BOOTSTRAP 的区别:后者连版本门都跳过;这里版本门照走,只跳过 venv。
+    if os.environ.get("WCHAT_NO_VENV") == "1":
         return
     venv = _venv_dir()
     # marker 说好、但 venv 起不来 -> **不要 return**,落到下面重建。

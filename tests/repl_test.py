@@ -116,5 +116,46 @@ _qflag = []
 run_repl_loop(lambda: next(_q, None), lambda t: None, None, lambda: _qflag.append(1))
 ck("on_quit 在 -q 调用一次", _qflag == [1], str(_qflag))
 
+# 输入助手起不来(rc=2,如换解释器后缺 prompt_toolkit)绝不能被当成"空行提交"无限重启。
+# 旧实现 nxt() 对非 0/1/4 的退出码返回 ""，run_repl_loop 见空串即 continue ->
+# 输入助手被无限次重启:屏幕无字、Ctrl+C 也打断不了(实测卡死事故)。这里用有界桩:
+# 若回归,第 51 次调用直接抛错把死循环打断,测试才不会自己挂住。
+from wchat_py import repl as _repl  # noqa: E402
+
+class _R2:
+    returncode = 2
+    stdout = ""
+    stderr = "ModuleNotFoundError: No module named 'prompt_toolkit'"
+
+_calls = {"n": 0}
+
+
+def _fake_run(*a, **k):
+    _calls["n"] += 1
+    if _calls["n"] > 50:
+        raise RuntimeError("输入助手被无限重启(rc=2 被当成空行)")
+    return _R2()
+
+
+_orig_run2 = _repl.subprocess.run
+_orig_stdin2 = sys.stdin
+_errbuf = io.StringIO()
+_orig_err2 = sys.stderr
+_repl.subprocess.run = _fake_run
+sys.stdin = io.StringIO("")          # input() 立即 EOF,让兜底路径正常结束
+sys.stderr = _errbuf
+try:
+    _repl.run_interactive(lambda t: None)
+    _hung = False
+except RuntimeError:
+    _hung = True
+finally:
+    _repl.subprocess.run = _orig_run2
+    sys.stdin = _orig_stdin2
+    sys.stderr = _orig_err2
+ck("nxt rc=2 不无限重启(有界,只调用 1 次)", (not _hung) and _calls["n"] == 1,
+   "调用 %d 次%s" % (_calls["n"], " · 死循环" if _hung else ""))
+ck("nxt rc=2 说明原因并退回基础输入", "输入框不可用" in _errbuf.getvalue(), repr(_errbuf.getvalue()))
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

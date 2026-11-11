@@ -683,6 +683,18 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
                     p = None
                 if p is None:
                     break
+                if p.returncode == 2:
+                    # 输入助手跑不起来(缺 prompt_toolkit / 非交互终端 / 其它环境异常)。
+                    # **绝不能返回 ""**:run_repl_loop 把空串当作"用户交了空行"直接
+                    # continue,于是输入助手被无限次重启 —— 屏幕上除自举那行外一个字都
+                    # 没有、Ctrl+C 也只能清空"这一行"再被同一循环接住,表现为**卡死且无法
+                    # 中断**(实测事故:3.9 换到裸 3.12 后 prompt_toolkit 缺席,退码 2)。
+                    # 退回内置 input():至少让人还能输入,并把原因说清楚。
+                    _why = (p.stderr or "").strip().splitlines()
+                    sys.stderr.write("  (输入框不可用,已退回基础输入。%s)\n"
+                                     % (_why[-1] if _why else "退出码 2"))
+                    sys.stderr.flush()
+                    break
                 if p.returncode == 4:
                     cur = (p.stdout or "")
                     if cur.endswith("\n"):

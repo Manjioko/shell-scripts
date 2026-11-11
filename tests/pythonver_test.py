@@ -146,11 +146,17 @@ ck("不可执行的文件判不合格",
 
 print("=== 4. 结构锁:选解释器的地方都必须过校验 ===")
 bs = read("wchat_py/bootstrap.py")
-_gate = "if not _py_ok(sys.version_info[:2]):"
+# 版本门现在是 `if (WCHAT_PY_SWITCHED != "1" and not _py_ok(...))`:换过解释器后只跳过
+# 版本门(否则 §7 那种动态抬高下限的测试会把刚换好的进程又逼去换),但依赖/venv 仍自举。
+_gate = "not _py_ok(sys.version_info[:2])"
 ck("ensure_runtime 里有版本门", _gate in bs, "找不到版本门:3.9 会被当成可用解释器")
 ck("版本门在依赖检查之前",
    _gate in bs and "if _deps_ok()" in bs and bs.index(_gate) < bs.index("if _deps_ok()"),
    "顺序反了:3.9 上'依赖齐全'会掩盖'不该用这个解释器'")
+# 回归锁:曾经换完解释器就置 WCHAT_BOOTSTRAPPED=1,新进程在函数开头直接 return,
+# 于是"裸 3.12 无 openai/prompt_toolkit"直接进业务代码 → 输入框退码 2 → REPL 空转卡死。
+ck("换解释器只跳过版本门(WCHAT_PY_SWITCHED),依赖/venv 仍自举",
+   "WCHAT_PY_SWITCHED" in bs, "换解释器后又跳过了依赖自举 → 裸解释器直接跑业务")
 ck("_base_python 每个候选都过 _suitable", "_suitable(c)" in bs)
 ck("_base_python 不再\"存在即用\"", "os.path.isfile(cand)" not in bs)
 rt = read("wchat_py/runtime.py")
@@ -267,7 +273,8 @@ else:
         f.write(probe_src)
     try:
         r = subprocess.run([sys.executable, probe], capture_output=True, text=True,
-                           env=dict(os.environ, HOME=os.environ.get("HOME", "")),
+                           env=dict(os.environ, HOME=os.environ.get("HOME", ""),
+                                    WCHAT_NO_VENV="1"),
                            timeout=120)
         out = (r.stdout or "") + (r.stderr or "")
         ck("低于要求时自动换解释器并继续跑", "AFTER" in out and "🔁" in out, out[-300:])
