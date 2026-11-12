@@ -128,6 +128,35 @@ class Screen:
             out.pop()
         return out
 
+    def resize_reflow(self, newcols, newrows):
+        """真终端那样把已有内容按新宽度重新折行(变窄),并把光标带回它所属的那一行。
+        变宽时每行只占 1 行(不折),内容左对齐。**必须迁移光标**:否则屏与 PTK 的模型脱节,
+        判据会永远"干净"(这正是旧 §7 非 reflow 屏假绿的根因之一)。"""
+        old = ["".join(r).rstrip() for r in self.g]
+        while old and not old[-1]:
+            old.pop()
+
+        def nwrap(line):
+            return 1 if not line else -(-len(line) // newcols)
+        before = sum(nwrap(old[i]) for i in range(min(self.y, len(old))))
+        cy_new = before + (self.x // newcols if (old and self.y < len(old)) else 0)
+        newg = []
+        for line in old:
+            if not line:
+                newg.append("")
+            else:
+                for i in range(0, len(line), newcols):
+                    newg.append(line[i:i + newcols])
+        scroll = max(0, len(newg) - newrows)
+        vis = newg[scroll:scroll + newrows]
+        grid = [[" "] * newcols for _ in range(newrows)]
+        for y, line in enumerate(vis):
+            for x, ch in enumerate(line[:newcols]):
+                grid[y][x] = ch
+        self.g, self.cols, self.rows = grid, newcols, newrows
+        self.y = max(0, min(newrows - 1, cy_new - scroll))
+        self.x = min(self.x, newcols - 1)
+
 
 def shot(keys, settle=1.2, cols=COLS, resize_to=None):
     """在真 pty 里起一次输入助手,写 keys,把渲染帧还原成屏幕文本。"""
@@ -148,9 +177,8 @@ def shot(keys, settle=1.2, cols=COLS, resize_to=None):
                         LINES=str(ROWS), PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"))
         os._exit(127)
     os.close(s)
-    # 屏幕缓冲按**两种宽度里较宽的那个**建:否则 resize 变宽之后画出来的长横线
-    # 会被模拟器自己折行,看起来像"残留半截"(我曾据此误判了一次)。
-    scr = Screen(cols=max(cols, resize_to or cols))
+    # 屏幕按**起始宽度**建;resize 时用 resize_reflow 真重排(变宽不折行,变窄折行并迁移光标)。
+    scr = Screen(cols=cols)
     frames = bytearray()
 
     def pump(dur):
@@ -167,9 +195,11 @@ def shot(keys, settle=1.2, cols=COLS, resize_to=None):
                 return
             frames.extend(data)
             scr.feed(data.decode("utf-8", "replace"))
-            # 不答 CPR 的话 prompt_toolkit 会打警告并重排(见 tty_osc_input_test.sh 的注释)
+            # 不答 CPR 的话 prompt_toolkit 会打警告并重排(见 tty_osc_input_test.sh 的注释)。
+            # 必须答**真实光标行**(scr.y),不能恒答第 2 行 —— 恒答会让 resize 后的
+            # `_min_available_height` 算错(以为下方有满满一屏),PTK 于是把框画到屏幕底部。
             for _ in range(data.count(b"\x1b[6n")):
-                os.write(m, b"\x1b[2;1R")
+                os.write(m, b"\x1b[%d;1R" % (scr.y + 1))
 
     try:
         pump(1.0)
@@ -179,7 +209,10 @@ def shot(keys, settle=1.2, cols=COLS, resize_to=None):
         if resize_to:
             # 真改窗口尺寸:TIOCSWINSZ 会让子进程收到 SIGWINCH,
             # prompt_toolkit 走它自己的 erase → 请求 CPR → 重绘 那条路。
+            # 屏幕先按真终端行为**重排旧内容并迁移光标**,再让 PTK 的重绘落到这屏上——
+            # 不重排的话结构上抓不到"旧横线折行残留"(旧 §7 就是这么假绿的)。
             fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, resize_to, 0, 0))
+            scr.resize_reflow(resize_to, ROWS)
             pump(1.5)
     finally:
         try:
@@ -554,6 +587,98 @@ _ng_rules = [i for i, l in enumerate(_ng) if l and set(l) == {RULE}]
 ck("负对照:去掉 guard 后缩窄确实出现多余横线(判据非恒绿)", len(_ng_rules) > 2,
    "横线 %d 条" % len(_ng_rules))
 shutil.rmtree(_td, ignore_errors=True)
+
+print("=== 10. 盒贴屏幕底部 + 切 tab 光标错位(真机主诉场景):底锚定消残影 ===")
+# 用户主诉:对话填满、输入框贴屏底,切到别的 tab、resize 再切回来 → 终端把光标挪了位置,
+# PTK 相对擦屏错位 → 旧盒整块残留、叠成多个框/多条上分界线。_anchor_to_bottom 用**绝对行**
+# 从屏幕底部锚定清屏来兜。这里:内容填到底、盒占最后几行、光标再被人为错位 delta 行、再缩窄。
+
+
+def _shot_anchor(helper, c0, c1, delta):
+    m, s = pty.openpty()
+    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, c0, 0, 0))
+    pid = os.fork()
+    if pid == 0:
+        os.close(m); os.setsid(); fcntl.ioctl(s, termios.TIOCSCTTY, 1)
+        for fd in (0, 1, 2):
+            os.dup2(s, fd)
+        os.chdir(REPO)
+        os.execvpe(sys.executable, [sys.executable, helper, "--no-commands",
+                                    "--history", "", "--clip-dir", ""],
+                   dict(os.environ, TERM="xterm-256color", COLUMNS=str(c0), LINES=str(ROWS),
+                        PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"))
+        os._exit(127)
+    os.close(s)
+    scr = _ReflowScreen(c0, ROWS)
+    fill = ROWS - 4                                    # 盒贴底:上面填满,盒占最后 4 行
+    for i in range(fill):
+        seg = ("历史对话正文内容" * 20)[:c0 - 1]
+        for x, ch in enumerate(seg):
+            scr.g[i][x] = ch
+    scr.y, scr.x = fill, 0
+
+    def pump(dur):
+        end = time.time() + dur
+        while time.time() < end:
+            r, _, _ = select.select([m], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                data = os.read(m, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            scr.feed(data.decode("utf-8", "replace"))
+            for _ in range(data.count(b"\x1b[6n")):
+                try:
+                    os.write(m, b"\x1b[%d;1R" % (scr.y + 1))
+                except OSError:
+                    pass
+    try:
+        pump(1.0)
+        scr.y = min(ROWS - 1, scr.y + delta)           # 切 tab:终端把光标挪了 delta 行(内容不动)
+        fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, c1, 0, 0))
+        scr.resize_with_reflow(c1, ROWS)
+        pump(1.6)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        try:
+            os.close(m)
+        except OSError:
+            pass
+    return scr.lines()
+
+
+_an = _shot_anchor(HELPER, 120, 90, 2)
+_an_rules = [i for i, l in enumerate(_an) if l and set(l) == {RULE}]
+_an_prompts = [i for i, l in enumerate(_an) if "❯" in l or "问点什么" in l]
+ck("底锚定:贴底+缩窄+光标错位 → 恰好两条横线(无残影)", len(_an_rules) == 2,
+   repr([(i, len(_an[i])) for i in _an_rules]))
+ck("底锚定:框仍在(❯ 与提示行都在)", len(_an_prompts) == 1
+   and any("回车发送" in l for l in _an), repr(_an[-6:]))
+
+# 负对照:剥掉 _anchor_to_bottom 调用后,同一场景必须**残留多余横线**(判据非恒绿)。
+_src2 = open(os.path.join(REPO, "wchat_py", "inputbox.py"), encoding="utf-8").read()
+_strip2 = _src2.replace("if _anchor_to_bottom(renderer, _new_cols()):",
+                        "if False:  # anchor stripped for negative control")
+ck("负对照2:成功剥掉 _anchor_to_bottom 调用", "_anchor_to_bottom(renderer, _new_cols())" not in _strip2)
+_td2 = tempfile.mkdtemp(prefix="iboanchor_")
+_noanchor = os.path.join(_td2, "inputbox_noanchor.py")
+with open(_noanchor, "w", encoding="utf-8") as _f2:
+    _f2.write(_strip2)
+_na = _shot_anchor(_noanchor, 120, 90, 2)
+_na_rules = [i for i, l in enumerate(_na) if l and set(l) == {RULE}]
+ck("负对照2:剥掉底锚定后该场景确实残留多余横线", len(_na_rules) > 2,
+   "横线 %d 条" % len(_na_rules))
+shutil.rmtree(_td2, ignore_errors=True)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)
