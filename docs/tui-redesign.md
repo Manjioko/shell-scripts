@@ -173,12 +173,36 @@ TUI 下:
 
 **交付物清单**:`wchat_py/tui.py`(新增)、`cli.py`(接线)、`tests/tui_test.py`(闸门)、本文件。
 
-### 6.2 M1:流式接入 + 退役 StreamBox
+### 6.2 M1:流式接入 + 退役 StreamBox(设计已定,待实现)
 
-- 把 `run_turn`/`_cl_stream` 的流式增量改为喂 RichLog(M0 的 shim 只处理整段,这里做增量)。
-- 删/停用 StreamBox 相关的逐字节 parity 测试,换成"RichLog 末段内容"快照测试。
-- 应用内滚动 + 行数上限。
-- 验收:流式输出在 TUI 里逐字出现、滚动正常、无残影;长会话内存/性能可控。
+**已查清的关键事实(决定实现形态)**:
+- `session.orchestrate` 调 `call_llm(msgs)` **不传 on_text/on_reason**(session.py:382)。
+  流式是**在 call_llm 包装函数内部**做副作用实现的:传进去的 `call_llm` 本身在内部调
+  `_call_llm(m, "", on_text=…, on_reason=…)`,边流边 `emit`;orchestrate 只拿最终文本。
+  → 所以 M1 要给 TUI 写一个 `_cl_stream_tui(m)`:内部 `_call_llm(m,"",on_text=append,
+  on_reason=append_dim)`,把增量 append 进 RichLog。**不需要改 orchestrate。**
+
+**设计岔口(append-only RichLog 的取舍)**:
+- RichLog 只能 append,不能"替换/清空一段"。于是"逐字流式(纯文本)"与"最终渲染 markdown"
+  二者难两全:若边流边 append 原文,又在结尾 append markdown = 重复。
+- **分两步走**:
+  - **M1-α(先做,低风险)**:`_cl_stream_tui` 边流边 `emit(delta)` 纯文本 append(先做行缓冲
+    合并,别一字一 write);`write_final=False`、`on_final=None`(不重复渲染)。工具轮之间
+    的横幅照常经 shim 上屏。**收益:模型输出逐字出现(核心 UX),代价:不渲染 markdown。**
+  - **M1-β**:引入"live 区域"(RichLog 之上/之内用一个可重建的 Widget 承载当前轮,完结时
+    用 markdown 重建这一块),或在完结后 `RichLog.clear()` 再重放整段 markdown。需要 Textual
+    的 `RichLog.clear()`/自定义 `Widget`;单独验证。
+- **退役 StreamBox**:TUI 路径不再用 StreamBox(它那套相对光标字节在 RichLog 里是垃圾)。
+  StreamBox 保留给**非 TUI 老路径**;等 TUI 默认开再评估整体删除。
+
+**验收(M1-α)**:
+- headless 闸门:用一个"分批 emit 的假 streaming handle_line"断言 RichLog 里**增量**出现
+  多段文本(而非结尾一次性);一个 turn 结束后内容完整、无重复。
+- 真 tmux:接一个假流源(带 sleep 的分段 emit),肉眼确认逐字出现、无残影。
+- 全量老闸门 76/76(老路径不动)。
+- 长会话:RichLog 行数上限(如只保留最近 N 行),验证内存/滚动。
+
+**实现记录**:(M1 完成后在此补:改了哪些函数、闸门数字、tmux 证据)
 
 ### 6.3 M2:输入特性 + 确认/审批
 
