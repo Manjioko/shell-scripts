@@ -1013,16 +1013,10 @@ def main(argv):
             if _tui.available():
                 from wchat_py.toolrun import _banner_text as _tui_banner
 
-                def _tui_handle_line(_text, _emit, _stream):
-                    # 一轮 turn,**流式**:正文/思考增量逐字进 live 区;工具横幅经 sys.stdout
-                    # shim 进 log 通道。M1 不走 StreamBox(它的相对光标字节在 RichLog 里无意义)。
+                def _tui_handle_line(_text, _emit, _stream, _reason):
+                    # 一轮 turn,**流式**:正文→stream、思考→reason(暗色);工具横幅经 stdout shim 进 log。
                     def _cl_stream_tui(_m):
-                        def _on_text(_d):
-                            _stream(_d)
-
-                        def _on_reason(_d):
-                            _stream(_d)          # 思考也先进 live(简化;后续可做 dim 区分)
-                        _t, _tc, _err = _call_llm(_m, "", on_text=_on_text, on_reason=_on_reason)
+                        _t, _tc, _err = _call_llm(_m, "", on_text=_stream, on_reason=_reason)
                         if _err:
                             sys.stderr.write("API 请求失败: %s\n" % _err)
                         return _t, _tc, _err
@@ -1041,7 +1035,8 @@ def main(argv):
                     _h2(_text)
 
                 try:
-                    _rc = _tui.run_tui(_tui_handle_line)
+                    _rc = _tui.run_tui(_tui_handle_line,
+                                       on_meta=lambda _a, _g: _meta(_a, _g))
                     _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原)
                     return _rc
                 except Exception as _te:

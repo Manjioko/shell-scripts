@@ -421,6 +421,20 @@ def reject_line(title, mark=""):
     sys.stdout.flush()
 
 
+# ---------------------------------------------------------------------------
+# 确认钩子:所有 yes/no 提问都经 confirm_block。在**全屏 TUI** 下 stdio 的 readline 不可用
+# (stdin 归 Textual 事件循环),由 TUI 装一个 hook 改成弹 ModalScreen。非 TUI 时保持 None,
+# 走原来的 readline(零改动)。
+# ---------------------------------------------------------------------------
+_CONFIRM_HOOK = [None]
+
+
+def set_confirm_hook(fn):
+    """装/卸(传 None)全屏 TUI 的确认钩子。
+    fn(title, mark, question) -> bool;返回 True=批准。"""
+    _CONFIRM_HOOK[0] = fn
+
+
 def confirm_block(title, mark="", strict=False, ask="是否执行",
                   default_yes=False, no_word="拒绝"):
     """打印一条交互确认块并读入答案,返回是否批准。
@@ -452,6 +466,14 @@ def confirm_block(title, mark="", strict=False, ask="是否执行",
         tail = "(y 或 yes,n/回车 = %s): " % no_word
     # 动词统一收口:调用方写 "是否放行?" 或 "是否放行" 都得到同一个形状。
     ask = str(ask or "是否执行").strip().rstrip("?？")
+    # 全屏 TUI:用 ModalScreen 弹窗取答案(stdin 归事件循环,不能 readline)。
+    _hook = _CONFIRM_HOOK[0]
+    if _hook is not None:
+        sys.stdout.flush()
+        try:
+            return bool(_hook(title, mark, ask))
+        except Exception:
+            return False
     # 提问文字灰,但**行末就复位**:否则用户敲的 yes 会继承灰色回显。
     sys.stdout.write("%s%s%s%s%s" % (GREY, STATUS_PREFIX, ask, tail, ZERO))
     sys.stdout.flush()

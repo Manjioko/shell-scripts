@@ -7,7 +7,7 @@
 > | 调研 | 选型 + 真终端可行性验证 | ✅ 完成(2026-11) |
 > | M0 | Textual 外壳 + 输出/输入接线 + 开关灰度 + 闸门 | ✅ 完成(2026-11) |
 > | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ✅ 完成(2026-11,M1-α 流式;M1-β markdown 定稿已用 Markdown 渲染) |
-> | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ⬜ 未开始 |
+> | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ✅ 完成(2026-11,含用户实测 5 问题修复) |
 > | M3 | 视觉闸门重写 + 终端兼容矩阵 | ⬜ 未开始 |
 > | M4 | (v2)打破串行枷锁:边流式输出边输入 | ⬜ 未开始 |
 >
@@ -226,11 +226,31 @@ TUI 下:
 - 已知限制(M2):思考(on_reason)当前与正文一起进 live(未做 dim 区分);工具确认/审批仍走内联
   (TUI 下可能干扰,需 ModalScreen);输入特性(Ctrl+F/粘贴图)未迁移;live 区无历史回滚(RichLog 有滚动)。
 
-### 6.3 M2:输入特性 + 确认/审批
+### 6.3 M2:输入特性 + 确认/审批(已完成 2026-11)
 
-- 迁移 Ctrl+F 选文件、Ctrl+V/Ctrl+G 粘贴图片、行尾 `\` 续行、占位符原子删除、历史文件。
-- `confirm_block`/路径授权/`AUTO` 签字 → ModalScreen(或 `run_system_command` 兜底)。
-- 验收:各确认/粘贴/选文件场景真机可用;两次 Ctrl+C 急停语义一致。
+**M2 实现记录(对应"用户实测 5 问题",全部已修)**:
+用户开 `WCHAT_TUI=1` 实测暴露的问题与修法:
+1. **回复内容不在内容区内** → 原来流式进 `#live`(RichLog 之外的独立 Static,显示在内容框下方)。
+   改为把 `#live` **嵌进带边框的 `#contentbox`**(`Vertical[RichLog #content(1fr), Static #live(auto)]`),
+   流式就显示在内容框内底部;完结定稿进 RichLog。
+2. **确认弹窗太大** → `ConfirmModal` 收敛为**小居中框**:`.dialog { width:64; height:auto; max-height:12 }`,
+   类 window/mac 小确认框。
+3. **`\` 续行无效 / Ctrl+F 无效** → 输入从单行 `Input` 换成**多行 `ChatInput(TextArea)`**:
+   `Binding("enter","submit_or_continue")`(行尾 `\`=续行换行,否则发送)、`Binding("ctrl+f","pick_file")`
+   (调 `repl._pick_file()` 选文件并插入占位行,提交时 `session_text_handler` 的 parse_placeholders 吃它)。
+4. **`-q` 无法退出 /其他 `-*` 命令失效** → 提交流程先 `cmdline.classify(text)`:`quit`→`self.exit()`;
+   其它 meta→`on_meta(action,arg)`(worker+shim,输出进内容区,`-cl` 特判清 RichLog);`text` 才进模型。
+5. **思考文本 dim 无效** → 流式区分正文/思考:`stream(s)`→正文(普通),`reason(s)`→思考(dim);
+   定稿时思考写 `Text(style="dim")`、正文写 `Markdown`。→ `handle_line(text, emit, stream, reason)`。
+- `render.py`:加**单一确认钩子** `set_confirm_hook(fn)`;`confirm_block` 有钩子走 `fn(title,mark,ask)`、
+  否则原 readline(非 TUI 零改动)。所有 yes/no 提问都经 confirm_block → 一处接通全走弹窗。
+- `tui.py`:`_confirm_blocking(title,mark,question)`:worker 线程里 `call_from_thread(push_screen(ConfirmModal,...))`+
+  `threading.Event` 阻塞等答案(主线程弹窗、用户回答桥回 worker)。
+- 验证:headless `tests/tui_test.py` **23/23**(续行/流式定稿进内容区/思考 dim 段/工具横幅/确认弹窗 y→True n→False/
+  钩子路由);真 tmux:内容框内显示 echo+思考+答案、`-q` 退出(GONE)、确认弹窗为小框、按 y→`结果:True`;
+  全量老闸门 **76/76**。
+- 遗留:①粘贴图片(Ctrl+V)未迁移(GUI 剪贴板;优先级低);②交互式 meta(如 `-l` 选历史号)在 TUI 下会读 stdin
+  受限,用到时再单独适配;③`AUTO` 首签仍在启动前(非 TUI 阶段),不受影响。
 
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 

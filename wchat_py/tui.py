@@ -5,18 +5,22 @@
 消除输入框 resize/切 tab 残影与流箱漂移。
 
 M0:外壳 + 输出路由 + 输入→一轮。
-M1:流式接入 —— 模型增量逐字进入「live 区」(#live Static),完结后整段落进富文本日志
-    (#content RichLog)。用一个**单线程安全事件队列**把 stream(增量) / log(横幅/工具/错误)
-    按**发出顺序**排好、由主线程统一消费入 widget:既避免跨线程碰 widget,又保证"流式正文
-    与工具横幅"的先后不乱(工具轮前 live 先定稿、再打横幅)。
+M1:流式 —— 模型增量逐字进入**内容框内**的 live 区(#live 嵌在带边框的 #contentbox 里,
+    看起来就在内容区内),完结后整段落进富文本日志(#content RichLog,markdown 渲染)。
+M2:① 确认/审批走 MapConfirmModal(stdin 归事件循环,不能 readline);② 输入改用多行
+    TextArea:回车发送、行尾 `\\` 续行、Ctrl+F 选文件;③ `-q` 等元命令经 classify+on_meta
+    分发;④ 思考文本 dim 显示。
 
-本模块**懒加载 textual**:没装则 available()=False,由 cli.main 回退旧交互。
+单线程安全事件队列:stream(增量,区分正文/思考)/log(横幅/工具/错误)按**发出顺序**入队,
+主线程定时 drain 入 widget;遇 log 先把 live 定稿再写日志(流式正文在工具横幅之前)。
+
+懒加载 textual:没装则 available()=False,由 cli.main 回退旧交互。
 
 公开接口:
     available() -> bool
-    make_app(handle_line, *, banner="") -> App   # handle_line(text, emit, stream)
-    run_tui(handle_line, *, banner="") -> int
-    TuiStdout(app)                                # sys.stdout/stderr 的 shim
+    make_app(handle_line, *, banner="", on_meta=None) -> App
+    run_tui(handle_line, *, banner="", on_meta=None) -> int
+    TuiStdout(app, style=None)
 """
 import os
 import queue
@@ -32,8 +36,7 @@ def available():
 
 
 class TuiStdout:
-    """把 sys.stdout/stderr 的写入投进 app 的事件队列(log 通道),由主线程消费入 RichLog。
-    这样现有 `sys.stdout.write(横幅/markdown/…)` 不必逐处改,排序也与 stream 一致。"""
+    """sys.stdout/stderr 的 shim:写入投进 app 事件队列(log 通道),主线程消费入 RichLog。"""
 
     def __init__(self, app, style=None):
         self._app = app
@@ -50,68 +53,199 @@ class TuiStdout:
         return False
 
 
-def make_app(handle_line, *, banner=""):
-    """构造(不 run)全屏 WchatApp。handle_line(text, emit, stream) 在工作线程执行:
-       emit(s)   -> log 通道(横幅/工具/错误/非流式文本)
-       stream(s) -> live 区(模型流式增量,逐字)
+def make_app(handle_line, *, banner="", on_meta=None):
+    """构造(不 run)WchatApp。handle_line(text, emit, stream, reason):
+       emit(s)   -> log 通道(横幅/工具/错误)
+       stream(s) -> live 区正文(普通亮度)
+       reason(s) -> live 区思考(暗色 dim)
+    on_meta(action, arg) 处理元命令(-q 之外的 -u/-n/... );-q 由 app 直接退出。
     textual 缺失抛 RuntimeError。"""
     if not available():
         raise RuntimeError("textual 未安装")
     from textual.app import App, ComposeResult
-    from textual.widgets import RichLog, Input, Static
+    from textual.widgets import RichLog, Static, Button, Label, TextArea
+    from textual.containers import Vertical, Horizontal, Container
+    from textual.screen import ModalScreen
+    from textual.binding import Binding
+    from textual.message import Message
     from rich.text import Text
     from rich.markdown import Markdown
     from textual import work
+    import threading
+
+    # ---- 输入框:多行 TextArea,回车发送/续行,Ctrl+F 选文件 ----
+    class ChatInput(TextArea):
+        BINDINGS = [
+            Binding("enter", "submit_or_continue", "发送", priority=True),
+            Binding("ctrl+f", "pick_file", "选文件"),
+        ]
+
+        class Submitted(Message):
+            def __init__(self, value):
+                self.value = value
+                super().__init__()
+
+        def action_submit_or_continue(self):
+            text = self.text
+            row, _col = self.cursor_location
+            lines = text.split("\n")
+            cur = lines[row] if row < len(lines) else ""
+            # 行尾 `\` + 回车 = 续行(吃掉那个反斜杠,换到下一行),与旧 inputbox 同义
+            if row == len(lines) - 1 and cur.rstrip().endswith("\\"):
+                lines[row] = cur.rstrip()[:-1]
+                self.text = "\n".join(lines) + "\n"
+                try:
+                    self.cursor_location = (len(lines), 0)
+                except Exception:
+                    pass
+                return
+            self.text = ""
+            try:
+                self.cursor_location = (0, 0)
+            except Exception:
+                pass
+            self.post_message(self.Submitted(text))
+
+        def action_pick_file(self):
+            try:
+                from wchat_py.repl import _pick_file, _file_placeholder
+            except Exception:
+                return
+            try:
+                p = _pick_file()
+            except Exception:
+                p = ""
+            if p and p != "CANCELLED" and os.path.isfile(p):
+                try:
+                    self.insert(_file_placeholder(p) + "\n")
+                except Exception:
+                    pass
+
+    class ConfirmModal(ModalScreen):
+        """小弹窗(类 window/mac 的小确认框):标题 + 问题 + 是/否。"""
+        BINDINGS = [("y", "yes", "是"), ("n", "no", "否"),
+                    ("escape", "no", "否"), ("enter", "yes", "是")]
+
+        def __init__(self, title, mark, question):
+            super().__init__()
+            self._title = title
+            self._mark = mark
+            self._question = question
+
+        def compose(self):
+            head = self._title + (("  " + self._mark) if self._mark else "")
+            with Container(classes="dialog"):
+                yield Label(Text(head[:78], style="bold"))
+                yield Label(Text(self._question[:78]))
+                yield Label(Text("y/回车=是  n/Esc=否", style="dim"))
+                with Horizontal(classes="btns"):
+                    yield Button("是", variant="success", id="yes")
+                    yield Button("否", variant="error", id="no")
+
+        def on_button_pressed(self, event):
+            self.dismiss(event.button.id == "yes")
+
+        def action_yes(self):
+            self.dismiss(True)
+
+        def action_no(self):
+            self.dismiss(False)
 
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; }
-        #content { height: 1fr; border: round $primary; padding: 0 1; }
-        #live { height: auto; max-height: 50%; padding: 0 1; }
-        #input { dock: bottom; height: 3; }
+        #contentbox { height: 1fr; border: round $primary; }
+        #content { height: 1fr; }
+        #live { height: auto; max-height: 45%; padding: 0 1; background: $surface; }
+        #input { dock: bottom; height: 3; border: round $accent; }
+        ConfirmModal { align: center middle; background: $background 60%; }
+        ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
+                               background: $surface; padding: 1 2; }
+        ConfirmModal .btns { height: auto; }
+        ConfirmModal Button { min-width: 10; }
         """
         BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
 
         def __init__(self):
             super().__init__()
-            # 单线程安全事件队列:("live", text) / ("log", text, style)。worker 只 put,
-            # 主线程定时 get 并入 widget。
             self._q = queue.Queue()
-            self._live = ""
+            self._reason = ""
+            self._answer = ""
             self._busy = False
 
         def compose(self) -> ComposeResult:
-            yield RichLog(id="content", highlight=False, markup=False, wrap=True)
-            yield Static("", id="live")
-            yield Input(placeholder="❯ 说点什么…(回车发送 · Ctrl+C 退出)", id="input")
+            with Vertical(id="contentbox"):
+                yield RichLog(id="content", highlight=False, markup=False, wrap=True)
+                yield Static("", id="live")
+            yield ChatInput(id="input")
 
         def on_mount(self):
             log = self.query_one("#content", RichLog)
             if banner:
                 log.write(Text.from_ansi(banner))
-            log.write(Text("内容区:模型输出在这里逐字出现;底部输入固定不动。", style="dim"))
-            self.query_one("#input", Input).focus()
+            log.write(Text("内容区:模型输出在这里逐字出现;底部输入(多行,Ctrl+F 选文件)。", style="dim"))
+            self.query_one("#input", ChatInput).focus()
             self.set_interval(0.04, self._drain)
+            try:
+                from wchat_py import render as _render
+                _render.set_confirm_hook(self._confirm_blocking)
+            except Exception:
+                pass
 
-        # 供 worker 直接调用(线程安全:只 put)
+        def _confirm_blocking(self, title, mark, question):
+            if threading.current_thread() is threading.main_thread():
+                return False
+            ev = threading.Event()
+            box = {}
+
+            def _show():
+                def _done(result):
+                    box["r"] = bool(result)
+                    ev.set()
+                try:
+                    self.push_screen(ConfirmModal(title, mark, question), _done)
+                except Exception:
+                    box["r"] = False
+                    ev.set()
+
+            self.call_from_thread(_show)
+            ev.wait()
+            return box.get("r", False)
+
         def emit(self, s):
             self._q.put(("log", str(s), None))
 
         def stream(self, s):
-            self._q.put(("live", str(s)))
+            self._q.put(("live", str(s), False))
+
+        def reason(self, s):
+            self._q.put(("live", str(s), True))
+
+        def _live_display(self):
+            t = Text()
+            if self._reason:
+                t.append(self._reason, style="dim")
+            if self._answer:
+                t.append(self._answer)
+            return t
 
         def _flush_live_locked(self):
-            """把当前 live 缓冲定稿进 RichLog(用 Markdown 渲染),清空 live 区。"""
-            if not self._live:
+            if not self._reason and not self._answer:
                 return
-            txt, self._live = self._live, ""
+            reason, answer = self._reason, self._answer
+            self._reason = ""
+            self._answer = ""
+            log = self.query_one("#content", RichLog)
             try:
-                self.query_one("#content", RichLog).write(Markdown(txt))
+                if reason.strip():
+                    log.write(Text(reason, style="dim"))
+                if answer.strip():
+                    try:
+                        log.write(Markdown(answer))
+                    except Exception:
+                        log.write(Text(answer))
             except Exception:
-                try:
-                    self.query_one("#content", RichLog).write(Text(txt))
-                except Exception:
-                    pass
+                pass
             try:
                 self.query_one("#live", Static).update("")
             except Exception:
@@ -124,9 +258,12 @@ def make_app(handle_line, *, banner=""):
                 while True:
                     ev = self._q.get_nowait()
                     if ev[0] == "live":
-                        self._live += ev[1]
+                        if ev[2]:
+                            self._reason += ev[1]
+                        else:
+                            self._answer += ev[1]
                         changed_live = True
-                    else:  # log:先定稿 live,再写日志,保证流式正文在工具横幅之前
+                    else:  # log:先定稿 live,再写日志(保证正文先于工具横幅)
                         self._flush_live_locked()
                         style = ev[2] if len(ev) > 2 else None
                         try:
@@ -137,16 +274,27 @@ def make_app(handle_line, *, banner=""):
                 pass
             if changed_live:
                 try:
-                    self.query_one("#live", Static).update(Text(self._live))
+                    self.query_one("#live", Static).update(self._live_display())
                 except Exception:
                     pass
 
-        def on_input_submitted(self, event):
-            text = (event.value or "").strip()
-            event.input.value = ""
-            if not text:
+        def on_chat_input_submitted(self, event):
+            text = event.value or ""
+            if not text.strip():
                 return
             self.query_one("#content", RichLog).write(Text("❯ " + text, style="reverse"))
+            # 元命令(-q/-u/-n/...)先分类;`-q` 直接退出,其余走 on_meta(text 才进模型)
+            try:
+                from wchat_py.cmdline import classify
+                action, arg = classify(text.strip())
+            except Exception:
+                action, arg = "text", text
+            if action == "quit":
+                self.exit()
+                return
+            if action != "text":
+                self._run_meta(action, arg)
+                return
             if self._busy:
                 self.query_one("#content", RichLog).write(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                 return
@@ -155,23 +303,46 @@ def make_app(handle_line, *, banner=""):
 
         @work(thread=True, exclusive=True)
         def _run_turn(self, text):
-            # worker:装 stdout/stderr shim(都投进 log 通道),跑一轮,还原。
             o_out, o_err = sys.stdout, sys.stderr
             sys.stdout = TuiStdout(self)
             sys.stderr = TuiStdout(self, style="bold red")
             try:
-                handle_line(text, self.emit, self.stream)
+                handle_line(text, self.emit, self.stream, self.reason)
             except Exception as e:
                 self.emit("\n处理失败: %r\n" % (e,))
             finally:
                 sys.stdout, sys.stderr = o_out, o_err
                 self.call_from_thread(self._on_turn_done)
 
+        @work(thread=True, exclusive=True)
+        def _run_meta(self, action, arg):
+            o_out, o_err = sys.stdout, sys.stderr
+            sys.stdout = TuiStdout(self)
+            sys.stderr = TuiStdout(self, style="bold red")
+            try:
+                if action == "clear":
+                    self.call_from_thread(self._clear_content)
+                elif on_meta is not None:
+                    on_meta(action, arg)
+                else:
+                    self.emit("(未接入元命令处理)\n")
+            except Exception as e:
+                self.emit("\n处理失败: %r\n" % (e,))
+            finally:
+                sys.stdout, sys.stderr = o_out, o_err
+                self.call_from_thread(self._on_turn_done)
+
+        def _clear_content(self):
+            try:
+                self.query_one("#content", RichLog).clear()
+            except Exception:
+                pass
+
         def _on_turn_done(self):
-            self._drain()          # 收尾:把残余事件、live 定稿刷干净
+            self._drain()
             self._busy = False
             try:
-                self.query_one("#input", Input).focus()
+                self.query_one("#input", ChatInput).focus()
             except Exception:
                 pass
 
@@ -181,18 +352,26 @@ def make_app(handle_line, *, banner=""):
     return WchatApp()
 
 
-def run_tui(handle_line, *, banner=""):
-    make_app(handle_line, banner=banner).run()
+def run_tui(handle_line, *, banner="", on_meta=None):
+    try:
+        make_app(handle_line, banner=banner, on_meta=on_meta).run()
+    finally:
+        try:
+            from wchat_py import render as _render
+            _render.set_confirm_hook(None)
+        except Exception:
+            pass
     return 0
 
 
 if __name__ == "__main__":
-    def _demo(text, emit, stream):
+    def _demo(text, emit, stream, reason):
+        reason("(思考中…)")
+        import time as _t
         for ch in ("收到:" + text):
             stream(ch)
-            import time as _t
             _t.sleep(0.01)
         emit("\n")
 
-    sys.exit(run_tui(_demo, banner="wchat TUI 自测(M1 流式)"))
+    sys.exit(run_tui(_demo, banner="wchat TUI 自测(M2)"))
 

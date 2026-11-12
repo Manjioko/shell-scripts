@@ -39,7 +39,8 @@ if not tui.available():
     print("SKIP: textual 未安装(TUI 为可选功能;pytest 环境若无则跳过)。安装:pip install textual")
     sys.exit(77)   # run_gates 约定:环境性缺席 exit 77,不计失败
 
-from textual.widgets import RichLog, Input  # noqa: E402
+from textual.widgets import RichLog, TextArea  # noqa: E402
+from textual.widgets import Static  # noqa: E402
 
 
 # ---- 1) TuiStdout 输出桥(投进 app 的事件队列) ----
@@ -73,42 +74,82 @@ ck("flush 不报错", (sh.flush() is None))
 async def run_app_checks():
     seen = {}
 
-    def handle_line(text, emit, stream):
+    def handle_line(text, emit, stream, reason):
         seen["text"] = text
-        # 模拟流式:M1 用 stream(逐字进 live 区),工具/横幅类走 emit(log 区)
+        reason("(思考中…)")                 # 思考 → dim
         for ch in ("回答:" + text):
-            stream(ch)
-        emit("\n[工具] 已完成\n")
+            stream(ch)                      # 正文 → 流式
+        emit("\n[工具] 已完成\n")            # 工具横幅 → log
 
     app = tui.make_app(handle_line, banner="banner-X")
     async with app.run_test() as pilot:
         await pilot.pause()
-        logs = app.query(RichLog)
-        inputs = app.query(Input)
-        ck("compose 出 1 个 RichLog", len(logs) == 1, "found %d" % len(logs))
-        ck("compose 出 1 个 Input", len(inputs) == 1, "found %d" % len(inputs))
+        ck("compose 出 1 个 RichLog", len(app.query(RichLog)) == 1, "found %d" % len(app.query(RichLog)))
+        ck("compose 出 1 个 TextArea(输入框)", len(app.query(TextArea)) == 1, "found %d" % len(app.query(TextArea)))
+        ck("compose 出 1 个 live Static", len(app.query("#live")) == 1)
 
-        # 输入 hello 回车 → 回显 + 流式答案 + 工具横幅
-        inp = app.query_one("#input", Input)
-        inp.value = "hello"
+        inp = app.query_one("#input", TextArea)
+
+        # 续行:行尾 \ + 回车 = 换行,不提交
+        inp.text = "abc\\"
         await pilot.press("enter")
         await pilot.pause()
-        await asyncio.sleep(0.35)      # 等 worker 跑完 + 定时 drain
+        ck("行尾 \\ + 回车 → 续行(不提交)", inp.text == "abc\n" and "text" not in seen, repr(inp.text))
+
+        # 正常提交:回车 → 回显 + 流式答案(定稿进内容区)+ 思考 + 工具横幅
+        inp.text = "hello"
+        await pilot.press("enter")
+        await pilot.pause()
+        await asyncio.sleep(0.4)
         await pilot.pause()
         txt = "\n".join(str(l) for l in app.query_one("#content", RichLog).lines)
         ck("输入回车后内容区出现回显 ❯ hello", "hello" in txt, repr(txt[-120:]))
-        ck("handle_line 收到输入", seen.get("text") == "hello", repr(seen))
-        ck("流式答案最终定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-160:]))
+        ck("handle_line 收到输入", seen.get("text", "").strip() == "hello", repr(seen))
+        ck("流式答案定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-160:]))
+        ck("思考文本进内容区(dim 段)", "思考中" in txt, repr(txt[-160:]))
         ck("工具横幅经 log 通道出现", "已完成" in txt, repr(txt[-160:]))
 
-        # resize 后仍是单个 Input/RichLog(不叠 widget)
+        # resize 后仍是单个 widget(不叠)
         try:
             await pilot.resize_terminal(70, 30)
             await pilot.pause()
         except Exception:
             pass
-        ck("resize 后仍 1 个 Input", len(app.query(Input)) == 1, "found %d" % len(app.query(Input)))
-        ck("resize 后仍 1 个 RichLog", len(app.query(RichLog)) == 1, "found %d" % len(app.query(RichLog)))
+        ck("resize 后仍 1 个 TextArea", len(app.query(TextArea)) == 1)
+        ck("resize 后仍 1 个 RichLog", len(app.query(RichLog)) == 1)
+        ck("resize 后仍 1 个 live", len(app.query("#live")) == 1)
+
+        # ---- 6) 确认弹窗:worker 线程 _confirm_blocking → 主线程弹 ConfirmModal → 桥回答案 ----
+        import threading
+
+        async def _answer_confirm(key):
+            res = {}
+
+            def _w():
+                res["v"] = app._confirm_blocking("确认测试", "markX", "是否执行")
+            th = threading.Thread(target=_w)
+            th.start()
+            shown = False
+            for _ in range(40):
+                await pilot.pause()
+                await asyncio.sleep(0.03)
+                if app.screen.__class__.__name__ == "ConfirmModal":
+                    shown = True
+                    break
+            ck("worker 触发后弹出 ConfirmModal", shown, app.screen.__class__.__name__)
+            await pilot.press(key)
+            for _ in range(40):
+                await pilot.pause()
+                await asyncio.sleep(0.03)
+                if not th.is_alive():
+                    break
+            th.join(timeout=2)
+            return res.get("v")
+
+        v_yes = await _answer_confirm("y")
+        ck("按 y → worker 拿到 True", v_yes is True, repr(v_yes))
+        v_no = await _answer_confirm("n")
+        ck("按 n → worker 拿到 False", v_no is False, repr(v_no))
 
 
 try:
@@ -117,6 +158,25 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     ck("headless 跑通(无异常)", False, repr(e))
+
+
+# ---- 7) render.confirm_block 走钩子(不 readline) ----
+print("=== 7. confirm_block 钩子路由 ===")
+from wchat_py import render as _R  # noqa: E402
+
+_orig_hook = _R._CONFIRM_HOOK[0]
+try:
+    _R.set_confirm_hook(lambda t, m, q: True)
+    ck("钩子返回 True → confirm_block True", _R.confirm_block("标题", "mark", ask="是否") is True)
+    _R.set_confirm_hook(lambda t, m, q: False)
+    ck("钩子返回 False → confirm_block False", _R.confirm_block("标题", "mark") is False)
+    _got = {}
+    _R.set_confirm_hook(lambda t, m, q: _got.update(t=t, m=m, q=q) or True)
+    _R.confirm_block("标题X", "命中的规则", ask="是否放行")
+    ck("钩子收到 title/mark/question", _got.get("t") == "标题X" and _got.get("m") == "命中的规则"
+       and "是否放行" in (_got.get("q") or ""), repr(_got))
+finally:
+    _R.set_confirm_hook(_orig_hook)
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
