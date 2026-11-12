@@ -252,6 +252,16 @@ TUI 下:
 - 遗留:①粘贴图片(Ctrl+V)未迁移(GUI 剪贴板;优先级低);②交互式 meta(如 `-l` 选历史号)在 TUI 下会读 stdin
   受限,用到时再单独适配;③`AUTO` 首签仍在启动前(非 TUI 阶段),不受影响。
 
+**M2 追加修(用户实测:回复从底部冒出,而非紧接提问下一行)**:
+- 根因:内容区原为 `RichLog(1fr)` + 其下独立 `#live` Static;RichLog 吃满高度把 #live 顶到**箱底**,
+  于是流式从底部冒、与顶部提问之间一大段空白。
+- 修法:内容区改成**消息列表**——`VerticalScroll #content` 里每段一个 `Static` 顺序 `mount`(append)。
+  回显/思考(dim)/正文(Markdown)/工具横幅都按发生顺序挂成 widget,live 是"最后那个 Static"原地
+  `.update()` 增长,完结 `_finalize_live()` 移除它并挂正式的 dim/Markdown 段。天然**从上往下、紧接上一段**,
+  自动 `scroll_end`。`-cl` 清空所有子件。
+- 验证:headless 22/22(含"回显在思考/答案之前"顺序断言);真 tmux:捕获行号 `❯ hi`=4、`思考`=5、
+  `你好!我是`=7、markdown 列表 9-13 —— 紧接提问下方,无底部空白;全量 76/76。
+
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
 - 重写 `inputbox_layout_test` 等"断言旧渲染"的闸门 → Textual `run_test` 快照(内容区行数/

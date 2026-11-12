@@ -39,8 +39,24 @@ if not tui.available():
     print("SKIP: textual 未安装(TUI 为可选功能;pytest 环境若无则跳过)。安装:pip install textual")
     sys.exit(77)   # run_gates 约定:环境性缺席 exit 77,不计失败
 
-from textual.widgets import RichLog, TextArea  # noqa: E402
-from textual.widgets import Static  # noqa: E402
+from textual.widgets import Static, TextArea  # noqa: E402
+from textual.containers import VerticalScroll  # noqa: E402
+
+
+def _content_text(app):
+    """把 #content(VerticalScroll)里所有 Static 子件的文本拼起来(Text.plain / Markdown.markup / str)。"""
+    from rich.text import Text
+    from rich.markdown import Markdown
+    out = []
+    for c in app.query_one("#content", VerticalScroll).children:
+        r = getattr(c, "content", "")
+        if isinstance(r, Text):
+            out.append(r.plain)
+        elif isinstance(r, Markdown):
+            out.append(r.markup)
+        else:
+            out.append(str(r))
+    return "\n".join(out)
 
 
 # ---- 1) TuiStdout 输出桥(投进 app 的事件队列) ----
@@ -84,9 +100,8 @@ async def run_app_checks():
     app = tui.make_app(handle_line, banner="banner-X")
     async with app.run_test() as pilot:
         await pilot.pause()
-        ck("compose 出 1 个 RichLog", len(app.query(RichLog)) == 1, "found %d" % len(app.query(RichLog)))
+        ck("compose 出 1 个 #content(VerticalScroll)", len(app.query("#content")) == 1)
         ck("compose 出 1 个 TextArea(输入框)", len(app.query(TextArea)) == 1, "found %d" % len(app.query(TextArea)))
-        ck("compose 出 1 个 live Static", len(app.query("#live")) == 1)
 
         inp = app.query_one("#input", TextArea)
 
@@ -102,12 +117,14 @@ async def run_app_checks():
         await pilot.pause()
         await asyncio.sleep(0.4)
         await pilot.pause()
-        txt = "\n".join(str(l) for l in app.query_one("#content", RichLog).lines)
-        ck("输入回车后内容区出现回显 ❯ hello", "hello" in txt, repr(txt[-120:]))
+        txt = _content_text(app)
+        ck("输入回车后内容区出现回显 ❯ hello", "❯ hello" in txt, repr(txt[-160:]))
         ck("handle_line 收到输入", seen.get("text", "").strip() == "hello", repr(seen))
-        ck("流式答案定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-160:]))
-        ck("思考文本进内容区(dim 段)", "思考中" in txt, repr(txt[-160:]))
-        ck("工具横幅经 log 通道出现", "已完成" in txt, repr(txt[-160:]))
+        ck("流式答案定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-200:]))
+        ck("思考文本进内容区(dim 段)", "思考中" in txt, repr(txt[-200:]))
+        ck("工具横幅经 log 通道出现", "已完成" in txt, repr(txt[-200:]))
+        # 顺序:回显在前,思考/答案在其后(自然从提问下一行开始,而非从底部冒)
+        ck("回显在思考/答案之前(顺序正确)", txt.find("❯ hello") < txt.find("思考中") if "思考中" in txt else True)
 
         # resize 后仍是单个 widget(不叠)
         try:
@@ -116,8 +133,7 @@ async def run_app_checks():
         except Exception:
             pass
         ck("resize 后仍 1 个 TextArea", len(app.query(TextArea)) == 1)
-        ck("resize 后仍 1 个 RichLog", len(app.query(RichLog)) == 1)
-        ck("resize 后仍 1 个 live", len(app.query("#live")) == 1)
+        ck("resize 后仍 1 个 #content", len(app.query("#content")) == 1)
 
         # ---- 6) 确认弹窗:worker 线程 _confirm_blocking → 主线程弹 ConfirmModal → 桥回答案 ----
         import threading

@@ -63,8 +63,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
     if not available():
         raise RuntimeError("textual 未安装")
     from textual.app import App, ComposeResult
-    from textual.widgets import RichLog, Static, Button, Label, TextArea
-    from textual.containers import Vertical, Horizontal, Container
+    from textual.widgets import Static, Button, Label, TextArea
+    from textual.containers import Vertical, Horizontal, Container, VerticalScroll
     from textual.screen import ModalScreen
     from textual.binding import Binding
     from textual.message import Message
@@ -155,8 +155,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
         CSS = """
         Screen { layout: vertical; }
         #contentbox { height: 1fr; border: round $primary; }
-        #content { height: 1fr; }
-        #live { height: auto; max-height: 45%; padding: 0 1; background: $surface; }
+        #content { height: 1fr; padding: 0 1; }
         #input { dock: bottom; height: 3; border: round $accent; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
@@ -171,19 +170,45 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._q = queue.Queue()
             self._reason = ""
             self._answer = ""
+            self._live_widget = None
             self._busy = False
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
-                yield RichLog(id="content", highlight=False, markup=False, wrap=True)
-                yield Static("", id="live")
+                yield VerticalScroll(id="content")
             yield ChatInput(id="input")
 
+        # ---- 内容区(消息列表:每段一个 Static,顺序 append,自然从提问下一行开始) ----
+        def _content(self):
+            return self.query_one("#content", VerticalScroll)
+
+        def _scroll_end(self):
+            try:
+                self._content().scroll_end(animate=False)
+            except Exception:
+                pass
+
+        def _mount(self, renderable):
+            try:
+                self._content().mount(Static(renderable))
+                self._scroll_end()
+            except Exception:
+                pass
+
+        def _ensure_live(self):
+            if self._live_widget is None:
+                w = Static("")
+                try:
+                    self._content().mount(w)
+                    self._scroll_end()
+                except Exception:
+                    pass
+                self._live_widget = w
+
         def on_mount(self):
-            log = self.query_one("#content", RichLog)
             if banner:
-                log.write(Text.from_ansi(banner))
-            log.write(Text("内容区:模型输出在这里逐字出现;底部输入(多行,Ctrl+F 选文件)。", style="dim"))
+                self._mount(Text.from_ansi(banner))
+            self._mount(Text("内容区:模型输出在这里逐字出现;底部输入(多行,Ctrl+F 选文件)。", style="dim"))
             self.query_one("#input", ChatInput).focus()
             self.set_interval(0.04, self._drain)
             try:
@@ -229,31 +254,28 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 t.append(self._answer)
             return t
 
-        def _flush_live_locked(self):
-            if not self._reason and not self._answer:
+        def _finalize_live(self):
+            """把当前 live 缓冲定稿:移除 live 临时 widget,正文按 Markdown、思考按 dim 各挂一段。"""
+            if self._live_widget is None:
                 return
-            reason, answer = self._reason, self._answer
+            w, reason, answer = self._live_widget, self._reason, self._answer
+            self._live_widget = None
             self._reason = ""
             self._answer = ""
-            log = self.query_one("#content", RichLog)
             try:
-                if reason.strip():
-                    log.write(Text(reason, style="dim"))
-                if answer.strip():
-                    try:
-                        log.write(Markdown(answer))
-                    except Exception:
-                        log.write(Text(answer))
+                w.remove()
             except Exception:
                 pass
-            try:
-                self.query_one("#live", Static).update("")
-            except Exception:
-                pass
+            if reason.strip():
+                self._mount(Text(reason, style="dim"))
+            if answer.strip():
+                try:
+                    self._mount(Markdown(answer))
+                except Exception:
+                    self._mount(Text(answer))
 
         def _drain(self):
-            logs = self.query_one("#content", RichLog)
-            changed_live = False
+            changed = False
             try:
                 while True:
                     ev = self._q.get_nowait()
@@ -262,27 +284,26 @@ def make_app(handle_line, *, banner="", on_meta=None):
                             self._reason += ev[1]
                         else:
                             self._answer += ev[1]
-                        changed_live = True
-                    else:  # log:先定稿 live,再写日志(保证正文先于工具横幅)
-                        self._flush_live_locked()
+                        changed = True
+                    else:  # log:先定稿 live 再挂日志(保证正文先于工具横幅,且都在提问下方顺次出现)
+                        self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
-                        try:
-                            logs.write(Text.from_ansi(ev[1]) if style is None else Text(ev[1], style=style))
-                        except Exception:
-                            pass
+                        self._mount(Text(ev[1], style=style) if style else Text.from_ansi(ev[1]))
             except queue.Empty:
                 pass
-            if changed_live:
+            if changed and (self._reason or self._answer):
+                self._ensure_live()
                 try:
-                    self.query_one("#live", Static).update(self._live_display())
+                    self._live_widget.update(self._live_display())
                 except Exception:
                     pass
+                self._scroll_end()
 
         def on_chat_input_submitted(self, event):
             text = event.value or ""
             if not text.strip():
                 return
-            self.query_one("#content", RichLog).write(Text("❯ " + text, style="reverse"))
+            self._mount(Text("❯ " + text, style="reverse"))
             # 元命令(-q/-u/-n/...)先分类;`-q` 直接退出,其余走 on_meta(text 才进模型)
             try:
                 from wchat_py.cmdline import classify
@@ -296,7 +317,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self._run_meta(action, arg)
                 return
             if self._busy:
-                self.query_one("#content", RichLog).write(Text("(上一轮仍在进行,请稍候…)", style="dim"))
+                self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                 return
             self._busy = True
             self._run_turn(text)
@@ -334,12 +355,14 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         def _clear_content(self):
             try:
-                self.query_one("#content", RichLog).clear()
+                for c in list(self._content().children):
+                    c.remove()
             except Exception:
                 pass
 
         def _on_turn_done(self):
             self._drain()
+            self._finalize_live()
             self._busy = False
             try:
                 self.query_one("#input", ChatInput).focus()
@@ -374,4 +397,3 @@ if __name__ == "__main__":
         emit("\n")
 
     sys.exit(run_tui(_demo, banner="wchat TUI 自测(M2)"))
-
