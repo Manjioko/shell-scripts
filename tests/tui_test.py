@@ -59,6 +59,13 @@ def _content_text(app):
     return "\n".join(out)
 
 
+def _status_text(app):
+    """读 #status 状态区的文本。"""
+    from rich.text import Text
+    r = getattr(app.query_one("#status"), "content", "")
+    return r.plain if isinstance(r, Text) else str(r)
+
+
 # ---- 1) TuiStdout 输出桥(投进 app 的事件队列) ----
 print("=== 1. TuiStdout 输出桥 ===")
 import queue as _q  # noqa: E402
@@ -122,6 +129,7 @@ async def run_app_checks():
         ck("handle_line 收到输入", seen.get("text", "").strip() == "hello", repr(seen))
         ck("流式答案定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-200:]))
         ck("思考文本进内容区(dim 段)", "思考中" in txt, repr(txt[-200:]))
+        ck("思考按折叠档渲染(有 ▸ 前缀,非整段)", "▸" in txt, repr(txt[-200:]))
         ck("工具横幅经 log 通道出现", "已完成" in txt, repr(txt[-200:]))
         # 顺序:回显在前,思考/答案在其后(自然从提问下一行开始,而非从底部冒)
         ck("回显在思考/答案之前(顺序正确)", txt.find("❯ hello") < txt.find("思考中") if "思考中" in txt else True)
@@ -267,6 +275,11 @@ async def _meta_path_check():
             if app.screen.__class__.__name__ != "InputModal":
                 break
         ck("键入 AUTO → auto 切实开启", os.environ.get("AUTO_MODE") == "full", repr(os.environ.get("AUTO_MODE")))
+        # auto 的横幅/状态应在**状态区**,不在对话内容区
+        _st = _status_text(app)
+        _ct = _content_text(app)
+        ck("auto 提示进状态区(#status)", "auto" in _st.lower(), repr(_st[-120:]))
+        ck("auto 横幅不污染对话内容区", "本次会话已自动放行" not in _ct, repr(_ct[-120:]))
     for k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
         os.environ.pop(k, None)
 

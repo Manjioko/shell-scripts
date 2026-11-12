@@ -273,6 +273,14 @@ TUI 下:
 - 验证:headless 26/26→28/28(新增 InputModal 桥、read_line 路由、完整 `-auto=full`→弹窗→键入 AUTO→开启);
   真 `./wchat`:`-auto=full` 弹 "请输入大写 AUTO" 输入框、键入 AUTO→`⚡ auto 已开启`、AUTO 不入模型、`-q` 退出;全量 76/76。
 
+**M2 追加修(用户实测第 4 批)**:
+- 问题1(auto 提示应"在输入框侧",不应进内容区):新增**状态区** `#status`(内容框与输入框之间的一行区,
+  最多 6 行)。`_run_meta` 的 stdout/stderr 走 `TuiStdout(status=True)` → 进状态区;元命令回显与输出
+  (auto 横幅/usage/model 状态…)都在那里,**不污染对话正文**。真 `./wchat`:`-auto=full` 的
+  `└─ 开启 auto / 请输入大写 AUTO / ⚡ auto 已开启` 落在内容框(21 行)与输入框(28 行)之间;内容区干净。
+- 问题2(思考不折叠):`_finalize_live` 改用 `render_reason(reason)` —— 默认折叠成一行(`▸` 首行),
+  `-tf=on` 整段,与老 UI 一致。headless 断言思考含 `▸`(折叠标记)。
+
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
 - 重写 `inputbox_layout_test` 等"断言旧渲染"的闸门 → Textual `run_test` 快照(内容区行数/

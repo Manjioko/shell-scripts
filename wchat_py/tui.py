@@ -36,15 +36,17 @@ def available():
 
 
 class TuiStdout:
-    """sys.stdout/stderr 的 shim:写入投进 app 事件队列(log 通道),主线程消费入 RichLog。"""
+    """sys.stdout/stderr 的 shim:写入投进 app 事件队列。status=True 走状态区(输入框上方),
+    否则走内容区。这样 auto 横幅/usage 等"侧栏信息"不污染对话正文。"""
 
-    def __init__(self, app, style=None):
+    def __init__(self, app, style=None, status=False):
         self._app = app
         self._style = style
+        self._status = status
 
     def write(self, s):
         if s:
-            self._app._q.put(("log", str(s), self._style))
+            self._app._q.put(("status" if self._status else "log", str(s), self._style))
 
     def flush(self):
         pass
@@ -181,7 +183,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         Screen { layout: vertical; }
         #contentbox { height: 1fr; border: round $primary; }
         #content { height: 1fr; padding: 0 1; }
-        #input { dock: bottom; height: auto; max-height: 12; border: round $accent; }
+        #status { height: auto; max-height: 6; padding: 0 1; color: $text-muted; }
+        #input { height: auto; max-height: 12; border: round $accent; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
@@ -199,11 +202,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._reason = ""
             self._answer = ""
             self._live_widget = None
+            self._status_buf = ""
             self._busy = False
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
                 yield VerticalScroll(id="content")
+            yield Static("", id="status")
             yield ChatInput(id="input")
 
         # ---- 内容区(消息列表:每段一个 Static,顺序 append,自然从提问下一行开始) ----
@@ -317,25 +322,45 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             if reason.strip():
-                self._mount(Text(reason, style="dim"))
+                # 折叠思考:render_reason 默认压成一行(▸ + 首行),-tf=on 时整段;与老 UI 一致。
+                try:
+                    from wchat_py.render import render_reason
+                    self._mount(Text.from_ansi(render_reason(reason)))
+                except Exception:
+                    self._mount(Text(reason, style="dim"))
             if answer.strip():
                 try:
                     self._mount(Markdown(answer))
                 except Exception:
                     self._mount(Text(answer))
 
+        def _update_status(self):
+            lines = self._status_buf.splitlines()
+            tail = lines[-6:] if len(lines) > 6 else lines
+            try:
+                self.query_one("#status", Static).update(Text.from_ansi("\n".join(tail)))
+            except Exception:
+                pass
+
         def _drain(self):
             changed = False
+            changed_status = False
             try:
                 while True:
                     ev = self._q.get_nowait()
-                    if ev[0] == "live":
+                    kind = ev[0]
+                    if kind == "live":
                         if ev[2]:
                             self._reason += ev[1]
                         else:
                             self._answer += ev[1]
                         changed = True
-                    else:  # log:先定稿 live 再挂日志(保证正文先于工具横幅,且都在提问下方顺次出现)
+                    elif kind == "status":
+                        self._status_buf += ev[1]
+                        if len(self._status_buf) > 20000:
+                            self._status_buf = self._status_buf[-20000:]
+                        changed_status = True
+                    else:  # log:先定稿 live 再挂内容(保证正文先于工具横幅,且都在提问下方顺次出现)
                         self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
                         self._mount(Text(ev[1], style=style) if style else Text.from_ansi(ev[1]))
@@ -348,12 +373,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 except Exception:
                     pass
                 self._scroll_end()
+            if changed_status:
+                self._update_status()
 
         def on_chat_input_submitted(self, event):
             text = event.value or ""
             if not text.strip():
                 return
-            self._mount(Text("❯ " + text, style="reverse"))
             # 元命令(-q/-u/-n/...)先分类;`-q` 直接退出,其余走 on_meta(text 才进模型)
             try:
                 from wchat_py.cmdline import classify
@@ -363,13 +389,23 @@ def make_app(handle_line, *, banner="", on_meta=None):
             if action == "quit":
                 self.exit()
                 return
+            # 每次提交清空状态区,避免上一轮的侧栏信息残留
+            self._status_buf = ""
+            try:
+                self.query_one("#status", Static).update("")
+            except Exception:
+                pass
             if action != "text":
                 if self._busy:
                     self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                     return
+                # 元命令的回显与输出都进**状态区**(不污染对话正文)
+                self._status_buf = "❯ " + text + "\n"
+                self._update_status()
                 self._busy = True
                 self._run_meta(action, arg)
                 return
+            self._mount(Text("❯ " + text, style="reverse"))
             if self._busy:
                 self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                 return
@@ -392,8 +428,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
         @work(thread=True, exclusive=True)
         def _run_meta(self, action, arg):
             o_out, o_err = sys.stdout, sys.stderr
-            sys.stdout = TuiStdout(self)
-            sys.stderr = TuiStdout(self, style="bold red")
+            # meta 的输出(auto 横幅/usage/model 状态…)**进状态区**,不污染对话内容区
+            sys.stdout = TuiStdout(self, status=True)
+            sys.stderr = TuiStdout(self, style="bold red", status=True)
             try:
                 if action == "clear":
                     self.call_from_thread(self._clear_content)
