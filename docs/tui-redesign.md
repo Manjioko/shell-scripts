@@ -6,7 +6,7 @@
 > |---|---|---|
 > | 调研 | 选型 + 真终端可行性验证 | ✅ 完成(2026-11) |
 > | M0 | Textual 外壳 + 输出/输入接线 + 开关灰度 + 闸门 | ✅ 完成(2026-11) |
-> | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ⬜ 未开始 |
+> | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ✅ 完成(2026-11,M1-α 流式;M1-β markdown 定稿已用 Markdown 渲染) |
 > | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ⬜ 未开始 |
 > | M3 | 视觉闸门重写 + 终端兼容矩阵 | ⬜ 未开始 |
 > | M4 | (v2)打破串行枷锁:边流式输出边输入 | ⬜ 未开始 |
@@ -203,6 +203,28 @@ TUI 下:
 - 长会话:RichLog 行数上限(如只保留最近 N 行),验证内存/滚动。
 
 **实现记录**:(M1 完成后在此补:改了哪些函数、闸门数字、tmux 证据)
+
+**M1 实现记录(已完成 2026-11,方案 M1-α + Markdown 定稿)**:
+- `wchat_py/tui.py` 重写为「单线程安全事件队列」模型:
+  · `TuiStdout(app[,style])`:sys.stdout/stderr 的 shim,**直接** `app._q.put(("log",s,style))`
+    (装进 worker 后,横幅/markdown/错误都进 log 通道,排序与 stream 一致)。
+  · `emit(s)`→("log")、`stream(s)`→("live")。`#live` Static 显示当前流式缓冲;`#content`
+    RichLog 存已完成条目。
+  · 主线程 `set_interval(0.04,_drain)`:按队列**发出顺序**消费——遇 "live" 累积;遇 "log"
+    **先把 live 定稿进 RichLog(Markdown 渲染)再写日志**(保证工具轮前正文先落地、横幅不乱序)。
+    跨线程只 put 队列,绝不跨线程碰 widget。
+  · worker(`@work(thread=True)`) 装 shim→跑 `handle_line(text, emit, stream)`→还原→
+    `call_from_thread(_on_turn_done)`(收尾 drain + live 定稿)。
+- `cli.py` 的 TUI `_tui_handle_line(_text,_emit,_stream)`:内部 `_cl_stream_tui(m)` 用
+  `_call_llm(m,"",on_text=_stream,on_reason=_stream)` **边流边喂 live**;**不再用 StreamBox**;
+  工具经 `_run_tool_tui`(先 emit 横幅再执行)。`write_final=False`、不额外渲染(流式正文即最终,
+  由 drain 用 Markdown 定稿,不重复)。
+- **StreamBox 未删**:仍服务非 TUI 老路径;TUI 路径不引用它。整体退役留到 TUI 默认开之后。
+- 验证:headless 闸门 `tests/tui_test.py` **12/12**(含"流式答案定稿进内容区""工具横幅经 log 通道
+  出现""resize 仍单 widget");真 tmux 跑 `python -m wchat_py.tui`,输入 hello → 流式落地、resize
+  100→68→120 始终 1 个输入框无残影;全量老闸门 **76/76**(老路径不动)。
+- 已知限制(M2):思考(on_reason)当前与正文一起进 live(未做 dim 区分);工具确认/审批仍走内联
+  (TUI 下可能干扰,需 ModalScreen);输入特性(Ctrl+F/粘贴图)未迁移;live 区无历史回滚(RichLog 有滚动)。
 
 ### 6.3 M2:输入特性 + 确认/审批
 

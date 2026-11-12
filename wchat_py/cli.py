@@ -1011,21 +1011,38 @@ def main(argv):
         if sys.stdin.isatty() and os.environ.get("WCHAT_TUI") == "1":
             from wchat_py import tui as _tui
             if _tui.available():
-                from wchat_py.render import render_markdown as _rmd_tui
+                from wchat_py.toolrun import _banner_text as _tui_banner
 
-                def _tui_handle_line(_text, _emit):
-                    # 一轮 turn:输出经 sys.stdout shim 进 RichLog;最终正文一次性渲染。
-                    # (M0 不流式;工具横幅仍会经 shim 实时上屏。)
-                    _h2 = session_text_handler(
-                        _s, lambda _m: _call_llm(_m, ""),
-                        lambda _n, _a: _run_tool(_n, _a),
-                        write_final=False,
-                        on_final=lambda _r: _emit(_rmd_tui(_r or "") + "\n"))
+                def _tui_handle_line(_text, _emit, _stream):
+                    # 一轮 turn,**流式**:正文/思考增量逐字进 live 区;工具横幅经 sys.stdout
+                    # shim 进 log 通道。M1 不走 StreamBox(它的相对光标字节在 RichLog 里无意义)。
+                    def _cl_stream_tui(_m):
+                        def _on_text(_d):
+                            _stream(_d)
+
+                        def _on_reason(_d):
+                            _stream(_d)          # 思考也先进 live(简化;后续可做 dim 区分)
+                        _t, _tc, _err = _call_llm(_m, "", on_text=_on_text, on_reason=_on_reason)
+                        if _err:
+                            sys.stderr.write("API 请求失败: %s\n" % _err)
+                        return _t, _tc, _err
+
+                    def _run_tool_tui(_n, _a):
+                        try:
+                            sys.stdout.write(_tui_banner(_n, _a)); sys.stdout.flush()
+                        except Exception:
+                            pass
+                        _out = _run_tool(_n, _a)
+                        sys.stdout.write("\n"); sys.stdout.flush()
+                        return _out
+
+                    _h2 = session_text_handler(_s, _cl_stream_tui, _run_tool_tui,
+                                               write_final=False)
                     _h2(_text)
 
                 try:
                     _rc = _tui.run_tui(_tui_handle_line)
-                    _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原,可正常交互)
+                    _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原)
                     return _rc
                 except Exception as _te:
                     sys.stderr.write("⚠ TUI 启动失败(%r),回退到基础交互\n" % (_te,))

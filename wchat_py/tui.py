@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
-"""Textual 全屏交互前端(M0 原型)。设计见 docs/tui-redesign.md。
+"""Textual 全屏交互前端。设计见 docs/tui-redesign.md。
 
-目标:用成熟 TUI 框架(Textual)取代"prompt_toolkit 内联 + StreamBox 相对重绘",
-从根本上消除输入框 resize/切 tab 残影与流箱漂移那一整类问题。
+用成熟 TUI 框架(Textual)取代"prompt_toolkit 内联 + StreamBox 相对重绘",从根本上
+消除输入框 resize/切 tab 残影与流箱漂移。
 
-本模块**懒加载 textual**:没装就由调用方回退旧交互(见 cli.main 的 WCHAT_TUI 分支)。
-M0 只做"外壳 + 输出路由 + 输入→一轮"的接线;流式增量、输入特性迁移、确认弹窗见文档 M1/M2。
+M0:外壳 + 输出路由 + 输入→一轮。
+M1:流式接入 —— 模型增量逐字进入「live 区」(#live Static),完结后整段落进富文本日志
+    (#content RichLog)。用一个**单线程安全事件队列**把 stream(增量) / log(横幅/工具/错误)
+    按**发出顺序**排好、由主线程统一消费入 widget:既避免跨线程碰 widget,又保证"流式正文
+    与工具横幅"的先后不乱(工具轮前 live 先定稿、再打横幅)。
+
+本模块**懒加载 textual**:没装则 available()=False,由 cli.main 回退旧交互。
 
 公开接口:
-    available() -> bool               # textual 是否可导入
-    run_tui(handle_line, *, banner="") # 跑全屏应用;handle_line(text, emit) 在 worker 里执行
-    TuiStdout(app)                     # 把 sys.stdout.write 收进 RichLog 的 shim
-
-线程模型(关键,勿改乱):
-  · Textual 事件循环在**主线程**;turn 执行(阻塞,起子进程/等 LLM)放 `@work(thread=True)`。
-  · worker 里**不直接碰 widget**,只把文本塞进线程安全缓冲(TuiStdout)。
-  · 主线程用 `set_interval` 定时把缓冲 drain 进 RichLog(Text.from_ansi 保留颜色)。
-    这样既满足"不冻 UI",又避免跨线程调用 widget 的竞态。
+    available() -> bool
+    make_app(handle_line, *, banner="") -> App   # handle_line(text, emit, stream)
+    run_tui(handle_line, *, banner="") -> int
+    TuiStdout(app)                                # sys.stdout/stderr 的 shim
 """
 import os
+import queue
 import sys
-import threading
 
 
 def available():
-    """textual 是否可用(懒加载探测,不 import 失败即 False)。"""
     try:
         import textual  # noqa: F401
         return True
@@ -32,135 +31,144 @@ def available():
         return False
 
 
-# ---------------------------------------------------------------------------
-# stdout -> RichLog 桥:让现有 wchat 代码照常 `sys.stdout.write(...)` 即可上屏,
-# 不必改那几十处写死 stdout 的调用点。缓冲 + 主线程定时 drain,天然线程安全。
-# ---------------------------------------------------------------------------
 class TuiStdout:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._buf = []
+    """把 sys.stdout/stderr 的写入投进 app 的事件队列(log 通道),由主线程消费入 RichLog。
+    这样现有 `sys.stdout.write(横幅/markdown/…)` 不必逐处改,排序也与 stream 一致。"""
+
+    def __init__(self, app, style=None):
+        self._app = app
+        self._style = style
 
     def write(self, s):
-        if not s:
-            return
-        with self._lock:
-            self._buf.append(str(s))
+        if s:
+            self._app._q.put(("log", str(s), self._style))
 
     def flush(self):
-        # 主动 flush 不做事:统一由主线程 drain,避免跨线程碰 widget。
         pass
 
     def isatty(self):
-        return False        # 让依赖 isatty 的分支走"非交互"(但它们多半已被 TUI 分支绕过)
-
-    def drain(self):
-        with self._lock:
-            if not self._buf:
-                return ""
-            s = "".join(self._buf)
-            self._buf = []
-        return s
-
-
-def _install_stdout_shim():
-    """把 sys.stdout 换成 TuiStdout,返回 (shim, 原 stdout)。调用方负责 finally 还原。"""
-    shim = TuiStdout()
-    orig = sys.stdout
-    sys.stdout = shim
-    return shim, orig
+        return False
 
 
 def make_app(handle_line, *, banner=""):
-    """构造(但不 run)全屏 WchatApp 实例。供 run_tui 与 headless 闸门共用。
-    textual 缺失时抛 RuntimeError。"""
+    """构造(不 run)全屏 WchatApp。handle_line(text, emit, stream) 在工作线程执行:
+       emit(s)   -> log 通道(横幅/工具/错误/非流式文本)
+       stream(s) -> live 区(模型流式增量,逐字)
+    textual 缺失抛 RuntimeError。"""
     if not available():
         raise RuntimeError("textual 未安装")
     from textual.app import App, ComposeResult
-    from textual.widgets import RichLog, Input
+    from textual.widgets import RichLog, Input, Static
     from rich.text import Text
+    from rich.markdown import Markdown
     from textual import work
 
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; }
         #content { height: 1fr; border: round $primary; padding: 0 1; }
+        #live { height: auto; max-height: 50%; padding: 0 1; }
         #input { dock: bottom; height: 3; }
         """
-        BINDINGS = [
-            ("ctrl+c", "maybe_quit", "退出"),
-            ("ctrl+d", "maybe_quit", "退出"),
-        ]
+        BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
+
+        def __init__(self):
+            super().__init__()
+            # 单线程安全事件队列:("live", text) / ("log", text, style)。worker 只 put,
+            # 主线程定时 get 并入 widget。
+            self._q = queue.Queue()
+            self._live = ""
+            self._busy = False
 
         def compose(self) -> ComposeResult:
             yield RichLog(id="content", highlight=False, markup=False, wrap=True)
-            yield Input(placeholder="❯ 说点什么…(回车发送,Ctrl+C 退出)", id="input")
+            yield Static("", id="live")
+            yield Input(placeholder="❯ 说点什么…(回车发送 · Ctrl+C 退出)", id="input")
 
         def on_mount(self):
-            self._busy = False
-            self._shim = None
             log = self.query_one("#content", RichLog)
             if banner:
                 log.write(Text.from_ansi(banner))
-            log.write(Text("内容区:模型输出都在这里;底部输入固定不动。", style="dim"))
+            log.write(Text("内容区:模型输出在这里逐字出现;底部输入固定不动。", style="dim"))
             self.query_one("#input", Input).focus()
-            # 定时把 worker 写入的 stdout 缓冲 drain 进 RichLog
-            self.set_interval(0.05, self._drain_stdout)
+            self.set_interval(0.04, self._drain)
 
-        def _drain_stdout(self):
-            if self._shim is None:
+        # 供 worker 直接调用(线程安全:只 put)
+        def emit(self, s):
+            self._q.put(("log", str(s), None))
+
+        def stream(self, s):
+            self._q.put(("live", str(s)))
+
+        def _flush_live_locked(self):
+            """把当前 live 缓冲定稿进 RichLog(用 Markdown 渲染),清空 live 区。"""
+            if not self._live:
                 return
-            s = self._shim.drain()
-            if s:
+            txt, self._live = self._live, ""
+            try:
+                self.query_one("#content", RichLog).write(Markdown(txt))
+            except Exception:
                 try:
-                    self.query_one("#content", RichLog).write(Text.from_ansi(s))
+                    self.query_one("#content", RichLog).write(Text(txt))
                 except Exception:
                     pass
+            try:
+                self.query_one("#live", Static).update("")
+            except Exception:
+                pass
 
-        def _emit(self, s):
-            # 供 handle_line 的 emit 用:直接走 shim,和 stdout 同一条通道
-            if self._shim is not None:
-                self._shim.write(s)
+        def _drain(self):
+            logs = self.query_one("#content", RichLog)
+            changed_live = False
+            try:
+                while True:
+                    ev = self._q.get_nowait()
+                    if ev[0] == "live":
+                        self._live += ev[1]
+                        changed_live = True
+                    else:  # log:先定稿 live,再写日志,保证流式正文在工具横幅之前
+                        self._flush_live_locked()
+                        style = ev[2] if len(ev) > 2 else None
+                        try:
+                            logs.write(Text.from_ansi(ev[1]) if style is None else Text(ev[1], style=style))
+                        except Exception:
+                            pass
+            except queue.Empty:
+                pass
+            if changed_live:
+                try:
+                    self.query_one("#live", Static).update(Text(self._live))
+                except Exception:
+                    pass
 
         def on_input_submitted(self, event):
             text = (event.value or "").strip()
             event.input.value = ""
             if not text:
                 return
-            log = self.query_one("#content", RichLog)
-            log.write(Text("❯ " + text, style="reverse"))
+            self.query_one("#content", RichLog).write(Text("❯ " + text, style="reverse"))
             if self._busy:
-                log.write(Text("(上一轮仍在进行,请稍候…)", style="dim"))
+                self.query_one("#content", RichLog).write(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                 return
             self._busy = True
             self._run_turn(text)
 
         @work(thread=True, exclusive=True)
         def _run_turn(self, text):
-            shim, orig = _install_stdout_shim()
-            self._shim = shim
+            # worker:装 stdout/stderr shim(都投进 log 通道),跑一轮,还原。
+            o_out, o_err = sys.stdout, sys.stderr
+            sys.stdout = TuiStdout(self)
+            sys.stderr = TuiStdout(self, style="bold red")
             try:
-                handle_line(text, self._emit_threadsafe)
+                handle_line(text, self.emit, self.stream)
             except Exception as e:
-                self.call_from_thread(self._append_err, "处理失败: %r" % (e,))
+                self.emit("\n处理失败: %r\n" % (e,))
             finally:
-                sys.stdout = orig
+                sys.stdout, sys.stderr = o_out, o_err
                 self.call_from_thread(self._on_turn_done)
 
-        def _emit_threadsafe(self, s):
-            # worker 线程里只写缓冲,不碰 widget
-            if self._shim is not None:
-                self._shim.write(s)
-
-        def _append_err(self, msg):
-            try:
-                self.query_one("#content", RichLog).write(Text(msg, style="bold red"))
-            except Exception:
-                pass
-
         def _on_turn_done(self):
-            # 收尾前再 drain 一次
-            self._drain_stdout()
+            self._drain()          # 收尾:把残余事件、live 定稿刷干净
             self._busy = False
             try:
                 self.query_one("#input", Input).focus()
@@ -174,17 +182,17 @@ def make_app(handle_line, *, banner=""):
 
 
 def run_tui(handle_line, *, banner=""):
-    """跑全屏 TUI。handle_line(text, emit) -> None:执行一轮(阻塞),emit(str) 追加到内容区。
-
-    返回进程退出码(0)。textual 缺失时抛 RuntimeError,由调用方回退。
-    """
     make_app(handle_line, banner=banner).run()
     return 0
 
 
 if __name__ == "__main__":
-    # 独立自测:handle_line 回显一句。
-    def _demo(text, emit):
-        emit("你说:%s\n" % text)
+    def _demo(text, emit, stream):
+        for ch in ("收到:" + text):
+            stream(ch)
+            import time as _t
+            _t.sleep(0.01)
+        emit("\n")
 
-    sys.exit(run_tui(_demo, banner="wchat TUI 自测(仅 M0 外壳)"))
+    sys.exit(run_tui(_demo, banner="wchat TUI 自测(M1 流式)"))
+

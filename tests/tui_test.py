@@ -42,16 +42,30 @@ if not tui.available():
 from textual.widgets import RichLog, Input  # noqa: E402
 
 
-# ---- 1) TuiStdout 缓冲/线程安全/isatty ----
+# ---- 1) TuiStdout 输出桥(投进 app 的事件队列) ----
 print("=== 1. TuiStdout 输出桥 ===")
-sh = tui.TuiStdout()
+import queue as _q  # noqa: E402
+
+
+class _FakeApp:
+    def __init__(self):
+        self._q = _q.Queue()
+
+
+_fa = _FakeApp()
+sh = tui.TuiStdout(_fa)
 ck("isatty 为 False(不误判为交互)", sh.isatty() is False)
 sh.write("abc")
 sh.write("")
 sh.write("def\n")
-ck("drain 拼回全部写入", sh.drain() == "abcdef\n", repr(sh.drain()))
-ck("drain 后清空", sh.drain() == "")
-sh.write("x")
+got = []
+try:
+    while True:
+        got.append(_fa._q.get_nowait())
+except _q.Empty:
+    pass
+ck("write 把非空写入投进队列", [e[1] for e in got] == ["abc", "def\n"], repr(got))
+ck("空串不投递", all(e[1] for e in got))
 ck("flush 不报错", (sh.flush() is None))
 
 
@@ -59,9 +73,12 @@ ck("flush 不报错", (sh.flush() is None))
 async def run_app_checks():
     seen = {}
 
-    def handle_line(text, emit):
+    def handle_line(text, emit, stream):
         seen["text"] = text
-        emit("回答:%s\n" % text)
+        # 模拟流式:M1 用 stream(逐字进 live 区),工具/横幅类走 emit(log 区)
+        for ch in ("回答:" + text):
+            stream(ch)
+        emit("\n[工具] 已完成\n")
 
     app = tui.make_app(handle_line, banner="banner-X")
     async with app.run_test() as pilot:
@@ -71,15 +88,18 @@ async def run_app_checks():
         ck("compose 出 1 个 RichLog", len(logs) == 1, "found %d" % len(logs))
         ck("compose 出 1 个 Input", len(inputs) == 1, "found %d" % len(inputs))
 
-        # 输入 hello 回车 → 回显
+        # 输入 hello 回车 → 回显 + 流式答案 + 工具横幅
         inp = app.query_one("#input", Input)
         inp.value = "hello"
         await pilot.press("enter")
         await pilot.pause()
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.35)      # 等 worker 跑完 + 定时 drain
         await pilot.pause()
         txt = "\n".join(str(l) for l in app.query_one("#content", RichLog).lines)
         ck("输入回车后内容区出现回显 ❯ hello", "hello" in txt, repr(txt[-120:]))
+        ck("handle_line 收到输入", seen.get("text") == "hello", repr(seen))
+        ck("流式答案最终定稿进内容区(回答:hello)", "回答:hello" in txt, repr(txt[-160:]))
+        ck("工具横幅经 log 通道出现", "已完成" in txt, repr(txt[-160:]))
 
         # resize 后仍是单个 Input/RichLog(不叠 widget)
         try:
@@ -89,13 +109,6 @@ async def run_app_checks():
             pass
         ck("resize 后仍 1 个 Input", len(app.query(Input)) == 1, "found %d" % len(app.query(Input)))
         ck("resize 后仍 1 个 RichLog", len(app.query(RichLog)) == 1, "found %d" % len(app.query(RichLog)))
-
-        # worker 把 handle_line 的输出经 emit 落进内容区
-        await asyncio.sleep(0.2)
-        await pilot.pause()
-        txt2 = "\n".join(str(l) for l in app.query_one("#content", RichLog).lines)
-        ck("handle_line 收到输入", seen.get("text") == "hello", repr(seen))
-        ck("handle_line 的 emit 落进内容区(worker→shim→RichLog)", "回答:hello" in txt2, repr(txt2[-160:]))
 
 
 try:
