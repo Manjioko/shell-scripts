@@ -1004,6 +1004,35 @@ def main(argv):
         _first_act = os.environ.pop("WCHAT_FIRST_ACTION", "")
         if _first_act:
             _meta(_first_act, "")
+        # ── Textual 全屏 TUI(M0,见 docs/tui-redesign.md)──
+        # 仅在 交互 TTY + 显式 WCHAT_TUI=1 + textual 可用 时启用;任一不满足都走原路径。
+        # 目标是根治输入框 resize/切 tab 残影与流箱漂移(全屏每帧整屏重绘)。M0 先做
+        # 非流式(整段落地)+ 输入→一轮;流式/输入特性/确认弹窗见 M1/M2。
+        if sys.stdin.isatty() and os.environ.get("WCHAT_TUI") == "1":
+            from wchat_py import tui as _tui
+            if _tui.available():
+                from wchat_py.render import render_markdown as _rmd_tui
+
+                def _tui_handle_line(_text, _emit):
+                    # 一轮 turn:输出经 sys.stdout shim 进 RichLog;最终正文一次性渲染。
+                    # (M0 不流式;工具横幅仍会经 shim 实时上屏。)
+                    _h2 = session_text_handler(
+                        _s, lambda _m: _call_llm(_m, ""),
+                        lambda _n, _a: _run_tool(_n, _a),
+                        write_final=False,
+                        on_final=lambda _r: _emit(_rmd_tui(_r or "") + "\n"))
+                    _h2(_text)
+
+                try:
+                    _rc = _tui.run_tui(_tui_handle_line)
+                    _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原,可正常交互)
+                    return _rc
+                except Exception as _te:
+                    sys.stderr.write("⚠ TUI 启动失败(%r),回退到基础交互\n" % (_te,))
+                    sys.stderr.flush()
+            else:
+                sys.stderr.write("⚠ WCHAT_TUI=1 但未安装 textual(`pip install textual`),回退基础交互\n")
+                sys.stderr.flush()
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox, render_reason, render_markdown
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
