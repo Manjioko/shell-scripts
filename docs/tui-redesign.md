@@ -167,6 +167,7 @@ TUI 下:
   **始终 1 个输入框、无残影/多框**;全量老闸门 76/76(老路径零回归)。
 
 **启用**:`WCHAT_TUI=1 ./wchat`(需解释器里能 `import textual`;否则自动回退老交互)。
+安装 textual(不并入主 requirements,保持可选):`~/.ct/venv/bin/pip install -r requirements-tui.txt`。
 **M0 已知限制(留给 M1/M2)**:非流式(整段落地,非逐字);确认/审批仍走内联(可能受 TUI 干扰,
 先只在 auto/lowsensitive 场景用);无应用内滚动上限;输入特性(Ctrl+F/粘贴图)未迁移。
 

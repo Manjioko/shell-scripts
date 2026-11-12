@@ -1,0 +1,7 @@
+# 可选:全屏 TUI 前端(见 docs/tui-redesign.md)。仅当你要用 `WCHAT_TUI=1` 时才需要装。
+# 不并入 requirements.txt:避免给所有用户强建 venv/增大安装体积(TUI 目前为 M0 实验特性)。
+# 安装到运行时解释器(brew 装的 wchat 用的是 ~/.ct/venv):
+#   ~/.ct/venv/bin/pip install -r requirements-tui.txt
+# 或任意能 import textual 的解释器(仓库直跑时用于 inputbox/子进程的那个)。
+textual>=1.0
+
