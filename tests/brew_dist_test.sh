@@ -227,9 +227,11 @@ for line in open(os.path.join(sys.argv[1], "requirements.txt")):
     # 剥掉 extras(httpx[socks] -> httpx):extras 是"可选附加",不是模块名,
     # 带着它 import_module 必然 ModuleNotFoundError,会把测试自己搞红。
     pkg = pkg.split("[")[0].strip()
-    # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips),
-    # 所以不强制本机 import;但必须仍写在 requirements 里,让 brew 装进 venv。
-    if pkg.lower() == "pillow":
+    # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips);
+    # textual(全屏 TUI)也是**可降级**的:缺它 `WCHAT_TUI=1` 自动回退旧交互。且本机 3.9
+    # 测试解释器通常没装、又受 H5 限制不能装。两者都仍写进 requirements(让 brew 装进 venv),
+    # 只是不强制本机 import。
+    if pkg.lower() in ("pillow", "textual"):
         continue
     names.append(pkg.replace("-", "_"))
 missing = []
@@ -244,6 +246,7 @@ PY
 ck "httpx 缺失时不崩(退化为默认超时)" "$(cut -d' ' -f1 <<<"$deps")" True
 ck "requirements 必需包都能 import" "$(cut -d' ' -f2 <<<"$deps")" "-"
 ck "pillow 仍声明在 requirements(可选但随包装)" "$(grep -c '^pillow' "$PFX/libexec/requirements.txt")" 1
+ck "textual 仍声明在 requirements(TUI 随包装,缺则自动回退)" "$(grep -c '^textual' "$PFX/libexec/requirements.txt")" 1
 
 echo "=== 8. bootstrap 语义(不联网) ==="
 b=$("$PY" - <<EOF

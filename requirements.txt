@@ -7,3 +7,6 @@ httpx[socks]>=0.24
 prompt_toolkit>=3
 rich>=13
 pillow>=9
+# 全屏 TUI 前端(docs/tui-redesign.md)。缺它时 `WCHAT_TUI=1` 会自动回退旧交互,
+# 但正常安装随包带入,保证开了开关就开箱可用。锁 8.x(与验证过的 8.2.8 同大版本)。
+textual>=8,<9

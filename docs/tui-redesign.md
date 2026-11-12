@@ -166,8 +166,8 @@ TUI 下:
 - **验证结果**:headless 闸门 11/11;真 tmux 终端跑 `python -m wchat_py.tui`,resize 100→68→120
   **始终 1 个输入框、无残影/多框**;全量老闸门 76/76(老路径零回归)。
 
-**启用**:`WCHAT_TUI=1 ./wchat`(需解释器里能 `import textual`;否则自动回退老交互)。
-安装 textual(不并入主 requirements,保持可选):`~/.ct/venv/bin/pip install -r requirements-tui.txt`。
+**启用**:`WCHAT_TUI=1 ./wchat`。`textual` 已并入主 `requirements.txt`(`>=8,<9`),正常安装即随包带入;
+若某环境缺它,`WCHAT_TUI=1` 会自动回退旧交互(不卡死)。
 **M0 已知限制(留给 M1/M2)**:非流式(整段落地,非逐字);确认/审批仍走内联(可能受 TUI 干扰,
 先只在 auto/lowsensitive 场景用);无应用内滚动上限;输入特性(Ctrl+F/粘贴图)未迁移。
 
