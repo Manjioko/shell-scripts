@@ -396,31 +396,164 @@ class _FakeOut:
 
 
 class _FakeRenderer:
-    def __init__(self, cols, old_cols, lens, y=1):
+    def __init__(self, cols, lens, y=1):
         self.output = _FakeOut(cols)
-        self._last_size = SimpleNamespace(columns=old_cols)
         self._last_screen = _FakeScreen(lens)
         self._cursor_pos = SimpleNamespace(y=y)
-        self.erased = 0
 
-    def erase(self, leave_alternate_screen=True):
-        self.erased += 1
+
+class _FakeApp:
+    def __init__(self, renderer):
+        self.renderer = renderer
+        self.resize_calls = 0
+        self._on_resize = self._real_on_resize
+
+    def _real_on_resize(self):
+        self.resize_calls += 1
 
 
 class _FakeSession:
-    def __init__(self, r):
-        self.app = SimpleNamespace(renderer=r)
+    def __init__(self, app):
+        self.app = app
 
 
-_r = _FakeRenderer(60, 100, [99, 3, 99, 40])
-ck("_resize_guard 接得上", IB._resize_guard(_FakeSession(_r)) is True)
-_r.erase()
-ck("erase 前先多上移 1 行(残影那一截)", _r.output.moves == [1], repr(_r.output.moves))
-ck("原 erase 仍然被调用", _r.erased == 1)
-_r2 = _FakeRenderer(100, 60, [59, 3, 59, 40])
-IB._resize_guard(_FakeSession(_r2))
-_r2.erase()
-ck("变宽时不多上移(不吃历史)", _r2.output.moves == [], repr(_r2.output.moves))
+# 新实现包的是 app._on_resize(不是 renderer.erase):在原始 resize 处理之前,
+# 按"上一帧每行宽度/新宽度"折行算出需**额外**上移的行数,先 cursor_up。
+_r = _FakeRenderer(60, [119, 3, 119, 40], y=1)          # 120→60,光标在 ❯ 行
+_app = _FakeApp(_r)
+ck("_resize_guard 接得上(包到 app._on_resize)", IB._resize_guard(_FakeSession(_app)) is True)
+_app._on_resize()
+ck("resize 时先额外上移 1 行(残影那一截)", _r.output.moves == [1], repr(_r.output.moves))
+ck("原始 _on_resize 仍被调用", _app.resize_calls == 1)
+
+_r2 = _FakeRenderer(20, [119, 3, 119, 40], y=1)         # 120→20:折 6 行,需补 5(不截断)
+_app2 = _FakeApp(_r2)
+IB._resize_guard(_FakeSession(_app2))
+_app2._on_resize()
+ck("大幅收窄补 5 行(不再截到 4)", _r2.output.moves == [5], repr(_r2.output.moves))
+
+_r3 = _FakeRenderer(120, [59, 3, 59, 40], y=1)          # 变宽:不补
+_app3 = _FakeApp(_r3)
+IB._resize_guard(_FakeSession(_app3))
+_app3._on_resize()
+ck("变宽时不多上移(不吃历史)", _r3.output.moves == [], repr(_r3.output.moves))
+
+print("=== 9. resize 缩窄:reflow 屏幕下无残影(真机行为回归锁,带负对照) ===")
+# §7 的 Screen 是**固定网格、resize 时不会 reflow**,所以结构上抓不到"旧横线折行后残留"
+# 这个真 bug(用户实报:锁屏/切屏回来输入框上方多出一条或多条横线)。这里用一个 resize 时
+# 会**按新宽度重排已有内容、并把光标带回它那一行**的屏(真终端就是这么做的),再判。
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+
+class _ReflowScreen(Screen):
+    def resize_with_reflow(self, newcols, newrows):
+        old = ["".join(r).rstrip() for r in self.g]
+        while old and not old[-1]:
+            old.pop()
+
+        def nwrap(line):
+            return 1 if not line else -(-len(line) // newcols)
+        before = sum(nwrap(old[i]) for i in range(min(self.y, len(old))))
+        cy_new = before + (self.x // newcols if (old and self.y < len(old)) else 0)
+        newg = []
+        for line in old:
+            if not line:
+                newg.append("")
+            else:
+                for i in range(0, len(line), newcols):
+                    newg.append(line[i:i + newcols])
+        scroll = max(0, len(newg) - newrows)
+        vis = newg[scroll:scroll + newrows]
+        grid = [[" "] * newcols for _ in range(newrows)]
+        for y, line in enumerate(vis):
+            for x, ch in enumerate(line[:newcols]):
+                grid[y][x] = ch
+        self.g, self.cols, self.rows = grid, newcols, newrows
+        self.y = max(0, min(newrows - 1, cy_new - scroll))
+        self.x = min(self.x, newcols - 1)
+
+
+def _shot_reflow(helper, c0, c1):
+    m, s = pty.openpty()
+    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, c0, 0, 0))
+    pid = os.fork()
+    if pid == 0:
+        os.close(m); os.setsid(); fcntl.ioctl(s, termios.TIOCSCTTY, 1)
+        for fd in (0, 1, 2):
+            os.dup2(s, fd)
+        os.chdir(REPO)
+        os.execvpe(sys.executable, [sys.executable, helper, "--no-commands",
+                                    "--history", "", "--clip-dir", ""],
+                   dict(os.environ, TERM="xterm-256color", COLUMNS=str(c0), LINES=str(ROWS),
+                        PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8"))
+        os._exit(127)
+    os.close(s)
+    scr = _ReflowScreen(c0, ROWS)
+
+    def pump(dur):
+        end = time.time() + dur
+        while time.time() < end:
+            r, _, _ = select.select([m], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                data = os.read(m, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            scr.feed(data.decode("utf-8", "replace"))
+            for _ in range(data.count(b"\x1b[6n")):
+                try:
+                    os.write(m, b"\x1b[%d;1R" % (scr.y + 1))
+                except OSError:
+                    pass
+    try:
+        pump(1.0)
+        os.write(m, b"hi")
+        pump(0.5)
+        fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, c1, 0, 0))
+        scr.resize_with_reflow(c1, ROWS)
+        pump(1.5)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        try:
+            os.close(m)
+        except OSError:
+            pass
+    return scr.lines()
+
+
+for (c0, c1) in ((120, 60), (120, 40), (100, 50)):
+    _lines = _shot_reflow(HELPER, c0, c1)
+    _rules = [i for i, l in enumerate(_lines) if l and set(l) == {RULE}]
+    ck("reflow %d→%d:恰好两条横线(无残影)" % (c0, c1), len(_rules) == 2,
+       repr([(i, len(_lines[i])) for i in _rules]))
+    ck("reflow %d→%d:❯ 与提示行都在(框没坏)" % (c0, c1),
+       any("❯" in l for l in _lines) and any("回车发送" in l for l in _lines), repr(_lines))
+
+# 负对照:把 _resize_guard 调用剥掉后,同一判据必须**能看到残影** —— 否则这个判据是恒绿的假闸门。
+_src = open(os.path.join(REPO, "wchat_py", "inputbox.py"), encoding="utf-8").read()
+_strip = _src.replace("    _resize_guard(session, tty)\n",
+                      "    pass  # guard stripped for negative control\n")
+ck("负对照:成功剥掉 _resize_guard 调用", "_resize_guard(session, tty)" not in _strip)
+_td = tempfile.mkdtemp(prefix="ibstrip_")
+_noguard = os.path.join(_td, "inputbox_noguard.py")
+with open(_noguard, "w", encoding="utf-8") as _f:
+    _f.write(_strip)
+_ng = _shot_reflow(_noguard, 120, 40)
+_ng_rules = [i for i, l in enumerate(_ng) if l and set(l) == {RULE}]
+ck("负对照:去掉 guard 后缩窄确实出现多余横线(判据非恒绿)", len(_ng_rules) > 2,
+   "横线 %d 条" % len(_ng_rules))
+shutil.rmtree(_td, ignore_errors=True)
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

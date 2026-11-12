@@ -683,18 +683,6 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
                     p = None
                 if p is None:
                     break
-                if p.returncode == 2:
-                    # 输入助手跑不起来(缺 prompt_toolkit / 非交互终端 / 其它环境异常)。
-                    # **绝不能返回 ""**:run_repl_loop 把空串当作"用户交了空行"直接
-                    # continue,于是输入助手被无限次重启 —— 屏幕上除自举那行外一个字都
-                    # 没有、Ctrl+C 也只能清空"这一行"再被同一循环接住,表现为**卡死且无法
-                    # 中断**(实测事故:3.9 换到裸 3.12 后 prompt_toolkit 缺席,退码 2)。
-                    # 退回内置 input():至少让人还能输入,并把原因说清楚。
-                    _why = (p.stderr or "").strip().splitlines()
-                    sys.stderr.write("  (输入框不可用,已退回基础输入。%s)\n"
-                                     % (_why[-1] if _why else "退出码 2"))
-                    sys.stderr.flush()
-                    break
                 if p.returncode == 4:
                     cur = (p.stdout or "")
                     if cur.endswith("\n"):
@@ -709,9 +697,26 @@ def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
                     continue
                 if p.returncode == 1:
                     return None
+                if p.returncode != 0:
+                    # **非受控退出码**一律不重开输入框:缺依赖(2)、被信号杀(<0 或
+                    # 128+信号:挂起/解挂、终端 detach 的 SIGHUP、系统休眠……)、或其它异常。
+                    # 旧实现只挡了 2;其余(3/-1/-9/130/137)都被当"空行提交"→ run_repl_loop
+                    # 见空串即 continue → 输入助手**无限重启**,每重启一次就重绘一个空框,
+                    # 屏幕上叠出一堆 `❯ 问点什么`(实测)。退回内置 input() 并说明原因。
+                    _why = (p.stderr or "").strip().splitlines()
+                    sys.stderr.write("  (输入框异常退出 rc=%s,已退回基础输入。%s)\n"
+                                     % (p.returncode, _why[-1] if _why else ""))
+                    sys.stderr.flush()
+                    break
                 _t = (p.stdout or "")
                 if _t.endswith("\n"):
                     _t = _t[:-1]
+                if not _t.strip():
+                    # rc=0 却没有任何内容:同样不正常(正常提交不会是空;空缓冲区回车不发送)。
+                    # 绝不当"空行"重开,否则又是无限重启叠空框。
+                    sys.stderr.write("  (输入框返回空内容,已退回基础输入)\n")
+                    sys.stderr.flush()
+                    break
                 return _t
         try:
             return input(prompt)

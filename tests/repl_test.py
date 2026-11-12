@@ -116,46 +116,75 @@ _qflag = []
 run_repl_loop(lambda: next(_q, None), lambda t: None, None, lambda: _qflag.append(1))
 ck("on_quit 在 -q 调用一次", _qflag == [1], str(_qflag))
 
-# 输入助手起不来(rc=2,如换解释器后缺 prompt_toolkit)绝不能被当成"空行提交"无限重启。
-# 旧实现 nxt() 对非 0/1/4 的退出码返回 ""，run_repl_loop 见空串即 continue ->
-# 输入助手被无限次重启:屏幕无字、Ctrl+C 也打断不了(实测卡死事故)。这里用有界桩:
+# 输入助手"非受控退出"绝不能被当成"空行提交"无限重启。旧实现只挡了 rc=2;
+# 3 / -9 / 130 / 137 等(被信号杀:挂起/解挂、终端 detach 的 SIGHUP、休眠…)都被当空串 ->
+# run_repl_loop 见空串即 continue -> 输入助手被无限次重启,每重启一次重绘一个空框
+# (屏幕上叠出一堆 `❯ 问点什么`,实测)。下面用有界桩覆盖这些退出码:
 # 若回归,第 51 次调用直接抛错把死循环打断,测试才不会自己挂住。
 from wchat_py import repl as _repl  # noqa: E402
 
-class _R2:
-    returncode = 2
-    stdout = ""
-    stderr = "ModuleNotFoundError: No module named 'prompt_toolkit'"
 
-_calls = {"n": 0}
-
-
-def _fake_run(*a, **k):
-    _calls["n"] += 1
-    if _calls["n"] > 50:
-        raise RuntimeError("输入助手被无限重启(rc=2 被当成空行)")
-    return _R2()
+class _Rc:
+    def __init__(self, rc, out="", err=""):
+        self.returncode = rc
+        self.stdout = out
+        self.stderr = err
 
 
-_orig_run2 = _repl.subprocess.run
-_orig_stdin2 = sys.stdin
-_errbuf = io.StringIO()
-_orig_err2 = sys.stderr
-_repl.subprocess.run = _fake_run
-sys.stdin = io.StringIO("")          # input() 立即 EOF,让兜底路径正常结束
-sys.stderr = _errbuf
+def _drive(rc, out=""):
+    """把 nxt() 的输入盒子进程桩成固定退出码,数它被拉起几次(有界)。返回 (calls, stderr)。"""
+    calls = {"n": 0}
+
+    def _fake_run(*a, **k):
+        calls["n"] += 1
+        if calls["n"] > 50:
+            raise RuntimeError("无限重启")
+        return _Rc(rc, out, "boom")
+    o_run, o_in, o_e = _repl.subprocess.run, sys.stdin, sys.stderr
+    errb = io.StringIO()
+    _repl.subprocess.run = _fake_run
+    sys.stdin = io.StringIO("")          # input() 立即 EOF,让兜底路径正常结束
+    sys.stderr = errb
+    hung = False
+    try:
+        _repl.run_interactive(lambda t: None)
+    except RuntimeError:
+        hung = True
+    finally:
+        _repl.subprocess.run, sys.stdin, sys.stderr = o_run, o_in, o_e
+    return calls["n"], errb.getvalue(), hung
+
+
+for _rc in (2, 3, -1, -9, -13, 130, 137):
+    _n, _err, _hung = _drive(_rc)
+    ck("nxt rc=%-4s 不无限重启(只拉起 1 次)" % _rc, (not _hung) and _n == 1,
+       "拉起 %d 次%s" % (_n, " · 死循环" if _hung else ""))
+    ck("nxt rc=%-4s 说明原因并退回基础输入" % _rc, "退回基础输入" in _err, repr(_err))
+# rc=0 却没有内容(异常):也不该当空行重开
+_n0, _err0, _h0 = _drive(0, "")
+ck("nxt rc=0 空内容不无限重启", (not _h0) and _n0 == 1, "拉起 %d 次" % _n0)
+# rc=1(EOF)正常退出会话:只拉起 1 次,不报错
+_eserr = io.StringIO()
+_o_e = sys.stderr
+sys.stderr = _eserr
+_rc1_calls = {"n": 0}
+
+
+def _run_eof(*a, **k):
+    _rc1_calls["n"] += 1
+    return _Rc(1)
+
+
+_o_run = _repl.subprocess.run
+_repl.subprocess.run = _run_eof
 try:
+    _r1 = _repl.subprocess.run  # noqa
     _repl.run_interactive(lambda t: None)
-    _hung = False
-except RuntimeError:
-    _hung = True
 finally:
-    _repl.subprocess.run = _orig_run2
-    sys.stdin = _orig_stdin2
-    sys.stderr = _orig_err2
-ck("nxt rc=2 不无限重启(有界,只调用 1 次)", (not _hung) and _calls["n"] == 1,
-   "调用 %d 次%s" % (_calls["n"], " · 死循环" if _hung else ""))
-ck("nxt rc=2 说明原因并退回基础输入", "输入框不可用" in _errbuf.getvalue(), repr(_errbuf.getvalue()))
+    _repl.subprocess.run = _o_run
+    sys.stderr = _o_e
+ck("nxt rc=1(EOF)只拉起 1 次、不报错", _rc1_calls["n"] == 1 and "退回基础输入" not in _eserr.getvalue(),
+   "拉起 %d 次" % _rc1_calls["n"])
 
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

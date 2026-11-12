@@ -541,54 +541,75 @@ def _reflow_extra(line_lens, cursor_y, new_width):
     """
     try:
         w = max(1, int(new_width))
-        need = 0
-        for ln in list(line_lens)[:max(0, int(cursor_y)) + 1]:
-            n = int(ln or 0)
-            need += max(1, -(-n // w)) if n > 0 else 1
-        return max(0, need - (max(0, int(cursor_y)) + 1))
+        cy = max(0, int(cursor_y))
+        lens = list(line_lens)
+        above = 0
+        for i in range(cy):                         # 只算光标**上方**的行
+            n = int(lens[i] or 0) if i < len(lens) else 0
+            above += (-(-n // w)) if n > 0 else 1
+        # extra = 物理行数(above) - 逻辑行数(cy) = erase 之前需**额外**上移的行数。
+        # **不截断**:大跨度收窄要多移好几行,截到常数会留下多条残影(旧实现的坑)。
+        return max(0, above - cy)
     except Exception:
         return 0
 
 
-def _resize_guard(session, cap=4):
-    """resize 时先"多上移几行"再让 prompt_toolkit 擦屏(见 `_reflow_extra`)。
+def _resize_guard(session, tty=None):
+    """resize 时把光标先退到**箱子真正的物理顶部**,再让 prompt_toolkit 擦屏。
 
-    只包 `renderer.erase` 的实例方法,不重写 PTK 的类;任何一步算不出来就退回
-    原样(残影难看总比输入框错位好)。
+    ⚠ 旧实现是包 `renderer.erase()`、在里面判 `output.get_size().列 < last_size.列` 决定
+    补多少 —— 实测**完全无效**(加了和没加一模一样):`_on_resize` 调 erase 的时刻
+    `output.get_size()` 往往还是旧值(等于 last_size),"变小"判据不成立、extra 恒 0;而且
+    只处理变窄、还把补偿截到 4 行。回归测试"假绿"是因为测试屏 resize 时**不 reflow**。
+
+    正确做法:包 `app._on_resize`,在原始 erase 之前,按"上一帧每行宽度 / 新宽度"折行算出
+    需**额外**上移的行数(`_reflow_extra`),先 `cursor_up(extra)`。新宽度**直读 ioctl**
+    (`os.get_terminal_size(tty.fileno())`),不信 resize 回调里可能过期的 `output.get_size()`。
+    变宽时 extra=0,不多吃历史;拿不到尺寸/上一帧就退回原行为(残影难看总比错位/吃历史好)。
     """
     try:
-        from wchat_py.render import display_width
+        app = session.app
+        renderer = app.renderer
+        orig = app._on_resize
 
-        renderer = session.app.renderer
-        orig = renderer.erase
+        def _new_cols():
+            f = None
+            try:
+                f = tty.fileno() if tty is not None else None
+            except Exception:
+                f = None
+            if f is not None:
+                try:
+                    return os.get_terminal_size(f).columns
+                except OSError:
+                    pass
+            try:
+                return renderer.output.get_size().columns
+            except Exception:
+                return 0
 
-        def erase(leave_alternate_screen=True):
-            extra = 0
+        def on_resize():
             try:
                 last = getattr(renderer, "_last_screen", None)
-                last_size = getattr(renderer, "_last_size", None)
-                cur = renderer.output.get_size()
-                if last is not None and last_size is not None and cur.columns < last_size.columns:
-                    lens = []
-                    for y in range(last.height):
-                        row = last.data_buffer[y]
-                        lens.append(max((x for x, cell in row.items()
-                                         if cell.char != " "), default=-1) + 1)
-                    extra = _reflow_extra(lens, getattr(renderer._cursor_pos, "y", 0),
-                                          cur.columns)
+                cy = getattr(getattr(renderer, "_cursor_pos", None), "y", 0) or 0
+                if last is not None and cy > 0:
+                    w = _new_cols()
+                    if w and w > 1:
+                        lens = []
+                        for y in range(last.height):
+                            row = last.data_buffer[y]
+                            lens.append(max((x for x, cell in row.items()
+                                             if cell.char != " "), default=-1) + 1)
+                        extra = _reflow_extra(lens, cy, w)
+                        if extra > 0:
+                            # erase 自己还会按 _cursor_pos.y 上移;这里补"折行多出来的"那段。
+                            renderer.output.cursor_up(extra)
+                            renderer.output.flush()
             except Exception:
-                extra = 0
-            if extra > 0:
-                # 多上移的这几行:紧接着由 orig 的 cursor_up + erase_down 一并擦掉,
-                # 顺带把折出来的旧横线残片清干净。
-                try:
-                    renderer.output.cursor_up(min(extra, cap))
-                    renderer.output.flush()
-                except Exception:
-                    pass
-            return orig(leave_alternate_screen=leave_alternate_screen)
+                pass
+            return orig()
 
-        renderer.erase = erase
+        app._on_resize = on_resize
         return True
     except Exception:
         return False
@@ -889,7 +910,7 @@ def main() -> int:
 
     _squeeze_box(session)
     _install_rules(session)
-    _resize_guard(session)
+    _resize_guard(session, tty)
 
     def _close_box():
         """提交/退出后补上底部横线。prompt_toolkit 收尾帧会收掉 bottom_toolbar,
