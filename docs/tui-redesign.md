@@ -281,6 +281,21 @@ TUI 下:
 - 问题2(思考不折叠):`_finalize_live` 改用 `render_reason(reason)` —— 默认折叠成一行(`▸` 首行),
   `-tf=on` 整段,与老 UI 一致。headless 断言思考含 `▸`(折叠标记)。
 
+**M2 追加修(用户澄清:状态区只放 auto 档标记;`-auto` 输出仍进内容区;思考折叠须单行)**:
+- 更正上一批:之前把**所有 meta 输出**塞进状态区是错的。用户要的是——`-auto` 的开启输出
+  (`开启 auto / 请输入大写 AUTO / auto 已开启`)留在**内容区**;而常驻的 `⚡ auto=full · 已自动放行 N 次 · …`
+  **档位标记**才放输入框上方(老 bash UI 里它就常驻在输入框上沿、auto 期间一直可见)。
+  · `_run_meta` 的 stdout/stderr 恢复走内容区(TuiStdout 默认);`❯` 回显不进内容。
+  · 新增 `_refresh_status()`:每 tick 若 `AUTO_MODE` 开着就用 `auto_enable.marker_text()` 刷新 `#status`
+    (该标记含"已自动放行 N 次",随放行递增),关则清空 → **常驻可见**。
+  · `_drain` 的 log 分支**丢弃**含"本次会话已自动放行"的行(它来自 auto_enable.repl 的 stdout 打印),
+    避免与状态区重复。
+- 思考折叠**真正单行**:`_render_reason` 不再用 `render_reason`(它按**整屏宽度**截断,而内容框更窄 →
+  折成两行)。改为:取首个非空行、压空白、按**内容区实际宽度**(`content_size.width`)逐字(CJK 记 2)截断、
+  超宽补 `…`,保证只占**一行**;`-tf=on` 仍整段。
+- 验证:headless 34/34(内容区含"已开启"、状态区含"已自动放行"、内容区无重复标记、思考折叠单行且以…结尾);
+  真 `./wchat`:auto 输出在内容框内、`⚡ auto=full…` 标记在内容框与输入框之间的状态区;全量 76/76。
+
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
 - 重写 `inputbox_layout_test` 等"断言旧渲染"的闸门 → Textual `run_test` 快照(内容区行数/

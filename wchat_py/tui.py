@@ -202,7 +202,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._reason = ""
             self._answer = ""
             self._live_widget = None
-            self._status_buf = ""
+            self._last_marker = None
             self._busy = False
 
         def compose(self) -> ComposeResult:
@@ -309,8 +309,43 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 t.append(self._answer)
             return t
 
+        def _render_reason(self, text):
+            """思考渲染:默认**折叠成一行**(▸ + 首个非空行,压空白、按内容区宽度截断、加 …);
+            -tf=on 时整段(render_reason)。保证折叠档只占**一行**(不因过长换行成两行)。"""
+            try:
+                from wchat_py.render import think_full, display_width, render_reason as _rr
+                if think_full():
+                    return Text.from_ansi(_rr(text))
+                first, more = "", False
+                for ln in (text or "").splitlines():
+                    s = " ".join(ln.split())
+                    if not s:
+                        continue
+                    if not first:
+                        first = s
+                    else:
+                        more = True
+                        break
+                if not first:
+                    return Text("")
+                try:
+                    width = max(10, int(self._content().content_size.width or 76) - 1)
+                except Exception:
+                    width = 76
+                out, wpx = "", 0
+                for ch in first:
+                    cw = display_width(ch)
+                    if wpx + cw > width:
+                        more = True
+                        break
+                    out += ch
+                    wpx += cw
+                return Text("▸ " + out + ("…" if more else ""), style="dim")
+            except Exception:
+                return Text(text or "", style="dim")
+
         def _finalize_live(self):
-            """把当前 live 缓冲定稿:移除 live 临时 widget,正文按 Markdown、思考按 dim 各挂一段。"""
+            """定稿 live 缓冲:移除临时 widget;思考按折叠档、正文按 Markdown 各挂一段。"""
             if self._live_widget is None:
                 return
             w, reason, answer = self._live_widget, self._reason, self._answer
@@ -322,48 +357,47 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             if reason.strip():
-                # 折叠思考:render_reason 默认压成一行(▸ + 首行),-tf=on 时整段;与老 UI 一致。
-                try:
-                    from wchat_py.render import render_reason
-                    self._mount(Text.from_ansi(render_reason(reason)))
-                except Exception:
-                    self._mount(Text(reason, style="dim"))
+                self._mount(self._render_reason(reason))
             if answer.strip():
                 try:
                     self._mount(Markdown(answer))
                 except Exception:
                     self._mount(Text(answer))
 
-        def _update_status(self):
-            lines = self._status_buf.splitlines()
-            tail = lines[-6:] if len(lines) > 6 else lines
+        def _refresh_status(self):
+            """状态区=**当前 auto 档位标记**(输入框上方常驻)。auto 未开则清空。
+            已自动放行次数会随工具放行变化,每 tick 重算,变了才重绘。"""
             try:
-                self.query_one("#status", Static).update(Text.from_ansi("\n".join(tail)))
+                from wchat_py.auto_enable import marker_text
+                m = marker_text() if (os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE")) else ""
+            except Exception:
+                m = ""
+            if self._last_marker == m:
+                return
+            self._last_marker = m
+            try:
+                self.query_one("#status", Static).update(Text.from_ansi(m) if m else "")
             except Exception:
                 pass
 
         def _drain(self):
             changed = False
-            changed_status = False
             try:
                 while True:
                     ev = self._q.get_nowait()
-                    kind = ev[0]
-                    if kind == "live":
+                    if ev[0] == "live":
                         if ev[2]:
                             self._reason += ev[1]
                         else:
                             self._answer += ev[1]
                         changed = True
-                    elif kind == "status":
-                        self._status_buf += ev[1]
-                        if len(self._status_buf) > 20000:
-                            self._status_buf = self._status_buf[-20000:]
-                        changed_status = True
-                    else:  # log:先定稿 live 再挂内容(保证正文先于工具横幅,且都在提问下方顺次出现)
+                    else:  # log:先定稿 live 再挂内容;auto 标记行只进状态区(不进内容区)
+                        t = ev[1]
+                        if "本次会话已自动放行" in t:
+                            continue
                         self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
-                        self._mount(Text(ev[1], style=style) if style else Text.from_ansi(ev[1]))
+                        self._mount(Text(t, style=style) if style else Text.from_ansi(t))
             except queue.Empty:
                 pass
             if changed and (self._reason or self._answer):
@@ -373,8 +407,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 except Exception:
                     pass
                 self._scroll_end()
-            if changed_status:
-                self._update_status()
+            self._refresh_status()
 
         def on_chat_input_submitted(self, event):
             text = event.value or ""
@@ -389,19 +422,12 @@ def make_app(handle_line, *, banner="", on_meta=None):
             if action == "quit":
                 self.exit()
                 return
-            # 每次提交清空状态区,避免上一轮的侧栏信息残留
-            self._status_buf = ""
-            try:
-                self.query_one("#status", Static).update("")
-            except Exception:
-                pass
             if action != "text":
+                # 元命令输出(如 -auto 的开启横幅)照常在**内容区**展示;auto 档标记另由
+                # 状态区常驻显示(#status,见 _refresh_status)。
                 if self._busy:
                     self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
                     return
-                # 元命令的回显与输出都进**状态区**(不污染对话正文)
-                self._status_buf = "❯ " + text + "\n"
-                self._update_status()
                 self._busy = True
                 self._run_meta(action, arg)
                 return
@@ -428,9 +454,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         @work(thread=True, exclusive=True)
         def _run_meta(self, action, arg):
             o_out, o_err = sys.stdout, sys.stderr
-            # meta 的输出(auto 横幅/usage/model 状态…)**进状态区**,不污染对话内容区
-            sys.stdout = TuiStdout(self, status=True)
-            sys.stderr = TuiStdout(self, style="bold red", status=True)
+            sys.stdout = TuiStdout(self)
+            sys.stderr = TuiStdout(self, style="bold red")
             try:
                 if action == "clear":
                     self.call_from_thread(self._clear_content)

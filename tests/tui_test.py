@@ -275,11 +275,21 @@ async def _meta_path_check():
             if app.screen.__class__.__name__ != "InputModal":
                 break
         ck("键入 AUTO → auto 切实开启", os.environ.get("AUTO_MODE") == "full", repr(os.environ.get("AUTO_MODE")))
-        # auto 的横幅/状态应在**状态区**,不在对话内容区
+        # 等 _refresh_status(0.04s tick)把常驻标记刷到 #status
+        for _ in range(10):
+            await pilot.pause()
+            await asyncio.sleep(0.03)
         _st = _status_text(app)
         _ct = _content_text(app)
-        ck("auto 提示进状态区(#status)", "auto" in _st.lower(), repr(_st[-120:]))
-        ck("auto 横幅不污染对话内容区", "本次会话已自动放行" not in _ct, repr(_ct[-120:]))
+        # -auto 的开启输出(auto 已开启…)应在**内容区**;常驻档标记(已自动放行 N 次)应在**状态区**
+        ck("auto 开启输出在内容区(auto 已开启)", "已开启" in _ct, repr(_ct[-160:]))
+        ck("auto 档常驻标记在状态区(#status)", "已自动放行" in _st, repr(_st[-160:]))
+        ck("auto 档标记不重复进内容区", "本次会话已自动放行" not in _ct, repr(_ct[-160:]))
+
+        # 思考折叠成**一行**(超宽截断加 …),不因过长换行
+        _rt = app._render_reason("word " * 300)
+        ck("思考折叠为单行(无换行符)", "\n" not in _rt.plain, repr(_rt.plain[:60]))
+        ck("思考折叠超宽以 … 结尾", _rt.plain.endswith("…"), repr(_rt.plain[-20:]))
     for k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
         os.environ.pop(k, None)
 
