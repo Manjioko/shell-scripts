@@ -109,7 +109,10 @@ def enable(tier):
           % (GREY, STATUS_PREFIX, ZERO))
         sys.stdout.flush()
         try:
-            ans = (sys.stdin.readline() or "").strip()
+            from wchat_py.render import read_line as _read_line
+            # TUI 下 stdin 归 Textual 事件循环,readline 不可用 → read_line 会弹输入框;
+            # 非 TUI 时退回 sys.stdin.readline(行为不变)。
+            ans = (_read_line("请输入大写 AUTO 确认(其他 = 关闭 auto)") or "").strip()
         except KeyboardInterrupt:
             ans = ""
         except Exception:

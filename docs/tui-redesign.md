@@ -262,6 +262,17 @@ TUI 下:
 - 验证:headless 22/22(含"回显在思考/答案之前"顺序断言);真 tmux:捕获行号 `❯ hi`=4、`思考`=5、
   `你好!我是`=7、markdown 列表 9-13 —— 紧接提问下方,无底部空白;全量 76/76。
 
+**M2 追加修(用户实测第 2、3 问题)**:
+- 问题2(输入框换行不变高、看不到上文):`#input` 由 `height:3` 改 `height:auto; max-height:12` ——
+  TextArea 随行数自动变高(验:输入 `aaa\`+回车续行再输 `bbb`,框内两行同时可见)。
+- 问题3(`-auto=full` 的 AUTO 签字收不到、AUTO 被当消息发给模型):根因是 `auto_enable.enable`
+  用裸 `sys.stdin.readline()`(TUI 下 stdin 归事件循环 → 立刻空 → auto 静默关闭,随后输入的
+  AUTO 被当普通消息)。修法:`render` 加**单行输入钩子** `set_line_hook/read_line`;`auto_enable`
+  改用 `read_line`(TUI 弹 `InputModal` 收字符串、非 TUI 退回 readline);TUI 装 `_line_blocking`
+  (worker 用 `call_from_thread(push_screen(InputModal))`+Event 桥回);meta 执行也置 `_busy` 防误发。
+- 验证:headless 26/26→28/28(新增 InputModal 桥、read_line 路由、完整 `-auto=full`→弹窗→键入 AUTO→开启);
+  真 `./wchat`:`-auto=full` 弹 "请输入大写 AUTO" 输入框、键入 AUTO→`⚡ auto 已开启`、AUTO 不入模型、`-q` 退出;全量 76/76。
+
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
 - 重写 `inputbox_layout_test` 等"断言旧渲染"的闸门 → Textual `run_test` 快照(内容区行数/

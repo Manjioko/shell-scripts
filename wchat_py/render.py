@@ -435,6 +435,31 @@ def set_confirm_hook(fn):
     _CONFIRM_HOOK[0] = fn
 
 
+# 单行文本输入钩子(用于需要输入**具体字符串**的交互,如开启 auto 的 "AUTO" 签字)。
+# TUI 下 stdio 的 readline 不可用(stdin 归事件循环),由 TUI 装一个 InputModal;非 TUI 走 readline。
+_LINE_HOOK = [None]
+
+
+def set_line_hook(fn):
+    _LINE_HOOK[0] = fn
+
+
+def read_line(question=""):
+    """读一行文本:hook 优先(TUI 弹输入框),否则退回到 sys.stdin.readline(非 TUI)。
+    返回**不含行尾换行**的字符串(与原 readline 调用处 `(...readline()...).strip()` 兼容)。"""
+    if _LINE_HOOK[0] is not None:
+        try:
+            return _LINE_HOOK[0](question) or ""
+        except Exception:
+            return ""
+    try:
+        return (sys.stdin.readline() or "").rstrip("\n")
+    except (KeyboardInterrupt, EOFError):
+        return ""
+    except Exception:
+        return ""
+
+
 def confirm_block(title, mark="", strict=False, ask="是否执行",
                   default_yes=False, no_word="拒绝"):
     """打印一条交互确认块并读入答案,返回是否批准。

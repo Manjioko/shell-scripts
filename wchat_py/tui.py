@@ -63,7 +63,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
     if not available():
         raise RuntimeError("textual 未安装")
     from textual.app import App, ComposeResult
-    from textual.widgets import Static, Button, Label, TextArea
+    from textual.widgets import Static, Button, Label, TextArea, Input
     from textual.containers import Vertical, Horizontal, Container, VerticalScroll
     from textual.screen import ModalScreen
     from textual.binding import Binding
@@ -151,17 +151,45 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def action_no(self):
             self.dismiss(False)
 
+    class InputModal(ModalScreen):
+        """单行文本输入弹窗(如开启 auto 的 AUTO 签字)。dismiss(输入的字符串)。"""
+        BINDINGS = [("escape", "cancel", "取消")]
+
+        def __init__(self, question):
+            super().__init__()
+            self._question = question
+
+        def compose(self):
+            with Container(classes="dialog"):
+                yield Label(Text(self._question[:120]))
+                yield Input(id="imput", placeholder="回车确认 · Esc 取消")
+
+        def on_mount(self):
+            try:
+                self.query_one("#imput", Input).focus()
+            except Exception:
+                pass
+
+        def on_input_submitted(self, event):
+            self.dismiss(event.value)
+
+        def action_cancel(self):
+            self.dismiss("")
+
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; }
         #contentbox { height: 1fr; border: round $primary; }
         #content { height: 1fr; padding: 0 1; }
-        #input { dock: bottom; height: 3; border: round $accent; }
+        #input { dock: bottom; height: auto; max-height: 12; border: round $accent; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
         ConfirmModal .btns { height: auto; }
         ConfirmModal Button { min-width: 10; }
+        InputModal { align: center middle; background: $background 60%; }
+        InputModal .dialog { width: 64; height: auto; max-height: 14; border: thick $accent;
+                             background: $surface; padding: 1 2; }
         """
         BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
 
@@ -214,6 +242,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             try:
                 from wchat_py import render as _render
                 _render.set_confirm_hook(self._confirm_blocking)
+                _render.set_line_hook(self._line_blocking)
             except Exception:
                 pass
 
@@ -236,6 +265,27 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self.call_from_thread(_show)
             ev.wait()
             return box.get("r", False)
+
+        def _line_blocking(self, question=""):
+            """被 worker 线程(read_line)调用:弹 InputModal 收一行文本,阻塞等结果。"""
+            if threading.current_thread() is threading.main_thread():
+                return ""
+            ev = threading.Event()
+            box = {}
+
+            def _show():
+                def _done(result):
+                    box["r"] = result if isinstance(result, str) else ""
+                    ev.set()
+                try:
+                    self.push_screen(InputModal(question or ""), _done)
+                except Exception:
+                    box["r"] = ""
+                    ev.set()
+
+            self.call_from_thread(_show)
+            ev.wait()
+            return box.get("r", "")
 
         def emit(self, s):
             self._q.put(("log", str(s), None))
@@ -314,6 +364,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self.exit()
                 return
             if action != "text":
+                if self._busy:
+                    self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
+                    return
+                self._busy = True
                 self._run_meta(action, arg)
                 return
             if self._busy:
@@ -382,6 +436,7 @@ def run_tui(handle_line, *, banner="", on_meta=None):
         try:
             from wchat_py import render as _render
             _render.set_confirm_hook(None)
+            _render.set_line_hook(None)
         except Exception:
             pass
     return 0
