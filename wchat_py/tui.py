@@ -395,6 +395,11 @@ def make_app(handle_line, *, banner="", on_meta=None):
                         t = ev[1]
                         if "本次会话已自动放行" in t:
                             continue
+                        # 每个 write 挂成一个 Static;去掉尾部换行(Static 带尾换行会多渲染一空行,
+                        # 造成横幅与结果之间/块之间多出空行),纯空白写入直接丢弃(不挂空行)。
+                        t = t.rstrip("\n")
+                        if not t.strip():
+                            continue
                         self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
                         self._mount(Text(t, style=style) if style else Text.from_ansi(t))

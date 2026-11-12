@@ -290,6 +290,15 @@ async def _meta_path_check():
         _rt = app._render_reason("word " * 300)
         ck("思考折叠为单行(无换行符)", "\n" not in _rt.plain, repr(_rt.plain[:60]))
         ck("思考折叠超宽以 … 结尾", _rt.plain.endswith("…"), repr(_rt.plain[-20:]))
+
+        # 没有"纯空白"子件(横幅/结果之间的多余空行来自带尾换行或纯 \n 的 write)
+        _blanks = []
+        for _i, _c in enumerate(app.query_one("#content", VerticalScroll).children):
+            _r = getattr(_c, "content", "")
+            _s = _r.plain if hasattr(_r, "plain") else (getattr(_r, "markup", None) or str(_r))
+            if not str(_s).strip():
+                _blanks.append(_i)
+        ck("内容区无纯空白子件(无多余空行)", not _blanks, repr(_blanks))
     for k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
         os.environ.pop(k, None)
 
