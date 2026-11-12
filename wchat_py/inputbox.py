@@ -554,54 +554,6 @@ def _reflow_extra(line_lens, cursor_y, new_width):
         return 0
 
 
-def _anchor_to_bottom(renderer, cols):
-    """盒**贴屏幕底部**时,把物理光标用**绝对行**定位到盒顶、清干净,并把 renderer 置成
-    "从这里全量重画" —— 免疫"切 tab / 挂起回来时终端把光标挪了位置"造成的相对擦屏错位
-    (那会让旧盒整块残留、叠成多个框,用户实报)。
-
-    只在盒确实贴底(`_min_available_height` 很小,光标下方空行不超过盒高)时动手;否则返回
-    False,交回原来的相对逻辑。盒不在底部(内容少、下方一片空)时绝不能贴底锚定,否则会把盒
-    搬到屏幕底部、还擦错位置。返回 True 表示"已定位+擦除并重置渲染状态,可直接重画"。
-    """
-    last = getattr(renderer, "_last_screen", None)
-    if last is None or not cols or cols < 2:
-        return False
-    minav = getattr(renderer, "_min_available_height", 0) or 0
-    out = renderer.output
-    try:
-        rows = out.get_size().rows
-    except Exception:
-        return False
-    cy = getattr(getattr(renderer, "_cursor_pos", None), "y", 0) or 0
-    # 上一帧各行在新宽度下的物理折行数;above=光标上方物理行数,H=盒**物理**总高
-    wrapped = []
-    for y in range(last.height):
-        row = last.data_buffer[y]
-        w = max((x for x, cell in row.items() if cell.char != " "), default=-1) + 1
-        wrapped.append(max(1, -(-w // cols)) if w > 0 else 1)
-    H = sum(wrapped)
-    above = sum(wrapped[:max(0, cy)]) if cy <= len(wrapped) else H
-    # 光标绝对行:_min_available_height 含光标行,row = rows - minav + 1
-    if not minav:
-        return False
-    cursor_row = rows - minav + 1
-    box_bottom = cursor_row + (H - above - 1)   # 盒底绝对行
-    # 只有盒底贴到屏幕底部(允许 1 行误差)才锚定;否则交回相对逻辑(别把半空屏的盒搬到底部)
-    if box_bottom < rows - 1:
-        return False
-    top = cursor_row - above                   # 盒顶绝对行
-    if top < 1:
-        return False
-    out.write_raw("\r\x1b[%d;1H" % top)   # 绝对定位到盒顶(第 top 行,第 1 列)
-    out.erase_down()                       # 从盒顶清到屏幕底 —— 不管光标原来在哪都清得干净
-    out.flush()
-    from prompt_toolkit.data_structures import Point
-    renderer._cursor_pos = Point(0, 0)     # 重画从"盒顶"开始
-    renderer._last_screen = None           # 强制全量重画(不留上一帧做 diff)
-    renderer._min_available_height = rows - top + 1
-    return True
-
-
 def _resize_guard(session, tty=None):
     """resize 时把光标先退到**箱子真正的物理顶部**,再让 prompt_toolkit 擦屏。
 
@@ -637,13 +589,6 @@ def _resize_guard(session, tty=None):
                 return 0
 
         def on_resize():
-            # 优先:盒贴屏幕底部时,用**绝对行**从屏幕底部锚定并清理,免疫光标错位(切 tab)。
-            # 成功则跳过下面的相对补偿(已把 renderer 置成从盒顶全量重画)。
-            try:
-                if _anchor_to_bottom(renderer, _new_cols()):
-                    return orig()
-            except Exception:
-                pass
             try:
                 last = getattr(renderer, "_last_screen", None)
                 cy = getattr(getattr(renderer, "_cursor_pos", None), "y", 0) or 0
