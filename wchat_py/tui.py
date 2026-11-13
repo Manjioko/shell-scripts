@@ -340,6 +340,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._live_widget = None
             self._last_marker = None
             self._busy = False
+            self._pending = []
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
@@ -629,7 +630,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 return
             self._mount(Text("❯ " + text, style="reverse"))
             if self._busy:
-                self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
+                # M4:边流式输出边输入 —— 上一轮还在跑时提交不丢弃,进队列,当前轮结束后自动依次发送。
+                self._pending.append(text)
+                self._mount(Text("（已加入队列，当前回复结束后自动发送）", style="dim"))
                 return
             self._busy = True
             self._run_turn(text)
@@ -676,6 +679,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._drain()
             self._finalize_live()
             self._busy = False
+            # M4:当前轮结束,若有排队消息,立即接着发下一条(不丢用户输入,免手动重发)
+            if self._pending:
+                _nxt = self._pending.pop(0)
+                self._mount(Text("（发送排队消息）", style="dim"))
+                self._busy = True
+                self._run_turn(_nxt)
+                return
             try:
                 self.query_one("#input", ChatInput).focus()
             except Exception:

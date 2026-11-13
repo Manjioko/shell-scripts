@@ -491,5 +491,63 @@ except Exception as e:
     traceback.print_exc()
     ck("list_history 接线无异常", False, repr(e))
 
+
+# ---- 11) M4 边流式输出边输入:一轮还在跑时提交不丢弃,进队列,当前轮结束后依次自动发送
+print("=== 11. M4:turn 运行期间提交 → 入队 → 依次自动发送 ===")
+
+
+async def _m4_queue_check():
+    import time
+    order = []
+
+    def handle_line(text, emit, stream, reason):
+        order.append(("start", text))
+        time.sleep(0.6)                       # 模拟慢流式(worker 线程里阻塞)
+        for ch in ("答:" + text):
+            stream(ch)
+        order.append(("done", text))
+
+    app = tui.make_app(handle_line, banner="b")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        inp.text = "first"
+        await pilot.press("enter")
+        # 等第一轮真正开始(busy)再提交第二条
+        for _ in range(30):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if ("start", "first") in order:
+                break
+        ck("第一轮已开始(worker 运行中)", ("start", "first") in order, repr(order))
+        inp.text = "second"
+        await pilot.press("enter")
+        await pilot.pause()
+        ck("busy 时提交被提示已入队(不丢输入)", "已加入队列" in _content_text(app), repr(_content_text(app)[-80:]))
+        # 等两条都跑完
+        for _ in range(200):
+            await pilot.pause()
+            await asyncio.sleep(0.05)
+            if ("done", "first") in order and ("done", "second") in order:
+                break
+        ck("两条都被处理(first 与 second 都 done)",
+           ("done", "first") in order and ("done", "second") in order, repr(order))
+        try:
+            ck("顺序正确(first 先、second 后)",
+               order.index(("start", "first")) < order.index(("start", "second")), repr(order))
+        except ValueError:
+            ck("顺序正确(first 先、second 后)", False, repr(order))
+        _txt = _content_text(app)
+        ck("两条答案都上屏(答:first 与 答:second)", "答:first" in _txt and "答:second" in _txt,
+           repr(_txt[-140:]))
+
+
+try:
+    asyncio.run(_m4_queue_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("M4 队列无异常", False, repr(e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
