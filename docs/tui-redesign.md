@@ -274,6 +274,15 @@ TUI 下:
 - 验证:真 tmux:无提示文本、content 无边框(全屏仅 1 个 ╭=输入框)、思考单行带 …;headless 36/36;全量 76/76。
   (滚动条/边框"颜色"在文本捕获里不可见,靠 CSS 断言;实际观感需真机确认。)
 
+**M2 UI 精修 2(用户截图,2026-11)**:
+- 内容区**完全贴合终端、不留缝**:`Screen padding:0`;`#contentbox padding:0 margin:0 border:none`;
+  `#content padding:0 margin:0 border:none`(去掉原来 `padding:0 1` 造成的左右 1 列缝)。真 tmux:内容行
+  从列 0 起,无缩进;全屏仅 1 个 ╭(输入框)。
+- 滚动条更暗更细:`scrollbar-size-vertical:1`、`scrollbar-color:#444`(+hover #555/active #666)、
+  `scrollbar-background:transparent`(hover/active 同)。→ 缩到 1 列、深灰不抢眼。
+- 输入框边框改深灰 `#6a6a6a`(与思考同档灰)。
+- 说明:滚动条"圆角"Textual 不支持(只有方形块);"再缩 1/3"已达最小值 1 列,无法再细。
+
 **M2 追加修(用户实测:回复从底部冒出,而非紧接提问下一行)**:
 - 根因:内容区原为 `RichLog(1fr)` + 其下独立 `#live` Static;RichLog 吃满高度把 #live 顶到**箱底**,
   于是流式从底部冒、与顶部提问之间一大段空白。

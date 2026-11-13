@@ -208,16 +208,20 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
     class WchatApp(App):
         CSS = """
-        Screen { layout: vertical; }
-        #contentbox { height: 1fr; border: none; }
-        #content { height: 1fr; padding: 0 1;
+        Screen { layout: vertical; padding: 0; }
+        #contentbox { height: 1fr; border: none; padding: 0; margin: 0; }
+        #content { height: 1fr; padding: 0; margin: 0; border: none;
                    scrollbar-size-vertical: 1;
-                   scrollbar-color: gray;
-                   scrollbar-background: transparent; }
+                   scrollbar-color: #444444;
+                   scrollbar-color-hover: #555555;
+                   scrollbar-color-active: #666666;
+                   scrollbar-background: transparent;
+                   scrollbar-background-hover: transparent;
+                   scrollbar-background-active: transparent; }
         #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
-        #status { height: 0; padding: 0; }
-        #status.on { height: auto; max-height: 6; padding: 0 1; color: gray; }
-        #input { height: auto; max-height: 12; border: round gray; }
+        #status { height: 0; padding: 0; margin: 0; }
+        #status.on { height: auto; max-height: 6; padding: 0 1; color: #666666; }
+        #input { height: auto; max-height: 12; border: round #6a6a6a; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
