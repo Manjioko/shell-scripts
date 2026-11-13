@@ -137,6 +137,9 @@ async def run_app_checks():
         ck("compose 出 1 个 TextArea(输入框)", len(app.query(TextArea)) == 1, "found %d" % len(app.query(TextArea)))
 
         inp = app.query_one("#input", TextArea)
+        ck("主输入框有 placeholder 提示文案",
+           getattr(inp, "placeholder", "") == "请输入问题,回车发送",
+           repr(getattr(inp, "placeholder", "")))
 
         # 续行:行尾 \ + 回车 = 换行,不提交
         inp.text = "abc\\"
@@ -230,6 +233,54 @@ async def run_app_checks():
 
         v_line = await _answer_line("AUTO")
         ck("输入框键入 AUTO → worker 拿到 'AUTO'", v_line == "AUTO", repr(v_line))
+
+        # ---- 6c) 历史编号选择:带 choices → HistoryPickModal 列出候选 + l/n 翻页 + 编号回传 ----
+        _choices = ["对话-%02d.json" % i for i in range(15)]   # 15 条 → 2 页(每页10)
+
+        async def _pick_history(value, keypresses=()):
+            res = {}
+
+            def _w():
+                res["v"] = app._line_blocking("请输入要加载的历史编号(回车=0)", _choices)
+            th = threading.Thread(target=_w, daemon=True)
+            th.start()
+            shown = False
+            for _ in range(50):
+                await pilot.pause()
+                await asyncio.sleep(0.03)
+                if app.screen.__class__.__name__ == "HistoryPickModal":
+                    shown = True
+                    break
+            ck("带 choices → 弹出 HistoryPickModal(不是普通 InputModal)", shown, app.screen.__class__.__name__)
+            sc = app.screen
+            list_txt = str(getattr(sc.query_one("#hist_list"), "content", ""))
+            page_txt = str(getattr(sc.query_one("#hist_page"), "content", ""))
+            ck("弹窗内列出候选(第 1 页含 0. 与 9. 条目)",
+               "0. 对话-00.json" in list_txt and "9. 对话-09.json" in list_txt, repr(list_txt[:80]))
+            ck("第 1 页不显示第 11 条(只在第 2 页)", "10. 对话-10.json" not in list_txt, repr(list_txt[-60:]))
+            ck("分页提示显示 1/2 页", "1/2" in page_txt and "l=上一页" in page_txt, repr(page_txt))
+            for k in keypresses:
+                await pilot.press(k)
+                await pilot.pause()
+                await asyncio.sleep(0.02)
+            if "n" in keypresses:
+                list_txt2 = str(getattr(sc.query_one("#hist_list"), "content", ""))
+                page_txt2 = str(getattr(sc.query_one("#hist_page"), "content", ""))
+                ck("按 n 翻到第 2 页(显示 10. 与 14.)",
+                   "10. 对话-10.json" in list_txt2 and "14. 对话-14.json" in list_txt2, repr(list_txt2[:80]))
+                ck("第 2 页提示 2/2", "2/2" in page_txt2, repr(page_txt2))
+            sc.query_one("#imput", Input).value = value
+            await pilot.press("enter")
+            for _ in range(50):
+                await pilot.pause()
+                await asyncio.sleep(0.03)
+                if not th.is_alive():
+                    break
+            th.join(timeout=2)
+            return res.get("v")
+
+        v_hist = await _pick_history("3", keypresses=("n",))
+        ck("历史选择:翻页后键入 3 → worker 拿到 '3'", v_hist == "3", repr(v_hist))
 
 
 try:
@@ -349,6 +400,63 @@ except Exception as e:
     import traceback
     traceback.print_exc()
     ck("元命令路径无异常", False, repr(e))
+
+
+# ---- 10) list_history 接线:TUI 下有 line hook 时,把候选列表交给 read_line(choices),
+#          且**不再**把整份列表打到 stdout(那正是"看不到历史"的来源:被弹窗遮住的背景)
+print("=== 10. list_history:TUI 下把候选交给 read_line(choices),不走 stdout 刷屏 ===")
+
+
+async def _list_history_check():
+    import tempfile
+    from wchat_py import repl as _repl
+    from wchat_py import render as _render
+    td = tempfile.mkdtemp(prefix="tui_hist_")
+    try:
+        for i in range(13):
+            with open(os.path.join(td, "convo-%02d.json" % i), "w", encoding="utf-8") as f:
+                f.write("[]")
+        os.environ["WCHAT_HISTORY_DIR"] = td
+        captured = {}
+
+        def _spy(question="", choices=None):
+            captured["q"] = question
+            captured["choices"] = choices
+            return "9999"   # 越界 → _default_meta 打印"请选择正确的编号"后提前返回(不触发真实加载)
+
+        _orig = _render.read_line
+        # 桩一个 line hook 让它判定为 TUI(choices 才会传),同时 read_line 也由桩接管
+        _orig_hook = _render._LINE_HOOK[0]
+        buf = io.StringIO()
+        _orig_out = sys.stdout
+        try:
+            _render.read_line = _spy
+            _render.set_line_hook(lambda q, c=None: "9999")
+            sys.stdout = buf
+            _repl._default_meta("list_history", "")
+        finally:
+            sys.stdout = _orig_out
+            _render.read_line = _orig
+            _render._LINE_HOOK[0] = _orig_hook
+            os.environ.pop("WCHAT_HISTORY_DIR", None)
+        ch = captured.get("choices")
+        ck("read_line 收到 choices(候选条目数=13)", isinstance(ch, list) and len(ch) == 13, repr(type(ch)))
+        ck("choices 是历史文件名(含 convo-00.json)", isinstance(ch, list) and any("convo-00.json" in str(x) for x in ch))
+        ck("问题文案是'请输入要加载的历史编号'", "历史编号" in (captured.get("q") or ""), repr(captured.get("q")))
+        _out = buf.getvalue()
+        ck("改走弹窗后,不再把『请从以下编号中选择』刷到 stdout(背景不再重复刷屏)",
+           "请从以下编号中选择" not in _out, repr(_out[:120]))
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+
+
+try:
+    asyncio.run(_list_history_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("list_history 接线无异常", False, repr(e))
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

@@ -108,15 +108,26 @@ def _default_meta(action, arg, session=None):
         if not files:
             sys.stdout.write("(无历史)\n")
             return True
-        sys.stdout.write("请从以下编号中选择你要加载的历史记录：\n")
-        for i, (_mt, f) in enumerate(files):
-            name = os.path.basename(f).replace("\n", " ").replace("\r", " ").replace("\t", " ")
-            sys.stdout.write("%d. %s\n" % (i, name))
-        sys.stdout.write("_>"); sys.stdout.flush()
+        names = [os.path.basename(f).replace("\n", " ").replace("\r", " ").replace("\t", " ")
+                 for (_mt, f) in files]
+        # TUI 下:把候选交给 HistoryPickModal 在**弹窗里分页展示**(用户实测"看不到列出的历史记录"
+        # 就是因为只把列表打到被弹窗遮住的背景)。非 TUI 仍把列表打到 stdout 再 readline。
+        try:
+            from wchat_py import render as _render
+            _tui = _render._LINE_HOOK[0] is not None
+        except Exception:
+            _tui = False
+        if not _tui:
+            sys.stdout.write("请从以下编号中选择你要加载的历史记录：\n")
+            for i, name in enumerate(names):
+                sys.stdout.write("%d. %s\n" % (i, name))
+            sys.stdout.write("_>"); sys.stdout.flush()
         try:
             from wchat_py.render import read_line as _read_line
-            # TUI 下 stdin 归事件循环,readline 不可用 → read_line 弹输入框;非 TUI 退回 readline。
-            num = (_read_line("请输入要加载的历史编号(回车=0)") or "").strip()
+            # TUI 下 stdin 归事件循环,readline 不可用 → read_line 弹(可带列表的)输入框;
+            # 非 TUI 退回 readline(列表已打到 stdout,choices 传 None 被忽略)。
+            num = (_read_line("请输入要加载的历史编号(回车=0)",
+                              choices=(names if _tui else None)) or "").strip()
         except KeyboardInterrupt:
             sys.stdout.write("\n"); sys.stdout.flush()
             return True

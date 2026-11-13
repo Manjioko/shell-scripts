@@ -206,6 +206,90 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def action_cancel(self):
             self.dismiss("")
 
+    class _PageInput(Input):
+        """只收数字、把 l/← / n/→ 解释成翻页的输入框(用于历史编号选择)。
+        为什么覆写 _on_key 而不是用 Binding(priority=True):本版 Textual 里 ModalScreen 上的
+        priority 绑定压不过聚焦 Input 的字符处理(实测 'l','n' 被当正文输入)。在 Input.**自己**
+        的按键层拦截才可靠:l/n 调 owner.page_by() 翻页,其余交给原生 Input(数字照常输入)。
+        用直接回调而非 post_message:nested Message 的处理函数命名在本版不可靠(实测 on_page_input_page
+        没被调到),直连最稳。"""
+
+        def __init__(self, owner=None, **kw):
+            super().__init__(**kw)
+            self._owner = owner
+
+        async def _on_key(self, event):
+            if self._owner is not None and event.key in ("l", "left"):
+                self._owner.page_by(-1)
+                event.stop()
+                event.prevent_default()
+                return
+            if self._owner is not None and event.key in ("n", "right"):
+                self._owner.page_by(1)
+                event.stop()
+                event.prevent_default()
+                return
+            await super()._on_key(event)
+
+    class HistoryPickModal(ModalScreen):
+        """从编号列表里选一条(如加载历史):候选(每页 10 条)列在输入框上方,l/n 翻页,
+        底下输入编号。dismiss 输入的字符串(与 read_line 一致)。"""
+        BINDINGS = [("escape", "cancel", "取消")]
+        PER = 10
+
+        def __init__(self, question, choices):
+            super().__init__()
+            self._question = question
+            self._choices = [str(c) for c in (choices or [])]
+            self._page = 0
+
+        @property
+        def _pages(self):
+            n = len(self._choices)
+            return max(1, (n + self.PER - 1) // self.PER)
+
+        def compose(self):
+            with Container(classes="dialog history"):
+                yield Label(Text(self._question[:120]))
+                yield Static("", id="hist_list")
+                yield Label(Text("", style="dim"), id="hist_page")
+                yield _PageInput(self, id="imput", placeholder="输入编号 · 回车确认 · Esc 取消")
+
+        def on_mount(self):
+            self._render_page()
+            try:
+                self.query_one("#imput", _PageInput).focus()
+            except Exception:
+                pass
+
+        def page_by(self, delta):
+            if delta < 0 and self._page > 0:
+                self._page -= 1
+                self._render_page()
+            elif delta > 0 and self._page < self._pages - 1:
+                self._page += 1
+                self._render_page()
+
+        def _render_page(self):
+            start = self._page * self.PER
+            end = min(start + self.PER, len(self._choices))
+            rows = []
+            for i in range(start, end):
+                name = self._choices[i].replace("\n", " ").replace("\r", " ").replace("\t", " ")
+                rows.append("%d. %s" % (i, name[:80]))
+            try:
+                self.query_one("#hist_list", Static).update(Text("\n".join(rows) or "(无)"))
+                hint = "第 %d/%d 页 · l=上一页 n=下一页" % (self._page + 1, self._pages)
+                self.query_one("#hist_page", Label).update(Text(hint, style="dim"))
+            except Exception:
+                pass
+
+        def on_input_submitted(self, event):
+            self.dismiss(event.value)
+
+        def action_cancel(self):
+            self.dismiss("")
+
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; padding: 0; }
@@ -231,6 +315,11 @@ def make_app(handle_line, *, banner="", on_meta=None):
         InputModal { align: center middle; background: $background 60%; }
         InputModal .dialog { width: 64; height: auto; max-height: 14; border: thick $accent;
                              background: $surface; padding: 1 2; }
+        HistoryPickModal { align: center middle; background: $background 60%; }
+        HistoryPickModal .dialog { width: 74; height: auto; max-height: 24; border: thick $accent;
+                                   background: $surface; padding: 1 2; }
+        HistoryPickModal #hist_list { height: auto; max-height: 12; }
+        HistoryPickModal #hist_page { height: auto; margin-top: 1; }
         """
         BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
 
@@ -251,7 +340,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             with Vertical(id="contentbox"):
                 yield VerticalScroll(id="content")
             yield Static("", id="status")
-            yield ChatInput(id="input")
+            yield ChatInput(id="input", placeholder="请输入问题,回车发送")
 
         # ---- 内容区(消息列表:每段一个 Static,顺序 append,自然从提问下一行开始) ----
         def _content(self):
@@ -313,8 +402,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
             ev.wait()
             return box.get("r", False)
 
-        def _line_blocking(self, question=""):
-            """被 worker 线程(read_line)调用:弹 InputModal 收一行文本,阻塞等结果。"""
+        def _line_blocking(self, question="", choices=None):
+            """被 worker 线程(read_line)调用:弹输入框收一行文本,阻塞等结果。
+            给了 choices 时弹**分页列表选择框**(HistoryPickModal),否则普通单行输入框。"""
             if threading.current_thread() is threading.main_thread():
                 return ""
             ev = threading.Event()
@@ -325,7 +415,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                     box["r"] = result if isinstance(result, str) else ""
                     ev.set()
                 try:
-                    self.push_screen(InputModal(question or ""), _done)
+                    if choices:
+                        self.push_screen(HistoryPickModal(question or "", choices), _done)
+                    else:
+                        self.push_screen(InputModal(question or ""), _done)
                 except Exception:
                     box["r"] = ""
                     ev.set()

@@ -1167,7 +1167,7 @@
 ## Textual TUI 闸门(M3①,2026-11)
 
 > **新增三道闸门并入 run_gates**:`TUI视觉`(`python3 tests/tui_visual_test.py`,**48/48**)、
-> `TUI功能`(`python3 tests/tui_test.py`,**36/36**)、`TUI终端`(`bash tests/tui_term_test.sh`,
+> `TUI功能`(`python3 tests/tui_test.py`,**48/48**)、`TUI终端`(`bash tests/tui_term_test.sh`,
 > **18/18**,需 tmux)。闸门数 **76 → 79**;全量 `run=79 pass=79 fail=0 skip=1`(skip 仍是主套件)。
 >
 > **自举**(本轮关键设计):run_gates 用宿主 `python3`(本机 3.9,无 textual)跑这两道。

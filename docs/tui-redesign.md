@@ -339,6 +339,26 @@ TUI 下:
 - 验证:headless 34/34(内容区含"已开启"、状态区含"已自动放行"、内容区无重复标记、思考折叠单行且以…结尾);
   真 `./wchat`:auto 输出在内容框内、`⚡ auto=full…` 标记在内容框与输入框之间的状态区;全量 76/76。
 
+**M2 追加修(用户实测截图:main 输入框 placeholder + 历史列表弹窗,2026-11)**:
+用户实测三问题:①主输入框没有提示文案;②触发「加载历史编号」弹窗只问编号、**看不到历史记录**;
+③期望弹窗里先列前 10 条历史、多于 10 条可分页(l/n),再是编号输入框。
+- **① 主输入框 placeholder**:`TextArea`(8.2.8)原生支持 `placeholder`,`ChatInput(id="input",
+  placeholder="请输入问题,回车发送")`。真 tmux 抓屏见输入框内灰字提示。
+- **②③ 历史分页选择弹窗 `HistoryPickModal`**:`repl._default_meta` 的 `list_history` 原先把列表
+  打到 stdout(被弹窗遮住的背景 → 用户看不到)。改为:检测到 TUI line hook(`render._LINE_HOOK`)
+  时,把候选 `names` 交给 `read_line(question, choices=names)`,弹窗**在框内分页列出**(每页 10、
+  `l/n` 翻页、`第 x/y 页`),列表不再刷 stdout;非 TUI 仍原样打到 stdout + readline。
+  · `render.read_line` 增可选 `choices`:非 None 时 hook 以 `(question, choices)` 调用(仅
+    `_line_blocking` 支持;单参旧 hook 仍按老法调,零破坏)。
+  · `_line_blocking(question, choices=None)`:有 choices 弹 `HistoryPickModal`,否则普通 `InputModal`。
+  · `HistoryPickModal` 的输入框是 `_PageInput(Input)`:**覆写 `_on_key` 拦截 l/← / n/→ 翻页**、其余交
+    原生 Input(数字照常)。为什么不用 `Binding(priority=True)`:本版 Textual 里 ModalScreen 的 priority
+    绑定**压不过聚焦 Input**(实测 'l','n' 被当正文输入成 `ln3`);而 nested `Message` 的处理函数命名
+    在本版也不可靠(实测 `on_page_input_page` 不被调用)——故用 `_PageInput._on_key` 直连 `owner.page_by()`。
+- 验证:headless `tui_test` **48/48**(+placeholder、HistoryPickModal 列表/1-2 页翻页/编号回传、
+  `list_history` 把 choices 交给 read_line 且不再刷 stdout);真 tmux:`-l` 弹窗列 0–9 共 10 条 +
+  「第 1/2 页」,按 n → 10–12 条 + 「第 2/2 页」;全量闸门 **79/79**。
+
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
 - 重写 `inputbox_layout_test` 等"断言旧渲染"的闸门 → Textual `run_test` 快照(内容区行数/
@@ -358,7 +378,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 36/36)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 48/48)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
