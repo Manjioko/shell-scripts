@@ -605,7 +605,6 @@ except Exception as e:
     traceback.print_exc()
     ck("M4 注入接线无异常", False, repr(e))
 
-
 # ---- 13) Ctrl+C/退出丢弃队列:action_maybe_quit 清空 _pending ----
 print("=== 13. 退出(Ctrl+C)丢弃排队消息 ===")
 
@@ -671,6 +670,82 @@ try:
     ck("主线程 pty_run 仍正常(MAINOK)", any("MAINOK" in ln for ln in _d2), repr(_d2))
 except Exception as _e:
     ck("主线程 pty_run 仍正常(MAINOK)", False, repr(_e))
+
+
+# ---- 15) 块间距(.blk) + 工具横幅按内容区宽度截断(不再折第二行)----
+print("=== 15. 块间距 + 横幅宽度覆盖(内容区宽度,单行截断) ===")
+
+
+def _wtxt(c):
+    from rich.text import Text as _T
+    from rich.markdown import Markdown as _M
+    r = getattr(c, "content", "")
+    if isinstance(r, _T):
+        return r.plain
+    if isinstance(r, _M):
+        return r.markup
+    return str(r)
+
+
+async def _spacing_width_check():
+    def hl(text, emit, stream, reason):
+        reason("想一下")
+        for ch in "答案正文":
+            stream(ch)
+        emit(" \x1b[36m⏺\x1b[0m read_file · {}\n")          # 工具横幅(含 ⏺)
+        emit("   └─ 完成 · 共 3 行\n")                        # 工具状态行(续行,含 └─)
+        emit("\n")
+
+    app = tui.make_app(hl, banner="b")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        inp.text = "hi"
+        await pilot.press("enter")
+        for _ in range(80):
+            await pilot.pause()
+            await asyncio.sleep(0.03)
+        kids = list(app.query_one("#content", VerticalScroll).children)
+        ban = [c for c in kids if "⏺" in _wtxt(c) and "read_file" in _wtxt(c)]
+        sta = [c for c in kids if "└─" in _wtxt(c)]
+        ech = [c for c in kids if _wtxt(c).startswith("❯ ")]
+        ans = [c for c in kids if "答案正文" in _wtxt(c)]
+        ck("工具横幅是一个块的起点(有 .blk)", bool(ban) and "blk" in ban[0].classes,
+           repr(ban[0].classes) if ban else "无横幅")
+        ck("工具状态续行紧跟横幅(无 .blk)", bool(sta) and "blk" not in sta[0].classes,
+           repr(sta[0].classes) if sta else "无状态行")
+        ck("用户回显是块起点(有 .blk)", bool(ech) and "blk" in ech[0].classes,
+           repr(ech[0].classes) if ech else "无回显")
+        ck("助手正文是块起点(有 .blk)", bool(ans) and "blk" in ans[0].classes,
+           repr(ans[0].classes) if ans else "无正文")
+        # 宽度覆盖:_drain 把 term_cols 设成内容区宽度
+        from wchat_py import render as _R
+        cw = app.query_one("#content", VerticalScroll).size.width
+        ck("term_cols 被覆盖成内容区宽度(非终端全宽)", _R.term_cols() == cw,
+           "term_cols=%r content_w=%r" % (_R.term_cols(), cw))
+
+
+try:
+    asyncio.run(_spacing_width_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("块间距/宽度无异常", False, repr(e))
+
+# 宽度覆盖单元:横幅在给定宽度下单行截断(以 … 收尾,不折第二行)
+from wchat_py import render as _RR  # noqa: E402
+import re as _re  # noqa: E402
+
+_prev_cols = _RR._TERM_COLS_OVERRIDE[0]
+try:
+    _RR.set_term_cols(40)
+    _b = _RR.tool_banner("read_file", "A" * 300)
+    _plain = _re.sub(r"\x1b\[[0-9;]*m", "", _b).rstrip("\n")
+    ck("宽度覆盖:超长横幅单行(无内部换行)", "\n" not in _plain, repr(_plain[:30]))
+    ck("宽度覆盖:横幅宽度不超 40 列", _RR.display_width(_plain) <= 40, _RR.display_width(_plain))
+    ck("宽度覆盖:超宽以 … 收尾", _plain.endswith("…"), repr(_plain[-6:]))
+finally:
+    _RR.set_term_cols(_prev_cols)
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

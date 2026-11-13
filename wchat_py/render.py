@@ -76,11 +76,27 @@ def _fit(s, limit):
     return "".join(out)
 
 
+_TERM_COLS_OVERRIDE = [0]
+
+
 def term_cols(default=80):
+    # 全屏 TUI 下内容区比终端窄(左右 padding + 滚动条),由 tui 用 set_term_cols 覆盖成
+    # **内容区实际可用宽度**;否则横幅/状态行按终端全宽算 → 比内容区宽 → 折行,第二行多出半截
+    # (用户实测"工具块行从第二行开始")。非 TUI 覆盖为 0,走真实终端宽度。
+    if _TERM_COLS_OVERRIDE[0] > 0:
+        return _TERM_COLS_OVERRIDE[0]
     try:
         return shutil.get_terminal_size((default, 24)).columns or default
     except Exception:
         return default
+
+
+def set_term_cols(n):
+    """覆盖 term_cols 的返回值(全屏 TUI 用内容区宽度;传 0/None 恢复真实终端宽度)。"""
+    try:
+        _TERM_COLS_OVERRIDE[0] = int(n) if n else 0
+    except (TypeError, ValueError):
+        _TERM_COLS_OVERRIDE[0] = 0
 
 
 class StreamBox:

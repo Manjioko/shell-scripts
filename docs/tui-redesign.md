@@ -399,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 67/67)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 75/75)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
@@ -470,6 +470,23 @@ TUI 下:
   `run_shell_command`(auto 绕过确认)见 `TOOL_OK /path`、`└─ 完成 · 共 2 行`,无 处理失败;
   `termpty_test` 7/7、`termpty_sig_test` 6/6(含"SIGINT handler 恢复为进入前")、`shell孤儿` 25/25;
   `tui_test` **67/67**(+worker 线程 pty_run 不抛/正常/主线程仍正常);全量闸门 **79/79**。
+
+**M4 追加修(用户实测截图:块间距 + 工具横幅折行)2026-11**:
+- 问题①**逻辑块之间太挤**:用户要求「内容正文 / 输入回显 / 思考 / 工具块」之间各空一行。
+  · 用 CSS `#content .blk { margin-top: 1 }` 做**块间距**(不插空 Static —— 那会被"内容区无纯空白
+    子件"的闸门判红,也污染消息列表)。`WchatApp._mount(..., sep=True)` 挂"块起点"时若已有内容就加
+    `.blk`;`sep=False` 用于工具块的**续行**(框线 `│` / 状态 `└─`)紧跟横幅不空行。`_drain` 按内容判续行:
+    含 `└─` 或 `│` 的 log 写入=续行(不空行),横幅(⏺)/其它=新块(空行)。`_has_blocks` 标记是否已有块;
+    `_clear_content`/`_mount_history` 清空时复位。
+- 问题②**工具块行从第二行开始(应第一行就折)**:`render.term_cols()` 在 TUI 下取的是**终端全宽**,
+  而内容区比终端窄(左右 padding 1+1、加滚动条 1),于是横幅按全宽截断 → 比内容区宽 2~3 列 → 真终端
+  换行,第二行多出半截。
+  · 加 `render.set_term_cols(n)` 覆盖钩子(0=恢复真实终端宽)。`tui._drain`(主线程,每 tick)用
+    `content.size.width` 覆盖;`run_tui` 退出复位 0。横幅/状态行的 `room_for`/`dim_after` 都走 `term_cols`
+    → 全部按内容区宽度截断,单行 `…` 收尾,不再折行。非 TUI 覆盖为 0,零改动。
+- 验证:真 tmux(84/60 列)看:回显/思考/正文/工具块之间各一空行,横幅+`└─` 合成一块;超长 shell
+  横幅在 84/60 列都**单行 `…` 收尾不折第二行**。`tui_test` **75/75**(+块间距 `.blk` 归属断言、term_cols
+  覆盖=内容区宽度、超长横幅单行≤宽度以 … 收尾);`渲染字节` 9/9;全量闸门 **79/79**。
 
 ## 七、风险与对策
 

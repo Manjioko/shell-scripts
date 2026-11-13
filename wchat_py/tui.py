@@ -317,6 +317,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                    scrollbar-background-hover: transparent;
                    scrollbar-background-active: transparent; }
         #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
+        /* 逻辑块之间空一行(用户要求:内容/输入回显/思考/工具块之间别太挤)。
+           用 margin-top 而不是插空 Static:空 Static 会被"无纯空白子件"的闸门判红,
+           且会污染消息列表。continuation(工具块的框线/状态行)不加 .blk。 */
+        #content .blk { margin-top: 1; }
         #status { height: 0; padding: 0; margin: 0; }
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #666666; }
         #input { height: auto; max-height: 12; background: transparent; border: round #6a6a6a; }
@@ -354,6 +358,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._live_widget = None
             self._last_marker = None
             self._busy = False
+            self._has_blocks = False        # 内容区是否已有"逻辑块"(决定是否加块间空行)
             self._pending = queue.Queue()   # M4:运行期补充消息(线程安全);worker 每小轮 poll 注入
 
         def compose(self) -> ComposeResult:
@@ -372,23 +377,33 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
 
-        def _mount(self, renderable, classes=""):
+        def _mount(self, renderable, classes="", sep=True):
+            """挂一个消息 widget 到内容区。
+            `sep=True`(默认):这是一个**逻辑块起点** → 若已有内容,加 `.blk`(margin-top:1)空一行。
+            `sep=False`:工具块的续行(框线 `│`/状态 `└─`)→ 不加间距,紧跟上一个块。"""
             try:
-                w = Static(renderable, classes=classes) if classes else Static(renderable)
+                cls = classes or ""
+                if sep and getattr(self, "_has_blocks", False):
+                    cls = (cls + " blk").strip()
+                w = Static(renderable, classes=cls) if cls else Static(renderable)
                 self._content().mount(w)
+                if sep:
+                    self._has_blocks = True
                 self._scroll_end()
             except Exception:
                 pass
 
         def _ensure_live(self):
             if self._live_widget is None:
-                w = Static("")
+                cls = "blk" if self._has_blocks else ""
+                w = Static("", classes=cls)
                 try:
                     self._content().mount(w)
                     self._scroll_end()
                 except Exception:
                     pass
                 self._live_widget = w
+                self._has_blocks = True
 
         def on_mount(self):
             if banner:
@@ -477,6 +492,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                     c.remove()
             except Exception:
                 pass
+            self._has_blocks = False
             if header:
                 self._mount(Text(header, style="bold"))
             from wchat_py import repl as _repl
@@ -504,7 +520,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                         shown = "\n".join(_repl._clip_line(ln) for ln in lines[:5])
                         if len(lines) > 5:
                             shown += "\n…(其余 %d 行已省略)" % (len(lines) - 5)
-                        self._mount(Text(shown, style="dim"))
+                        self._mount(Text(shown, style="dim"), sep=False)
                 elif role == "user":
                     self._mount(Text("❯ " + content, style="reverse"))
                 else:   # assistant / 其它
@@ -600,6 +616,14 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 pass
 
         def _drain(self):
+            # 全屏 TUI:把横幅/状态行的宽度算据覆盖成**内容区实际宽度**(否则按终端全宽算 → 折行)。
+            try:
+                from wchat_py.render import set_term_cols as _stc
+                _w = self._content().size.width
+                if _w:
+                    _stc(_w)
+            except Exception:
+                pass
             changed = False
             try:
                 while True:
@@ -621,7 +645,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                             continue
                         self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
-                        self._mount(Text(t, style=style) if style else Text.from_ansi(t))
+                        # 工具块的续行(框线 `│` / 状态 `└─`)**不**加块间空行;横幅(⏺)与其它=新块。
+                        _cont = ("└─" in t) or ("│" in t)
+                        self._mount(Text(t, style=style) if style else Text.from_ansi(t),
+                                    sep=(not _cont))
             except queue.Empty:
                 pass
             if changed and (self._reason or self._answer):
@@ -650,7 +677,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 # 元命令输出(如 -auto 的开启横幅)照常在**内容区**展示;auto 档标记另由
                 # 状态区常驻显示(#status,见 _refresh_status)。
                 if self._busy:
-                    self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"))
+                    self._mount(Text("(上一轮仍在进行,请稍候…)", style="dim"), sep=False)
                     return
                 self._busy = True
                 self._run_meta(action, arg)
@@ -660,7 +687,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 # M4:边流式输出边输入 —— 上一轮还在跑时提交不丢弃,进队列;worker 会在下一个
                 # 小轮边界把它(们)作为"补充信息"并入本轮;纯问答则本轮结束后自动作为下一轮发。
                 self._pending.put(text)
-                self._mount(Text("（已加入队列：将在下一小轮或下一轮并入发给模型）", style="dim"))
+                self._mount(Text("（已加入队列：将在下一小轮或下一轮并入发给模型）", style="dim"),
+                            sep=False)
                 return
             self._busy = True
             self._run_turn(text)
@@ -715,6 +743,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                     c.remove()
             except Exception:
                 pass
+            self._has_blocks = False
 
         def _on_turn_done(self):
             self._drain()
@@ -757,6 +786,7 @@ def run_tui(handle_line, *, banner="", on_meta=None):
             _render.set_confirm_hook(None)
             _render.set_line_hook(None)
             _render.set_history_hook(None)
+            _render.set_term_cols(0)      # 退出 TUI 恢复真实终端宽度
         except Exception:
             pass
     return 0
