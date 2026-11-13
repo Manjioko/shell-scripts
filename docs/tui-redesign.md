@@ -399,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 86/86)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 89/89)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
@@ -502,6 +502,12 @@ TUI 下:
 ③ **`WCHAT_TUI` 默认开**:`cli.main(["repl"])` 的判定改为"交互 TTY + 未显式关闭 + textual 可用 → 走 TUI";`WCHAT_TUI=0/false/no/off` 关闭回旧路径;textual 不可用**静默回退**(仅当用户显式要 TUI 却缺 textual 才提示)。老 prompt_toolkit 路仍完整保留。**旧路径 tty e2e 闸门**(`interrupt_e2e`/`py_entry_e2e`/主套件 `auto_test.sh`)钉了 `WCHAT_TUI=0`,专注测老路。
 
 - 验证:headless `tui_test` **86/86**(+Ctrl+C busy 打断不退出/空闲退出/结束清取消 + watcher 假进程单测:取消→kill+abort、未取消不 kill、进程已结束不 kill + 历史 1 基);`会话编排` 82/82(Aborted 保留语义);真 tmux Ctrl+C 打断保留+会话继续;`分层结构` 38/38(cli.py 1246 行 ≤1250,取消通道已抽到独立模块);`发行包` 47/47、`安装完整性` 15/15(新模块随包);全量闸门 **79/79 fail=0**。
+
+**M2/M4 追加修(用户实测:流式期思考末尾紧贴正文)2026-11**:
+- 现象:流式输出时,思考文本的**末尾紧跟正文**(同一行粘连),别扭。仅流式 live 显示期有问题;md 定稿阶段没这个问题(那是两个独立 widget)。
+- 根因:live 区 `_live_display()` 把 `self._reason` 与 `self._answer` **直接拼接**,二者之间没有分隔。
+- 修法:`_live_display` 在"思考非空且正文开始"时,若思考未以换行结尾就**补一个 `\n`** 再拼正文(不重复补)。定稿阶段 `_finalize_live` 本就是 reason/answer 两个独立 Static,不动。
+- 验证:headless `tui_test` **89/89**(+流式:思考末与正文之间有换行/思考已带换行不重复补/无思考不加空行);真 tmux 流式期可见"思考一行、正文另起一行",定稿 md 仍正常;全量闸门 **79/79**。
 
 ## 七、风险与对策
 

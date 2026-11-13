@@ -549,10 +549,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._q.put(("live", str(s), True))
 
         def _live_display(self):
+            """流式 live 区的显示文本。**思考与正文之间换一行**:用户实测思考末尾紧贴正文很别扭,
+            希望思考结束后正文另起一行(仅流式期;md 定稿阶段 reason/answer 是两个独立 widget,本就分行)。"""
             t = Text()
             if self._reason:
                 t.append(self._reason, style="dim")
             if self._answer:
+                # 思考非空且正文开始:确保正文另起一行(思考没以换行结尾就补一个,不重复补)。
+                if self._reason and not self._reason.endswith("\n"):
+                    t.append("\n")
                 t.append(self._answer)
             return t
 

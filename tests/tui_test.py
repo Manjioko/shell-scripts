@@ -867,5 +867,27 @@ _tt.sleep(0.15)
 ck("watcher:进程已结束时不再 kill", _p3.killed is False)
 _clicli.clear_llm_cancel()
 
+
+# ---- 18) 流式 live 区:思考与正文之间换行(思考末尾不再紧贴正文)----
+print("=== 18. 流式:思考与正文之间换行(md 定稿不受影响) ===")
+try:
+    _la = tui.make_app(lambda *a: None, banner="")
+    _la._reason = "思考ABC"
+    _la._answer = "正文XYZ"
+    _p1 = _la._live_display().plain
+    ck("流式:思考末尾与正文之间有换行(不紧贴)", _p1 == "思考ABC\n正文XYZ", repr(_p1))
+    _la._reason = "思考行\n"          # 思考已自带换行 → 不重复补
+    _la._answer = "正文"
+    _p2 = _la._live_display().plain
+    ck("流式:思考已带换行时不重复补换行", _p2 == "思考行\n正文", repr(_p2))
+    _la._reason = ""
+    _la._answer = "纯正文"
+    _p3 = _la._live_display().plain
+    ck("流式:无思考时正文不受影响(不加空行)", _p3 == "纯正文", repr(_p3))
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("流式思考/正文换行无异常", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
