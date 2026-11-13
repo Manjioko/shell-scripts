@@ -177,6 +177,14 @@ GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('TUI 交互端到端(headless run_test):续行/流式定稿进内容区/思考折叠/确认弹窗 y·n/InputModal 桥/元命令 -auto=full/粘贴图占位')
 
+# 真终端 resize 冒烟(tmux)。tmux 缺 → SKIP 77。守"转义序列在真终端模拟器里渲染成单框贴底、
+# 不出残影/多框"——这层 run_test 的 region 断言管不到(它只改 app 尺寸,不验真终端重绘)。
+GATE_NAMES+=('TUI终端')
+GATE_CMDS+=('bash tests/tui_term_test.sh')
+GATE_MODE+=('x')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('TUI 真终端 tmux resize:多尺寸后每次恰好 1 输入框/宽=新宽/贴底(真终端模拟器重绘,非手搓屏;需 tmux,缺则 SKIP)')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。

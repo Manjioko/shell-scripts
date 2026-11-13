@@ -1166,9 +1166,9 @@
 
 ## Textual TUI 闸门(M3①,2026-11)
 
-> **新增两道闸门并入 run_gates**:`TUI视觉`(`python3 tests/tui_visual_test.py`,**48/48**)
-> 与 `TUI功能`(`python3 tests/tui_test.py`,**36/36**)。闸门数 **76 → 78**;
-> 全量 `run=78 pass=78 fail=0 skip=1`(skip 仍是主套件)。
+> **新增三道闸门并入 run_gates**:`TUI视觉`(`python3 tests/tui_visual_test.py`,**48/48**)、
+> `TUI功能`(`python3 tests/tui_test.py`,**36/36**)、`TUI终端`(`bash tests/tui_term_test.sh`,
+> **18/18**,需 tmux)。闸门数 **76 → 79**;全量 `run=79 pass=79 fail=0 skip=1`(skip 仍是主套件)。
 >
 > **自举**(本轮关键设计):run_gates 用宿主 `python3`(本机 3.9,无 textual)跑这两道。
 > 它们开头自检 `import textual`,失败则**自动 `os.execv` 到带 textual 的解释器**重新执行
@@ -1186,3 +1186,10 @@
 > ⚠ **为什么不在这里测 resize 残影**:Textual 是 alternate-screen、resize 后做**增量**重绘
 > (它默认终端旧内容还在)。把转义流接到会 reflow 的手搓 VT 屏上会漏掉旧帧、被误判成残影/漏画
 > —— 正是"模拟屏护不住"。真终端 resize/切 tab/滚动观感**只能在真 GUI 终端验**(§6.4 终端矩阵:M3②)。
+>
+> **`TUI终端`(`tests/tui_term_test.sh`,真终端 resize 冒烟)**:在**真 tmux 终端模拟器**里跑整个
+> TUI,多尺寸 resize(100×30/62×22/120×34/40×15/80×24/73×31)后 `capture-pane` 抓真实渲染帧,
+> 断言每次**恰好 1 个输入框、宽=新宽、贴底**(顶角在倒数第 3 行)。tmux 是货真价实的终端模拟器
+> (有 alt-screen/重绘),能抓"resize 出残影/多框";这层**转义序列渲染** run_test 的 region 断言管
+> 不到(它只改 app 尺寸)。缺 tmux 或带 textual 的解释器 → SKIP + exit 77。实测 18/18,连跑两遍稳定。
+> ⚠ 这仍**替代不了** Terminal.app/iTerm2/Ghostty 的肉眼验(真彩/鼠标/字体渲染差异);M3② 待真机。
