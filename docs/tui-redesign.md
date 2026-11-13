@@ -283,6 +283,18 @@ TUI 下:
 - 输入框边框改深灰 `#6a6a6a`(与思考同档灰)。
 - 说明:滚动条"圆角"Textual 不支持(只有方形块);"再缩 1/3"已达最小值 1 列,无法再细。
 
+**M2 UI 精修 3(背景融合,2026-11)**:
+- 现象:内容区与终端之间有一圈**背景色差细缝**(非 padding 问题)。根因:`textual-dark` 主题把整屏涂成
+  `#121212`,与用户终端背景不同。实测:`background:transparent` 对 Screen 无效(回落 #121212)、
+  `ansi_default` 近似成 #0c0c0c 仍≠终端。
+- 解法:`App.theme = "ansi-dark"` → Screen 背景发 `\e[49m`(=终端默认背景)×每帧数百次,**零 RGB 背景填充**,
+  彻底贴合终端(含其透明/背景图)。显式 hex 颜色(边框#6a6a6a/灰字/滚动条#444)实测**精确保留**。
+- 输入框同样处理:`#input { background: transparent; border: round #6a6a6a }`(+ `#input:focus` 同),
+  TextArea 内部背景实测全 `\e[49m`(无面板填充),**只留边框线**,内部与终端融为一体。
+- `padding` 恢复 `#content { padding: 0 1 }`(文字不贴边,更耐看)。
+- 验证:真实 WchatApp 抓流:458× `\e[49m`、0 个 RGB 背景填充、边框灰在;tui_test 36/36;全量 76/76。
+  (前提:深色终端;浅色终端可考虑切 ansi-light。)
+
 **M2 追加修(用户实测:回复从底部冒出,而非紧接提问下一行)**:
 - 根因:内容区原为 `RichLog(1fr)` + 其下独立 `#live` Static;RichLog 吃满高度把 #live 顶到**箱底**,
   于是流式从底部冒、与顶部提问之间一大段空白。

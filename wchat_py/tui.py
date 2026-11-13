@@ -210,7 +210,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
         CSS = """
         Screen { layout: vertical; padding: 0; }
         #contentbox { height: 1fr; border: none; padding: 0; margin: 0; }
-        #content { height: 1fr; padding: 0; margin: 0; border: none;
+        #content { height: 1fr; padding: 0 1; margin: 0; border: none;
                    scrollbar-size-vertical: 1;
                    scrollbar-color: #444444;
                    scrollbar-color-hover: #555555;
@@ -221,7 +221,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
         #status { height: 0; padding: 0; margin: 0; }
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #666666; }
-        #input { height: auto; max-height: 12; border: round #6a6a6a; }
+        #input { height: auto; max-height: 12; background: transparent; border: round #6a6a6a; }
+        #input:focus { background: transparent; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
@@ -235,6 +236,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         def __init__(self):
             super().__init__()
+            # 主题用 ansi-dark:Screen 背景发 \e[49m(=终端默认背景),与终端背景彻底融合、
+            # 消除"内容区 vs 终端"的色差细缝;我们显式写死的 hex(灰边框/滚动条/灰字)不受影响。
+            # (textual-dark 会把整屏涂成 #121212,与用户终端背景不同 → 有缝。)
+            self.theme = "ansi-dark"
             self._q = queue.Queue()
             self._reason = ""
             self._answer = ""
