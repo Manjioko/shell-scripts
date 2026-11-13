@@ -444,6 +444,21 @@ def set_line_hook(fn):
     _LINE_HOOK[0] = fn
 
 
+# 历史渲染钩子:加载历史时,非 TUI 走 `_render_history` 把整份 markdown 打到 stdout(终端原生
+# scrollback,便宜);全屏 TUI 下 stdout 是 shim,把 708 条历史整份 render_markdown 成一个巨型字符串
+# 塞进单个 Static,真终端要么极慢要么空白(用户实测"只有切换提示")。TUI 装此钩子→**原生逐条渲染**
+# (有上限、复用消息列表机制)。非 TUI 为 None,零改动。
+_HISTORY_HOOK = [None]
+
+
+def set_history_hook(fn):
+    _HISTORY_HOOK[0] = fn
+
+
+def history_hook():
+    return _HISTORY_HOOK[0]
+
+
 def read_line(question="", choices=None):
     """读一行文本:hook 优先(TUI 弹输入框),否则退回到 sys.stdin.readline(非 TUI)。
     返回**不含行尾换行**的字符串(与原 readline 调用处 `(...readline()...).strip()` 兼容)。

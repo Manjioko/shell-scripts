@@ -355,9 +355,30 @@ TUI 下:
     原生 Input(数字照常)。为什么不用 `Binding(priority=True)`:本版 Textual 里 ModalScreen 的 priority
     绑定**压不过聚焦 Input**(实测 'l','n' 被当正文输入成 `ln3`);而 nested `Message` 的处理函数命名
     在本版也不可靠(实测 `on_page_input_page` 不被调用)——故用 `_PageInput._on_key` 直连 `owner.page_by()`。
-- 验证:headless `tui_test` **48/48**(+placeholder、HistoryPickModal 列表/1-2 页翻页/编号回传、
+- 验证:headless `tui_test` **55/55**(+placeholder、HistoryPickModal 列表/1-2 页翻页/编号回传、
   `list_history` 把 choices 交给 read_line 且不再刷 stdout);真 tmux:`-l` 弹窗列 0–9 共 10 条 +
   「第 1/2 页」,按 n → 10–12 条 + 「第 2/2 页」;全量闸门 **79/79**。
+
+**M2 追加修(用户实测截图:加载历史只显示切换提示、正文空白;placeholder 要灰斜体,2026-11)**:
+- **问题①「-l 后只有'切换到…'、看不到历史内容」**:根因是 `list_history` 调 `_render_history`
+  → `render_markdown`(整份 708 条)**一次子进程渲染成一个巨型字符串**,再经 TuiStdout 塞进**单个
+  Static**。真终端布局上万行的单一 Static 会极慢/空白(用户实测)。合成数据(纯文本 700 条、含工具
+  1401 条)在本机反而能渲(从顶部),说明是真实文件体积/形状把单一 mega-Static 压垮 / `render_markdown`
+  对大输入慢(无 timeout)。
+  · 解法:加 **history 渲染钩子** `render.set_history_hook(fn)`(与 confirm/line 钩子同一套)。
+    TUI 装 `WchatApp._render_loaded_history` → worker 里 `call_from_thread(self._mount_history, msgs, header)`
+    **原生逐条渲染**:清空内容区→抬头「切换到 …」→更早的折叠成一行→逐条挂 回显(❯ reverse)/思考(dim)/正文
+    (Markdown)/工具横幅(dim,行裁到 5 行)。**只渲染最近 `HIST_MAX=60` 条**(其余折叠并提示可用 -msgs 看全部),
+    彻底不碰整份 mega-blob。非 TUI 无钩子→原样 stdout markdown(零改动)。
+  · `repl._render_history(msgs, header="")`:有钩子交钩子,否则 stdout。`list_history` 有钩子时不往 shim
+    打清屏/切换行(会被原生清屏覆盖),由 `_mount_history` 出抬头。
+  · 真 tmux 验证:加载 1401 条历史后**正文正常出现**(滚到最近 60 条:消息 347–349 + 工具横幅 + 折叠提示 + 滚动条),
+    不再空白。
+- **问题②「placeholder 应灰色、最好斜体,与思考文本一致」**:`TextArea` 的占位提示由内部类
+  `.text-area--placeholder` 控制(默认 `$text 40%` 偏亮)。改 CSS:
+  `#input .text-area--placeholder { color: #6a6a6a; text-style: italic; }`。实测样式 = rgb(106,106,106) 斜体。
+- 验证:headless `tui_test` **55/55**(+placeholder 灰斜体样式、原生历史渲染有界/折叠/抬头/保留最近、
+  `_render_history` 走钩子带 header);真 tmux 大历史可见;全量闸门 **79/79**。
 
 ### 6.4 M3:视觉闸门重写 + 终端兼容矩阵
 
@@ -378,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 48/48)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 55/55)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。

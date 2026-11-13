@@ -140,6 +140,13 @@ async def run_app_checks():
         ck("主输入框有 placeholder 提示文案",
            getattr(inp, "placeholder", "") == "请输入问题,回车发送",
            repr(getattr(inp, "placeholder", "")))
+        try:
+            _phst = inp.get_visual_style("text-area--placeholder")
+            ck("placeholder 样式=灰色#6a6a6a 且斜体",
+               bool(_phst.italic) and "106" in str(_phst.foreground),
+               repr(_phst))
+        except Exception as _e:
+            ck("placeholder 样式=灰色#6a6a6a 且斜体", False, repr(_e))
 
         # 续行:行尾 \ + 回车 = 换行,不提交
         inp.text = "abc\\"
@@ -281,6 +288,21 @@ async def run_app_checks():
 
         v_hist = await _pick_history("3", keypresses=("n",))
         ck("历史选择:翻页后键入 3 → worker 拿到 '3'", v_hist == "3", repr(v_hist))
+
+        # ---- 6d) 原生历史渲染:_mount_history 有界 + 折叠更早 + 抬头 ----
+        _hmsgs = [{"role": "system", "content": "s"}]
+        for _i in range(100):
+            _hmsgs.append({"role": "user", "content": "问%d" % _i})
+            _hmsgs.append({"role": "assistant", "content": "答%d" % _i})
+        app._mount_history(_hmsgs, "切换到 X(共 101 条消息)")
+        await pilot.pause()
+        _htxt = _content_text(app)
+        ck("历史原生渲染:抬头可见", "切换到 X" in _htxt, repr(_htxt[:50]))
+        ck("历史原生渲染:更早的折叠提示(条数>HIST_MAX)", "更早的" in _htxt and "已折叠" in _htxt, repr(_htxt[:80]))
+        ck("历史原生渲染:保留最近消息(答99)", "答99" in _htxt, repr(_htxt[-60:]))
+        ck("历史原生渲染:不渲染最早的(问0 不在)", "问0" not in _htxt, repr(_htxt[:120]))
+        _nkids = len(list(app.query_one("#content", VerticalScroll).children))
+        ck("历史原生渲染:子件数受控(≤ HIST_MAX*2+2)", _nkids <= app.HIST_MAX * 2 + 2, "n=%d" % _nkids)
 
 
 try:
@@ -446,6 +468,17 @@ async def _list_history_check():
         _out = buf.getvalue()
         ck("改走弹窗后,不再把『请从以下编号中选择』刷到 stdout(背景不再重复刷屏)",
            "请从以下编号中选择" not in _out, repr(_out[:120]))
+        # _render_history 走 history hook(不写 stdout):给了 hook 时交回 hook 并带上 header
+        _seen = []
+        _prev_hook = _render.history_hook()
+        try:
+            _render.set_history_hook(lambda msgs, header="": _seen.append((len(msgs), header)))
+            _repl._render_history([{"role": "system", "content": "s"},
+                                   {"role": "user", "content": "u"}], header="切换到 Z")
+            ck("_render_history 走 history hook(带 header,不写 stdout)",
+               _seen == [(2, "切换到 Z")], repr(_seen))
+        finally:
+            _render.set_history_hook(_prev_hook)
     finally:
         import shutil
         shutil.rmtree(td, ignore_errors=True)

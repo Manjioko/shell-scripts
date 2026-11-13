@@ -307,6 +307,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #666666; }
         #input { height: auto; max-height: 12; background: transparent; border: round #6a6a6a; }
         #input:focus { background: transparent; }
+        /* placeholder 与思考文本同档灰、斜体,用户好区分(默认 $text 40% 偏亮) */
+        #input .text-area--placeholder { color: #6a6a6a; text-style: italic; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
@@ -322,6 +324,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
         HistoryPickModal #hist_page { height: auto; margin-top: 1; }
         """
         BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
+        # 加载历史时最多原生渲染这么多条(其余折叠;见 _mount_history)。避免整份几百条塞进
+        # 内容区导致布局/渲染爆掉(那是 TUI 下"切换提示有了、正文空白"的真因)。
+        HIST_MAX = 60
 
         def __init__(self):
             super().__init__()
@@ -379,6 +384,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 from wchat_py import render as _render
                 _render.set_confirm_hook(self._confirm_blocking)
                 _render.set_line_hook(self._line_blocking)
+                _render.set_history_hook(self._render_loaded_history)
             except Exception:
                 pass
 
@@ -426,6 +432,68 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self.call_from_thread(_show)
             ev.wait()
             return box.get("r", "")
+
+        def _render_loaded_history(self, msgs, header=""):
+            """history hook(worker 线程):把加载的历史交给主线程**原生逐条渲染**。"""
+            try:
+                self.call_from_thread(self._mount_history, msgs, header)
+            except Exception:
+                pass
+
+        def _mount_history(self, msgs, header=""):
+            """主线程:清空内容区后,把历史**逐条**挂成消息 widget(复用回显/思考/Markdown/工具横幅
+            的样式),只渲染最近 HIST_MAX 条(更早的折叠成一行提示)。这样避免把几百条历史整份
+            render_markdown 成一个巨型 Static(真终端会卡死/空白)。"""
+            try:
+                for c in list(self._content().children):
+                    c.remove()
+            except Exception:
+                pass
+            if header:
+                self._mount(Text(header, style="bold"))
+            from wchat_py import repl as _repl
+            body = [m for m in msgs[1:] if isinstance(m, dict)]   # 跳过 system
+            folded = max(0, len(body) - self.HIST_MAX)
+            if folded:
+                self._mount(Text("…（更早的 %d 条消息已折叠，可用 -msgs 查看全部）" % folded,
+                                 style="dim"))
+            tc_names = {}
+            for m in body:
+                for tc in (m.get("tool_calls") or []) if isinstance(m, dict) else []:
+                    tc_names[tc.get("id") or ""] = (tc.get("function") or {}).get("name") or "?"
+            for m in body[-self.HIST_MAX:]:
+                role = m.get("role", "")
+                content = _repl._msg_content_text(m.get("content"))
+                reasoning = m.get("reasoning_content") or ""
+                if reasoning.strip():
+                    self._mount(self._render_reason(reasoning), classes="reason")
+                if role == "tool":
+                    name = tc_names.get(m.get("tool_call_id") or "")
+                    self._mount(Text(("tool → %s" % name) if name else "tool", style="dim"))
+                    disp = content.replace("\\n", "\n").lstrip("\ufeff")
+                    lines = [ln for ln in disp.splitlines() if ln.strip()]
+                    if lines:
+                        shown = "\n".join(_repl._clip_line(ln) for ln in lines[:5])
+                        if len(lines) > 5:
+                            shown += "\n…(其余 %d 行已省略)" % (len(lines) - 5)
+                        self._mount(Text(shown, style="dim"))
+                elif role == "user":
+                    self._mount(Text("❯ " + content, style="reverse"))
+                else:   # assistant / 其它
+                    if content.strip():
+                        try:
+                            self._mount(Markdown(content))
+                        except Exception:
+                            self._mount(Text(content))
+                    else:
+                        self._mount(Text("（本轮无文本内容）", style="dim"))
+                    if m.get("tool_calls"):
+                        tcl = ["🔧 %s: %s" % ((tc.get("function") or {}).get("name") or "?",
+                               ((tc.get("function") or {}).get("arguments") or "")
+                               .replace("\n", " ").replace("\r", " "))
+                               for tc in m["tool_calls"]]
+                        self._mount(Text("\n".join(_repl._clip_line(x) for x in tcl[:6]), style="dim"))
+            self._scroll_end()
 
         def emit(self, s):
             self._q.put(("log", str(s), None))
@@ -627,6 +695,7 @@ def run_tui(handle_line, *, banner="", on_meta=None):
             from wchat_py import render as _render
             _render.set_confirm_hook(None)
             _render.set_line_hook(None)
+            _render.set_history_hook(None)
         except Exception:
             pass
     return 0

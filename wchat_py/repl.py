@@ -32,8 +32,17 @@ def _clip_line(s, n=200):
     return s if len(s) <= n else s[:n] + "…"
 
 
-def _render_history(msgs):
-    """把加载的历史按 master get_history 的格式渲染成 markdown。"""
+def _render_history(msgs, header=""):
+    """把加载的历史按 master get_history 的格式渲染成 markdown。
+    TUI 装了 history hook 时交给它**原生逐条渲染**(header=切换到…);否则走 stdout markdown。"""
+    try:
+        from wchat_py.render import history_hook
+        _h = history_hook()
+        if _h is not None:
+            _h(msgs, header)
+            return
+    except Exception:
+        pass
     from wchat_py.render import render_markdown
     tc_names = {}
     for m in msgs:
@@ -174,10 +183,19 @@ def _default_meta(action, arg, session=None):
             _reset_image_refs()
         except Exception:
             pass
-        sys.stdout.write("\033[H\033[2J")
-        sys.stdout.write("切换到 %s(共 %d 条消息)\n\n" % (path, len(msgs)))
-        sys.stdout.flush()
-        _render_history(msgs)
+        _switch = "切换到 %s(共 %d 条消息)" % (path, len(msgs))
+        # TUI 有 history hook 时由它原生渲染(含抬头);此时不往 shim 打清屏/切换行(会被原生清屏覆盖)。
+        _has_hist_hook = False
+        try:
+            from wchat_py.render import history_hook
+            _has_hist_hook = history_hook() is not None
+        except Exception:
+            pass
+        if not _has_hist_hook:
+            sys.stdout.write("\033[H\033[2J")
+            sys.stdout.write(_switch + "\n\n")
+            sys.stdout.flush()
+        _render_history(msgs, header=_switch)
         return True
     if action == "compact":
         try:
