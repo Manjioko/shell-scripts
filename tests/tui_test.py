@@ -299,6 +299,21 @@ async def _meta_path_check():
             if not str(_s).strip():
                 _blanks.append(_i)
         ck("内容区无纯空白子件(无多余空行)", not _blanks, repr(_blanks))
+
+        # Ctrl+V 粘贴图片:桩 _clip_image_file 返回路径 → 插入 📋[图片] 占位行
+        try:
+            import wchat_py.inputbox as _ibo
+            _oc = _ibo._clip_image_file
+            _ibo._clip_image_file = lambda d: "/tmp/probe_img.png"
+            try:
+                inp.text = ""
+                inp.action_paste_image()
+                ck("Ctrl+V 粘贴图片插入占位行", "📋 [图片] /tmp/probe_img.png" in inp.text, repr(inp.text))
+            finally:
+                _ibo._clip_image_file = _oc
+                inp.text = ""
+        except Exception as _e:
+            ck("Ctrl+V 粘贴图片插入占位行", False, repr(_e))
     for k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
         os.environ.pop(k, None)
 

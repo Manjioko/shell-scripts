@@ -80,6 +80,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         BINDINGS = [
             Binding("enter", "submit_or_continue", "发送", priority=True),
             Binding("ctrl+f", "pick_file", "选文件"),
+            Binding("ctrl+v", "paste_image", "粘贴图片"),
+            Binding("ctrl+g", "paste_image", "粘贴图片"),
         ]
 
         class Submitted(Message):
@@ -120,6 +122,32 @@ def make_app(handle_line, *, banner="", on_meta=None):
             if p and p != "CANCELLED" and os.path.isfile(p):
                 try:
                     self.insert(_file_placeholder(p) + "\n")
+                except Exception:
+                    pass
+
+        def action_paste_image(self):
+            """Ctrl+V/Ctrl+G:从系统剪贴板抓图片,插入 `📋 [图片] <路径>` 占位行。
+            提交时 session 的 parse_placeholders 会把它读进 input_images(与老 inputbox 同管线)。"""
+            try:
+                from wchat_py import inputbox as _ibo
+                from wchat_py import repl as _repl
+            except Exception:
+                return
+            ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
+            clip_dir = os.path.join(ct, "clip")
+            try:
+                path = _ibo._clip_image_file(clip_dir)
+            except Exception:
+                path = None
+            if path:
+                try:
+                    # 不加零宽标记(TUI 无 PTK 原子删除需求;零宽会污染路径)。
+                    self.insert(_repl._PLACE_IMG + path + "\n")
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.app.bell()
                 except Exception:
                     pass
 

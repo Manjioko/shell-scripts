@@ -252,6 +252,14 @@ TUI 下:
 - 遗留:①粘贴图片(Ctrl+V)未迁移(GUI 剪贴板;优先级低);②交互式 meta(如 `-l` 选历史号)在 TUI 下会读 stdin
   受限,用到时再单独适配;③`AUTO` 首签仍在启动前(非 TUI 阶段),不受影响。
 
+**§6.3 遗留已清(2026-11)**:
+- ② 交互式 meta(`-l` 选历史号):`_default_meta` 的编号读取改走 `render.read_line`(TUI 弹 `InputModal`、
+  非 TUI 退回 readline)。同理 `auto_enable` 的 AUTO 签字(见上批)已迁移。
+- ① Ctrl+V / Ctrl+G 粘贴图片:`ChatInput` 加 `action_paste_image`,复用 `inputbox._clip_image_file`
+  从系统剪贴板取图(经 `_grab_macos`,osascript/sips,零额外依赖),插入 `📋 [图片] <路径>` 占位行;
+  提交时 `session.parse_placeholders` 读进 input_images(与老 inputbox 同管线)。无图则 bell。
+- 验证:headless tui_test 36/36(新增 Ctrl+V 插入占位行、read_line 路由);全量 76/76。
+
 **M2 追加修(用户实测:回复从底部冒出,而非紧接提问下一行)**:
 - 根因:内容区原为 `RichLog(1fr)` + 其下独立 `#live` Static;RichLog 吃满高度把 #live 顶到**箱底**,
   于是流式从底部冒、与顶部提问之间一大段空白。

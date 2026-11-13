@@ -114,7 +114,9 @@ def _default_meta(action, arg, session=None):
             sys.stdout.write("%d. %s\n" % (i, name))
         sys.stdout.write("_>"); sys.stdout.flush()
         try:
-            num = (sys.stdin.readline() or "").strip()
+            from wchat_py.render import read_line as _read_line
+            # TUI 下 stdin 归事件循环,readline 不可用 → read_line 弹输入框;非 TUI 退回 readline。
+            num = (_read_line("请输入要加载的历史编号(回车=0)") or "").strip()
         except KeyboardInterrupt:
             sys.stdout.write("\n"); sys.stdout.flush()
             return True
