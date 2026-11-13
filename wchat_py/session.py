@@ -300,11 +300,20 @@ def _data_url(path):
         return path
 
 
-def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
+PENDING_PREFIX = "【用户在等待你时补充了以下信息,请在继续完成当前任务的同时一并考虑】"
+
+
+def orchestrate(session, content, call_llm, run_tool, max_rounds=None, poll_queue=None):
     """带工具续发的一轮编排（llm/tool 可注入，便于离线自测配对）。
 
     max_rounds 缺省读 MAX_TOOL_ROUNDS(缺省 250,与 master 一致)；跑满说明模型陷入
     工具循环，会打印上限提示后结束本轮（而不是静默停下等人补“继续”）。
+
+    `poll_queue`:可选的零参可调用,返回"用户在本轮运行期间补充的消息"列表(M4 边输出边输入)。
+    在**每一个小轮边界**(即上一次工具调用/思考/正文输出之后、下一次 call_llm 之前,drain 一次)
+    把累积的多条**合并成一条** `user` 消息注入,强前缀 `PENDING_PREFIX`(让模型"继续当前任务的同时
+    一并考虑")。首个小轮(iteration 0)**不注入**——补充信息只能是"上一小轮输出之后"才插。
+    纯问答(无工具、这一轮就是最终答案)没有下一个小轮 → 由调用方在整轮结束后作为下一轮发。
     """
     if max_rounds is None:
         try:
@@ -351,7 +360,7 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
     # 追加的 assistant/tool 全部丢弃——否则半截正文配上半截 tool_calls 会污染下一轮
     # (孤儿 tool_calls 让网关 400)。
     _n_user = len(msgs)
-    for _ in range(max_rounds):
+    for _r in range(max_rounds):
         # 主动压缩:最近一次请求带回的 usage 超阈值 → 本次请求前先摘要重写历史。
         #
         # ⚠ 必须读**最新**用量,不能只读 session.last_prompt_tokens:
@@ -378,6 +387,21 @@ def orchestrate(session, content, call_llm, run_tool, max_rounds=None):
                     _n_user = len(msgs)
         except Exception:
             pass
+        # M4 每小轮边界注入"用户等待时的补充信息"(仅从第 2 个小轮起;首轮不注入)。
+        # 多条**合并成一条** user,强前缀 PENDING_PREFIX;放在压缩之后(压缩会重写 msgs)。
+        if poll_queue is not None and _r > 0:
+            try:
+                _pend = [str(x) for x in (poll_queue() or []) if str(x).strip()]
+            except Exception:
+                _pend = []
+            if _pend:
+                msgs.append({"role": "user", "content": PENDING_PREFIX + "\n" + "\n".join(_pend)})
+                try:
+                    from wchat_py.render import dim_after as _diminj
+                    sys.stdout.write(" " + _diminj(" ", "（已把你等待时补充的信息并入本轮一起发给模型）") + "\n")
+                    sys.stdout.flush()
+                except Exception:
+                    pass
         try:
             text, tcs, err = call_llm(msgs)
         except Aborted as _ab:

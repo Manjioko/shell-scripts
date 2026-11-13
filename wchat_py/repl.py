@@ -521,7 +521,7 @@ def _grant_read(path):
 
 
 def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None,
-                         on_abort=None):
+                         on_abort=None, poll_queue=None):
     """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
 
     write_final=False 时不在末尾整段输出（正文已由 call_llm 的 on_text 流式画过）。
@@ -542,7 +542,7 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
             except Exception:
                 pass
         try:
-            r = orchestrate(session, text, call_llm, run_tool)
+            r = orchestrate(session, text, call_llm, run_tool, poll_queue=poll_queue)
         except Aborted as _ab:
             if on_abort is not None:
                 on_abort(_ab)

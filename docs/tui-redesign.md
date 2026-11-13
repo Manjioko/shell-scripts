@@ -9,7 +9,7 @@
 > | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ✅ 完成(2026-11,M1-α 流式;M1-β markdown 定稿已用 Markdown 渲染) |
 > | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ✅ 完成(2026-11,含用户实测 5 问题修复) |
 > | M3 | 视觉闸门重写 + 终端兼容矩阵 | 🟡 进行中(①视觉闸门已完成 2026-11;②终端矩阵待真机) |
-> | M4 | (v2)打破串行枷锁:边流式输出边输入 | ✅ 完成(2026-11,队列式:运行中提交不丢、依次自动发送) |
+> | M4 | (v2)打破串行枷锁:边流式输出边输入 | ✅ 完成(2026-11,补充信息注入:每小轮边界并入本轮;纯问答顺延下一轮) |
 >
 > 最近更新:2026-11 · 负责人:见 git blame · 关键结论:**用 Textual,不再手搓 prompt_toolkit**
 >
@@ -399,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 60/60)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 64/64)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
@@ -423,18 +423,33 @@ TUI 下:
 
 - 边流式输出边输入:worker 跑 turn 期间输入区仍可编辑/预填下一条;Textual 原生支持。
 
-**M4 实现记录(已完成 2026-11,队列式)**:
-- 现状矛盾:worker 跑 turn 时 TextArea 本就**可编辑**(独立 widget,不随 worker 阻塞);但旧逻辑在
-  `_busy` 时提交只弹"(上一轮仍在进行,请稍候…)"**丢弃**输入 —— 用户的字白打了。
-- 解法(**入队**,不并发跑两条 turn——共享 session/状态,并发不安全):`WchatApp` 加 `_pending`
-  队列。`on_chat_input_submitted` 文本分支:先挂 `❯ text` 回显;若 `_busy` 则 append 到 `_pending` 并
-  挂 dim"（已加入队列，当前回复结束后自动发送）"返回;**不丢弃**。`_on_turn_done` 收尾后若有
-  `_pending`,pop 一条、挂 dim"（发送排队消息）"、`_busy=True`、`_run_turn(next)` —— **依次自动发送**,
-  免手动重发。元命令(-q 除外的 `-*`)在 busy 时仍按原样提示(不排队,避免会话中途改状态)。
-- 效果:`WCHAT_TUI=1` 下可边看流式边打字、边提交;提交的后续消息排队,前一轮一结束就自动发。
-- 验证:headless `tui_test` **60/60**(+慢 turn 中提交→"已入队"→两条都 done→顺序 first<second→
-  两条答案都上屏);真 tmux:第一条慢流式时提交第二条,见"已加入队列…",第一条结束后第二条自动发送
-  并出答案;全量闸门 **79/79**。
+**M4 实现记录(已完成 2026-11,补充信息注入)**:
+- 现状矛盾:worker 跑 turn 时 TextArea 本就**可编辑**(独立 widget,不随 worker 阻塞);旧逻辑在
+  `_busy` 时提交只弹"(上一轮仍在进行,请稍候…)"**丢弃**输入。而"等整轮结束才发"也太晚。
+- 目标模型(用户图):在**每一小轮(工具调用/思考/正文输出)之后**、下一小轮发模型之前,把用户
+  运行期补充的消息注入进 messages,让模型"继续当前任务的同时一并考虑"。抽象:**队列 = 补充信息,
+  不是打断**(不做 abort-replace;不掐断正在流的那次请求)。
+- 实现(注入点在 `session.orchestrate`,与 confirm/line/history 同一套钩子思路,非 TUI 零改动):
+  · `orchestrate(..., poll_queue=None)`:`for` 小轮循环里,**第 2 小轮起**(`_r>0`)每次 `call_llm` 前
+    drain 一次 `poll_queue()`;把累积的**多条合并成一条** `user`,前缀 `PENDING_PREFIX`
+    (【用户在等待你时补充了以下信息,请在继续完成当前任务的同时一并考虑】)。注入放在**压缩之后**
+    (压缩会重写 msgs),且只在**上一条 tool 结果之后**——绝不插在 tool_calls 与 tool 之间(否则 400)。
+    首个小轮不注入(补充只能"上一小轮输出后"才插)。**纯问答**(无工具、这一轮即最终答案)没有下一
+    小轮 → 由调用方在整轮后作为**下一轮**发。
+  · `repl.session_text_handler(..., poll_queue=None)` 透传;`cli._tui_handle_line(_text,_emit,_stream,
+    _reason,_poll_queue=None)` 接收并透传。
+  · `tui.WchatApp`:`_pending` 用**线程安全 `queue.Queue`**(主线程 put、worker poll pop);`_drain_pending()`
+    供 orchestrate 每小轮取件;`make_app` 用 `inspect` 判断 handle_line 是否接受第 5 参(旧 4 参 handle_line
+    照旧调,零破坏);`_run_turn` 传 `self._drain_pending`。`_on_turn_done` 兜底:轮结束若还有排队(纯问答/
+    最后小轮之后才到),作为**下一轮** `_run_turn` 发出。`action_maybe_quit`(Ctrl+C/Ctrl+D 退出)**清空队列**
+    (按用户要求丢弃,不自动续发)。
+- 注意:**Ctrl+C 在 TUI 下是"退出应用"(key binding,不是 SIGINT)**;worker 线程收不到 KeyboardInterrupt。
+  "Ctrl+C 只打断当前轮、不退出、继续用" 是另一个改动(目前不提供)。本批只保证退出时**丢弃**队列。
+- 验证:headless `tui_test` **64/64**(+M4:4 参 handle_line 走兜底队列依次处理;5 参 handle_line 真拿到
+  poller、轮内取走排队消息消费、不当独立下一轮;退出清空队列);`session_test` **82/82**(+orchestrate
+  每小轮注入:合并成一条 user/前缀/在 tool 之后/首轮不注入/无 poll_queue 负对照不注入);真 tmux:主问题
+  多小轮期间提交两条补充,第 1 轮 poller 一并取走并在**同一条回复**里消费(补答:补充一 补充二),不再当
+  独立下一轮;全量闸门 **79/79**。
 
 ## 七、风险与对策
 

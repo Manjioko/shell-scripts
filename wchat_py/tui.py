@@ -56,10 +56,12 @@ class TuiStdout:
 
 
 def make_app(handle_line, *, banner="", on_meta=None):
-    """构造(不 run)WchatApp。handle_line(text, emit, stream, reason):
+    """构造(不 run)WchatApp。handle_line(text, emit, stream, reason[, poll_pending]):
        emit(s)   -> log 通道(横幅/工具/错误)
        stream(s) -> live 区正文(普通亮度)
        reason(s) -> live 区思考(暗色 dim)
+    第 5 个可选参数 poll_pending():返回运行期补充消息列表(M4 边输出边输入)。只有
+    handle_line 接受 5 参时才传,否则按 4 参调用(向后兼容)。
     on_meta(action, arg) 处理元命令(-q 之外的 -u/-n/... );-q 由 app 直接退出。
     textual 缺失抛 RuntimeError。"""
     if not available():
@@ -74,6 +76,18 @@ def make_app(handle_line, *, banner="", on_meta=None):
     from rich.markdown import Markdown
     from textual import work
     import threading
+    import inspect
+
+    # handle_line 是否接受第 5 个参数(poll_pending):据此决定要不要把轮内补充消息的取件器传进去。
+    # 保持向后兼容——旧的 4 参 handle_line(tests 里那种)照旧调用,不会 TypeError。
+    try:
+        _sig = inspect.signature(handle_line)
+        _has_var = any(p.kind == p.VAR_POSITIONAL for p in _sig.parameters.values())
+        _npos = len([p for p in _sig.parameters.values()
+                     if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)])
+        _hl_takes_poll = _has_var or _npos >= 5
+    except (TypeError, ValueError):
+        _hl_takes_poll = False
 
     # ---- 输入框:多行 TextArea,回车发送/续行,Ctrl+F 选文件 ----
     class ChatInput(TextArea):
@@ -340,7 +354,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._live_widget = None
             self._last_marker = None
             self._busy = False
-            self._pending = []
+            self._pending = queue.Queue()   # M4:运行期补充消息(线程安全);worker 每小轮 poll 注入
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
@@ -630,12 +644,23 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 return
             self._mount(Text("❯ " + text, style="reverse"))
             if self._busy:
-                # M4:边流式输出边输入 —— 上一轮还在跑时提交不丢弃,进队列,当前轮结束后自动依次发送。
-                self._pending.append(text)
-                self._mount(Text("（已加入队列，当前回复结束后自动发送）", style="dim"))
+                # M4:边流式输出边输入 —— 上一轮还在跑时提交不丢弃,进队列;worker 会在下一个
+                # 小轮边界把它(们)作为"补充信息"并入本轮;纯问答则本轮结束后自动作为下一轮发。
+                self._pending.put(text)
+                self._mount(Text("（已加入队列：将在下一小轮或下一轮并入发给模型）", style="dim"))
                 return
             self._busy = True
             self._run_turn(text)
+
+        def _drain_pending(self):
+            """worker(orchestrate)在每小轮边界调用:取出并清空累积的补充消息(线程安全)。"""
+            out = []
+            try:
+                while True:
+                    out.append(self._pending.get_nowait())
+            except queue.Empty:
+                pass
+            return out
 
         @work(thread=True, exclusive=True)
         def _run_turn(self, text):
@@ -643,7 +668,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
             sys.stdout = TuiStdout(self)
             sys.stderr = TuiStdout(self, style="bold red")
             try:
-                handle_line(text, self.emit, self.stream, self.reason)
+                if _hl_takes_poll:
+                    handle_line(text, self.emit, self.stream, self.reason, self._drain_pending)
+                else:
+                    handle_line(text, self.emit, self.stream, self.reason)
             except Exception as e:
                 self.emit("\n处理失败: %r\n" % (e,))
             finally:
@@ -679,9 +707,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._drain()
             self._finalize_live()
             self._busy = False
-            # M4:当前轮结束,若有排队消息,立即接着发下一条(不丢用户输入,免手动重发)
-            if self._pending:
-                _nxt = self._pending.pop(0)
+            # M4 兜底:本轮结束若还有排队消息(纯问答/最后一个小轮之后才到的),作为**下一轮**发出。
+            # (有工具轮的场合,它们一般已在 orchestrate 的小轮边界被并入本轮,这里队列已空。)
+            try:
+                _nxt = self._pending.get_nowait()
+            except queue.Empty:
+                _nxt = None
+            if _nxt is not None:
                 self._mount(Text("（发送排队消息）", style="dim"))
                 self._busy = True
                 self._run_turn(_nxt)
@@ -692,6 +724,12 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 pass
 
         def action_maybe_quit(self):
+            # Ctrl+C/Ctrl+D 退出:按用户要求**丢弃**排队中的补充消息(不再自动续发)。
+            try:
+                while True:
+                    self._pending.get_nowait()
+            except queue.Empty:
+                pass
             self.exit()
 
     return WchatApp()

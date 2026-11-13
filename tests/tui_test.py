@@ -549,5 +549,94 @@ except Exception as e:
     traceback.print_exc()
     ck("M4 队列无异常", False, repr(e))
 
+
+# ---- 12) M4 注入接线:5 参 handle_line 拿到 poller,运行中提交的消息被**本轮内**取走消费 ----
+print("=== 12. M4 注入接线:轮内 poller 取走补充消息(本轮消费,不当独立下一轮) ===")
+
+
+async def _m4_poll_wired_check():
+    got = {}
+
+    def handle_line5(text, emit, stream, reason, poll_pending):
+        got.setdefault("started", []).append(text)
+        import time
+        time.sleep(0.6)                       # 让第一条 busy,给用户时间提交第二条
+        pend = poll_pending()                  # 模拟"下一个小轮边界"取补充
+        got.setdefault("polled", []).append(list(pend))
+        for ch in ("答:" + text):
+            stream(ch)
+        for p in pend:                        # 把取到的补充也消费掉(证明本轮内被用上)
+            for ch in ("补答:" + p):
+                stream(ch)
+
+    app = tui.make_app(handle_line5, banner="b")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        inp.text = "first"
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if "first" in got.get("started", []):
+                break
+        inp.text = "second"
+        await pilot.press("enter")
+        await pilot.pause()
+        for _ in range(120):
+            await pilot.pause()
+            await asyncio.sleep(0.05)
+            if got.get("polled") and got["polled"][0]:
+                break
+        ck("5 参 handle_line 收到并使用 poller:第一轮 poll 到排队消息 'second'",
+           bool(got.get("polled")) and "second" in (got["polled"][0] or []), repr(got.get("polled")))
+        await asyncio.sleep(0.4)
+        await pilot.pause()
+        ck("排队消息被本轮消费后,不作为独立下一轮重复处理('second' 不进 started)",
+           got.get("started", []).count("second") == 0, repr(got.get("started")))
+        _txt = _content_text(app)
+        ck("补充消息在本轮内被消费(补答:second 上屏)", "补答:second" in _txt, repr(_txt[-120:]))
+
+
+try:
+    asyncio.run(_m4_poll_wired_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("M4 注入接线无异常", False, repr(e))
+
+
+# ---- 13) Ctrl+C/退出丢弃队列:action_maybe_quit 清空 _pending ----
+print("=== 13. 退出(Ctrl+C)丢弃排队消息 ===")
+
+
+async def _m4_quit_drops_check():
+    import queue as _q
+    app = tui.make_app(lambda t, e, s, r: None, banner="b")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        app._pending.put("x")
+        app._pending.put("y")
+        try:
+            app.action_maybe_quit()
+        except Exception:
+            pass
+        await pilot.pause()
+        rem = []
+        try:
+            while True:
+                rem.append(app._pending.get_nowait())
+        except _q.Empty:
+            pass
+        ck("action_maybe_quit 清空排队消息(丢弃)", rem == [], repr(rem))
+
+
+try:
+    asyncio.run(_m4_quit_drops_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("退出丢弃队列无异常", False, repr(e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

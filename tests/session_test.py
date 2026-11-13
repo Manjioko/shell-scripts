@@ -8,7 +8,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
                                auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto,
-                               record_allow, record_deny, make_checkpoint, Aborted)  # noqa: E402
+                               record_allow, record_deny, make_checkpoint, Aborted,
+                               PENDING_PREFIX)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
 p = f = 0
@@ -135,6 +136,58 @@ ck("orchestrate 角色序列", [m["role"] for m in _ml] == ["user", "assistant",
 ck("tool 配对 id", _ml[2]["tool_call_id"] == _ml[1]["tool_calls"][0]["id"] == "c1")
 ck("tool 结果内容", _ml[2]["content"] == "OUT")
 ck("msg_count=4", oc.msg_count == 4)
+
+
+# ── orchestrate: 每小轮边界注入"用户等待时的补充信息"(M4 边输出边输入)──────────────
+# poll_queue 在**每个小轮边界(第2轮起)** drain 一次;多条合并成**一条** user,前缀 PENDING_PREFIX;
+# 首个小轮不注入;注入位置必须在上一条 tool 结果之后(不能插在 tool_calls 与 tool 之间)。
+oi = Session()
+_qs = {"n": 0, "polls": []}
+
+
+def _cl_inject(msgs):
+    _qs["n"] += 1
+    if _qs["n"] == 1:
+        return "", [{"id": "cX", "name": "list_dir", "arguments": "{}"}], None
+    return "done", [], None
+
+
+def _poll_inject():
+    # 第一次被 poll(第2小轮)返回两条(验证合并),之后空
+    if not _qs["polls"]:
+        _qs["polls"].append(1)
+        return ["补充A", "补充B"]
+    return []
+
+
+_tr = orchestrate(oi, "原始问题", _cl_inject, lambda n, a: "OUT", poll_queue=_poll_inject)
+_mi = messages_list(oi.messages_json)
+_roles = [m["role"] for m in _mi]
+ck("M4注入:最终文本", _tr == "done", _tr)
+ck("M4注入:序列合法(user/assistant/tool/user/assistant)", _roles == ["user", "assistant", "tool", "user", "assistant"], str(_roles))
+_inj = [m for m in _mi if m.get("role") == "user" and (m.get("content") or "").startswith(PENDING_PREFIX)]
+ck("M4注入:恰好一条合并后的 user", len(_inj) == 1, repr([m.get("content") for m in _mi if m.get("role") == "user"]))
+ck("M4注入:合并了 补充A 与 补充B", bool(_inj) and "补充A" in _inj[0]["content"] and "补充B" in _inj[0]["content"], repr(_inj[0]["content"] if _inj else ""))
+ck("M4注入:在 tool 结果之后(不在 tool_calls 与 tool 之间)", _roles.index("user") < len(_roles) - 1 and _roles[3] == "user", str(_roles))
+# 负对照:不传 poll_queue 时不注入(非 TUI 零改动)
+onq = Session()
+_qs2 = {"n": 0}
+
+
+def _cl_noq(msgs):
+    _qs2["n"] += 1
+    if _qs2["n"] == 1:
+        return "", [{"id": "cY", "name": "list_dir", "arguments": "{}"}], None
+    return "done", [], None
+
+
+orchestrate(onq, "原始", _cl_noq, lambda n, a: "OUT")
+_mn = messages_list(onq.messages_json)
+ck("M4注入负对照:无 poll_queue 时不注入(user 只有原始一条)",
+   [m["role"] for m in _mn] == ["user", "assistant", "tool", "assistant"], str([m["role"] for m in _mn]))
+ck("M4注入负对照:无 PENDING_PREFIX 消息",
+   not any(PENDING_PREFIX in (m.get("content") or "") for m in _mn))
+
 
 
 # ── orchestrate: Ctrl+C 保留语义(建议1)──────────────────────────────────────

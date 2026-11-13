@@ -1013,7 +1013,7 @@ def main(argv):
             if _tui.available():
                 from wchat_py.toolrun import _banner_text as _tui_banner
 
-                def _tui_handle_line(_text, _emit, _stream, _reason):
+                def _tui_handle_line(_text, _emit, _stream, _reason, _poll_queue=None):
                     # 一轮 turn,**流式**:正文→stream、思考→reason(暗色);工具横幅经 stdout shim 进 log。
                     def _cl_stream_tui(_m):
                         _t, _tc, _err = _call_llm(_m, "", on_text=_stream, on_reason=_reason)
@@ -1031,7 +1031,7 @@ def main(argv):
                         return _out
 
                     _h2 = session_text_handler(_s, _cl_stream_tui, _run_tool_tui,
-                                               write_final=False)
+                                               write_final=False, poll_queue=_poll_queue)
                     _h2(_text)
 
                 try:
