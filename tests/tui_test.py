@@ -286,10 +286,10 @@ async def _meta_path_check():
         ck("auto 档常驻标记在状态区(#status)", "已自动放行" in _st, repr(_st[-160:]))
         ck("auto 档标记不重复进内容区", "本次会话已自动放行" not in _ct, repr(_ct[-160:]))
 
-        # 思考折叠成**一行**(超宽截断加 …),不因过长换行
+        # 思考折叠成**一行**(单个 Text、无换行);视觉超宽由 CSS nowrap+ellipsis 截断
         _rt = app._render_reason("word " * 300)
         ck("思考折叠为单行(无换行符)", "\n" not in _rt.plain, repr(_rt.plain[:60]))
-        ck("思考折叠超宽以 … 结尾", _rt.plain.endswith("…"), repr(_rt.plain[-20:]))
+        ck("思考折叠带 ▸ 前缀", _rt.plain.startswith("▸ "), repr(_rt.plain[:20]))
 
         # 没有"纯空白"子件(横幅/结果之间的多余空行来自带尾换行或纯 \n 的 write)
         _blanks = []

@@ -260,6 +260,20 @@ TUI 下:
   提交时 `session.parse_placeholders` 读进 input_images(与老 inputbox 同管线)。无图则 bell。
 - 验证:headless tui_test 36/36(新增 Ctrl+V 插入占位行、read_line 路由);全量 76/76。
 
+**M2 UI 精修(用户截图 6 点,2026-11)**:
+1. 去掉内容区顶部提示文本("内容区:模型输出…"),on_mount 不再挂它。
+2. 内容区**去掉边框**(`#contentbox border:none`),与终端融合(输入框仍保留边框)。
+3. 思考折叠**真正单行**:`_render_reason` 只取首个非空行(▸ + 压空白),超宽由 CSS
+   `#content .reason { text-wrap:nowrap; text-overflow:ellipsis }` 保证**一行 + … 截断**
+   (原先手工按宽度算会因内容框比整屏窄而折成两行)。
+4. 滚动条:`#content scrollbar-size-vertical:1; scrollbar-color:gray; scrollbar-background:transparent`
+   → 缩小且灰色,与思考文字同色。
+5. 输入框边框:`#input border:round gray`(原来是 accent 蓝),与思考内容同为灰。
+6. 输入框上方留白:`#status` 默认 `height:0`,仅 auto 开启时加 `.on` 类(`height:auto`)——
+   无 auto 时不留过宽空档。
+- 验证:真 tmux:无提示文本、content 无边框(全屏仅 1 个 ╭=输入框)、思考单行带 …;headless 36/36;全量 76/76。
+  (滚动条/边框"颜色"在文本捕获里不可见,靠 CSS 断言;实际观感需真机确认。)
+
 **M2 追加修(用户实测:回复从底部冒出,而非紧接提问下一行)**:
 - 根因:内容区原为 `RichLog(1fr)` + 其下独立 `#live` Static;RichLog 吃满高度把 #live 顶到**箱底**,
   于是流式从底部冒、与顶部提问之间一大段空白。

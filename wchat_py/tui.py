@@ -209,10 +209,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; }
-        #contentbox { height: 1fr; border: round $primary; }
-        #content { height: 1fr; padding: 0 1; }
-        #status { height: auto; max-height: 6; padding: 0 1; color: $text-muted; }
-        #input { height: auto; max-height: 12; border: round $accent; }
+        #contentbox { height: 1fr; border: none; }
+        #content { height: 1fr; padding: 0 1;
+                   scrollbar-size-vertical: 1;
+                   scrollbar-color: gray;
+                   scrollbar-background: transparent; }
+        #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
+        #status { height: 0; padding: 0; }
+        #status.on { height: auto; max-height: 6; padding: 0 1; color: gray; }
+        #input { height: auto; max-height: 12; border: round gray; }
         ConfirmModal { align: center middle; background: $background 60%; }
         ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
                                background: $surface; padding: 1 2; }
@@ -249,9 +254,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
 
-        def _mount(self, renderable):
+        def _mount(self, renderable, classes=""):
             try:
-                self._content().mount(Static(renderable))
+                w = Static(renderable, classes=classes) if classes else Static(renderable)
+                self._content().mount(w)
                 self._scroll_end()
             except Exception:
                 pass
@@ -269,7 +275,6 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def on_mount(self):
             if banner:
                 self._mount(Text.from_ansi(banner))
-            self._mount(Text("内容区:模型输出在这里逐字出现;底部输入(多行,Ctrl+F 选文件)。", style="dim"))
             self.query_one("#input", ChatInput).focus()
             self.set_interval(0.04, self._drain)
             try:
@@ -338,37 +343,22 @@ def make_app(handle_line, *, banner="", on_meta=None):
             return t
 
         def _render_reason(self, text):
-            """思考渲染:默认**折叠成一行**(▸ + 首个非空行,压空白、按内容区宽度截断、加 …);
-            -tf=on 时整段(render_reason)。保证折叠档只占**一行**(不因过长换行成两行)。"""
+            """思考渲染:默认**折叠成一行**(▸ + 首个非空行、压空白);单行由 CSS
+            (`.reason { text-wrap:nowrap; text-overflow:ellipsis }`)保证,超宽自动 … 截断。
+            -tf=on 时整段(render_reason)。"""
             try:
-                from wchat_py.render import think_full, display_width, render_reason as _rr
+                from wchat_py.render import think_full, render_reason as _rr
                 if think_full():
                     return Text.from_ansi(_rr(text))
-                first, more = "", False
+                first = ""
                 for ln in (text or "").splitlines():
                     s = " ".join(ln.split())
-                    if not s:
-                        continue
-                    if not first:
+                    if s:
                         first = s
-                    else:
-                        more = True
                         break
                 if not first:
                     return Text("")
-                try:
-                    width = max(10, int(self._content().content_size.width or 76) - 1)
-                except Exception:
-                    width = 76
-                out, wpx = "", 0
-                for ch in first:
-                    cw = display_width(ch)
-                    if wpx + cw > width:
-                        more = True
-                        break
-                    out += ch
-                    wpx += cw
-                return Text("▸ " + out + ("…" if more else ""), style="dim")
+                return Text("▸ " + first, style="dim")
             except Exception:
                 return Text(text or "", style="dim")
 
@@ -385,7 +375,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             if reason.strip():
-                self._mount(self._render_reason(reason))
+                self._mount(self._render_reason(reason), classes="reason")
             if answer.strip():
                 try:
                     self._mount(Markdown(answer))
@@ -404,7 +394,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 return
             self._last_marker = m
             try:
-                self.query_one("#status", Static).update(Text.from_ansi(m) if m else "")
+                st = self.query_one("#status", Static)
+                st.update(Text.from_ansi(m) if m else "")
+                # 有标记才占高度(#status.on),否则 collapsed 成 0 —— 无 auto 时不留过宽空档
+                st.set_class(bool(m), "on")
             except Exception:
                 pass
 
