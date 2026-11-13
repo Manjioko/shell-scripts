@@ -395,6 +395,19 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self._mount(Text.from_ansi(banner))
             self.query_one("#input", ChatInput).focus()
             self.set_interval(0.04, self._drain)
+            # TUI 把一轮 turn 放 worker 线程跑,而 signal handler 只能在**主线程**装
+            # (pty_run/install_signal_cleanup 在 worker 里装会被跳过)。这里(on_mount 是主线程)
+            # 先把"被 kill/SIGHUP 时收掉前台 shell 进程组 + MCP daemon"的清理装上,否则 shell 工具
+            # 在 worker 里装不上 → wchat 被杀时前台命令变孤儿。幂等,失败不影响启动。
+            try:
+                from wchat_py.termpty import install_signal_cleanup
+                try:
+                    from wchat_py import mcp_boot as _mbc
+                    install_signal_cleanup(extra=_mbc._atexit_stop)
+                except Exception:
+                    install_signal_cleanup()
+            except Exception:
+                pass
             try:
                 from wchat_py import render as _render
                 _render.set_confirm_hook(self._confirm_blocking)

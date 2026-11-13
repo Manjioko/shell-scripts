@@ -638,5 +638,39 @@ except Exception as e:
     traceback.print_exc()
     ck("退出丢弃队列无异常", False, repr(e))
 
+
+# ---- 14) 回归:worker 线程调 pty_run 不得抛 signal ValueError(TUI 把 turn 放 worker 线程跑)----
+print("=== 14. worker 线程 pty_run(signal 只能在主线程装 → 不得崩) ===")
+import threading as _th
+
+_pres = {}
+
+
+def _run_pty_in_thread():
+    try:
+        from wchat_py.termpty import pty_run
+        d, f, rc, to, intr = pty_run(["bash", "-c", "echo SIGOK; pwd"], timeout=10)
+        _pres["ok"] = True
+        _pres["d"] = d
+    except Exception as _e:
+        _pres["ok"] = False
+        _pres["err"] = repr(_e)
+
+
+_t = _th.Thread(target=_run_pty_in_thread)
+_t.start()
+_t.join(timeout=20)
+ck("worker 线程 pty_run 不抛异常(修复 signal only works in main thread)",
+   _pres.get("ok") is True, _pres.get("err", "timeout/无结果"))
+ck("worker 线程 pty_run 正常执行(SIGOK 在输出里)",
+   any("SIGOK" in ln for ln in (_pres.get("d") or [])), repr(_pres.get("d")))
+# 主线程仍正常(非 TUI 零回归)
+try:
+    from wchat_py.termpty import pty_run as _pr2
+    _d2 = _pr2(["bash", "-c", "echo MAINOK"], timeout=10)[0]
+    ck("主线程 pty_run 仍正常(MAINOK)", any("MAINOK" in ln for ln in _d2), repr(_d2))
+except Exception as _e:
+    ck("主线程 pty_run 仍正常(MAINOK)", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

@@ -89,10 +89,20 @@ def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1,
         except OSError:
             pass
 
-    # 先装 handler 再 spawn，堵住竞态窗口
+    # 先装 handler 再 spawn，堵住竞态窗口。
+    # ⚠ signal.signal 只能在**主线程**装。TUI 把一轮 turn 放 worker 线程跑,这里装会抛
+    # ValueError('signal only works in main thread of the main interpreter')→ 整个 shell 工具
+    # "处理失败"(用户实测)。装不了就退化为**不接管 SIGINT**:TUI 下 Ctrl+C 本就是 Textual 的
+    # 退出键(不经这条);子进程仍 start_new_session,超时/收尾照常 killpg,只是不再响应父进程
+    # SIGINT。非 TUI(主线程)行为完全不变。
+    _sigint_installed = False
     if handle_sigint:
-        old_handler = signal.getsignal(signal.SIGINT)
-        signal.signal(signal.SIGINT, _on_sigint)
+        try:
+            old_handler = signal.getsignal(signal.SIGINT)
+            signal.signal(signal.SIGINT, _on_sigint)
+            _sigint_installed = True
+        except (ValueError, OSError):
+            old_handler = None
 
     master = slave = None
     try:
@@ -113,8 +123,11 @@ def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1,
                     os.close(fd)
                 except OSError:
                     pass
-        if handle_sigint and old_handler is not None:
-            signal.signal(signal.SIGINT, old_handler)
+        if _sigint_installed:
+            try:
+                signal.signal(signal.SIGINT, old_handler)
+            except (ValueError, OSError):
+                pass
         raise
     os.close(slave)
 
@@ -161,8 +174,11 @@ def pty_run(argv, timeout=20.0, win=10, head_n=50, buf_size=300, poll=0.1,
         _ACTIVE["pgid"] = 0      # 已经不归我们管了:别再让信号处理器去杀这个 pgid
                                  # (pgid 会被系统复用,留着会误杀下一条命令)
         os.close(master)
-        if handle_sigint and old_handler is not None:
-            signal.signal(signal.SIGINT, old_handler)
+        if _sigint_installed:
+            try:
+                signal.signal(signal.SIGINT, old_handler)
+            except (ValueError, OSError):
+                pass
 
     text = b"".join(chunks).decode("utf-8", "replace")
     lines = [clean_line(ln) for ln in text.splitlines()]

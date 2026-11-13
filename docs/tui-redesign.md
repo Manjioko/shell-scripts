@@ -399,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 64/64)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 67/67)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
@@ -450,6 +450,26 @@ TUI 下:
   每小轮注入:合并成一条 user/前缀/在 tool 之后/首轮不注入/无 poll_queue 负对照不注入);真 tmux:主问题
   多小轮期间提交两条补充,第 1 轮 poller 一并取走并在**同一条回复**里消费(补答:补充一 补充二),不再当
   独立下一轮;全量闸门 **79/79**。
+
+**M4 追加修(用户实测:`处理失败：ValueError('signal only works in main thread')`)2026-11**:
+- 现象:用户让模型跑 `shell`(run_shell_command)工具,整轮吐 `处理失败: ValueError('signal only works
+  in main thread of the main interpreter')`。
+- 根因(**TUI 引入**):TUI 把一轮 turn 放 worker 线程跑(`@work(thread=True)`),而 `termpty.pty_run`
+  在 spawn 前**无条件** `signal.signal(SIGINT, ...)` 装中断处理器 —— `signal.signal` 只能在主线程装,
+  worker 里必抛 ValueError → shell 工具整轮失败。非 TUI(主线程)不触发。旁证:`cli._call_llm` 的
+  SIGINT 安装早已 `try/except (ValueError,OSError)` 兜住(注释"非主线程装不了"),流式请求那条不崩,
+  只有 pty_run 这条漏了。
+- 修法:
+  · `termpty.pty_run`:装 SIGINT 处理器改 `try/except (ValueError,OSError)` + `_sigint_installed` 标志;
+    装不上就**退化为不接管 SIGINT**(TUI 下 Ctrl+C 本就是 Textual 退出键,不经这条),两处 restore 也按
+    "是否真装上"并兜底。子进程仍 `start_new_session`、超时/收尾照常 killpg。
+  · `tui.WchatApp.on_mount`(主线程):预先 `install_signal_cleanup(extra=mcp._atexit_stop)` —— 因为
+    worker 里装不了,SIGTERM/SIGHUP "被杀也收掉前台 shell 进程组 + MCP daemon" 的清理必须在主线程装,
+    否则 shell 工具在 worker 下装不上 → wchat 被杀时前台命令变孤儿。
+- 验证:**worker 线程**调 `pty_run` 不再抛、正常执行,主线程仍正常;真 tmux worker 线程跑
+  `run_shell_command`(auto 绕过确认)见 `TOOL_OK /path`、`└─ 完成 · 共 2 行`,无 处理失败;
+  `termpty_test` 7/7、`termpty_sig_test` 6/6(含"SIGINT handler 恢复为进入前")、`shell孤儿` 25/25;
+  `tui_test` **67/67**(+worker 线程 pty_run 不抛/正常/主线程仍正常);全量闸门 **79/79**。
 
 ## 七、风险与对策
 
