@@ -983,13 +983,23 @@ def install(argv=None):
     #   · 用户明确 -no-mcp;
     #   · auto 档:无人值守时不允许模型自行拉起外部能力并把内容发出去
     #     (与 -auto 的"白名单启动时一次批好,模型不能半路自己加"同一条纪律);
-    #   · 这台机器从没成功用过 MCP(无标记):白送三个每轮占 ~300 tokens 的工具,
-    #     而绝大多数人根本不碰 MCP。
+    #   · 非交互(管道/重定向/一次性 -st/run-st):脚本/CI 里不该意外拉起外部能力。
+    # **交互(真终端)且非 auto 时:即使没有 .enabled 标记也默认开**(2026-11 用户要求:让模型确信
+    # 随时能调 MCP、无需用户提示、该用就果断用)。仍是**惰性**(只注册 mcp_*,首次调用才探测),
+    # 启动不变慢;清单为空(没配 server)则不注册。`WCHAT_MCP_DEFAULT=0` 可一键退回"仅标记过才开"。
     if os.environ.get("MCP_DISABLE") == "1":
         return
     if _arg_auto(argv):
         return
-    if not _lazy_armed():
+    _rest = argv[1:]
+    _is_single = ("-st" in _rest) or (bool(_rest) and _rest[0] == "run-st")
+    try:
+        _interactive = (not _is_single) and sys.stdin.isatty() and sys.stdout.isatty()
+    except Exception:
+        _interactive = False
+    _default_on = _interactive and (os.environ.get("WCHAT_MCP_DEFAULT", "1").strip().lower()
+                                    not in ("0", "false", "no", "off"))
+    if not (_lazy_armed() or _default_on):
         return
     _ensure_manifest_and_migrate()
     from wchat_py import mcp_bridge as mb

@@ -357,6 +357,53 @@ ck("auto 档不带 -mcp 时惰性**不开**(无人值守不许模型自己拉起
    "AUTO_ENABLE= None" in out, out.strip())
 ck("-no-mcp 记成显式关闭", "NOMCP_DISABLE= 1" in out, out.strip())
 
+print("=== 11b. 交互(真终端)非 auto 默认开 MCP(无需 -mcp/标记);-st 与回退开关不开 ===")
+# 用户要求:让模型确信随时能调 MCP、无需用户提示、该用就果断用。交互真终端下即使没标记也默认开。
+_TTY_WRAP = """
+_real_out = sys.stdout
+class _InT:
+    def isatty(self): return True
+class _OutT:
+    def isatty(self): return True
+    def write(self, s): _real_out.write(s)
+    def flush(self): _real_out.flush()
+sys.stdin = _InT()
+sys.stdout = _OutT()
+os.environ.pop("MCP_LAZY", None)
+"""
+_, out, _ = py(_TTY_WRAP + """
+mcp_boot.install(["wchat"])
+print("ENABLE=", os.environ.get("MCP_ENABLE"))
+print("STATE=", os.environ.get("MCP_STATE"))
+spec = json.loads(tools.build(provider="", mcp_enable=(1 if os.environ.get("MCP_ENABLE") == "1" else 0)))
+print("HAS_MCP=", any(t["function"]["name"].startswith("mcp_") for t in spec))
+mt = [t["function"]["description"] for t in spec if t["function"]["name"] == "mcp_tools"]
+print("NO_MEMORY_BAN=", bool(mt) and ("不要查 memory" in mt[0]))
+mc = [t["function"]["description"] for t in spec if t["function"]["name"] == "mcp_call"]
+print("DECISIVE=", bool(mc) and ("果断" in mc[0]) and ("随时可用" in mc[0]))
+""")
+ck("交互非 auto 默认开(MCP_ENABLE=1,无 -mcp/标记)", "ENABLE= 1" in out, out.strip())
+ck("默认开仍是惰性态(lazy,启动不探测)", "STATE= lazy" in out, out.strip())
+ck("默认开时 mcp_* 进 schema", "HAS_MCP= True" in out, out.strip())
+ck("契约:mcp_tools 描述点名『不要查 memory』", "NO_MEMORY_BAN= True" in out, out.strip())
+ck("契约:mcp_call 描述含『随时可用』与『果断』", "DECISIVE= True" in out, out.strip())
+
+# 一次性 -st:即使真终端也不默认开
+_, out, _ = py(_TTY_WRAP + """
+mcp_boot.install(["wchat", "-st", "hi"])
+print("ENABLE=", os.environ.get("MCP_ENABLE"))
+""")
+ck("一次性 -st 即使真终端也不默认开", "ENABLE= None" in out, out.strip())
+
+# 回退开关 WCHAT_MCP_DEFAULT=0
+_, out, _ = py(_TTY_WRAP + """
+os.environ["WCHAT_MCP_DEFAULT"] = "0"
+mcp_boot.install(["wchat"])
+print("ENABLE=", os.environ.get("MCP_ENABLE"))
+""")
+ck("WCHAT_MCP_DEFAULT=0 一键回退(不开)", "ENABLE= None" in out, out.strip())
+
+
 print("=== 12. 显式 -mcp:探测前先说话(不许静默卡住) ===")
 _, out, err = py("""
 mb.list_json = lambda timeout=None: (None, "stub")

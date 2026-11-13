@@ -1193,3 +1193,24 @@
 > (有 alt-screen/重绘),能抓"resize 出残影/多框";这层**转义序列渲染** run_test 的 region 断言管
 > 不到(它只改 app 尺寸)。缺 tmux 或带 textual 的解释器 → SKIP + exit 77。实测 18/18,连跑两遍稳定。
 > ⚠ 这仍**替代不了** Terminal.app/iTerm2/Ghostty 的肉眼验(真彩/鼠标/字体渲染差异);M3② 待真机。
+
+## MCP 交互默认开 + 决策契约(2026-11)
+
+> **动机**:模型被问"能不能调 MCP"时好时坏——有时确定能、有时去翻文档/读 memory/凭记忆猜。根因见下。
+> **根因**:①`MCP_MANIFEST` 恒为空(为不破 prompt 前缀缓存),MCP 状态/目录只挂在**工具描述**里;
+> ②未启用时 system 里连"MCP"都没有,模型对"开没开"无权威来源;③`ROUTE_HINT` 只讲"何时该用",
+> 没讲"被问到就先查 mcp_tools、别读文档/memory 猜"。
+>
+> **改动 1(决策契约,零缓存代价,`mcp_bridge.py`)**:
+> - `ROUTE_HINT`:明写"**本会话 MCP 随时可用;确信该用就果断调用 mcp_call,不要犹豫/等提示/反复试**";
+>   并加"**被问能否/如何用 MCP 或不确定有哪些 server 时,先调 mcp_tools(不带参)看真实可用性再据实回答;
+>   不要读文档、不要查 memory、不要凭记忆断言——memory/文档是历史记录,以 mcp_tools 实时返回为准**"。
+> - `mcp_tools` 描述:同款点名("不要查 memory/凭记忆断言")。
+>
+> **改动 2(交互默认开,`mcp_boot.install`)**:**交互(真终端 isatty)且非 auto、非一次性(-st/run-st)、
+> 非 -no-mcp 时,即使无 `.enabled` 标记也默认开惰性 MCP**(只注册 mcp_*,首次调用才探测,启动不变慢;
+> 清单空则不注册)。auto 仍不开(无人值守不许模型自行拉外部能力),自动跳过。`WCHAT_MCP_DEFAULT=0` 一键回退。
+>
+> **基线变化**:`MCP启动` **100 → 107**(+7:交互默认开 MCP_ENABLE=1/惰性态/mcp_* 进 schema/契约含
+> "不要查 memory"/mcp_call 含"随时可用+果断"/-st 即使真终端也不开/WCHAT_MCP_DEFAULT=0 回退);
+> `MCP通道` **133/133** 不变。全量 `run=79 pass=79 fail=0 skip=1`。真 tty(pty)实测默认开、管道不开、-st/-auto/-no-mcp 不开。
