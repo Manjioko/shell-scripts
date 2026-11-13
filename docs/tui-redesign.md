@@ -8,7 +8,7 @@
 > | M0 | Textual 外壳 + 输出/输入接线 + 开关灰度 + 闸门 | ✅ 完成(2026-11) |
 > | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ✅ 完成(2026-11,M1-α 流式;M1-β markdown 定稿已用 Markdown 渲染) |
 > | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ✅ 完成(2026-11,含用户实测 5 问题修复) |
-> | M3 | 视觉闸门重写 + 终端兼容矩阵 | ⬜ 未开始 |
+> | M3 | 视觉闸门重写 + 终端兼容矩阵 | 🟡 进行中(①视觉闸门已完成 2026-11;②终端矩阵待真机) |
 > | M4 | (v2)打破串行枷锁:边流式输出边输入 | ⬜ 未开始 |
 >
 > 最近更新:2026-11 · 负责人:见 git blame · 关键结论:**用 Textual,不再手搓 prompt_toolkit**
@@ -345,6 +345,33 @@ TUI 下:
   输入区位置/无重复 widget)。
 - 终端矩阵:Terminal.app / iTerm2 / Ghostty 各跑一遍 resize + 切 tab + 滚动。
 - **这次必须真终端验证**(前几轮的教训:模拟屏护不住)。
+
+**M3① 实现记录(已完成 2026-11)**:
+
+- **旧闸门保留**:`tests/inputbox_layout_test.py`(43 条,真 pty + 最小 VT 屏)守的是
+  **WCHAT_TUI=0 的 prompt_toolkit 老路**——在 TUI 默认开之前老路仍是默认,不能删。等 TUI
+  默认开、老路退役时再一并退休。
+- **新增 `tests/tui_visual_test.py`(TUI 布局闸门,48 条)**:用 Textual `run_test()` 跑**真布局
+  引擎**,读每个 widget 布局后的 `region`(=屏幕坐标)做断言,不是手搓 VT 模拟屏。覆盖:
+  ①恰好 1 输入框/1 内容区/1 状态区(无重复 widget);②输入框**贴底**(region.bottom==屏高)、
+  整宽、在内容区之下;③内容区从顶起、消息顺序堆叠互不重叠、都在内容区内(回复不从底部冒出);
+  ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
+  ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
+  `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 36/36)。
+  为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
+  `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
+  都无才 `SKIP:`+exit 77。闸门数 76→**78**,全量 `run=78 pass=78 fail=0 skip=1`。
+- **为什么不在此闸门测 resize 残影**:Textual 是 alternate-screen、resize 后**增量**重绘
+  (默认终端旧内容还在)。把转义流接到会 reflow 的手搓 VT 屏会漏旧帧、误判残影/漏画——正是
+  "模拟屏护不住"。真观测感只能在**真 GUI 终端**验(见下 M3②)。
+
+**M3② 终端兼容矩阵(待真机,未能自动化)**:
+
+> 需要用户在 Terminal.app / iTerm2 / Ghostty 上各跑一遍,记录:resize(放大/缩小/拖拽)、
+> 切 tab 再回来、应用内滚动(PgUp/滚轮)、长会话滚动后输入框是否贴底、有无残影/多框。
+> 检查表:`WCHAT_TUI=1 ./wchat` → 输几轮 → 拖拽改窗口宽窄各几次 → Cmd+Tab 切走再切回 →
+> 看输入框是否仍单框贴底、内容是否干净。这三家任一有问题,回到本节记现象 + 终端名/版本。
 
 ### 6.5 M4(v2):打破串行枷锁
 

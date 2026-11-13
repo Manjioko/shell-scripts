@@ -162,6 +162,21 @@ GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('docx/pdf→Markdown(read_file集成):类型判定/真实转换/扫描件判空/.doc给提示不吐乱码/未装markitdown降级/缓存命中/Ctrl-F自动读小文件/超限退回分页/pdfminer字体警告压制')
 
+# M3①:Textual TUI 的两道闸门(功能 + 视觉/布局)。它们会**自举**:本机 system python3 无
+# textual 时自动换到 ~/.ct/venv(或 WCHAT_TUI_PY)重新执行;找不到带 textual 的解释器才
+# 打印 SKIP + exit 77(环境性缺席,不计失败)。所以并入套件不会恒 SKIP。
+GATE_NAMES+=('TUI视觉')
+GATE_CMDS+=('python3 tests/tui_visual_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('TUI 布局不变量(run_test 真布局引擎):输入框贴底整宽/内容区从顶起且顺序堆叠不重叠/resize 一组尺寸后仍单输入框且贴底/状态区位置')
+
+GATE_NAMES+=('TUI功能')
+GATE_CMDS+=('python3 tests/tui_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('TUI 交互端到端(headless run_test):续行/流式定稿进内容区/思考折叠/确认弹窗 y·n/InputModal 桥/元命令 -auto=full/粘贴图占位')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。

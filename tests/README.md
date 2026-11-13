@@ -1163,3 +1163,26 @@
 > ⚠ 注意:`文档读取` 闸门在 `run_gates` 里用宿主 `python3` 跑,没装 markitdown 时
 > **真实转换那 12 条会 `-- 跳过`**(不计入总数)。要跑真实档必须用 brew venv 的
 > python:`/opt/homebrew/Cellar/wchat/*/libexec/venv/bin/python3 tests/docread_test.py`。
+
+## Textual TUI 闸门(M3①,2026-11)
+
+> **新增两道闸门并入 run_gates**:`TUI视觉`(`python3 tests/tui_visual_test.py`,**48/48**)
+> 与 `TUI功能`(`python3 tests/tui_test.py`,**36/36**)。闸门数 **76 → 78**;
+> 全量 `run=78 pass=78 fail=0 skip=1`(skip 仍是主套件)。
+>
+> **自举**(本轮关键设计):run_gates 用宿主 `python3`(本机 3.9,无 textual)跑这两道。
+> 它们开头自检 `import textual`,失败则**自动 `os.execv` 到带 textual 的解释器**重新执行
+> (`WCHAT_TUI_PY` → `~/.ct/venv/bin/python` → `.scratch/tui_venv/bin/python`);都找不到才
+> 打印 `SKIP:` + `exit 77`(环境性缺席,不计失败)。→ 并入套件**不会恒 SKIP**,而是真跑。
+>
+> `TUI视觉` 守的是**布局不变量**(用 Textual 自己的 `run_test()` 跑真布局引擎,读每个 widget
+> 布局后的 `region`=屏幕坐标,不是手搓 VT 模拟屏):①恰好 1 输入框/1 内容区/1 状态区(无重复
+> widget);②输入框**贴底**(region.bottom==屏高)、整宽、在内容区之下;③内容区从顶起、消息
+> **顺序堆叠互不重叠**、都在内容区内(回复不从底部冒出);④resize 一组尺寸(60×20/100×30/
+> 40×15/80×24/73×31)后仍**单输入框且贴底、内容区仍在上**;⑤状态区(auto 开)夹在内容区与
+> 输入框之间、auto 关折叠为 0。
+> **变异验证**:把 `Screen{layout:vertical}` 改成 `horizontal` → **22 条红**(证明断言承重),
+> 复原后 48/48。
+> ⚠ **为什么不在这里测 resize 残影**:Textual 是 alternate-screen、resize 后做**增量**重绘
+> (它默认终端旧内容还在)。把转义流接到会 reflow 的手搓 VT 屏上会漏掉旧帧、被误判成残影/漏画
+> —— 正是"模拟屏护不住"。真终端 resize/切 tab/滚动观感**只能在真 GUI 终端验**(§6.4 终端矩阵:M3②)。

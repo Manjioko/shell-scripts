@@ -20,6 +20,32 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 os.environ["WCHAT_NO_SETUP"] = "1"
 
+
+def _import_textual_ok(exe=None):
+    import subprocess
+    try:
+        if exe is None:
+            import textual  # noqa: F401
+            return True
+        return subprocess.run([exe, "-c", "import textual"],
+                              capture_output=True, timeout=30).returncode == 0
+    except Exception:
+        return False
+
+
+# 本进程无 textual(如 run_gates 用的 system python3 3.9):找一个带 textual 的解释器
+# 重新执行本文件,这样闸门在套件里**真的跑**,而不是恒 SKIP。找不到才 SKIP(exit 77)。
+if not _import_textual_ok():
+    if not os.environ.get("WCHAT_TUI_REEXEC"):
+        for _exe in (os.environ.get("WCHAT_TUI_PY"),
+                     os.path.expanduser("~/.ct/venv/bin/python"),
+                     os.path.join(REPO, ".scratch", "tui_venv", "bin", "python")):
+            if _exe and os.path.exists(_exe) and _import_textual_ok(_exe):
+                os.environ["WCHAT_TUI_REEXEC"] = "1"
+                os.execv(_exe, [_exe, os.path.abspath(__file__)] + sys.argv[1:])
+    print("SKIP: textual 未安装且找不到带 textual 的解释器(TUI 为可选功能;可设 WCHAT_TUI_PY)")
+    sys.exit(77)
+
 P = F = 0
 
 
