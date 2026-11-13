@@ -58,6 +58,7 @@ for _ in range(50):
 env = dict(os.environ,
            BASE_URL="http://127.0.0.1:%d/v1/chat/completions" % port,
            WCHAT_API_KEY="sk-stub",
+           WCHAT_TUI="0",   # 本闸门测的是**旧 prompt_toolkit 路径**的 Ctrl+C 语义;钉死走老路
            PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""),
            CT_HOME=os.path.join(d, "ct"),
            WCHAT_HISTORY_DIR=os.path.join(d, "hist"),

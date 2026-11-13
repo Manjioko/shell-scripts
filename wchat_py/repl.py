@@ -129,13 +129,13 @@ def _default_meta(action, arg, session=None):
         if not _tui:
             sys.stdout.write("请从以下编号中选择你要加载的历史记录：\n")
             for i, name in enumerate(names):
-                sys.stdout.write("%d. %s\n" % (i, name))
+                sys.stdout.write("%d. %s\n" % (i + 1, name))   # 1 基(用户要求:更直观)
             sys.stdout.write("_>"); sys.stdout.flush()
         try:
             from wchat_py.render import read_line as _read_line
             # TUI 下 stdin 归事件循环,readline 不可用 → read_line 弹(可带列表的)输入框;
             # 非 TUI 退回 readline(列表已打到 stdout,choices 传 None 被忽略)。
-            num = (_read_line("请输入要加载的历史编号(回车=0)",
+            num = (_read_line("请输入要加载的历史编号(回车=1)",
                               choices=(names if _tui else None)) or "").strip()
         except KeyboardInterrupt:
             sys.stdout.write("\n"); sys.stdout.flush()
@@ -143,11 +143,11 @@ def _default_meta(action, arg, session=None):
         except Exception:
             num = ""
         if not num:
-            num = "0"
-        if not num.isdigit() or not (0 <= int(num) < len(files)):
+            num = "1"                              # 回车 = 1 = 最新一条(索引 0)
+        if not num.isdigit() or not (1 <= int(num) <= len(files)):
             sys.stdout.write("请选择正确的编号\n"); sys.stdout.flush()
             return True
-        path = files[int(num)][1]
+        path = files[int(num) - 1][1]
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
                 data = _json.load(f)

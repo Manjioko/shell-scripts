@@ -290,7 +290,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             rows = []
             for i in range(start, end):
                 name = self._choices[i].replace("\n", " ").replace("\r", " ").replace("\t", " ")
-                rows.append("%d. %s" % (i, name[:80]))
+                rows.append("%d. %s" % (i + 1, name[:80]))   # 1 基(与 list_history 解析一致)
             try:
                 self.query_one("#hist_list", Static).update(Text("\n".join(rows) or "(无)"))
                 hint = "第 %d/%d 页 · l=上一页 n=下一页" % (self._page + 1, self._pages)
@@ -705,6 +705,12 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         @work(thread=True, exclusive=True)
         def _run_turn(self, text):
+            # 新一轮开始:清除上一轮可能残留的取消标志(防御性)。
+            try:
+                from wchat_py import cli as _cli
+                _cli.clear_llm_cancel()
+            except Exception:
+                pass
             o_out, o_err = sys.stdout, sys.stderr
             sys.stdout = TuiStdout(self)
             sys.stderr = TuiStdout(self, style="bold red")
@@ -746,6 +752,12 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._has_blocks = False
 
         def _on_turn_done(self):
+            # 本轮结束:清掉取消标志(否则下一轮首个请求会被立刻取消)。
+            try:
+                from wchat_py import cli as _cli
+                _cli.clear_llm_cancel()
+            except Exception:
+                pass
             self._drain()
             self._finalize_live()
             self._busy = False
@@ -765,14 +777,42 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
 
-        def action_maybe_quit(self):
-            # Ctrl+C/Ctrl+D 退出:按用户要求**丢弃**排队中的补充消息(不再自动续发)。
+        def _force_quit(self):
+            """真正退出:丢弃排队消息 + 清取消标志,exit。"""
+            try:
+                from wchat_py import cli as _cli
+                _cli.clear_llm_cancel()
+            except Exception:
+                pass
             try:
                 while True:
                     self._pending.get_nowait()
             except queue.Empty:
                 pass
             self.exit()
+
+        def action_maybe_quit(self):
+            """Ctrl+C:正在跑 → **打断当前轮**(保留已完成部分,不退出);空闲 → 退出。
+            连按(1.5s 内)始终视为强退。这符合直觉:跑着时想停下当前输出,而不是关掉整个会话。"""
+            import time as _t
+            now = _t.monotonic()
+            _last = getattr(self, "_last_ctrlc", 0.0)
+            self._last_ctrlc = now
+            if self._busy:
+                if now - _last <= 1.5:
+                    self._force_quit()          # 连按两次 = 急停强退
+                    return
+                try:
+                    from wchat_py import cli as _cli
+                    _cli.request_llm_cancel()
+                except Exception:
+                    pass
+                try:
+                    self._mount(Text("⏹ 正在中断本轮…(再按一次 Ctrl+C 退出)", style="dim"), sep=False)
+                except Exception:
+                    pass
+                return
+            self._force_quit()
 
     return WchatApp()
 

@@ -262,9 +262,9 @@ async def run_app_checks():
             sc = app.screen
             list_txt = str(getattr(sc.query_one("#hist_list"), "content", ""))
             page_txt = str(getattr(sc.query_one("#hist_page"), "content", ""))
-            ck("弹窗内列出候选(第 1 页含 0. 与 9. 条目)",
-               "0. 对话-00.json" in list_txt and "9. 对话-09.json" in list_txt, repr(list_txt[:80]))
-            ck("第 1 页不显示第 11 条(只在第 2 页)", "10. 对话-10.json" not in list_txt, repr(list_txt[-60:]))
+            ck("弹窗内列出候选(第 1 页含 1. 与 10. 条目,1 基)",
+               "1. 对话-00.json" in list_txt and "10. 对话-09.json" in list_txt, repr(list_txt[:80]))
+            ck("第 1 页不显示第 11 条(只在第 2 页)", "11. 对话-10.json" not in list_txt, repr(list_txt[-60:]))
             ck("分页提示显示 1/2 页", "1/2" in page_txt and "l=上一页" in page_txt, repr(page_txt))
             for k in keypresses:
                 await pilot.press(k)
@@ -273,8 +273,8 @@ async def run_app_checks():
             if "n" in keypresses:
                 list_txt2 = str(getattr(sc.query_one("#hist_list"), "content", ""))
                 page_txt2 = str(getattr(sc.query_one("#hist_page"), "content", ""))
-                ck("按 n 翻到第 2 页(显示 10. 与 14.)",
-                   "10. 对话-10.json" in list_txt2 and "14. 对话-14.json" in list_txt2, repr(list_txt2[:80]))
+                ck("按 n 翻到第 2 页(显示 11. 与 15.)",
+                   "11. 对话-10.json" in list_txt2 and "15. 对话-14.json" in list_txt2, repr(list_txt2[:80]))
                 ck("第 2 页提示 2/2", "2/2" in page_txt2, repr(page_txt2))
             sc.query_one("#imput", Input).value = value
             await pilot.press("enter")
@@ -465,6 +465,7 @@ async def _list_history_check():
         ck("read_line 收到 choices(候选条目数=13)", isinstance(ch, list) and len(ch) == 13, repr(type(ch)))
         ck("choices 是历史文件名(含 convo-00.json)", isinstance(ch, list) and any("convo-00.json" in str(x) for x in ch))
         ck("问题文案是'请输入要加载的历史编号'", "历史编号" in (captured.get("q") or ""), repr(captured.get("q")))
+        ck("编号提示是 1 基(回车=1)", "回车=1" in (captured.get("q") or ""), repr(captured.get("q")))
         _out = buf.getvalue()
         ck("改走弹窗后,不再把『请从以下编号中选择』刷到 stdout(背景不再重复刷屏)",
            "请从以下编号中选择" not in _out, repr(_out[:120]))
@@ -614,20 +615,22 @@ async def _m4_quit_drops_check():
     app = tui.make_app(lambda t, e, s, r: None, banner="b")
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.pause()
-        app._pending.put("x")
-        app._pending.put("y")
+        _orig_exit = app.exit
+        app.exit = lambda *a, **k: None      # 桩掉真正退出(只验清队列逻辑)
         try:
-            app.action_maybe_quit()
-        except Exception:
-            pass
-        await pilot.pause()
-        rem = []
-        try:
-            while True:
-                rem.append(app._pending.get_nowait())
-        except _q.Empty:
-            pass
-        ck("action_maybe_quit 清空排队消息(丢弃)", rem == [], repr(rem))
+            app._pending.put("x")
+            app._pending.put("y")
+            app.action_maybe_quit()          # 空闲 → 走 _force_quit:清队列
+            await pilot.pause()
+            rem = []
+            try:
+                while True:
+                    rem.append(app._pending.get_nowait())
+            except _q.Empty:
+                pass
+            ck("action_maybe_quit 清空排队消息(丢弃)", rem == [], repr(rem))
+        finally:
+            app.exit = _orig_exit
 
 
 try:
@@ -746,6 +749,123 @@ try:
     ck("宽度覆盖:超宽以 … 收尾", _plain.endswith("…"), repr(_plain[-6:]))
 finally:
     _RR.set_term_cols(_prev_cols)
+
+
+# ---- 16) Ctrl+C:跑着时=打断本轮(不退出);空闲时=退出;结束清取消标志 ----
+print("=== 16. Ctrl+C:busy 打断本轮不退出 / idle 退出 / 结束清取消 ===")
+
+
+async def _ctrlc_check():
+    import time as _t
+    order = []
+
+    def hl(text, emit, stream, reason):
+        order.append("start")
+        _t.sleep(0.8)
+        order.append("end")
+
+    app = tui.make_app(hl, banner="b")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        from wchat_py import cli as _cli
+        _cli.clear_llm_cancel()
+        _orig_exit = app.exit
+        inp = app.query_one("#input", TextArea)
+        inp.text = "go"
+        await pilot.press("enter")
+        for _ in range(60):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if "start" in order:
+                break
+        ck("第一轮已开始(busy)", app._busy is True and "start" in order, repr(order))
+        # busy 时 Ctrl+C:只在这一次 action 调用期间 stub exit,之后立即还原(别破坏 run_test 关停)
+        called = {"v": False}
+        app.exit = lambda *a, **k: called.__setitem__("v", True)
+        try:
+            app.action_maybe_quit()
+        finally:
+            app.exit = _orig_exit
+        await pilot.pause()
+        ck("busy 时 Ctrl+C 置取消标志", _cli.llm_cancelled() is True, repr(_cli.llm_cancelled()))
+        ck("busy 时 Ctrl+C 不退出", called["v"] is False, repr(called))
+        ck("busy 时提示正在中断", "正在中断" in _content_text(app), repr(_content_text(app)[-90:]))
+        for _ in range(160):
+            await pilot.pause()
+            await asyncio.sleep(0.05)
+            if "end" in order and not app._busy:
+                break
+        await asyncio.sleep(0.1)
+        await pilot.pause()
+        ck("本轮结束后取消标志被清除(下一轮不会被误取消)", _cli.llm_cancelled() is False,
+           repr(_cli.llm_cancelled()))
+        # 空闲时 Ctrl+C:同样只在单次调用期间 stub exit
+        called2 = {"v": False}
+        app.exit = lambda *a, **k: called2.__setitem__("v", True)
+        try:
+            app.action_maybe_quit()
+        finally:
+            app.exit = _orig_exit
+        await pilot.pause()
+        ck("空闲时 Ctrl+C 退出", called2["v"] is True, repr(called2))
+        _cli.clear_llm_cancel()
+
+
+try:
+    asyncio.run(_ctrlc_check())
+except Exception as e:
+    import traceback
+    traceback.print_exc()
+    ck("Ctrl+C 打断接线无异常", False, repr(e))
+
+
+# ---- 17) 取消 watcher 单测(假进程,确定性):置位 → kill 进程 + 置 abort;不置位不误杀 ----
+print("=== 17. 取消 watcher:置位就 kill 进程并置 abort;进程已结束则不动 ===")
+
+
+class _FakeProc:
+    def __init__(self):
+        self.killed = False
+        self._alive = True
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+
+import time as _tt  # noqa: E402
+from wchat_py import cli as _clicli  # noqa: E402
+
+# a) 进程活着 + 先不取消 → 短时间内不 kill
+_p1 = _FakeProc()
+_dummy = _clicli._spawn_cancel_watcher(_p1, lambda: None)
+_clicli.clear_llm_cancel()
+_tt.sleep(0.2)
+ck("watcher:未取消时不 kill 活进程", _p1.killed is False)
+
+# b) 置取消 → watcher kill 进程并把 abort 置真
+_aborted = {"v": False}
+_p2 = _FakeProc()
+_dummy2 = _clicli._spawn_cancel_watcher(_p2, lambda: _aborted.__setitem__("v", True))
+_clicli.request_llm_cancel()
+for _ in range(40):
+    _tt.sleep(0.03)
+    if _p2.killed:
+        break
+ck("watcher:置取消后 kill 了进程", _p2.killed is True)
+ck("watcher:置取消后把 abort 置真", _aborted["v"] is True)
+_clicli.clear_llm_cancel()
+
+# c) 进程已自行结束(poll 非 None)→ watcher 退出、不 kill
+_p3 = _FakeProc(); _p3._alive = False
+_clicli.request_llm_cancel()
+_dummy3 = _clicli._spawn_cancel_watcher(_p3, lambda: None)
+_tt.sleep(0.15)
+ck("watcher:进程已结束时不再 kill", _p3.killed is False)
+_clicli.clear_llm_cancel()
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

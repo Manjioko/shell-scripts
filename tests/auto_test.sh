@@ -476,7 +476,7 @@ run_case() {
     ( cd "$BASE/proj" && env -u AUTO_MODE -u WCHAT_AUTO_MODE -u CT_HOME \
       -u WCHAT_AUTO_APPROVALS -u WCHAT_AUTO_BACKUPS -u WCHAT_AUTO_BACKUP_DIR \
       -u WORK_ROOT -u WCHAT_MODEL -u WCHAT_THINKING -u WCHAT_HISTORY_DIR \
-      -u WCHAT_CHAT_TITLE -u AUTO_AUDIT_LOG \
+      -u WCHAT_CHAT_TITLE -u AUTO_AUDIT_LOG WCHAT_TUI=0 \
       BASE_URL="http://127.0.0.1:$port/v1/chat/completions" \
       PYTHONPATH="$(dirname "$REAL")${PYTHONPATH:+:$PYTHONPATH}" \
       E2E_FEED="$feed" MAX_TOOL_ROUNDS="$mtr" CMD_TIMEOUT="${CMD_TIMEOUT:-20}" \

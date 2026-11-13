@@ -15,6 +15,14 @@ import os
 import re
 import sys
 
+# 流式取消通道(TUI 下 Ctrl+C 打断当前轮):实现在 wchat_py/cancel.py(纯 stdlib,不 import cli)。
+# 这里保留薄别名,维持 `cli.request_llm_cancel()` 等旧调用面不变。
+from wchat_py import cancel as _cancel
+request_llm_cancel = _cancel.request
+clear_llm_cancel = _cancel.clear
+llm_cancelled = _cancel.cancelled
+_spawn_cancel_watcher = _cancel.spawn_watcher
+
 # MCP 清单默认位:**在 ~/.ct/ 下**,与 config/history/skills 同源。
 # (上游默认位留给 mcporter 自己的 daemon socket / vault —— 那是运行态,不是配置。)
 def inp_msg(msg=""):
@@ -308,6 +316,13 @@ def _call_llm(msgs, model, on_text=None, on_reason=None):
         _old_int = _signal.signal(_signal.SIGINT, _on_sigint)
     except (ValueError, OSError):
         _old_int = None          # 非主线程装不了处理器:退回默认行为
+    # TUI 取消通道:worker 里装不了 SIGINT,用一个守护 watcher 轮询 `_LLM_CANCEL`,置位就
+    # kill 子进程(读循环 EOF)并置 _LLM_ABORT → 抛 Aborted 保留半截正文。非 TUI 无人 set,空转。
+    def _set_abort():
+        global _LLM_ABORT
+        _LLM_ABORT = True
+
+    _spawn_cancel_watcher(p, _set_abort)
     try:
         text, tcs, err = _consume_stream(p, on_text, on_reason)
     finally:
@@ -1004,11 +1019,15 @@ def main(argv):
         _first_act = os.environ.pop("WCHAT_FIRST_ACTION", "")
         if _first_act:
             _meta(_first_act, "")
-        # ── Textual 全屏 TUI(M0,见 docs/tui-redesign.md)──
-        # 仅在 交互 TTY + 显式 WCHAT_TUI=1 + textual 可用 时启用;任一不满足都走原路径。
-        # 目标是根治输入框 resize/切 tab 残影与流箱漂移(全屏每帧整屏重绘)。M0 先做
-        # 非流式(整段落地)+ 输入→一轮;流式/输入特性/确认弹窗见 M1/M2。
-        if sys.stdin.isatty() and os.environ.get("WCHAT_TUI") == "1":
+        # ── Textual 全屏 TUI(见 docs/tui-redesign.md;M0–M4 已完成)──
+        # **默认开启**(M4 收尾):交互 TTY + 未显式关闭 + textual 可用 → 走 TUI。
+        # 关闭方式:`WCHAT_TUI=0`(或 false/no/off)→ 走旧 prompt_toolkit 路径。
+        # 非 TTY / 管道 / 子命令 / `-st` 天然不进这里(isatty 门);textual 不可用则**静默回退**旧交互。
+        _tui_env = os.environ.get("WCHAT_TUI")
+        _tui_on = True
+        if _tui_env is not None:
+            _tui_on = str(_tui_env).strip().lower() not in ("0", "false", "no", "off")
+        if sys.stdin.isatty() and _tui_on:
             from wchat_py import tui as _tui
             if _tui.available():
                 from wchat_py.toolrun import _banner_text as _tui_banner
@@ -1043,8 +1062,11 @@ def main(argv):
                     sys.stderr.write("⚠ TUI 启动失败(%r),回退到基础交互\n" % (_te,))
                     sys.stderr.flush()
             else:
-                sys.stderr.write("⚠ WCHAT_TUI=1 但未安装 textual(`pip install textual`),回退基础交互\n")
-                sys.stderr.flush()
+                # 默认开但没装 textual:静默回退旧交互(不该每次启动都吓人)。
+                # 只有用户**显式**要 TUI(WCHAT_TUI=1/true)却没装时才提示一句。
+                if _tui_env is not None and _tui_on:
+                    sys.stderr.write("⚠ WCHAT_TUI 已开启但未安装 textual(`pip install textual`),回退基础交互\n")
+                    sys.stderr.flush()
         if sys.stdin.isatty():
             from wchat_py.render import StreamBox, render_reason, render_markdown
             _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))

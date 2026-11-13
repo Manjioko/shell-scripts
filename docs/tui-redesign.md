@@ -8,8 +8,8 @@
 > | M0 | Textual 外壳 + 输出/输入接线 + 开关灰度 + 闸门 | ✅ 完成(2026-11) |
 > | M1 | 流式接入(退役 StreamBox)+ 应用内滚动 | ✅ 完成(2026-11,M1-α 流式;M1-β markdown 定稿已用 Markdown 渲染) |
 > | M2 | 输入特性迁移 + 确认/审批 ModalScreen | ✅ 完成(2026-11,含用户实测 5 问题修复) |
-> | M3 | 视觉闸门重写 + 终端兼容矩阵 | 🟡 进行中(①视觉闸门已完成 2026-11;②终端矩阵待真机) |
-> | M4 | (v2)打破串行枷锁:边流式输出边输入 | ✅ 完成(2026-11,补充信息注入:每小轮边界并入本轮;纯问答顺延下一轮) |
+> | M3 | 视觉闸门重写 + 终端兼容矩阵 | ✅ 完成(2026-11,①视觉闸门 48/48;②Terminal.app/iTerm2/Ghostty 用户真机验通过 + tmux 冒烟 18/18) |
+> | M4 | (v2)打破串行枷锁:边流式输出边输入 | ✅ 完成(2026-11,补充信息注入 + Ctrl+C 打断当前轮 + `-l` 1 基 + TUI 默认开) |
 >
 > 最近更新:2026-11 · 负责人:见 git blame · 关键结论:**用 Textual,不再手搓 prompt_toolkit**
 >
@@ -399,7 +399,7 @@ TUI 下:
   ④resize 一组尺寸(60×20/100×30/40×15/80×24/73×31)后仍单输入框且贴底、内容区仍在上;
   ⑤状态区(auto 开)夹在内容区与输入框之间、auto 关折叠为 0。**变异验证**:把
   `Screen{layout:vertical}` 改 `horizontal` → 22 条红,复原后 48/48。
-- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 75/75)。
+- **两道 TUI 闸门并入 `run_gates`**:`TUI视觉`(48/48)+ `TUI功能`(`tui_test.py` 86/86)。
   为解决"宿主 python3(3.9)无 textual"问题,两文件开头**自举**:`import textual` 失败则
   `os.execv` 到带 textual 的解释器(`WCHAT_TUI_PY`→`~/.ct/venv`→`.scratch/tui_venv`)重跑,
   都无才 `SKIP:`+exit 77。
@@ -488,6 +488,21 @@ TUI 下:
   横幅在 84/60 列都**单行 `…` 收尾不折第二行**。`tui_test` **75/75**(+块间距 `.blk` 归属断言、term_cols
   覆盖=内容区宽度、超长横幅单行≤宽度以 … 收尾);`渲染字节` 9/9;全量闸门 **79/79**。
 
+**M4 收尾三件套(2026-11,用户确认全做)**:
+
+① **Ctrl+C = 打断当前轮(不再一次即退出)**:先前 TUI 把 `ctrl+c → maybe_quit → exit()`,一圈输出到一半按一下就把整个会话关了、半截也丢。改为:
+   · 新增取消通道 `wchat_py/cancel.py`(纯 stdlib,独立模块 —— cli.py 有行数上限):线程安全 Event + `spawn_watcher(p, set_abort)` 守护线程轮询。
+   · `_call_llm` 起 watcher:取消置位 → `p.kill()` + 置 `_LLM_ABORT` → 读循环 EOF → 抛 `Aborted(半截正文)` → `orchestrate` **保留已完成部分**(用户那句 + 已流出正文照常进上下文)→ 回输入框,会话继续。
+   · TUI `action_maybe_quit`:忙时(跑着)单按 Ctrl+C = **请求取消本轮**(挂"⏹ 正在中断…"),不退出;连按(1.5s 内)两次 = 强退;空闲时 = 退出。`_on_turn_done`/`_run_turn` 起止清取消标志(免误取消下一轮);`_force_quit` 清队列+取消标志。
+   · 注意:Ctrl+C 在 TUI 里是 Textual 按键(不是 SIGINT,worker 也装不了 handler),所以不能靠 signal,必须在流式读循环里用 watcher kill 子进程 —— 与老非 TUI 的 SIGINT 路径并存(非 TUI 零改动)。
+   · 真 tmux e2e(真 TUI + 慢速桩流):Ctrl+C 前见半截正文在流;按 Ctrl+C 后 `⏹ 正在中断本轮…` → **半截保留在屏上** → `⏹ 已中断。本轮已完成的部分已保留 1 条` → 进程仍在;再发一句仍能回复(会话继续)。
+
+② **`-l` 历史编号改 1 基**:`repl._default_meta` 的 list_history 显示从 `0.` 起改为 `1.` 起,回车默认 `1`(=最新一条),解析 `files[int(num)-1]`(`1<=num<=len`);`HistoryPickModal` 显示同步 1 基。老 non-TUI 的 stdout 列表也一并 1 基(同一函数,一致)。
+
+③ **`WCHAT_TUI` 默认开**:`cli.main(["repl"])` 的判定改为"交互 TTY + 未显式关闭 + textual 可用 → 走 TUI";`WCHAT_TUI=0/false/no/off` 关闭回旧路径;textual 不可用**静默回退**(仅当用户显式要 TUI 却缺 textual 才提示)。老 prompt_toolkit 路仍完整保留。**旧路径 tty e2e 闸门**(`interrupt_e2e`/`py_entry_e2e`/主套件 `auto_test.sh`)钉了 `WCHAT_TUI=0`,专注测老路。
+
+- 验证:headless `tui_test` **86/86**(+Ctrl+C busy 打断不退出/空闲退出/结束清取消 + watcher 假进程单测:取消→kill+abort、未取消不 kill、进程已结束不 kill + 历史 1 基);`会话编排` 82/82(Aborted 保留语义);真 tmux Ctrl+C 打断保留+会话继续;`分层结构` 38/38(cli.py 1246 行 ≤1250,取消通道已抽到独立模块);`发行包` 47/47、`安装完整性` 15/15(新模块随包);全量闸门 **79/79 fail=0**。
+
 ## 七、风险与对策
 
 | 风险 | 影响 | 对策 |
@@ -502,7 +517,8 @@ TUI 下:
 
 ## 八、回滚
 
-- 运行期:`WCHAT_TUI` 不设 = 旧路径(默认关闭,直到 M3 验收通过再考虑默认开)。
+- 运行期:**默认开 TUI**(交互 TTY + textual 可用);`WCHAT_TUI=0`(或 false/no/off)= 走旧路径。
+  textual 不可用则静默回退旧交互。M3/M4 均已验收。
 - 代码级:每阶段独立提交,可单独 revert。
 
 ## 九、待定问题(推进中填)

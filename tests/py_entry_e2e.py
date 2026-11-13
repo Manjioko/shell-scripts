@@ -64,8 +64,8 @@ for _ in range(50):
         time.sleep(0.1)
 
 env = dict(os.environ, BASE_URL="http://127.0.0.1:%d/v1/chat/completions" % port,
-           WCHAT_API_KEY="sk-stub", PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""),
-           TERM="xterm-256color")
+           WCHAT_API_KEY="sk-stub", WCHAT_TUI="0",
+           PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""), TERM="xterm-256color")
 master, slave = pty.openpty()
 p = subprocess.Popen([PY, "-m", "wchat_py.cli", "repl"],
                      stdin=slave, stdout=slave, stderr=slave, env=env, cwd=d)
