@@ -493,6 +493,406 @@ def guess_group(pairs=None, fallback="main"):
     return fallback
 
 
+# ---------------------------------------------------------------- 组管理(add / rm / list / edit)
+#
+# 配置天然就是多组的(同家几行用行尾 `# @model <组名>` 归组,活动组去注释、其余注释)。
+# 这里补的是"填配置"这一侧之前缺的组级操作:新增一组、删一组、列出、编辑指定组。
+# 关键约束(都为了不伤到用户已有配置):
+#   · 新增一组默认**不切换**(不动当前生效组),建完再问要不要切过去,默认否;
+#   · 组名不允许与已存在的重名(重名=覆盖,会静默改掉别人);
+#   · 删的是生效组时,自动把剩下的第一组设为生效(否则整个文件没有生效行,运行期读不到配置);
+#   · 编辑某组时默认值取**那一组**的存量,不是当前生效组。
+
+DOMAIN_TOKENS = ("deepseek", "qwen", "mimo", "openai", "moonshot", "zhipu", "glm",
+                 "anthropic", "gemini", "ollama", "localhost", "127.0.0.1")
+
+
+def guess_new_group(pairs=None):
+    """给"新增一组"猜组名:只看域名,**不**回落到当前生效组(否则一加就跟自己重名)。猜不到返回空串。"""
+    bu = ((pairs or {}).get("BASE_URL") or "").lower()
+    for token in DOMAIN_TOKENS:
+        if token in bu:
+            return {"127.0.0.1": "local", "localhost": "local"}.get(token, token)
+    return ""
+
+
+def _save_lines(lines):
+    """把完整行列表原子写回 config(备份 + 600)。供删除/重排等组操作用。"""
+    p = config_path()
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    body = "\n".join(lines).rstrip() + "\n"
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            old = f.read()
+        if old != body:
+            with open(p + ".bak", "w", encoding="utf-8") as f:
+                f.write(old)
+            os.chmod(p + ".bak", 0o600)
+    except OSError:
+        pass
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(body)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, p)
+    os.chmod(p, 0o600)
+    return p
+
+
+def _activate_only(lines, name):
+    """把 name 组设为唯一生效组(去注释它、注释其它),原地改 lines。与 write_group 第③步同义。"""
+    for i, line in enumerate(lines):
+        p = _parse_line(line)
+        if not p:
+            continue
+        _ind, commented, key, val, group = p
+        if not group:
+            continue
+        if group == name:
+            if commented:
+                lines[i] = _render(key, val, group, commented=False)
+        elif not commented:
+            lines[i] = _render(key, val, group, commented=True)
+
+
+def list_groups(verbose=True):
+    """列出所有模型组,标记当前生效;verbose 时带地址/打码 key/模型名。"""
+    groups = read_groups()
+    if not groups:
+        _w("")
+        _w("  还没有任何模型组。跑 `wchat -config` 填一组,或 `wchat -config add` 新增。")
+        _w("")
+        return
+    act = active_group()
+    _w("")
+    _w("  模型组(共 %d 组,* = 当前生效):" % len(groups))
+    for name in model_groups():
+        info = groups.get(name, {})
+        mark = "*" if name == act else " "
+        if verbose:
+            host = (info.get("BASE_URL", "") or "")
+            host = host.replace("https://", "").replace("http://", "").split("/")[0]
+            _w("   %s %-12s %s  key %s  flash=%s  pro=%s"
+               % (mark, name, host or "(无地址)", mask(info.get("WCHAT_API_KEY", "")),
+                  info.get("FLASH_MODEL", "") or "-", info.get("PRO_MODEL", "") or "-"))
+        else:
+            _w("   %s %s" % (mark, name))
+    if not act:
+        _w("")
+        _w("  \033[2m(当前没有生效组 —— 用 `wchat model <名字>` 切一个)\033[0m")
+    _w("")
+
+
+def remove_group(name):
+    """删除一组(所有带 @model 该组名的行)。返回 (rc, 说明尾巴)。"""
+    name = (name or "").strip()
+    groups = model_groups()
+    if name not in groups:
+        return RC_NEED_USER, "没有这个模型组:%s(现有:%s)" % (name, " ".join(groups) or "(无)")
+    lines = _read_lines()
+    was_active = (active_group() == name)
+    kept = []
+    for line in lines:
+        p = _parse_line(line)
+        if p and p[4] == name:          # group == name
+            continue
+        kept.append(line)
+    # 删掉一块会留下空行:连续空行收敛成一条,去尾部空行
+    out = []
+    for ln in kept:
+        if ln.strip() == "" and out and out[-1].strip() == "":
+            continue
+        out.append(ln)
+    while out and out[-1].strip() == "":
+        out.pop()
+    remaining = []
+    for ln in out:
+        m = MARK.search(ln)
+        if m and m.group(1) not in remaining:
+            remaining.append(m.group(1))
+    if was_active and remaining:
+        _activate_only(out, remaining[0])
+    _save_lines(out)
+    if not remaining:
+        return RC_OK, ("已删除最后一组 %s —— 现在没有可用配置,请 `wchat -config` 重新填" % name)
+    if was_active:
+        return RC_OK, "已删除 %s;它原本是生效组,已把 %s 设为生效" % (name, remaining[0])
+    return RC_OK, "已删除 %s(当前生效组仍是 %s)" % (name, active_group() or "(无)")
+
+
+def _collect_fields(existing):
+    """逐项问 BASE_URL/key/FLASH_MODEL(必填)与 PRO_MODEL(可选)。返回 vals(只含改动或需填的键)。"""
+    vals = {}
+    for f in ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL"):
+        v, changed = _ask(f, existing.get(f, ""))
+        if changed:
+            vals[f] = v
+        elif not (existing.get(f) or "").strip():
+            vals[f] = ""
+        _w("")
+    pm, pm_changed = _ask("PRO_MODEL", existing.get("PRO_MODEL", ""), label="PRO_MODEL(可选)")
+    if pm_changed:
+        vals["PRO_MODEL"] = pm
+    _w("")
+    return vals
+
+
+def _finalize(existing, vals):
+    """合并 + 规范化 BASE_URL + PRO_MODEL 跟随 → (merged, issues)。会就地更新 vals 里的地址/模型。"""
+    merged = dict(existing)
+    merged.update({k: v for k, v in vals.items() if v})
+    if merged.get("BASE_URL"):
+        merged["BASE_URL"] = normalize_base_url(merged["BASE_URL"])
+        if vals.get("BASE_URL"):
+            vals["BASE_URL"] = merged["BASE_URL"]
+    if not merged.get("PRO_MODEL") and merged.get("FLASH_MODEL"):
+        merged["PRO_MODEL"] = merged["FLASH_MODEL"]
+        vals.setdefault("PRO_MODEL", merged["FLASH_MODEL"])
+    return merged, validate(merged)
+
+
+def _ask_new_group(existing_names, suggest=""):
+    """问一个**新的**组名(不能与已有重名),用于 `-config add`。"""
+    existing_names = list(existing_names or [])
+    while True:
+        _w("  \033[1;36m新的一组叫什么名字?\033[0m")
+        _w("    \033[2m一个短名字,用来区分是哪家供应商(如 mimo / moonshot)。"
+           "以后用 `wchat model <名字>` 切换\033[0m")
+        _w("    \033[2m现在: %s\033[0m" % (suggest or "(请填一个新名字)"))
+        sys.stdout.write("    \033[1;32m›\033[0m ")
+        sys.stdout.flush()
+        name = _unquote(_read_line()) or suggest
+        bad = validate_group(name)
+        if bad:
+            _w("    \033[1;31m%s\033[0m" % bad[0])
+            _w("")
+            continue
+        if name in existing_names:
+            _w("    \033[1;31m已经有叫 %s 的组了,换一个名字(想改它请用 `wchat -config edit %s`)\033[0m"
+               % (name, name))
+            _w("")
+            continue
+        _w("")
+        return name
+
+
+def _confirm(question, default_no=True):
+    """问一个 y/n;default_no=True 时直接回车=否。返回 bool。"""
+    _w("  \033[1;36m%s\033[0m \033[2m%s\033[0m" % (question, "[y/N]" if default_no else "[Y/n]"))
+    sys.stdout.write("    \033[1;32m›\033[0m ")
+    sys.stdout.flush()
+    ans = _unquote(_read_line()).lower()
+    _w("")
+    if not ans:
+        return not default_no
+    return ans in ("y", "yes", "是", "1", "true")
+
+
+def _no_pairs(text):
+    """参数里没认出任何配置项(以前这里会"假成功"什么都不改却报已保存)。"""
+    _w("")
+    _w("  \033[1;31m✗ 没能从这些参数里认出任何配置项:\033[0m \033[2m%s\033[0m" % (text or "(空)"))
+    _w("    · 配置项要写成 KEY=value,例如:BASE_URL=https://.../v1 WCHAT_API_KEY=sk-... FLASH_MODEL=<模型名>")
+    _w("    · 想新增一组:wchat -config add --name <组名> \"KEY=value ...\"")
+    _w("    · 想逐项填:wchat -config add(不带参数)")
+    _w("")
+    return RC_NEED_USER
+
+
+def _report_issues(issues):
+    _w("  \033[1;31m✗ 有几处需要改:\033[0m")
+    for _k, m in issues:
+        _w("    · %s" % m)
+    _w("")
+    _w("  \033[2m没有写入任何东西。重跑 wchat -config 再填一次。\033[0m")
+    _w("")
+
+
+def _configure_add_interactive(group, verify_conn, existing_names):
+    """`-config add` 的交互流程:问新组名 → 字段全空逐项 → 写盘(默认不切换) → 问是否切换 → 验连通。"""
+    existing = {}
+    show_header(existing, group or "")
+    g = group or _ask_new_group(existing_names, suggest="")
+    vals = _collect_fields(existing)
+    merged, issues = _finalize(existing, vals)
+    if issues:
+        _report_issues(issues)
+        return RC_NEED_USER
+    if not vals:
+        _w("  \033[2m什么都没填,直接退出(没有新增)。\033[0m")
+        _w("")
+        return RC_NEED_USER
+    p = write_group(g, vals, activate=False)
+    _w("  \033[2m已新增 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, g))
+    if _confirm("现在切换到这一组吗?(以后也可用 `wchat model %s`)" % g, default_no=True):
+        write_group(g, {}, activate=True)
+        _w("  \033[2m已切换到 \033[0m\033[1m%s\033[0m" % g)
+    else:
+        _w("  \033[2m保持当前生效组不变;需要时用 \033[0m\033[1mwchat model %s\033[0m\033[2m 切换\033[0m" % g)
+    _w("")
+    return _after_write(verify_conn, values=merged)
+
+
+def configure_add(args, group, check_only, verify_conn):
+    """`wchat -config add` —— 强制新增一组(不动当前生效组,除非用户选择切换)。"""
+    data = " ".join(args).strip()
+    existing_names = model_groups()
+    if data:
+        pairs = parse_pasted(data)
+        if not pairs:
+            return _no_pairs(data)
+        if pairs.get("BASE_URL"):
+            pairs["BASE_URL"] = normalize_base_url(pairs["BASE_URL"])
+        if pairs.get("FLASH_MODEL") and not pairs.get("PRO_MODEL"):
+            pairs["PRO_MODEL"] = pairs["FLASH_MODEL"]
+        merged = dict(pairs)
+        issues = validate(merged)
+        if issues:
+            _w("")
+            _w("  \033[1;31m✗ 格式有问题,没有写入:\033[0m")
+            for _k, m in issues:
+                _w("    · %s" % m)
+            _w("")
+            return RC_NEED_USER
+        g = group or guess_new_group(pairs)
+        if not g:
+            if _is_tty():
+                g = _ask_new_group(existing_names)
+            else:
+                _w("")
+                _w("  这个地址认不出是哪家,没法自动起名字。请用 --name 指定组名:")
+                _w("")
+                _w("    \033[1;33mwchat -config add --name <组名> \"...\"\033[0m")
+                _w("")
+                return RC_NEED_USER
+        bad = validate_group(g)
+        if bad:
+            _w("")
+            _w("  \033[1;31m✗ %s\033[0m" % bad[0])
+            _w("")
+            return RC_NEED_USER
+        if g in existing_names:
+            _w("")
+            _w("  \033[1;31m✗ 已经有叫 %s 的组了(新增不能用已有名字;想改它请用 "
+               "`wchat -config edit %s`)\033[0m" % (g, g))
+            _w("")
+            return RC_NEED_USER
+        if check_only:
+            _w("")
+            _w("  \033[1;32m✅ 检查通过\033[0m \033[2m(将新增组 %s;--check 未写入)\033[0m" % g)
+            _w("")
+            return RC_OK
+        p = write_group(g, pairs, activate=False)
+        _w("")
+        _w("  \033[2m已新增 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, g))
+        _w("  \033[2m当前生效组不变;要切过去:\033[0m \033[1mwchat model %s\033[0m" % g)
+        return _after_write(verify_conn, values=merged)
+    # 交互
+    if not _is_tty():
+        _w("")
+        _w("  这里没有交互终端,没法逐项问。请一次给完:")
+        _w("")
+        _w("    \033[1;33mwchat -config add --name <组名> \"BASE_URL=... "
+           "WCHAT_API_KEY=sk-xxxx FLASH_MODEL=<模型名>\"\033[0m")
+        _w("")
+        return RC_NEED_USER
+    if group:
+        bad = validate_group(group)
+        if bad:
+            _w("  \033[1;31m✗ %s\033[0m" % bad[0])
+            _w("")
+            return RC_NEED_USER
+        if group in existing_names:
+            _w("")
+            _w("  \033[1;31m✗ 已经有叫 %s 的组了(想改它请用 `wchat -config edit %s`)\033[0m"
+               % (group, group))
+            _w("")
+            return RC_NEED_USER
+    return _configure_add_interactive(group, verify_conn, existing_names)
+
+
+def configure_edit(target, args, check_only, verify_conn):
+    """`wchat -config edit <组>` —— 编辑指定组;交互默认值取**该组**存量,并保持它原本的生效状态。"""
+    names = model_groups()
+    if not target:
+        if names and _is_tty():
+            _w("  要编辑哪一组?现有:%s" % " ".join(names))
+            sys.stdout.write("    \033[1;32m›\033[0m ")
+            sys.stdout.flush()
+            target = _unquote(_read_line())
+    if not target:
+        _w("")
+        _w("  用法: wchat -config edit <组名>(现有:%s)" % (" ".join(names) or "(无)"))
+        _w("")
+        return RC_NEED_USER
+    bad = validate_group(target)
+    if bad:
+        _w("  \033[1;31m✗ %s\033[0m" % bad[0])
+        _w("")
+        return RC_NEED_USER
+    if target not in names:
+        _w("")
+        _w("  \033[1;31m✗ 没有这个组:%s(现有:%s)\033[0m" % (target, " ".join(names) or "(无)"))
+        _w("")
+        return RC_NEED_USER
+    existing = dict(read_groups().get(target, {}))
+    was_active = (active_group() == target)
+    data = " ".join(args).strip()
+    if data:
+        pairs = parse_pasted(data)
+        if not pairs:
+            return _no_pairs(data)
+        merged = dict(existing)
+        merged.update(pairs)
+        if merged.get("BASE_URL"):
+            merged["BASE_URL"] = normalize_base_url(merged["BASE_URL"])
+            if pairs.get("BASE_URL"):
+                pairs["BASE_URL"] = merged["BASE_URL"]
+        if not merged.get("PRO_MODEL") and merged.get("FLASH_MODEL"):
+            merged["PRO_MODEL"] = merged["FLASH_MODEL"]
+            pairs.setdefault("PRO_MODEL", merged["FLASH_MODEL"])
+        issues = validate(merged)
+        if issues:
+            _w("")
+            _w("  \033[1;31m✗ 格式有问题,没有写入:\033[0m")
+            for _k, m in issues:
+                _w("    · %s" % m)
+            _w("")
+            return RC_NEED_USER
+        if check_only:
+            _w("")
+            _w("  \033[1;32m✅ 检查通过\033[0m \033[2m(将改组 %s;--check 未写入)\033[0m" % target)
+            _w("")
+            return RC_OK
+        p = write_group(target, pairs, activate=was_active)
+        _w("")
+        _w("  \033[2m已更新 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, target))
+        return _after_write(verify_conn, values=merged)
+    # 交互编辑
+    if not _is_tty():
+        _w("")
+        _w("  这里没有交互终端,没法逐项改。请一次给完:")
+        _w("")
+        _w("    \033[1;33mwchat -config edit %s \"BASE_URL=... WCHAT_API_KEY=... "
+           "FLASH_MODEL=...\"\033[0m" % target)
+        _w("")
+        return RC_NEED_USER
+    show_header(existing, target)
+    vals = _collect_fields(existing)
+    merged, issues = _finalize(existing, vals)
+    if issues:
+        _report_issues(issues)
+        return RC_NEED_USER
+    if not vals:
+        _w("  \033[2m什么都没改,直接退出。\033[0m")
+        _w("")
+        return RC_NEED_USER
+    p = write_group(target, vals, activate=was_active)
+    _w("  \033[2m已更新 %s(权限 600),这组叫 \033[0m\033[1m%s\033[0m" % (p, target))
+    _w("  \033[2m以后切回这一组:\033[0m \033[1mwchat model %s\033[0m" % target)
+    return _after_write(verify_conn, values=merged)
+
+
 # ---------------------------------------------------------------- 诊断
 
 def diagnose():
@@ -687,43 +1087,26 @@ def _ask_group(suggest):
 
 
 def configure_interactive(existing=None, verify_conn=True, group=None):
-    """逐项问答 → 校验 → 写盘(ctmodel 格式) → 验连通。返回退出码。"""
-    existing = dict(existing or _effective())
+    """逐项问答 → 校验 → 写盘(ctmodel 格式) → 验连通。返回退出码。
+
+    不带 group:改当前生效组(existing 缺省取自有效配置);
+    带 group 且该组已存在:预填**该组**的存量(而不是当前生效组),
+    避免"想编辑 A 组,却拿当前生效的 B 组的值当默认值"这个坑。
+    """
+    if existing is None:
+        if group and group in read_groups():
+            existing = dict(read_groups()[group])
+        else:
+            existing = dict(_effective())
+    else:
+        existing = dict(existing)
     g = group or guess_group(existing)
     show_header(existing, g)
     g = _ask_group(g)
-    vals = {}
-    for f in ("BASE_URL", "WCHAT_API_KEY", "FLASH_MODEL"):
-        v, changed = _ask(f, existing.get(f, ""))
-        if changed:
-            vals[f] = v
-        elif not (existing.get(f) or "").strip():
-            vals[f] = ""
-        _w("")
-    # PRO_MODEL:回车跟随 FLASH_MODEL(少问一个不必要的问题)
-    pm, pm_changed = _ask("PRO_MODEL", existing.get("PRO_MODEL", ""), label="PRO_MODEL(可选)")
-    if pm_changed:
-        vals["PRO_MODEL"] = pm
-    _w("")
-
-    merged = dict(existing)
-    merged.update({k: v for k, v in vals.items() if v})
-    if merged.get("BASE_URL"):
-        merged["BASE_URL"] = normalize_base_url(merged["BASE_URL"])
-        if vals.get("BASE_URL"):
-            vals["BASE_URL"] = merged["BASE_URL"]
-    if not merged.get("PRO_MODEL") and merged.get("FLASH_MODEL"):
-        merged["PRO_MODEL"] = merged["FLASH_MODEL"]
-        vals.setdefault("PRO_MODEL", merged["FLASH_MODEL"])
-
-    issues = validate(merged)
+    vals = _collect_fields(existing)
+    merged, issues = _finalize(existing, vals)
     if issues:
-        _w("  \033[1;31m✗ 有几处需要改:\033[0m")
-        for k, m in issues:
-            _w("    · %s" % m)
-        _w("")
-        _w("  \033[2m没有写入任何东西。重跑 wchat -config 再填一次。\033[0m")
-        _w("")
+        _report_issues(issues)
         return RC_NEED_USER
 
     if not vals:
@@ -738,8 +1121,12 @@ def configure_interactive(existing=None, verify_conn=True, group=None):
     return _after_write(verify_conn)
 
 
-def _after_write(verify_conn):
-    """写盘之后:验连通 → 打印结论。返回退出码。"""
+def _after_write(verify_conn, values=None):
+    """写盘之后:验连通 → 打印结论。返回退出码。
+
+    values 给定时,校验**这一组的值**(临时塞进环境再复原),这样 add/edit 一个
+    非生效组也能验它自己的连通,而不受当前生效组影响。
+    """
     if not verify_conn:
         _w("  \033[2m跳过连通性验证(--no-verify)\033[0m")
         _w("")
@@ -748,7 +1135,7 @@ def _after_write(verify_conn):
         return RC_OK
     sys.stdout.write("  \033[2m验证中…\033[0m\r")
     sys.stdout.flush()
-    ok, detail = verify()
+    ok, detail = (_verify_pairs(values) if values else verify())
     sys.stdout.write("\033[2K")
     if ok:
         _w("  \033[1;32m✅ 配置成功\033[0m \033[2m%s\033[0m" % detail)
@@ -767,14 +1154,24 @@ def _after_write(verify_conn):
 # ---------------------------------------------------------------- 入口
 
 USAGE = """用法:
-  wchat -config                     逐项填写(推荐)
-  wchat -config "BASE_URL=... WCHAT_API_KEY=... FLASH_MODEL=..."    一次给完
-  wchat -config --check "..."       只校验,不写盘
-  wchat -config --no-verify "..."   先不验连通(离线/内网)
-  wchat -config --name deepseek     指定这组配置的名字(默认沿用当前生效组/按域名猜)
+  wchat -config                       逐项填写(改当前生效组;推荐)
+  wchat -config "BASE_URL=... WCHAT_API_KEY=... FLASH_MODEL=..."    一次给完(改当前生效组)
+  wchat -config add                   新增一组(问组名,字段全空;建完问是否切换,默认否)
+  wchat -config add --name mimo "..." 新增一组并命名
+  wchat -config list                  列出所有模型组(* = 当前生效)
+  wchat -config edit <组>             编辑指定组(默认值取自该组的存量)
+  wchat -config rm <组>               删除一组(删的是生效组时会自动切到剩下第一组)
+  wchat -config --check "..."         只校验,不写盘
+  wchat -config --no-verify "..."     先不验连通(离线/内网)
+  wchat -config --name deepseek       指定组名(默认沿用当前生效组/按域名猜)
 
 配置写在 ~/.ct/config(权限 600),格式与 ctmodel 一致(行尾 # @model <组名>),
-因此可以用 `ctmodel <组名>` 在几组(不同厂商)之间切换。"""
+因此可以用 `wchat model <组名>` 在几组(不同厂商)之间切换;`wchat model -l` 列组。"""
+
+# 子命令词:必须是 `-config` 后的第一个裸词。其余裸词要么是 KEY=value(数据),
+# 要么是错误 —— 绝不再当成"没识别出来就静默成功"。
+CONFIG_SUBCMDS = ("add", "list", "ls", "groups", "show",
+                  "rm", "remove", "del", "delete", "edit")
 
 
 def configure(argv):
@@ -817,9 +1214,44 @@ def configure(argv):
             _w("")
             return RC_NEED_USER
 
+    # ---- 子命令:必须在"一次给完"之前认出裸词,否则 add/rm 会被当成值吞掉 ----
+    if rest and rest[0] in CONFIG_SUBCMDS:
+        cmd, sub = rest[0], rest[1:]
+        if cmd in ("list", "ls", "groups", "show"):
+            list_groups(verbose=True)
+            return RC_OK
+        if cmd == "add":
+            return configure_add(sub, group, check_only, verify_conn)
+        if cmd in ("rm", "remove", "del", "delete"):
+            target = group or (sub[0] if sub and "=" not in sub[0] else "")
+            if not target:
+                _w("")
+                _w("  用法: wchat -config rm <组名>(现有:%s)"
+                   % (" ".join(model_groups()) or "(无)"))
+                _w("")
+                return RC_NEED_USER
+            rc, tail = remove_group(target)
+            if tail:
+                _w("")
+                _w(("  \033[1;32m✓ %s\033[0m" if rc == RC_OK else "  \033[1;31m✗ %s\033[0m") % tail)
+                _w("")
+            return rc
+        if cmd == "edit":
+            target = group
+            if not target and sub and "=" not in sub[0]:
+                target = sub[0]
+                data_args = sub[1:]
+            else:
+                data_args = sub
+            return configure_edit(target, data_args, check_only, verify_conn)
+
     if rest:
-        # 一次给完:解析 → 校验 → (验) → 写
+        # 一次给完:解析 → 校验 → (验) → 写(改当前生效组)
         pairs = parse_pasted(" ".join(rest))
+        if not pairs:
+            # 以前这里会对空 pairs 校验通过并 apply({}) —— 文件没变却打印"已保存",
+            # 敲 `wchat -config add` 之类就被静默吞掉(假成功)。现在明确报错。
+            return _no_pairs(" ".join(rest))
         merged = dict(_effective())
         merged.update(pairs)
         if merged.get("BASE_URL"):

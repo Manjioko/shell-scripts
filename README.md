@@ -73,6 +73,7 @@ bash tests/brew_dist_test.sh      # 发行包验收(35 条:可复现/无字节�
 brew install Manjioko/shell-scripts/wchat    # 一条命令,自动 tap
 brew update && brew upgrade wchat            # 以后升级
 wchat -config                                # 填一次接口地址与 API key(逐项问,不用排版)
+wchat -config add                            # 中途加另一家供应商(新增一组;list 列组、rm 删组、edit 改组)
 wchat                                        # 开始用
 ```
 

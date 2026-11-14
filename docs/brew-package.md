@@ -151,8 +151,20 @@ ctmodel qwen        # 切到另一组(切换前自动备份 config.bak)
 ctmodel             # 看当前生效的是哪组
 ```
 
-`wchat -config` 再次运行时**默认改当前生效的那一组**（不会平白多出一组）；
-要新增一家就 `wchat -config --name mimo`。
+`wchat -config` 再次运行时**默认改当前生效的那一组**（不会平白多出一组）。
+
+中途要加另一家供应商，用组级子命令（都不会误伤已有组）：
+
+```bash
+wchat -config add                       # 新增一组:问组名、字段全空;建完问是否切过去(默认否)
+wchat -config add --name mimo "..."      # 新增一组并命名
+wchat -config list                       # 列出所有组(* = 当前生效),带地址/打码 key/模型名
+wchat -config edit mimo "..."            # 编辑指定组(默认值取该组存量,不会拿生效组的值)
+wchat -config rm mimo                    # 删除一组(删到生效组时会自动切到剩下第一组)
+```
+
+> 新增默认**不切换**当前生效组；建完会问"是否切过去"，回车 = 否。
+> 想切过去随时 `wchat model mimo`。组名不能与已有组重名（重名=覆盖，会被拒绝并提示改用 `edit`）。
 
 其它写法：
 
@@ -160,7 +172,7 @@ ctmodel             # 看当前生效的是哪组
 wchat -config "BASE_URL=https://api.deepseek.com/v1 WCHAT_API_KEY=sk-xxx FLASH_MODEL=deepseek-chat"
 wchat -config --check "..."        # 只校验,不写盘
 wchat -config --no-verify "..."    # 先不验连通(离线/内网)
-wchat -config --name mimo "..."    # 这组叫 mimo(不影响当前生效组之外的东西)
+wchat -config --name mimo "..."    # 改/建名为 mimo 的这一组,并切换过去(旧写法;要"只加不切"请用 add)
 wchat -config -h                   # 帮助
 ```
 

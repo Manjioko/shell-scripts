@@ -449,5 +449,106 @@ ck("config.bak 权限 600",
    stat.S_IMODE(os.stat(setup.config_path() + ".bak").st_mode) == 0o600,
    oct(stat.S_IMODE(os.stat(setup.config_path() + ".bak").st_mode)))
 
+# ---------- 17) 组管理:add / list / rm / edit(方案A) ----------
+# 现场:配置天然支持多组(不同供应商),但入口只有"填一组"。
+#   · `wchat -config add` 之类裸词以前被当成"值",空 pairs 校验通过 → 文件没变却报"已保存"(假成功);
+#   · 再跑一次不带 --name 的 -config 会把当前生效组覆盖;
+#   · 没有 list / rm / edit 指定组。
+# 这一节锁住:新增不串组、撞名报错、list 标生效、edit 只改目标组、rm 生效组自动切换、未知裸词不假成功。
+print("=== 17. 组管理 ===")
+fresh()
+setup.configure(["--no-verify", "BASE_URL=https://api.deepseek.com",
+                 "WCHAT_API_KEY=sk-ds111111", "FLASH_MODEL=deepseek-chat"])
+ck("17 基线 deepseek 生效",
+   setup.model_groups() == ["deepseek"] and setup.active_group() == "deepseek",
+   repr((setup.model_groups(), setup.active_group())))
+
+# add 批量(--name):新组写为注释行,当前生效组不变
+rc = setup.configure(["--no-verify", "add", "--name", "qwen",
+                      "BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1",
+                      "WCHAT_API_KEY=sk-qw222222", "FLASH_MODEL=qwen-plus"])
+ck("17 add 新增 rc=0", rc == 0, repr(rc))
+ck("17 add 变成两组", setup.model_groups() == ["deepseek", "qwen"], repr(setup.model_groups()))
+ck("17 add 不动生效组", setup.active_group() == "deepseek", repr(setup.active_group()))
+_q = open(setup.config_path(), encoding="utf-8").read()
+ck("17 新增组以注释形式存在(未启用)",
+   '# BASE_URL="https://dashscope.aliyuncs.com' in _q, _q)
+ck("17 read_groups 读到 qwen 的值",
+   setup.read_groups().get("qwen", {}).get("WCHAT_API_KEY") == "sk-qw222222",
+   repr(setup.read_groups().get("qwen")))
+
+# add 撞名:报错、不改已有组
+rc, screen = cap(setup.configure, ["--no-verify", "add", "--name", "deepseek",
+                                   "BASE_URL=https://api.deepseek.com",
+                                   "WCHAT_API_KEY=sk-x", "FLASH_MODEL=m"], tty=False)
+ck("17 add 撞名 rc=2", rc == 2, repr(rc))
+ck("17 add 撞名给改法(edit)", "edit deepseek" in screen, screen[-200:])
+ck("17 add 撞名没改 deepseek 的 key",
+   setup.read_groups().get("deepseek", {}).get("WCHAT_API_KEY") == "sk-ds111111",
+   repr(setup.read_groups().get("deepseek")))
+
+# list:标出生效组、带打码 key
+rc, screen = cap(setup.configure, ["list"], tty=False)
+ck("17 list rc=0", rc == 0, repr(rc))
+ck("17 list 列出两组", "deepseek" in screen and "qwen" in screen, screen)
+ck("17 list 标出生效组(*)", "* deepseek" in screen, screen)
+ck("17 list 打码 key", "sk-qw…222" in screen, screen)
+
+# edit 指定非生效组:只改目标组,生效组不变,预填取该组自身
+rc = setup.configure(["--no-verify", "edit", "qwen", "FLASH_MODEL=qwen-max"])
+ck("17 edit qwen rc=0", rc == 0, repr(rc))
+ck("17 edit 改了 qwen 的模型",
+   setup.read_groups().get("qwen", {}).get("FLASH_MODEL") == "qwen-max",
+   repr(setup.read_groups().get("qwen")))
+ck("17 edit 非生效组后生效组不变", setup.active_group() == "deepseek", repr(setup.active_group()))
+ck("17 edit 没动 deepseek",
+   setup.read_groups().get("deepseek", {}).get("FLASH_MODEL") == "deepseek-chat",
+   repr(setup.read_groups().get("deepseek")))
+
+# edit 不存在的组:报错
+rc, screen = cap(setup.configure, ["--no-verify", "edit", "nope"], tty=False)
+ck("17 edit 不存在组 rc=2", rc == 2, repr(rc))
+ck("17 edit 不存在组提示现有", "现有" in screen, screen[-200:])
+
+# rm 非生效组:生效组仍不变
+rc, screen = cap(setup.configure, ["rm", "qwen"], tty=False)
+ck("17 rm qwen rc=0", rc == 0, repr(rc))
+ck("17 rm 后只剩 deepseek", setup.model_groups() == ["deepseek"], repr(setup.model_groups()))
+ck("17 rm 非生效组后生效组仍是 deepseek", setup.active_group() == "deepseek", repr(setup.active_group()))
+
+# 删掉"生效组":自动把剩下的第一组设为生效(否则文件没有生效行,运行期读不到配置)
+setup.configure(["--no-verify", "add", "--name", "qwen",
+                 "BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1",
+                 "WCHAT_API_KEY=sk-qw333333", "FLASH_MODEL=qwen-plus"])
+ck("17 又两组(deepseek 生效)",
+   setup.model_groups() == ["deepseek", "qwen"] and setup.active_group() == "deepseek",
+   repr((setup.model_groups(), setup.active_group())))
+rc, screen = cap(setup.configure, ["rm", "deepseek"], tty=False)
+ck("17 rm 生效组 rc=0", rc == 0, repr(rc))
+ck("17 rm 生效组后自动切到 qwen", setup.active_group() == "qwen", repr(setup.active_group()))
+ck("17 rm 生效组后 read_config 是 qwen 的 key",
+   setup.read_config().get("WCHAT_API_KEY") == "sk-qw333333", repr(setup.read_config()))
+
+# 假成功修复:未知裸词不再是"已保存"(文件逐字节不变、明确报没认出配置项)
+fresh()
+setup.configure(["--no-verify", "BASE_URL=https://api.deepseek.com",
+                 "WCHAT_API_KEY=sk-ds111111", "FLASH_MODEL=deepseek-chat"])
+_before = open(setup.config_path(), encoding="utf-8").read()
+rc, screen = cap(setup.configure, ["qwen"], tty=False)
+ck("17 未知裸词 rc=2", rc == 2, repr(rc))
+ck("17 未知裸词明说没认出配置项", "没能" in screen and "认出" in screen, screen[-200:])
+ck("17 未知裸词没改文件", open(setup.config_path(), encoding="utf-8").read() == _before)
+
+# add 交互:问新组名、字段不预填旧值、建完问是否切换(默认否)
+rc, screen = cap(setup.configure, ["add", "--no-verify"],
+                 lines=["mimo", "https://api.mimo.example/v1", "sk-mimo5555", "mimo-chat", "", ""])
+ck("17 add 交互问新组名", "新的一组叫什么名字" in screen, screen[:300])
+ck("17 add 交互问是否切换", "切换到这一组" in screen, screen[-300:])
+ck("17 add 交互后多了 mimo", "mimo" in setup.model_groups(), repr(setup.model_groups()))
+ck("17 add 交互后生效组不变(deepseek)", setup.active_group() == "deepseek", repr(setup.active_group()))
+ck("17 add 交互字段用了新值(不是预填旧值)",
+   setup.read_groups().get("mimo", {}).get("WCHAT_API_KEY") == "sk-mimo5555",
+   repr(setup.read_groups().get("mimo")))
+
 print("RESULT total=%d pass=%d fail=%d" % (PASSES[0] + len(FAILS), PASSES[0], len(FAILS)))
 sys.exit(0 if not FAILS else 1)
