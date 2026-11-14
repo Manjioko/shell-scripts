@@ -9,6 +9,7 @@
 只做**循环与分发**，不碰 tty/信号/网络——便于用假 stream + 假 handler 单测。
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -135,13 +136,18 @@ def _default_meta(action, arg, session=None):
             from wchat_py.render import read_line as _read_line
             # TUI 下 stdin 归事件循环,readline 不可用 → read_line 弹(可带列表的)输入框;
             # 非 TUI 退回 readline(列表已打到 stdout,choices 传 None 被忽略)。
-            num = (_read_line("请输入要加载的历史编号(回车=1)",
-                              choices=(names if _tui else None)) or "").strip()
+            _raw = _read_line("请输入要加载的历史编号(回车=1)",
+                              choices=(names if _tui else None))
         except KeyboardInterrupt:
             sys.stdout.write("\n"); sys.stdout.flush()
             return True
         except Exception:
-            num = ""
+            _raw = ""
+        # `None` = 用户按 Esc 取消 → 直接放弃,不加载任何历史(旧实现把取消当成空串,
+        # 又被下面 `if not num: num="1"` 兜成"第 1 条",于是"Esc 取消却默默选了第一条")。
+        if _raw is None:
+            return True
+        num = (_raw or "").strip()
         if not num:
             num = "1"                              # 回车 = 1 = 最新一条(索引 0)
         if not num.isdigit() or not (1 <= int(num) <= len(files)):
@@ -643,6 +649,78 @@ def _is_text_file(p):
     return ext in _TEXT_EXTS or os.path.basename(p).lower() in _TEXT_EXTS
 
 
+def _is_wsl_env():
+    """是否运行在 WSL 下:WSL_DISTRO_NAME 或 /proc/version 含 microsoft
+    (与 inputbox._is_wsl 同一判据)。"""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
+def _win_to_wsl_path(winpath):
+    """把 Windows 路径转成 WSL 里可访问的 Linux 路径。
+
+    为什么必须转:Ctrl-F 的选择器是 Windows 原生对话框(powershell.exe),
+    返回的是 `C:\\Users\\...\\a.png`。WSL 里 `os.path.isfile()` 认不出这种盘符
+    路径,于是被当成"选择被取消",占位行根本不进输入框 —— 现象就是"弹窗能选,
+    选完输入框没有任何回显"。bash 旧实现用 `wslpath -u` 转,Python 版漏了这一步。
+
+    优先 `wslpath -u`(能正确处理盘符、UNC 的 \\\\wsl.localhost\\ / \\\\wsl$\\);
+    没有 wslpath 时退回手动盘符映射(C:\\foo -> /mnt/c/foo)。都失败则原样返回,
+    交给调用方的 isfile 兜底判失败。"""
+    if not winpath:
+        return ""
+    import shutil
+    if shutil.which("wslpath"):
+        try:
+            r = subprocess.run(["wslpath", "-u", winpath], capture_output=True, text=True)
+            out = (r.stdout or "").strip()
+            if r.returncode == 0 and out:
+                return out
+        except OSError:
+            pass
+    m = re.match(r"^([A-Za-z]):[\\/]+(.*)$", winpath)
+    if m:
+        return "/mnt/%s/%s" % (m.group(1).lower(), m.group(2).replace("\\", "/"))
+    return winpath
+
+
+def _wsl_pick_file():
+    """WSL:优先 Windows 原生对话框(powershell.exe + WinForms),把返回的 Windows
+    路径转成 WSL 可访问的 Linux 路径。
+
+    三条实测坑(与 bash 版 wsl_choose_file 对齐):
+      1) 不能带 -NonInteractive:否则 ShowDialog 静默立即返回,框根本不弹;
+      2) 必须传一个 TopMost 属主窗体:否则 WSLg 下对话框藏在终端后面(或直接被
+         当成取消);
+      3) 显式设 UTF-8 输出编码:否则中文路径按 GBK 回,落盘/isfile 全错。
+    """
+    import shutil
+    if not shutil.which("powershell.exe"):
+        return ""
+    try:
+        p = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command",
+             "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+             "Add-Type -AssemblyName System.Windows.Forms;"
+             "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"
+             "$f=New-Object System.Windows.Forms.OpenFileDialog;"
+             "$f.Title='选择文件';$f.Multiselect=$false;"
+             "if($f.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK)"
+             "{Write-Output $f.FileName}"],
+            capture_output=True)
+    except OSError:
+        return ""
+    winpath = (p.stdout or b"").decode("utf-8", "replace").replace("\r", "").strip()
+    if not winpath:
+        return "CANCELLED"
+    return _win_to_wsl_path(winpath)
+
+
 def _pick_file():
     """Ctrl-F 文件选择器:用系统原生对话框(macOS AppleScript / Linux zenity|kdialog / WSL)。"""
     import shutil
@@ -655,17 +733,11 @@ def _pick_file():
             return (p.stdout or "").strip()
         except OSError:
             return ""
-    if os.environ.get("WSL_DISTRO_NAME"):
-        try:
-            p = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-Command",
-                 "Add-Type -AssemblyName System.Windows.Forms;"
-                 "$f=New-Object System.Windows.Forms.OpenFileDialog;"
-                 "if($f.ShowDialog() -eq 'OK'){$f.FileName}else{'CANCELLED'}"],
-                capture_output=True, text=True)
-            return (p.stdout or "").strip()
-        except OSError:
-            return ""
+    if _is_wsl_env():
+        _p = _wsl_pick_file()
+        if _p:
+            return _p
+        # powershell.exe 不可用 -> 回退到 WSLg 图形环境的 zenity/kdialog(落到下面循环)
     for cmd in (["zenity", "--file-selection"], ["kdialog", "--getopenfilename"]):
         if shutil.which(cmd[0]):
             try:

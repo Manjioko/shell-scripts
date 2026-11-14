@@ -186,5 +186,54 @@ finally:
 ck("nxt rc=1(EOF)只拉起 1 次、不报错", _rc1_calls["n"] == 1 and "退回基础输入" not in _eserr.getvalue(),
    "拉起 %d 次" % _rc1_calls["n"])
 
+# Ctrl-F(rc=4)选中图片后,占位行必须回填进输入框(--default),不能被当成"选择取消"。
+# 回归:WSL 下 powershell.exe 返回的是 Windows 盘符路径(C:\...)。旧实现直接把这串
+# 返回给调用方,`os.path.isfile()` 在 WSL 里认不出 -> 当成取消 -> 占位行丢失 ->
+# 用户看到的就是"弹窗能选图,选完输入框没有任何回显"。修法是 wslpath 转成 /mnt/...
+import base64 as _b64  # noqa: E402
+import tempfile as _tf  # noqa: E402
+
+_png = _b64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
+_fd, _img = _tf.mkstemp(suffix=".png")
+os.write(_fd, _png)
+os.close(_fd)
+try:
+    _seen = []
+    _state = {"n": 0}
+
+    def _fake_pick_run(*a, **k):
+        _state["n"] += 1
+        _seen.append(list(a[0]) if a and isinstance(a[0], (list, tuple)) else [])
+        if _state["n"] == 1:
+            return _Rc(4, "")        # Ctrl-F,空缓冲
+        if _state["n"] == 2:
+            return _Rc(0, "x")       # 回填占位后再正常提交
+        return _Rc(1)                # 之后 EOF 收尾
+
+    _o_run_p = _repl.subprocess.run
+    _o_pick = _repl._pick_file
+    _repl.subprocess.run = _fake_pick_run
+    _repl._pick_file = lambda: _img
+    try:
+        _repl.run_interactive(lambda t: None)
+    finally:
+        _repl.subprocess.run = _o_run_p
+        _repl._pick_file = _o_pick
+    _want = _repl._file_placeholder(_img)
+    _second = _seen[1] if len(_seen) >= 2 else []
+    ck("Ctrl-F 选中图片回填进输入框(--default 含占位行)", _want in _second, repr(_second))
+finally:
+    os.unlink(_img)
+
+# Windows 盘符路径必须转成 WSL 可访问的 Linux 路径(否则 isfile 失败=白选)。
+_w2l = _repl._win_to_wsl_path
+ck("_win_to_wsl_path 盘符转换", _w2l(r"C:\Users\wzk\Pictures\a.png") == "/mnt/c/Users/wzk/Pictures/a.png",
+   repr(_w2l(r"C:\Users\wzk\Pictures\a.png")))
+ck("_win_to_wsl_path 小写盘符/中文/空格", _w2l(r"d:\data\图 1.jpg") == "/mnt/d/data/图 1.jpg",
+   repr(_w2l(r"d:\data\图 1.jpg")))
+ck("_win_to_wsl_path 空串", _w2l("") == "")
+ck("_win_to_wsl_path 非盘符原样", _w2l("/tmp/x.png") == "/tmp/x.png")
+
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

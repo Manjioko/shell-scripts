@@ -24,6 +24,7 @@ M2:① 确认/审批走 MapConfirmModal(stdin 归事件循环,不能 readline);�
 """
 import os
 import queue
+import re
 import sys
 
 
@@ -73,10 +74,78 @@ def make_app(handle_line, *, banner="", on_meta=None):
     from textual.binding import Binding
     from textual.message import Message
     from rich.text import Text
-    from rich.markdown import Markdown
+    from wchat_py.mdstyle import build_markdown, markdown_theme
     from textual import work
     import threading
     import inspect
+
+    # ---- 可选/可复制的 markdown 正文 ----
+    # 为什么需要它:正文若用 rich.markdown.Markdown(一个 rich *renderable*)渲染,
+    # `Static._render()` 得到的是 `RichVisual`。Textual 的拖拽选中靠屏幕坐标→文本偏移的
+    # 映射,而这个映射来自渲染片段的 `style.meta["offset"]` 元数据 —— 只有 `Content`
+    # (Text 渲染后的产物)才带它,RichVisual 不带。于是 `get_widget_and_offset_at()` 在正文上
+    # 返回 `offset=None`,选中状态机根本建不出针对正文的 Selection → 正文永远选不中、复制不了
+    # (而思考/工具是 Text→Content,带 offset,所以可选)。这是"正文不可选"的真因。
+    # 修法:把 markdown **按控件当前宽度**预渲成 ANSI,再转成 rich `Text`(→ `Content`)显示。
+    # 这样既有样式(颜色/框线都在 ANSI 里),又带 offset 元数据 → 可被原生选中/复制。
+    # 宽度变化时(on_resize)按新宽度重渲,保证"显示折行"与"复制文本"始终一致。
+    def _render_md_to_text(md_source, width):
+        import io as _io
+        from rich.console import Console as _Console
+        from rich.text import Text as _RText
+        buf = _io.StringIO()
+        con = _Console(width=width, file=buf, force_terminal=True,
+                       color_system="truecolor", highlight=False)
+        try:
+            con.push_theme(markdown_theme())
+        except Exception:
+            pass
+        con.print(build_markdown(md_source), end="")
+        return _RText.from_ansi(buf.getvalue())
+
+    class _MarkdownStatic(Static):
+        def __init__(self, md_source, *args, **kwargs):
+            self._md_source = md_source          # 原始 markdown 源串(宽度变化时重渲用)
+            super().__init__("", *args, **kwargs)
+            # **先按兜底宽度渲一次**,保证 .content 立即可读 —— 否则从构造到 on_mount 的
+            # 真正宽度确定之前,控件内容是空串,任何"按 .content 取正文"的调用(测试的
+            # _content_text、剪贴/断言的采样)会偶发看不到刚挂上的答案(实测会让 M4 队列
+            # 用例 ~1/3 概率红)。拿到真实宽度后 on_mount/on_resize 会重渲覆盖。
+            self._rendered_w = -1
+            try:
+                self.update(_render_md_to_text(md_source, 100))
+            except Exception:
+                pass
+
+        def _reflow(self):
+            try:
+                w = self.content_size.width or self.size.width or 0
+                if w <= 0 or w == self._rendered_w:
+                    return
+                self._rendered_w = w
+                self.update(_render_md_to_text(self._md_source, w))
+            except Exception:
+                pass
+
+        def on_mount(self):
+            self._reflow()
+            # 首次挂载时宽度可能尚未确定(0)→ 布局完成后再补一次,避免正文空着。
+            try:
+                self.call_after_refresh(self._reflow)
+            except Exception:
+                pass
+
+        def on_resize(self, event):
+            self._reflow()
+
+        def get_selection(self, selection):
+            # offset 现在由 Content 原生提供,父类能正确抽取;这里只做一次"去行尾补白",
+            # 让复制出来的正文干净(rich 渲成定宽会产生行尾空格)。
+            res = super().get_selection(selection)
+            if res is None:
+                return None
+            text, ending = res
+            return "\n".join(ln.rstrip() for ln in text.split("\n")), ending
 
     # handle_line 是否接受第 5 个参数(poll_pending):据此决定要不要把轮内补充消息的取件器传进去。
     # 保持向后兼容——旧的 4 参 handle_line(tests 里那种)照旧调用,不会 TypeError。
@@ -93,6 +162,11 @@ def make_app(handle_line, *, banner="", on_meta=None):
     class ChatInput(TextArea):
         BINDINGS = [
             Binding("enter", "submit_or_continue", "发送", priority=True),
+            # Shift+Enter = 换行(对非程序员更直观)。依赖终端用 Kitty 键盘协议把
+            # Shift+Enter 与 Enter 区分开(Textual 启动时已发 disambiguate 序列);
+            # 终端不支持时它会退化成普通 Enter(提交)——所以下面仍保留"行尾 \ + 回车"
+            # 作为**全终端通用**的续行兜底,二者并存、不冲突。
+            Binding("shift+enter", "insert_newline", "换行", priority=True),
             Binding("ctrl+f", "pick_file", "选文件"),
             Binding("ctrl+v", "paste_image", "粘贴图片"),
             Binding("ctrl+g", "paste_image", "粘贴图片"),
@@ -103,12 +177,20 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self.value = value
                 super().__init__()
 
+        def action_insert_newline(self):
+            """Shift+Enter:在当前光标处插入一个换行(多行输入),不提交。"""
+            try:
+                self.insert("\n")
+            except Exception:
+                pass
+
         def action_submit_or_continue(self):
             text = self.text
             row, _col = self.cursor_location
             lines = text.split("\n")
             cur = lines[row] if row < len(lines) else ""
-            # 行尾 `\` + 回车 = 续行(吃掉那个反斜杠,换到下一行),与旧 inputbox 同义
+            # 行尾 `\` + 回车 = 续行(吃掉那个反斜杠,换到下一行)。这是**全终端通用**的
+            # 换行兜底(不依赖终端把 Shift+Enter 报成独立按键),与上面的 Shift+Enter 并存。
             if row == len(lines) - 1 and cur.rstrip().endswith("\\"):
                 lines[row] = cur.rstrip()[:-1]
                 self.text = "\n".join(lines) + "\n"
@@ -124,6 +206,85 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 pass
             self.post_message(self.Submitted(text))
 
+        # 占位行(选中的文件/粘贴的图片)以零宽空格 U+200B 结尾作**原子标记**:退格/删除
+        # 碰到占位行任意位置都整行删除,而不是一个字符一个字符删。否则用户想撤掉一张
+        # "选中/粘贴"的图,得按几十下退格(实测)。
+        _PH_MARK = "\u200b"
+
+        def _placeholder_rows(self):
+            """当前文本里所有占位行(含零宽标记)的行号集合。"""
+            return {i for i, ln in enumerate(self.text.split("\n")) if self._PH_MARK in ln}
+
+        def _insert_placeholder_line(self, line):
+            """插入一行占位(带零宽标记 + 换行),且保证它**独占一行**:
+            光标所在行已有内容时先补一个换行,否则占位会和正文挤在同一行 —— 那样
+            整行会被当字面文本提交、图片丢失,原子删除也失效。"""
+            if not line.endswith(self._PH_MARK):
+                line = line + self._PH_MARK
+            row, _col = self.cursor_location
+            lines = self.text.split("\n")
+            line_before = lines[row] if row < len(lines) else ""
+            if line_before:
+                self.insert("\n" + line + "\n")
+            else:
+                self.insert(line + "\n")
+
+        def _delete_row(self, row):
+            """整行删除第 row 行(连同它的换行);返回是否执行。"""
+            lines = self.text.split("\n")
+            if row < 0 or row >= len(lines):
+                return False
+            if row < len(lines) - 1:
+                start, end = (row, 0), (row + 1, 0)     # 本行内容 + 行尾换行
+                dest = (row, 0)
+            else:                                        # 末行:本行内容 + 与上一行间的换行
+                start = (row - 1, len(lines[row - 1])) if row > 0 else (0, 0)
+                end = (row, len(lines[row]))
+                dest = (row - 1, len(lines[row - 1])) if row > 0 else (0, 0)
+            try:
+                self.delete(start, end, maintain_selection_offset=False)
+                self.move_cursor(dest)
+            except Exception:
+                return False
+            return True
+
+        def _atomic_delete(self, forward=False):
+            """退格/删除时的占位感知:若删除点紧邻占位行,整行删掉;否则返回 False
+            让默认逐字符删除接手。返回 True 表示已整行删除、调用方应吞掉该按键。"""
+            sel = self.selection
+            if not sel.is_empty:
+                return False                             # 有选区:交给默认删除(删选区)
+            rows = self._placeholder_rows()
+            if not rows:
+                return False
+            row, col = self.cursor_location
+            lines = self.text.split("\n")
+            if not forward:
+                # 退格:光标在占位行内(含行尾) → 删本行;光标在下一行行首 → 删上一行(占位)
+                if row in rows and col > 0:
+                    return self._delete_row(row)
+                if col == 0 and (row - 1) in rows:
+                    return self._delete_row(row - 1)
+            else:
+                # 前向删除:光标在占位行内 → 删本行;光标在行尾且下一行是占位 → 删下一行
+                if row in rows and col < len(lines[row]):
+                    return self._delete_row(row)
+                if row + 1 in rows and col >= len(lines[row]):
+                    return self._delete_row(row + 1)
+            return False
+
+        def action_delete_left(self):
+            """退格:占位行整段删除(一次性)。默认行为逐字符删,用户实测删一张图要按几十下。"""
+            if not self.read_only and self._atomic_delete(forward=False):
+                return
+            super().action_delete_left()
+
+        def action_delete_right(self):
+            """Delete 键:与退格对称的占位行整段删除。"""
+            if not self.read_only and self._atomic_delete(forward=True):
+                return
+            super().action_delete_right()
+
         def action_pick_file(self):
             try:
                 from wchat_py.repl import _pick_file, _file_placeholder
@@ -135,7 +296,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 p = ""
             if p and p != "CANCELLED" and os.path.isfile(p):
                 try:
-                    self.insert(_file_placeholder(p) + "\n")
+                    self._insert_placeholder_line(_file_placeholder(p))
                 except Exception:
                     pass
 
@@ -155,8 +316,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 path = None
             if path:
                 try:
-                    # 不加零宽标记(TUI 无 PTK 原子删除需求;零宽会污染路径)。
-                    self.insert(_repl._PLACE_IMG + path + "\n")
+                    # 与 Ctrl-F 一致带零宽标记:整行原子删除(否则退格要一个个删);
+                    # parse_placeholders 会先剥掉零宽再取路径,不会污染路径。
+                    self._insert_placeholder_line(_repl._PLACE_IMG + path)
                 except Exception:
                     pass
             else:
@@ -196,7 +358,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self.dismiss(False)
 
     class InputModal(ModalScreen):
-        """单行文本输入弹窗(如开启 auto 的 AUTO 签字)。dismiss(输入的字符串)。"""
+        """单行文本输入弹窗(如开启 auto 的 AUTO 签字)。dismiss(输入的字符串);
+        Esc 取消 → dismiss(None)。区分"回车提交空串"与"取消":前者是""(用户确认空),
+        后者是 None(用户按 Esc 放弃),由调用方决定语义(如 -l 取消不应默认选第 1 条)。"""
         BINDINGS = [("escape", "cancel", "取消")]
 
         def __init__(self, question):
@@ -218,7 +382,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self.dismiss(event.value)
 
         def action_cancel(self):
-            self.dismiss("")
+            self.dismiss(None)          # None = 取消(区别于回车提交的空串)
 
     class _PageInput(Input):
         """只收数字、把 l/← / n/→ 解释成翻页的输入框(用于历史编号选择)。
@@ -302,7 +466,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self.dismiss(event.value)
 
         def action_cancel(self):
-            self.dismiss("")
+            self.dismiss(None)          # None = 取消(区别于回车提交的空串 → 默认第 1 条)
 
     class WchatApp(App):
         CSS = """
@@ -322,7 +486,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
            且会污染消息列表。continuation(工具块的框线/状态行)不加 .blk。 */
         #content .blk { margin-top: 1; }
         #status { height: 0; padding: 0; margin: 0; }
-        #status.on { height: auto; max-height: 6; padding: 0 1; color: #666666; }
+        /* 与输入框 placeholder 同一灰 + 斜体(#6a6a6a italic),深色终端上也看得清。
+           旧值是 #666666:auto 标记又被 \033[2m(dim) 压暗成 ~#494949,几乎看不见。 */
+        #status.on { height: auto; max-height: 6; padding: 0 1; color: #6a6a6a; text-style: italic; }
         #input { height: auto; max-height: 12; background: transparent; border: round #6a6a6a; }
         #input:focus { background: transparent; }
         /* placeholder 与思考文本同档灰、斜体,用户好区分(默认 $text 40% 偏亮) */
@@ -393,6 +559,20 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
 
+        def _mount_markdown(self, md_text, sep=True):
+            """把助手正文挂成一个**可选/可复制**的 markdown 块(见 _MarkdownStatic)。
+            与 _mount 同样的 `.blk` 块间距规则;正文按控件宽度预渲成带样式 Text→Content,
+            从而带 offset 元数据、可被原生拖拽选中复制。"""
+            try:
+                cls = "blk" if (sep and getattr(self, "_has_blocks", False)) else ""
+                w = _MarkdownStatic(md_text, classes=cls) if cls else _MarkdownStatic(md_text)
+                self._content().mount(w)
+                if sep:
+                    self._has_blocks = True
+                self._scroll_end()
+            except Exception:
+                pass
+
         def _ensure_live(self):
             if self._live_widget is None:
                 cls = "blk" if self._has_blocks else ""
@@ -408,6 +588,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def on_mount(self):
             if banner:
                 self._mount(Text.from_ansi(banner))
+            # 统一 markdown 观感:给 app 控制台压入与 mdrender 同一份现代主题。
+            # Textual 的 RichVisual 渲染 mounted 的 rich.markdown.Markdown 时用的就是
+            # app.console,所以这里 push 之后,TUI 里的标题/代码/链接/表格等样式与
+            # 非 TUI 的 render_markdown 完全一致(以前 TUI 用的是 rich 纯默认:标题居中、
+            # 品红/青色、粗体黑底代码块)。
+            try:
+                self.console.push_theme(markdown_theme())
+            except Exception:
+                pass
             self.query_one("#input", ChatInput).focus()
             self.set_interval(0.04, self._drain)
             # TUI 把一轮 turn 放 worker 线程跑,而 signal handler 只能在**主线程**装
@@ -453,28 +642,32 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         def _line_blocking(self, question="", choices=None):
             """被 worker 线程(read_line)调用:弹输入框收一行文本,阻塞等结果。
-            给了 choices 时弹**分页列表选择框**(HistoryPickModal),否则普通单行输入框。"""
+            给了 choices 时弹**分页列表选择框**(HistoryPickModal),否则普通单行输入框。
+            返回值:str = 用户提交的内容(可能空串);None = 用户按 Esc 取消(不能和空串混为一谈,
+            否则 -l 取消会被当成"回车=第 1 条")。"""
             if threading.current_thread() is threading.main_thread():
-                return ""
+                return None
             ev = threading.Event()
             box = {}
 
+            def _done(result):
+                # None(取消)原样保留,空串(回车提交空)也是空串 —— 两者语义不同,别在这一层抹平。
+                box["r"] = result
+                ev.set()
+
             def _show():
-                def _done(result):
-                    box["r"] = result if isinstance(result, str) else ""
-                    ev.set()
                 try:
                     if choices:
                         self.push_screen(HistoryPickModal(question or "", choices), _done)
                     else:
                         self.push_screen(InputModal(question or ""), _done)
                 except Exception:
-                    box["r"] = ""
+                    box["r"] = None
                     ev.set()
 
             self.call_from_thread(_show)
             ev.wait()
-            return box.get("r", "")
+            return box.get("r")
 
         def _render_loaded_history(self, msgs, header=""):
             """history hook(worker 线程):把加载的历史交给主线程**原生逐条渲染**。"""
@@ -526,7 +719,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 else:   # assistant / 其它
                     if content.strip():
                         try:
-                            self._mount(Markdown(content))
+                            self._mount_markdown(content)
                         except Exception:
                             self._mount(Text(content))
                     else:
@@ -597,7 +790,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self._mount(self._render_reason(reason), classes="reason")
             if answer.strip():
                 try:
-                    self._mount(Markdown(answer))
+                    self._mount_markdown(answer)
                 except Exception:
                     self._mount(Text(answer))
 
@@ -614,7 +807,11 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._last_marker = m
             try:
                 st = self.query_one("#status", Static)
-                st.update(Text.from_ansi(m) if m else "")
+                # marker_text() 自带 \033[2m(dim):dim 会把 CSS 灰再压暗一档(实测 #6a6a6a →
+                # ~#4a4a4a),深色终端上几乎看不见。这里**剥掉 ANSI**、颜色/斜体交给 CSS
+                # (#status.on = 与 placeholder 同一灰+斜体),让状态行清楚可读。
+                plain = re.sub(r"\x1b\[[0-9;]*m", "", m).strip() if m else ""
+                st.update(Text(plain) if plain else "")
                 # 有标记才占高度(#status.on),否则 collapsed 成 0 —— 无 auto 时不留过宽空档
                 st.set_class(bool(m), "on")
             except Exception:

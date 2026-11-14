@@ -2,7 +2,7 @@
 """wchat markdown 渲染助手:stdin 读 markdown,stdout 输出 rich 渲染的 ANSI。
 与输入助手同属 Python 组件通道,三平台输出一致,替代 glow/mdcat 的分平台分装。
 OSC-8 超链接序列统一剥离(各终端支持不一,样式链接保留显示);
-标题左对齐(rich 默认居中,观感与旧渲染器差异大且占大量空白)。
+样式(颜色/字形/左对齐标题)统一放在 `wchat_py/mdstyle.py`,与 TUI 渲染共用一份。
 退出码:0=成功,2=缺 rich 依赖(调用方回退纯文本)。
 """
 import io
@@ -10,6 +10,13 @@ import os
 import re
 import sys
 import shutil
+
+# 以脚本方式被调用(render_markdown 走 `python <此文件>`)时,sys.path[0] 是
+# 本文件所在目录(wchat_py/),导入不到 `wchat_py.mdstyle`。把仓库根补进 sys.path,
+# 这样能按包路径复用一个共享样式模块(而不是在两处各抄一份主题)。
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO not in sys.path:
+    sys.path.insert(0, _REPO)
 
 _OSC8 = re.compile(r"\x1b\]8;.*?\x1b\\")
 
@@ -37,35 +44,10 @@ def _term_width() -> int:
 
 def main() -> int:
     try:
-        from rich.console import Console
-        from rich.markdown import Markdown as _Markdown
-        from rich.markdown import Heading as _Heading
-        from rich.text import Text
+        import rich  # noqa: F401  —— 缺 rich 依赖时按契约返回 2(调用方回退纯文本)
+        from wchat_py.mdstyle import build_markdown, make_console
     except ImportError:
         return 2
-
-    class _LeftHeading(_Heading):
-        """标题左对齐(覆盖 rich 默认的居中——居中观感与旧渲染器差异大)"""
-
-        def __rich_console__(self, console, options):
-            self.text.justify = "left"
-            if self.tag == "h1":
-                # H1 保留边框面板,文字左对齐
-                from rich.panel import Panel
-                from rich import box
-                yield Panel(
-                    self.text,
-                    box=box.HEAVY,
-                    style="markdown.h1.border",
-                )
-            else:
-                if self.tag == "h2":
-                    yield Text("")
-                yield self.text
-
-    class Markdown(_Markdown):
-        elements = dict(_Markdown.elements)
-        elements["heading_open"] = _LeftHeading
 
     # 按字节读入再自行解码:输入里可能夹带被切掉一半的 UTF-8 序列(长行按字节
     # 截断的产物、旧版本存进历史文件的坏数据)。sys.stdin.read() 撞上非法字节会
@@ -73,14 +55,14 @@ def main() -> int:
     # 字节降级为一个占位符,后面的内容照常渲染。
     text = sys.stdin.buffer.read().decode("utf-8", "replace")
     buf = io.StringIO()
-    console = Console(
+    console = make_console(
         width=_term_width(),
         file=buf,
         force_terminal=True,
         highlight=False,
     )
     try:
-        console.print(Markdown(text))
+        console.print(build_markdown(text))
     except Exception:
         return 2
 

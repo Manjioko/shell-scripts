@@ -148,7 +148,7 @@ async def run_app_checks():
         except Exception as _e:
             ck("placeholder 样式=灰色#6a6a6a 且斜体", False, repr(_e))
 
-        # 续行:行尾 \ + 回车 = 换行,不提交
+        # 续行:行尾 \ + 回车 = 换行,不提交(全终端通用的兜底)
         inp.text = "abc\\"
         await pilot.press("enter")
         await pilot.pause()
@@ -888,6 +888,343 @@ except Exception as _e:
     import traceback
     traceback.print_exc()
     ck("流式思考/正文换行无异常", False, repr(_e))
+
+# ---- 19) 占位行(选图/粘贴图)原子删除:一个退格删掉整行,不用逐字符删 ----
+print("=== 19. 占位行原子删除:退格/删除一次删整行 ===")
+
+
+async def _atomic_del_check():
+    import tempfile as _tf
+    from wchat_py import repl as _repl
+    from wchat_py import inputbox as _ibo
+
+    app = tui.make_app(lambda *a: None, banner="")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+
+        _fd, _img = _tf.mkstemp(suffix=".png")
+        os.write(_fd, b"\x89PNG\r\n\x1a\n")
+        os.close(_fd)
+        _o_pick = _repl._pick_file
+        _repl._pick_file = lambda: _img
+        try:
+            # 场景 1:空输入选图 → 一次退格整行删除(用户报的核心场景)
+            inp.text = ""
+            inp.action_pick_file()
+            await pilot.pause()
+            _ph = _repl._file_placeholder(_img)
+            ck("选图后占位行进入输入框", _ph in inp.text, repr(inp.text))
+            ck("占位行带零宽原子标记", "\u200b" in inp.text, repr(inp.text))
+            ck("选图后光标落在占位行下一行行首", inp.cursor_location == (1, 0), repr(inp.cursor_location))
+            await pilot.press("backspace")
+            await pilot.pause()
+            ck("退格一次整行删掉选中图片(不留残字)", inp.text.strip("\n") == "", repr(inp.text))
+            ck("整行删除后光标回到 (0,0)", inp.cursor_location == (0, 0), repr(inp.cursor_location))
+
+            # 场景 2:占位行前已有正文 → 只删占位行,正文保留
+            inp.text = "hi"
+            inp.move_cursor((0, 2))
+            inp.action_pick_file()
+            await pilot.pause()
+            ck("正文+占位行同时存在", "hi" in inp.text and _ph in inp.text, repr(inp.text))
+            await pilot.press("backspace")
+            await pilot.pause()
+            ck("退格只删占位行、保留正文(hi)", inp.text.strip("\n") == "hi", repr(inp.text))
+        finally:
+            _repl._pick_file = _o_pick
+
+        # 场景 3:光标停在占位行内(行尾)退格 → 整行删除
+        _phline = "📋 [图片] /tmp/xyz.png\u200b"
+        inp.text = _phline + "\n"
+        inp.move_cursor((0, len(_phline)))
+        await pilot.press("backspace")
+        await pilot.pause()
+        ck("光标在占位行尾退格 → 整行删除", inp.text == "", repr(inp.text))
+
+        # 场景 4:Delete 键(前向删除)对称:光标在占位行首删一次整行
+        inp.text = _phline + "\n"
+        inp.move_cursor((0, 0))
+        await pilot.press("delete")
+        await pilot.pause()
+        ck("Delete 键在占位行首 → 整行删除", inp.text == "", repr(inp.text))
+
+        # 场景 5:Ctrl+V 粘贴图片也原子(带零宽标记,一次退格清掉)
+        _oc = _ibo._clip_image_file
+        _ibo._clip_image_file = lambda d: "/tmp/probe_img2.png"
+        try:
+            inp.text = ""
+            inp.action_paste_image()
+            await pilot.pause()
+            ck("粘贴图片插入占位行(带零宽标记)", "📋 [图片] /tmp/probe_img2.png" in inp.text
+               and "\u200b" in inp.text, repr(inp.text))
+            await pilot.press("backspace")
+            await pilot.pause()
+            ck("粘贴图片一次退格整行删掉", inp.text.strip("\n") == "", repr(inp.text))
+        finally:
+            _ibo._clip_image_file = _oc
+            inp.text = ""
+
+        # 反向锁:普通文本(无零宽标记)退格仍逐字符删除,不能被误吞
+        inp.text = "abc"
+        inp.move_cursor((0, 3))
+        await pilot.press("backspace")
+        await pilot.pause()
+        ck("普通文本退格仍逐字符删除(不误伤)", inp.text == "ab", repr(inp.text))
+        inp.text = ""
+
+        try:
+            os.unlink(_img)
+        except OSError:
+            pass
+
+
+try:
+    asyncio.run(_atomic_del_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("占位行原子删除无异常", False, repr(_e))
+
+
+# ---- 20) 正文(资源/可复制):assistant 的 markdown 正文必须能"选中→复制" ----
+# 回归:正文用 rich.markdown.Markdown 渲染,Textual 的复制选中靠 Widget.get_selection,
+# 而它只在 _render() 是 Text/Content 时才抽文本;Markdown→RichVisual→抽不到 → 正文不可选。
+# 思考/工具是 Text 所以可选,唯独正文不行(用户实测)。修法见 tui._MarkdownStatic。
+print("=== 20. 正文可选可复制(markdown 正文 get_selection) ===")
+
+
+async def _body_selectable_check():
+    from textual.containers import VerticalScroll
+    from textual.selection import Selection
+    from textual.geometry import Offset
+
+    _body = ("# 正文标题\n\n这是一段**助手正文**,足够长以便在窄内容区里折成多行来测选择。\n\n"
+             "- 要点一\n- 要点二\n")
+
+    def hl(text, emit, stream, reason):
+        reason("(思考内容可复制)")
+        for ch in _body:
+            stream(ch)
+        emit(" \x1b[36m⏺\x1b[0m read_file · {}\n")     # 工具横幅(Text,可选)
+
+    app = tui.make_app(hl, banner="")
+    async with app.run_test(size=(44, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        inp.text = "hi"
+        await pilot.press("enter")
+        for _ in range(80):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if not app._busy and app._live_widget is None:
+                break
+        await pilot.pause()
+        kids = list(app.query_one("#content", VerticalScroll).children)
+        body_w = next((k for k in kids if type(k).__name__ == "_MarkdownStatic"), None)
+        ck("正文挂成 _MarkdownStatic(而非裸 Markdown/RichVisual)", body_w is not None,
+           repr([type(k).__name__ for k in kids]))
+        if body_w is not None:
+            # 真·拖拽选择的判据:屏幕坐标→文本偏移必须拿得到(offset 非 None)。
+            # RichVisual 拿不到 offset(选不中),这是"正文不可选"的真因,必须钉住。
+            _br = body_w.region
+            _w, _off = app.screen.get_widget_and_offset_at(_br.x + 1, _br.y + min(1, _br.height - 1))
+            ck("正文可被拖拽选中(命中偏移非 None,脱离 RichVisual)",
+               _w is body_w and _off is not None, "widget=%r offset=%r" % (type(_w).__name__ if _w else None, _off))
+            # 整块选中 → 抽出正文纯文本
+            app.screen._select_all_in_widget(body_w)
+            got = app.screen.get_selected_text() or ""
+            app.screen.clear_selection()
+            ck("正文整块选中能抽出文本(可复制)", "助手正文" in got and "要点一" in got,
+               repr(got[:80]))
+            ck("复制文本不含 RichVisual 的 repr 噪声", "RichVisual(" not in got, repr(got[:40]))
+            # 部分选区:标题那行抽得到(证明 (行,列) 对齐)
+            r = body_w.get_selection(Selection(Offset(0, 0), Offset(4, 0)))
+            ck("正文部分选区按行列抽取得当", r is not None and "正文" in (r[0] or ""),
+               repr(r))
+
+        # 反向锁:思考(Text)本来就可选,修正文不能把它弄坏
+        _think = next((k for k in kids if type(k).__name__ == "Static"
+                       and "思考内容可复制" in str(getattr(k, "content", ""))), None)
+        if _think is not None:
+            app.screen._select_all_in_widget(_think)
+            tt = app.screen.get_selected_text() or ""
+            app.screen.clear_selection()
+            ck("思考内容仍可选可复制(未回归)", "思考内容可复制" in tt, repr(tt[:40]))
+
+
+try:
+    asyncio.run(_body_selectable_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("正文可选可复制无异常", False, repr(_e))
+
+
+# ---- 21) -l 历史选择:Esc 取消不能默认选第 1 条(None=取消 vs ""=回车空串 要区分) ----
+# 回归:HistoryPickModal/InputModal 的 action_cancel 曾 dismiss(""),与"回车提交空串"
+# 无法区分;list_history 又把空串兜成"1"→ 用户按 Esc 取消却默默加载了第一条(实测)。
+print("=== 21. -l 的 Esc 取消不默认加载第 1 条(取消=None,回车空串='') ===")
+
+
+async def _line_blocking_cancel_check():
+    import threading
+    _choices = ["h-%02d.json" % i for i in range(4)]
+
+    # 1) 弹 HistoryPickModal,按 Esc → _line_blocking 返回 None(取消),不是 ""
+    app = tui.make_app(lambda *a: None, banner="")
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        for _key, _expect, _modal in (("escape", None, "HistoryPickModal"),
+                                      ("enter", "", "HistoryPickModal")):
+            res = {}
+            th = threading.Thread(target=lambda: res.__setitem__(
+                "v", app._line_blocking("请选择历史编号(回车=1)", _choices)), daemon=True)
+            th.start()
+            shown = False
+            for _ in range(60):
+                await pilot.pause(); await asyncio.sleep(0.03)
+                if app.screen.__class__.__name__ == _modal:
+                    shown = True; break
+            ck("%s 弹出用于测试" % _modal if _key == "escape" else "再次弹出 %s" % _modal, shown,
+               app.screen.__class__.__name__)
+            await pilot.press(_key)
+            for _ in range(60):
+                await pilot.pause(); await asyncio.sleep(0.03)
+                if not th.is_alive():
+                    break
+            th.join(timeout=2)
+            _got = res.get("v")
+            ck("HistoryPickModal %s → _line_blocking=%r" % ("Esc" if _key == "escape" else "回车空输入", _got),
+               _got == _expect, repr(_got))
+
+
+try:
+    asyncio.run(_line_blocking_cancel_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("Esc 取消返回 None 无异常", False, repr(_e))
+
+
+def _list_history_cancel_vs_empty():
+    import json as _json
+    import tempfile as _tf
+    import time as _time
+    import shutil as _sh
+    from wchat_py import repl as _repl, render as _render
+    td = _tf.mkdtemp(prefix="tui_hist_esc_")
+    try:
+        newest = os.path.join(td, "newest.json")
+        older = os.path.join(td, "older.json")
+        with open(newest, "w", encoding="utf-8") as f:
+            f.write(_json.dumps([{"role": "system", "content": "s"}, {"role": "user", "content": "u-new"}]))
+        with open(older, "w", encoding="utf-8") as f:
+            f.write(_json.dumps([{"role": "system", "content": "s"}, {"role": "user", "content": "u-old"}]))
+        now = _time.time()
+        os.utime(older, (now - 100, now - 100))   # older 更旧 → files[0]=newest
+        os.utime(newest, (now, now))
+        os.environ["WCHAT_HISTORY_DIR"] = td
+        seen = []
+        _oh = _render.history_hook()
+        _orl = _render.read_line
+        _olh = _render._LINE_HOOK[0]
+        try:
+            _render.set_line_hook(lambda q, c=None: "")   # 让 _tui 判定为真(choices 才会传)
+            _render.set_history_hook(lambda msgs, header="": seen.append(header))
+            # A) 取消(None):不加载任何历史
+            _render.read_line = lambda q, choices=None: None
+            _repl._default_meta("list_history", "")
+            ck("Esc 取消 → 不加载任何历史(_render_history 未被调用)", len(seen) == 0, repr(seen))
+            # B) 回车空串(""):默认第 1 条(最新)
+            seen.clear()
+            _render.read_line = lambda q, choices=None: ""
+            _repl._default_meta("list_history", "")
+            ck("回车空输入 → 默认加载第 1 条(最新)", len(seen) == 1, repr(seen))
+            ck("默认加载的是最新一条(newest.json)", bool(seen) and "newest.json" in (seen[0] or ""),
+               repr(seen[:1]))
+        finally:
+            _render.set_history_hook(_oh)
+            _render.read_line = _orl
+            _render._LINE_HOOK[0] = _olh
+            os.environ.pop("WCHAT_HISTORY_DIR", None)
+    finally:
+        _sh.rmtree(td, ignore_errors=True)
+
+
+try:
+    _list_history_cancel_vs_empty()
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("list_history 取消/空串区分无异常", False, repr(_e))
+
+
+# ---- 22) Shift+Enter 换行(面向非程序员的直观方式;不依赖反斜杠) ----
+# 说明:能否真正生效取决于终端是否把 Shift+Enter 报成独立按键(Kitty 键盘协议;
+# 本项目 Textual 启动时已发 disambiguate 序列)。不支持时会退化成普通 Enter(提交),
+# 所以保留"行尾 \ + 回车"作全终端兜底。以下在应用层验证"键被识别为 shift+enter 时"的行为。
+print("=== 22. Shift+Enter 换行(不提交),回车仍发送;反斜杠兜底仍在 ===")
+
+
+async def _shift_enter_check():
+    seen = {}
+
+    def hl(text, emit, stream, reason):
+        seen["text"] = text
+        for ch in ("答:" + text):
+            stream(ch)
+
+    # 直接确认 ChatInput 里 shift+enter 绑到了 insert_newline(即使终端不报,绑定也在)
+    app = tui.make_app(hl, banner="")
+    async with app.run_test(size=(60, 20)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        inp.focus()
+        _bindings = {}
+        for b in inp.BINDINGS:
+            try:
+                _bindings[b.key] = b.action
+            except Exception:
+                pass
+        ck("ChatInput 绑定了 shift+enter → insert_newline",
+           _bindings.get("shift+enter") == "insert_newline", repr(_bindings))
+
+        # 1) Shift+Enter 插入换行、不提交
+        inp.text = "first"
+        inp.move_cursor((0, len("first")))
+        await pilot.press("shift+enter")
+        await pilot.pause()
+        ck("Shift+Enter → 换行(不提交)", inp.text == "first\n" and "text" not in seen, repr(inp.text))
+        inp.insert("second")
+        await pilot.pause()
+        ck("换行后继续输入(缓冲区含两行)", inp.text == "first\nsecond", repr(inp.text))
+
+        # 2) 回车 → 发送整段(含换行)
+        await pilot.press("enter")
+        for _ in range(40):
+            await pilot.pause(); await asyncio.sleep(0.02)
+            if "text" in seen:
+                break
+        ck("Shift+Enter 换行后回车 → 提交整段含换行", seen.get("text") == "first\nsecond",
+           repr(seen.get("text")))
+
+        # 3) 反斜杠兜底仍在:行尾 \ + 回车 = 换行不提交
+        seen.pop("text", None)
+        inp.text = "tail\\"
+        inp.move_cursor((0, 5))
+        await pilot.press("enter")
+        await pilot.pause()
+        ck("反斜杠兜底仍在(\\+回车 → 换行不提交)",
+           inp.text == "tail\n" and "text" not in seen, repr(inp.text))
+
+
+try:
+    asyncio.run(_shift_enter_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("Shift+Enter 换行无异常", False, repr(_e))
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

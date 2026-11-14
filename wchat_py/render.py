@@ -479,15 +479,19 @@ def read_line(question="", choices=None):
     """读一行文本:hook 优先(TUI 弹输入框),否则退回到 sys.stdin.readline(非 TUI)。
     返回**不含行尾换行**的字符串(与原 readline 调用处 `(...readline()...).strip()` 兼容)。
 
+    **取消语义**:TUI 下用户按 Esc 取消时返回 `None`(与"回车提交空串"的 `""` 区分开);
+    调用方据此区分"放弃"与"确认空值"(例:`-l` 取消不应被当成"回车=加载第 1 条")。
+    非 TUI 的 readline 路径不产生 None(EOF/中断仍返回空串,维持旧行为)。
+
     可选 `choices`(字符串列表):给出时 TUI 弹**分页列表选择框**(如加载历史编号),
     把候选条目列在输入框上方、支持 l/n 翻页;非 TUI 下忽略它(调用方照旧把列表打到 stdout)。"""
     if _LINE_HOOK[0] is not None:
         try:
             if choices is not None:
-                return _LINE_HOOK[0](question, choices) or ""
-            return _LINE_HOOK[0](question) or ""
+                return _LINE_HOOK[0](question, choices)   # None=取消,str=提交内容
+            return _LINE_HOOK[0](question)
         except Exception:
-            return ""
+            return None
     try:
         return (sys.stdin.readline() or "").rstrip("\n")
     except (KeyboardInterrupt, EOFError):

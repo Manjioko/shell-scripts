@@ -185,6 +185,14 @@ GATE_MODE+=('x')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('TUI 真终端 tmux resize:多尺寸后每次恰好 1 输入框/宽=新宽/贴底(真终端模拟器重绘,非手搓屏;需 tmux,缺则 SKIP)')
 
+# markdown 现代样式:两条渲染路径(mdrender 子进程 / TUI rich 渲染)共用一份主题。
+# 锁"标题左对齐、H1 去下划线、正文不灰、行内代码去重样式、分隔线统一 ─"。缺 rich → SKIP。
+GATE_NAMES+=('Markdown样式')
+GATE_CMDS+=('python3 tests/mdstyle_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('共享 markdown 主题(mdstyle):H1 左对齐+bold 无下划线/正文不灰/行内代码无 bold·无黑底/分隔线用 ─/mdrender 子进程左对齐')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。

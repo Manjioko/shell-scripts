@@ -231,6 +231,37 @@ async def run_checks():
             app._last_marker = None
             app._refresh_status()
 
+        # 6c) 状态行配色 = placeholder 同一灰(#6a6a6a)+ 斜体,且**不被 dim 压暗**。
+        # 回归:marker_text() 自带 \033[2m(dim),旧实现 Text.from_ansi 会把 #666666 压成
+        # ~#494949,深色终端上几乎看不见(用户实测)。这里用真·ANSI 标记复现,从截图 SVG
+        # 读该行实际的 fill/font-style,断言脱离 dim、等于 placeholder 灰。
+        import re as _re
+        _orig2 = _ae.marker_text
+        try:
+            _ae.marker_text = lambda: "\x1b[2m⚡ auto=full · 本次会话已自动放行 77 次\x1b[0m"
+            os.environ["AUTO_MODE"] = "full"
+            app._last_marker = "__force3__"
+            app._refresh_status()
+            await pilot.pause()
+            _svg = app.export_screenshot()
+            _classes = {}
+            for _m in _re.finditer(r"\.(terminal-\d+-r\d+)\s*\{([^}]*)\}", _svg):
+                _classes[_m.group(1)] = _m.group(2).replace("\n", " ").strip()
+            _rule = ""
+            _mm = _re.search(r'<text class="(terminal-\d+-r\d+)"[^>]*>(?:(?!</text>).)*?auto=full',
+                             _svg, _re.S)
+            if _mm:
+                _rule = _classes.get(_mm.group(1), "")
+            ck("auto 标记状态行用 placeholder 灰 #6a6a6a", "6a6a6a" in _rule, repr(_rule))
+            ck("auto 标记状态行斜体(与 placeholder 一致)", "italic" in _rule, repr(_rule))
+            ck("auto 标记状态行不被 dim 压暗(非 #494949/#4a4a4a)",
+               ("494949" not in _rule and "4a4a4a" not in _rule), repr(_rule))
+        finally:
+            _ae.marker_text = _orig2
+            _fix_env()
+            app._last_marker = None
+            app._refresh_status()
+
 
 def main():
     try:
@@ -245,4 +276,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
