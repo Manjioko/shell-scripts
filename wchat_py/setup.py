@@ -652,7 +652,12 @@ def _finalize(existing, vals):
 
 
 def _ask_new_group(existing_names, suggest=""):
-    """问一个**新的**组名(不能与已有重名),用于 `-config add`。"""
+    """问一个**新的**组名(不能与已有重名),用于 `-config add`。
+
+    Ctrl+C / Ctrl+D(EOF)一律取消(返回 None),绝不无限重问 ——
+    以前 `_read_line` 把中断吞成空串 → 空名 → 校验失败 → while 永远转,
+    连按 Ctrl+C 都出不来("无法中断")。用户实测就是这个。
+    """
     existing_names = list(existing_names or [])
     while True:
         _w("  \033[1;36m新的一组叫什么名字?\033[0m")
@@ -661,7 +666,21 @@ def _ask_new_group(existing_names, suggest=""):
         _w("    \033[2m现在: %s\033[0m" % (suggest or "(请填一个新名字)"))
         sys.stdout.write("    \033[1;32m›\033[0m ")
         sys.stdout.flush()
-        name = _unquote(_read_line()) or suggest
+        try:
+            raw = sys.stdin.readline()
+        except EOFError:
+            raw = ""
+        if raw == "":                 # EOF(Ctrl+D / 输入结束):取消,别无限重问
+            _w("")
+            _w("  \033[2m已取消,未新增。\033[0m")
+            _w("")
+            return None
+        name = _unquote(raw.strip()) or suggest
+        if not name:
+            # 空回车 ≠ 卡死:明确告诉用户怎么走,别让它看起来像死循环。
+            _w("    \033[1;31m需要一个名字 —— 直接回车不会继续;Ctrl+C 取消\033[0m")
+            _w("")
+            continue
         bad = validate_group(name)
         if bad:
             _w("    \033[1;31m%s\033[0m" % bad[0])
@@ -712,7 +731,11 @@ def _configure_add_interactive(group, verify_conn, existing_names):
     """`-config add` 的交互流程:问新组名 → 字段全空逐项 → 写盘(默认不切换) → 问是否切换 → 验连通。"""
     existing = {}
     show_header(existing, group or "")
-    g = group or _ask_new_group(existing_names, suggest="")
+    g = group
+    if not g:
+        g = _ask_new_group(existing_names, suggest="")
+        if not g:                     # Ctrl+C / EOF 取消
+            return RC_NEED_USER
     vals = _collect_fields(existing)
     merged, issues = _finalize(existing, vals)
     if issues:
@@ -1040,9 +1063,11 @@ def show_header(existing=None, group=""):
 # ---------------------------------------------------------------- 交互填写
 
 def _read_line():
+    """读一行并去空白。EOF 返回空串;但 **KeyboardInterrupt(Ctrl+C)不再吞掉** ——
+    交给调用方/顶层取消(以前吞成空串,交互向导里 Ctrl+C 出不来、还会无限重问)。"""
     try:
         return (sys.stdin.readline() or "").strip()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         return ""
 
 
@@ -1175,6 +1200,22 @@ CONFIG_SUBCMDS = ("add", "list", "ls", "groups", "show",
 
 
 def configure(argv):
+    """`wchat -config` 顶层入口。Ctrl+C = 用户取消:干净退出、不吐 traceback。
+
+    真正的实现是 `_configure_body`;这里只在最外层兜住 KeyboardInterrupt ——
+    交互向导(尤其 `-config add` 问组名)里 Ctrl+C 必须能退出,且退出码用 130
+    (与 shell 的"被中断"惯例一致),而不是一路冒成 traceback。
+    """
+    try:
+        return _configure_body(argv)
+    except KeyboardInterrupt:
+        _w("")
+        _w("  \033[1;33m已取消,未修改。\033[0m")
+        _w("")
+        return 130
+
+
+def _configure_body(argv):
     """`wchat -config` 的实现。argv 是去掉 `-config` 之后的部分。返回退出码。"""
     if any(a in ("-h", "--help") for a in argv):
         _w(USAGE.rstrip())

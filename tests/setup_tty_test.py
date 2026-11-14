@@ -13,6 +13,7 @@
 import os
 import pty
 import select
+import signal
 import stat
 import sys
 import tempfile
@@ -124,6 +125,69 @@ def run_burst(home, payload):
     return out.decode("utf-8", "replace"), rc
 
 
+def run_pty_add_ctrl(home, payloads):
+    """真 pty 跑 `wchat -config add`,在"问新组名"处灌控制字节(Ctrl+C/Ctrl+D/回车)。
+
+    专门锁那个现场 bug:`_read_line` 把 Ctrl+C/EOF 吞成空串 → 空组名 → while 无限重问,
+    连按 Ctrl+C 都出不来。这里断言"进程真的退出"(而不是靠 DEVNULL 下的假绿)。
+    返回 (屏幕文本, 退出码, 是否在超时内退出)。
+    """
+    env = dict(os.environ, HOME=home, CT_HOME=os.path.join(home, ".ct"),
+               WCHAT_NO_BOOTSTRAP="1", TERM="xterm-256color", COLUMNS="100",
+               PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""),
+               WCHAT_SETUP_NO_VERIFY="1")
+    for k in ("BASE_URL", "API_KEY", "WCHAT_API_KEY", "FLASH_MODEL", "PRO_MODEL"):
+        env.pop(k, None)
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe(sys.executable, [sys.executable, os.path.join(REPO, "wchat"),
+                                    "-config", "add"], env)
+    out = b""
+
+    def drain(t):
+        nonlocal out
+        end = time.time() + t
+        while time.time() < end:
+            r, _, _ = select.select([fd], [], [], 0.05)
+            if not r:
+                continue
+            try:
+                c = os.read(fd, 65536)
+            except OSError:
+                return
+            if not c:
+                return
+            out += c
+
+    drain(1.8)                          # 等"问名字"提示出现
+    for p in payloads:
+        os.write(fd, p)
+        drain(0.6)
+    exited, rc = False, None
+    end = time.time() + 2.5
+    while time.time() < end:
+        wp, st = os.waitpid(pid, os.WNOHANG)
+        if wp == pid:
+            exited = True
+            rc = os.waitstatus_to_exitcode(st)
+            break
+        drain(0.1)
+    if not exited:                      # 没退出 = 复现了"无法中断",强杀并判失败
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return out.decode("utf-8", "replace"), rc, exited
+
+
 def main():
     home = tempfile.mkdtemp(prefix="tty_cfg_")
     screen, rc = run_pty(home, ["tty", "https://tty.example/v1", "sk-typed-by-hand-123", "m-tty", ""],
@@ -173,6 +237,23 @@ def main():
     ck("整段粘贴三行:key 没丢", "sk-burst-key-987" in txt3, txt3 or "(无文件)")
     ck("整段粘贴三行:模型名没被 key 顶掉", 'FLASH_MODEL="m-burst"' in txt3, txt3)
     ck("整段粘贴三行:rc=0", rc3 == 0, repr(rc3))
+
+    # Ctrl+C 必须能中断 `-config add` 的"问新组名"(现场:空名字 while 死循环,连 Ctrl+C 都出不来)。
+    # 用真 pty 灌 \x03,断言进程**真的在超时内退出**,而不是看起来卡住。
+    h4 = tempfile.mkdtemp(prefix="tty_cfg_ctrlc_")
+    txt4, rc4, exited4 = run_pty_add_ctrl(h4, [b"\n", b"\n", b"\x03"])
+    ck("空回车多次后 Ctrl+C 仍能退出(不卡在问名字)", exited4, "exited=%s rc=%s" % (exited4, rc4))
+    ck("Ctrl+C 中断后有'已取消'提示", "已取消" in txt4, txt4[-220:])
+    ck("Ctrl+C 中断退出码 130", rc4 == 130, repr(rc4))
+    h5 = tempfile.mkdtemp(prefix="tty_cfg_ctrlc2_")
+    txt5, rc5, exited5 = run_pty_add_ctrl(h5, [b"\x03"])
+    ck("直接 Ctrl+C 也能退出", exited5, "exited=%s rc=%s" % (exited5, rc5))
+    # Ctrl+D(EOF)也应退出,且不新增
+    h6 = tempfile.mkdtemp(prefix="tty_cfg_eof_")
+    txt6, rc6, exited6 = run_pty_add_ctrl(h6, [b"\x04"])
+    ck("Ctrl+D(EOF)能退出 -config add", exited6, "exited=%s rc=%s" % (exited6, rc6))
+    ck("Ctrl+D 后提示未新增", "未新增" in txt6, txt6[-220:])
+    ck("Ctrl+D 没写出配置", not os.path.exists(os.path.join(h6, ".ct", "config")))
 
     print("RESULT total=%d pass=%d fail=%d" % (PASSES[0] + len(FAILS), PASSES[0], len(FAILS)))
     return 0 if not FAILS else 1
