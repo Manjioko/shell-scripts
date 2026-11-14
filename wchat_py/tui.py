@@ -36,6 +36,65 @@ def available():
         return False
 
 
+# ---------- 终端应答过滤(TUI 输入侧) ----------
+# 现象:TUI 输入框(TextArea)里冒出 `^]11;rgb:0000/0000/0000`,回车后还会当正文发给模型。
+# 成因:子进程(gh / vim / mdcat / codex / opencode / tmux —— 本机 PATH 上多个可执行文件
+#   内嵌 `\x1b]11;?` 这条查询)问终端"背景色是什么",终端**必定**回一段 OSC 应答;子进程早已退出,
+#   应答留在 pty 输入队列等**下一个读者**。TUI 下 stdin 归 Textual 的 `XTermParser`:它对
+#   OSC(`ESC ]…`)/DCS(`ESC P…`)序列**完全没有分支** —— 既不匹配光标报告/鼠标/模式报告,也不在
+#   按键表里,于是走 `reissue_sequence_as_keys` 被**逐字符当按键重放**,ESC→`^`、其余→字面字符,
+#   正好拼成用户看到的 `^]11;rgb:…`。实测(Textual 8.2.8):
+#     list(XTermParser().feed(b"\x1b]11;rgb:0000/0000/0000\x1b\\"))  → 23 个 Key,
+#   拼起来 == '^]11;rgb:0000/0000/0000'。
+# 判据**刻意只丢 OSC/DCS**:DA1/DA2、kitty 键盘标志、DECRPM 模式报告、DSR 光标报告这几类
+#   Textual 会**正常消费**(实测:0 事件,或正确的 CursorPosition / TerminalSupportsSynchronizedOutput),
+#   而且它靠这些做终端能力与光标探测;照搬非 TUI 输入框那套"四类全丢"会破坏键盘协议/同步输出/
+#   光标定位。wchat 自身从不发这类查询(测试 T17 有静态守卫),应答只可能来自子进程残留,剥离安全。
+# 与非 TUI 输入框(inputbox.py 的 _guarded_input)同口径:**在读者侧堵**,不追谁查询;只丢整段
+#   可识别应答,判不动的一律放行(误吞一个按键比漏一条应答严重得多)。
+_OSC_DCS_RESP_RE = re.compile(r"\x1b[\]PX^_][^\x1b\x07]*(?:\x1b\\|\x07)")
+
+
+def _strip_terminal_responses(s):
+    """丢掉整段可识别的 OSC/DCS 终端应答(BEL 或 ST 终止),其余原样返回。"""
+    if not s or "\x1b" not in s:
+        return s
+    return _OSC_DCS_RESP_RE.sub("", s)
+
+
+def _install_response_filter():
+    """把 Textual 的 `XTermParser.feed` 包一层:喂给解析器前先丢掉 OSC/DCS 终端应答。
+
+    为什么包在 `feed` 上:各 driver(linux / linux_inline / web / win32)都
+    `from textual._xterm_parser import XTermParser` 后 `parser.feed(...)`;改**类方法**一处即可
+    覆盖全部 driver(它们在应用 mode 启动时才 `feed = parser.feed`,取到的是包好的方法)。
+
+    **过滤后为空但原始非空**时直接返回空、绝不喂空串 —— Textual `Parser.feed("")` 是 **EOF 信号**
+    (`self._eof=True` + throw ParseEOF),喂空会误关解析器。任何一步拿不到(版本漂移)都静默跳过、
+    退回原行为,绝不因加固而崩。"""
+    try:
+        from textual._xterm_parser import XTermParser
+    except Exception:
+        return False
+    orig = getattr(XTermParser, "feed", None)
+    if orig is None:
+        return False
+    if getattr(orig, "_wchat_osc_filter", False):
+        return True
+
+    def feed(self, data):
+        if data:
+            filtered = _strip_terminal_responses(data)
+            if filtered != data and not filtered:
+                return ()                       # 整块都是应答 → 不产出事件,也不触发 EOF
+            data = filtered
+        return orig(self, data)
+
+    feed._wchat_osc_filter = True
+    XTermParser.feed = feed
+    return True
+
+
 class TuiStdout:
     """sys.stdout/stderr 的 shim:写入投进 app 事件队列。status=True 走状态区(输入框上方),
     否则走内容区。这样 auto 横幅/usage 等"侧栏信息"不污染对话正文。"""
@@ -67,6 +126,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
     textual 缺失抛 RuntimeError。"""
     if not available():
         raise RuntimeError("textual 未安装")
+    # 终端应答过滤(见 _install_response_filter):在 driver 输入线程起来前装好。
+    # 幂等、失败静默退回原行为,不影响 TUI 启动。
+    _install_response_filter()
     from textual.app import App, ComposeResult
     from textual.widgets import Static, Button, Label, TextArea, Input
     from textual.containers import Vertical, Horizontal, Container, VerticalScroll

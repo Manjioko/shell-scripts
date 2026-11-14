@@ -1226,5 +1226,75 @@ except Exception as _e:
     traceback.print_exc()
     ck("Shift+Enter 换行无异常", False, repr(_e))
 
+
+# ---- 23) 终端应答过滤:OSC/DCS 应答(如 `]11;rgb:…`)不得漏成输入框文本 ----
+# 复现依据:Textual 8.2.8 的 XTermParser 对 OSC/DCS 无分支,会把 `\x1b]11;rgb:…` 逐字符当按键
+# 重放成 `^]11;rgb:…`(实测 23 个 Key)。修法见 tui._install_response_filter(包 XTermParser.feed,
+# 只丢 OSC/DCS,保留 DA/kitty/DECRPM/CPR 这些 Textual 要用的应答)。本段锁住"漏→不漏"与"没误杀"。
+print("=== 23. 终端应答过滤(OSC/DCS 不漏成输入框文本,真键与能力应答不受影响) ===")
+
+
+def _resp_filter_check():
+    from textual._xterm_parser import XTermParser
+    from textual import events as _ev
+
+    ck("_install_response_filter 装上(True)", tui._install_response_filter() is True)
+    ck("_install_response_filter 幂等(重复装仍 True)", tui._install_response_filter() is True)
+
+    def _feed(payload):
+        p = XTermParser(debug=False)
+        return list(p.feed(payload.decode("utf-8", "replace")))
+
+    def _typed(msgs):
+        out = []
+        for m in msgs:
+            if isinstance(m, _ev.Key):
+                out.append(m.character if m.character is not None else "<%s>" % m.key)
+            else:
+                out.append("[%s]" % type(m).__name__)
+        return "".join(out)
+
+    # OSC/DCS 应答 → 不再产出任何字面字符(核心回归)
+    for nm, pl in {
+        "OSC11背景色(ST)": b"\x1b]11;rgb:0000/0000/0000\x1b\\",
+        "OSC11背景色(BEL)": b"\x1b]11;rgb:0000/0000/0000\x07",
+        "OSC10前景色": b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\",
+        "OSC4调色板": b"\x1b]4;11;rgb:2828/2c2c/3434\x1b\\",
+        "DCS(XTVERSION)": b"\x1bP>| xterm-ghostty\x1b\\",
+    }.items():
+        _t = _typed(_feed(pl))
+        ck("%s 应答不漏成字面文本" % nm, _t == "", repr(_t))
+
+    # 真按键照常;应答夹在按键中间只留按键
+    ck("普通键 a 仍产出 'a'", _typed(_feed(b"a")) == "a", repr(_typed(_feed(b"a"))))
+    ck("应答夹在真键中间 → 只留按键", _typed(_feed(b"\x1b]11;rgb:0/0/0\x1b\\a")) == "a",
+       repr(_typed(_feed(b"\x1b]11;rgb:0/0/0\x1b\\a"))))
+    # Textual 要用的能力/光标应答不能被误杀
+    ck("DECRPM 仍被正常消费(TerminalSupportsSynchronizedOutput)",
+       any(type(m).__name__ == "TerminalSupportsSynchronizedOutput" for m in _feed(b"\x1b[?2026;1$y")))
+    ck("CPR 仍被正常消费(CursorPosition)",
+       any(type(m).__name__ == "CursorPosition" for m in _feed(b"\x1b[24;1R")))
+    ck("DA1 无字面泄漏",
+       all(not (isinstance(m, _ev.Key) and m.character) for m in _feed(b"\x1b[?62;1;6c")))
+
+    # 关键边界:整块都是应答(过滤后为空)不得把解析器误当 EOF 关掉
+    p = XTermParser(debug=False)
+    ck("整块应答不产出事件", list(p.feed("\x1b]11;rgb:0/0/0\x1b\\")) == [])
+    ck("纯应答后解析器仍活着(紧接 'a' 能解析)",
+       any(isinstance(m, _ev.Key) and m.character == "a" for m in p.feed("a")))
+
+    # 纯函数边界
+    ck("_strip_terminal_responses 普通文本不变", tui._strip_terminal_responses("hello") == "hello")
+    ck("_strip_terminal_responses 去应答留文字", tui._strip_terminal_responses("q\x1b]11;rgb:1/1/1\x1b\\z") == "qz")
+
+
+try:
+    _resp_filter_check()
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("终端应答过滤无异常", False, repr(_e))
+
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
