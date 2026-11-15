@@ -54,6 +54,12 @@ def available():
 #   可识别应答,判不动的一律放行(误吞一个按键比漏一条应答严重得多)。
 _OSC_DCS_RESP_RE = re.compile(r"\x1b[\]PX^_][^\x1b\x07]*(?:\x1b\\|\x07)")
 
+# 提示行(dim │ 前缀)剥离:旧的非 TUI 输出给每行提示都用 `\033[2m│\033[0m ` 加一根暗色竖线来
+# **模拟"次要/说明"样式**(见 cli.inp_msg、render.BAR)。TUI 里不再需要这根竖线 —— 统一改成
+# "思考内容灰 + 斜体"(见 WchatApp._hint_text),既干净又和 placeholder/状态行同档。
+# 只匹配行首这一种 hint 前缀;工具框线的 `   │ `(3 空格 + 裸竖线,无 ANSI)不受影响。
+_HINT_BAR_RE = re.compile(r"^\x1b\[2m│\x1b\[0m ?")
+
 
 def _strip_terminal_responses(s):
     """丢掉整段可识别的 OSC/DCS 终端应答(BEL 或 ST 终止),其余原样返回。"""
@@ -534,6 +540,17 @@ def make_app(handle_line, *, banner="", on_meta=None):
         CSS = """
         Screen { layout: vertical; padding: 0; }
         #contentbox { height: 1fr; border: none; padding: 0; margin: 0; }
+        /* 空态欢迎提示:首次进入(或清屏 -cl/-n 后)内容区为空时,在正中显示一段用法提示,
+           免得一进来大片空白、也让新用户第一眼知道怎么用。
+           独立成一个 #welcome widget 挂在 #contentbox 里(**不进 #content 消息列表**),避免污染
+           对话正文与"内容区无纯空白子件"那类判据;有逻辑块时它隐藏、让 #content 独占整块。
+           配色与思考文本同一档灰(#6a6a6a)+ 斜体,深色终端也读得清。 */
+        #welcome { display: none; height: 1fr; width: 1fr;
+                   content-align: center middle; text-align: center;
+                   color: #6a6a6a; text-style: italic; padding: 0 2; }
+        /* 空态:藏起 #content、亮出 #welcome(由 _set_welcome 切 #contentbox 的 .empty 类) */
+        #contentbox.empty #content { display: none; }
+        #contentbox.empty #welcome { display: block; }
         #content { height: 1fr; padding: 0 1; margin: 0; border: none;
                    scrollbar-size-vertical: 1;
                    scrollbar-color: #444444;
@@ -592,8 +609,31 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
                 yield VerticalScroll(id="content")
+                yield Static(self._welcome_text(), id="welcome")
             yield Static("", id="status")
             yield ChatInput(id="input", placeholder="请输入问题,回车发送")
+
+        # ---- 空态欢迎提示 ----
+        @staticmethod
+        def _welcome_text():
+            """内容区为空时居中显示的用法提示(纯文本,颜色/斜体交给 CSS #welcome)。
+            文案对齐真实命令(见 helptext.py):-h 帮助、-q 退出、Ctrl+F/Ctrl+V 选图/贴图。"""
+            return (
+                "欢迎使用 WCHAT\n"
+                "\n"
+                "直接输入你的问题,按回车发送\n"
+                "输入 -h 显示更多用法\n"
+                "输入 -q 离开 WCHAT\n"
+                "Ctrl+F 选择文件 · Ctrl+V 粘贴截图"
+            )
+
+        def _set_welcome(self, show):
+            """切换空态欢迎:#contentbox 加/去 .empty 类 → 藏 #content、亮 #welcome(见 CSS)。
+            幂等;拿不到控件(极早期/已卸载)时静默跳过,绝不因提示而崩。"""
+            try:
+                self.query_one("#contentbox").set_class(bool(show), "empty")
+            except Exception:
+                pass
 
         # ---- 内容区(消息列表:每段一个 Static,顺序 append,自然从提问下一行开始) ----
         def _content(self):
@@ -613,6 +653,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 cls = classes or ""
                 if sep and getattr(self, "_has_blocks", False):
                     cls = (cls + " blk").strip()
+                self._set_welcome(False)          # 有内容了 → 收起空态欢迎、亮出 #content
                 w = Static(renderable, classes=cls) if cls else Static(renderable)
                 self._content().mount(w)
                 if sep:
@@ -627,6 +668,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             从而带 offset 元数据、可被原生拖拽选中复制。"""
             try:
                 cls = "blk" if (sep and getattr(self, "_has_blocks", False)) else ""
+                self._set_welcome(False)          # 有正文了 → 收起空态欢迎、亮出 #content
                 w = _MarkdownStatic(md_text, classes=cls) if cls else _MarkdownStatic(md_text)
                 self._content().mount(w)
                 if sep:
@@ -638,6 +680,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def _ensure_live(self):
             if self._live_widget is None:
                 cls = "blk" if self._has_blocks else ""
+                self._set_welcome(False)          # 开始流式 → 收起空态欢迎、亮出 #content
                 w = Static("", classes=cls)
                 try:
                     self._content().mount(w)
@@ -650,6 +693,8 @@ def make_app(handle_line, *, banner="", on_meta=None):
         def on_mount(self):
             if banner:
                 self._mount(Text.from_ansi(banner))
+            # 首次进入:内容区为空(无 banner/无历史)时显示居中欢迎提示;有 banner 则收着。
+            self._set_welcome(not self._has_blocks)
             # 统一 markdown 观感:给 app 控制台压入与 mdrender 同一份现代主题。
             # Textual 的 RichVisual 渲染 mounted 的 rich.markdown.Markdown 时用的就是
             # app.console,所以这里 push 之后,TUI 里的标题/代码/链接/表格等样式与
@@ -748,6 +793,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             self._has_blocks = False
+            self._set_welcome(False)          # 准备挂历史 → 亮出 #content;挂完再按是否为空决定欢迎
             if header:
                 self._mount(Text(header, style="bold"))
             from wchat_py import repl as _repl
@@ -793,6 +839,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                                for tc in m["tool_calls"]]
                         self._mount(Text("\n".join(_repl._clip_line(x) for x in tcl[:6]), style="dim"))
             self._scroll_end()
+            self._set_welcome(not self._has_blocks)   # 历史为空 → 回到欢迎;有内容则收着
 
         def emit(self, s):
             self._q.put(("log", str(s), None))
@@ -815,6 +862,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
                     t.append("\n")
                 t.append(self._answer)
             return t
+
+        def _hint_text(self, t):
+            """把带 dim│ 前缀的"提示行"转成 TUI 展示:去掉每行行首的竖线前缀,整行统一成
+            "思考内容灰 + 斜体"(dim italic,与 placeholder/状态行同档次要文本样式)。
+            保留行内其它 ANSI(如 ✅/⚠ 的颜色)——只把**基础**色与字形统一,不动语义强调。"""
+            lines = [_HINT_BAR_RE.sub("", ln, count=1) for ln in t.split("\n")]
+            txt = Text.from_ansi("\n".join(lines))
+            txt.style = "dim italic"
+            return txt
 
         def _render_reason(self, text):
             """思考渲染:默认**折叠成一行**(▸ + 首个非空行、压空白);单行由 CSS
@@ -910,9 +966,17 @@ def make_app(handle_line, *, banner="", on_meta=None):
                         self._finalize_live()
                         style = ev[2] if len(ev) > 2 else None
                         # 工具块的续行(框线 `│` / 状态 `└─`)**不**加块间空行;横幅(⏺)与其它=新块。
+                        # _cont 用**原文**判定:提示行带 dim│ 时也归为续行、保持紧凑(不逐行空行)。
                         _cont = ("└─" in t) or ("│" in t)
-                        self._mount(Text(t, style=style) if style else Text.from_ansi(t),
-                                    sep=(not _cont))
+                        if style is None and _HINT_BAR_RE.match(t):
+                            # 提示行:去掉行首 dim│ 前缀,统一成"思考内容灰 + 斜体"(不再是竖线)。
+                            hint = self._hint_text(t)
+                            if not hint.plain.strip():
+                                continue          # 去前缀后是空行(如 helptext 里的空行)→ 不挂
+                            self._mount(hint, sep=(not _cont))
+                        else:
+                            self._mount(Text(t, style=style) if style else Text.from_ansi(t),
+                                        sep=(not _cont))
             except queue.Empty:
                 pass
             if changed and (self._reason or self._answer):
@@ -1014,6 +1078,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             self._has_blocks = False
+            self._set_welcome(True)           # 清屏/新对话后内容区空了 → 重新显示欢迎提示
 
         def _on_turn_done(self):
             # 本轮结束:清掉取消标志(否则下一轮首个请求会被立刻取消)。
@@ -1038,6 +1103,12 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 return
             try:
                 self.query_one("#input", ChatInput).focus()
+            except Exception:
+                pass
+            # 一轮结束按**真实子件数**对账空态:本轮若没留下任何可见块(空回复等),把欢迎提示放回来,
+            # 避免内容区空着却一直收着提示(比只靠 _has_blocks 更准;正常有内容时无副作用)。
+            try:
+                self._set_welcome(len(self._content().children) == 0)
             except Exception:
                 pass
 
