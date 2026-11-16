@@ -637,17 +637,20 @@ def _run_tool(name, args_json):
         _fmt = (a.get("format") or os.environ.get("TTS_FORMAT") or "wav")
         if _fmt != "wav":                       # v1 只做非流式 wav
             return "错误:v1 只支持 format=wav(收到 %r)" % _fmt
-        _base = os.environ.get("TTS_BASE_URL") or _tts.DEFAULT_BASE_URL
         _key = _tts.resolve_key()
         if not _key:
-            return ("错误:未配置 TTS key。请在 ~/.ct/config 加一行 TTS_API_KEY=\"<mimo 平台的 key>\""
-                    "(或 export TTS_API_KEY=...),或把主对话切到 mimo 组后再试。")
+            return ("错误:未配置 TTS key。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
+                    "TTS_API_KEY,或把主对话切到同一供应商的组;由用户决定继续还是放弃。")
+        # TTS_BASE_URL **原样使用,不做任何兜底/拼接**。路径是供应商特有的,代码一拼换供应商就错;
+        # 端点必须由用户在 config 里写全(如 https://api.xiaomimimo.com/v1/chat/completions)。
+        _url = (os.environ.get("TTS_BASE_URL") or "").strip()
+        if not _url:
+            return ("错误:未配置 TTS_BASE_URL。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
+                    "TTS_BASE_URL 为该供应商的**完整** TTS 端点(mimo: "
+                    "https://api.xiaomimimo.com/v1/chat/completions);由用户决定补全还是放弃。")
         _body = _tts.build_body(_model, _text, _voice, _style, _fmt)
         _hdrs = {"Content-Type": "application/json", "Authorization": "Bearer " + _key,
                  "api-key": _key}
-        # 关键:TTS_BASE_URL 可能是**根地址**(官方 SDK 习惯填 .../v1),统一归一成完整
-        # /chat/completions 端点再 POST;否则会打到 .../v1 得到 HTTP 404(用户实报过)。
-        _url = _tts.normalize_endpoint(_base)
         _req = _ur.Request(_url, data=_json.dumps(_body, ensure_ascii=False).encode("utf-8"),
                            headers=_hdrs)
         try:
@@ -655,17 +658,23 @@ def _run_tool(name, args_json):
                 _resp = _json.loads(_r.read().decode("utf-8", "replace"))
         except Exception as _e:                 # noqa: BLE001 —— HTTPError/URLError/超时都归一
             _code = getattr(_e, "code", None)
-            if _code == 401:
-                return "错误:TTS key 无效或缺失(HTTP 401,检查 TTS_API_KEY)"
-            if _code == 404:
-                return ("错误:TTS 端点 404(地址: %s)。请检查 TTS_BASE_URL 是否为该供应商的**完整**端点"
-                        "(mimo: https://api.xiaomimimo.com/v1/chat/completions;OpenAI: https://api.openai.com/v1/audio/speech)。"
-                        "换供应商时把它的完整 TTS 端点填进来即可,不用改代码。" % _url)
-            return "错误:语音生成失败: %s(端点: %s)" % (_e, _url)
+            try:
+                _bodytxt = _e.read().decode("utf-8", "replace")[:300]      # HTTPError 的响应体
+            except Exception:
+                _bodytxt = ""
+            _detail = ("HTTP %s" % _code) if _code else repr(_e)
+            if _bodytxt.strip():
+                _detail += " · " + " ".join(_bodytxt.split())
+            # 明确要求:不重试、不猜别的地址,把真实错误交给用户定夺。
+            return ("错误:调用 TTS 接口失败(%s)。当前 TTS_BASE_URL = %s。"
+                    "**不要重试,也不要猜测或改用别的地址**;请把这条错误如实告诉用户,"
+                    "让用户决定是补充/修正 TTS_BASE_URL(需为该供应商的完整端点)还是放弃本次语音合成。"
+                    % (_detail, _url))
         try:
             _audio = _tts.parse_audio(_resp)
         except Exception as _e:                 # noqa: BLE001
-            return "错误:%s" % _e
+            return ("错误:%s。接口返回了内容但取不到音频。请不要重试,"
+                    "把这条告诉用户,由用户决定是否检查 TTS_BASE_URL/模型后重来或放弃。" % _e)
         _op = a.get("out_path") or ""
         if _op:
             _op = os.path.expanduser(_op)

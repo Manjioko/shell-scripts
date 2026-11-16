@@ -73,23 +73,9 @@ ck("缺 audio.data → ValueError", _raises(T.parse_audio, {"choices": [{"messag
 ck("空 audio.data → ValueError", _raises(T.parse_audio, {"choices": [{"message": {"audio": {"data": ""}}}]}))
 ck("坏 base64 → ValueError", _raises(T.parse_audio, {"choices": [{"message": {"audio": {"data": "!!!notb64!!!"}}}]}))
 
-print("=== 3b. normalize_endpoint:完整端点原样(provider 各自路径),只给 /v1 兜底 ===")
-ck("完整端点 .../chat/completions → 原样",
-   T.normalize_endpoint("https://api.xiaomimimo.com/v1/chat/completions")
-   == "https://api.xiaomimimo.com/v1/chat/completions")
-ck("别的供应商完整路径 .../v1/audio/speech → **原样不拼**(换供应商不错)",
-   T.normalize_endpoint("https://api.openai.com/v1/audio/speech")
-   == "https://api.openai.com/v1/audio/speech", T.normalize_endpoint("https://api.openai.com/v1/audio/speech"))
-ck("任意完整路径 .../tts/synthesize → 原样",
-   T.normalize_endpoint("https://other.example/tts/synthesize")
-   == "https://other.example/tts/synthesize")
-ck("仅到 .../v1(官方 base_url 写法)→ 兜底补 /chat/completions",
-   T.normalize_endpoint("https://api.xiaomimimo.com/v1")
-   == "https://api.xiaomimimo.com/v1/chat/completions", T.normalize_endpoint("https://api.xiaomimimo.com/v1"))
-ck("尾斜杠 .../v1/ → 兜底补",
-   T.normalize_endpoint("https://api.xiaomimimo.com/v1/")
-   == "https://api.xiaomimimo.com/v1/chat/completions")
-ck("空 → 默认(完整端点)", T.normalize_endpoint("") == T.DEFAULT_BASE_URL == "https://api.xiaomimimo.com/v1/chat/completions")
+print("=== 3b. 无兜底:TTS_BASE_URL 原样使用,代码不归一/不拼路径 ===")
+ck("normalize_endpoint 已移除(代码不做路径兜底)", not hasattr(T, "normalize_endpoint"))
+ck("默认值是完整端点", T.DEFAULT_BASE_URL == "https://api.xiaomimimo.com/v1/chat/completions", T.DEFAULT_BASE_URL)
 
 print("=== 3. resolve_key:显式 > 同 host 复用 > 空 ===")
 for k in ("TTS_API_KEY", "WCHAT_API_KEY", "API_KEY", "TTS_BASE_URL", "BASE_URL"):
@@ -148,9 +134,11 @@ class _FakeResp:
 
 
 def _fake_urlopen(req, timeout=None):
+    _fake_urlopen.last_url = req.full_url   # 记录实际请求的 URL,断言"原样使用"
     return _FakeResp(json.dumps({"choices": [{"message": {"audio": {"data": _enc2}}}]}).encode())
 
 
+_fake_urlopen.last_url = None
 _urlreq.urlopen = _fake_urlopen
 try:
     _out = toolrun._run_tool("text_to_speech", json.dumps(
@@ -163,6 +151,38 @@ ck("e2e:文件已写出", os.path.isfile(_opath), _opath)
 ck("e2e:文件字节==解码结果", (open(_opath, "rb").read() if os.path.isfile(_opath) else b"") == _audio,
    "len=%d" % (os.path.getsize(_opath) if os.path.isfile(_opath) else -1))
 ck("e2e:返回文案含音色", "冰糖" in (_out or ""), repr(_out)[:160])
+ck("e2e:TTS_BASE_URL 原样使用(未拼接)",
+   _fake_urlopen.last_url == "https://api.xiaomimimo.com/v1/chat/completions", _fake_urlopen.last_url)
+
+# 无兜底:即便只填到 .../v1,也**原样**请求(不再自动补 /chat/completions)
+os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1"
+_fake_urlopen.last_url = None
+_urlreq.urlopen = _fake_urlopen
+try:
+    toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "v1.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+ck("e2e:.../v1 也原样请求(代码不做兜底补全)",
+   _fake_urlopen.last_url == "https://api.xiaomimimo.com/v1", _fake_urlopen.last_url)
+
+# 接口报错(如 404):返回要**解释给用户、且明确让模型不要重试**
+import urllib.error as _urlerr  # noqa: E402
+
+
+def _fake_404(req, timeout=None):
+    raise _urlerr.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+
+os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1"
+_urlreq.urlopen = _fake_404
+try:
+    _err = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "e.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+ck("报错:含 HTTP 404", "404" in (_err or ""), repr(_err)[:160])
+ck("报错:含当前 TTS_BASE_URL", "https://api.xiaomimimo.com/v1" in (_err or ""), repr(_err)[:200])
+ck("报错:明确让模型不要重试", "不要重试" in (_err or ""), repr(_err)[:200])
+ck("报错:让用户决定(补充/放弃)", ("用户决定" in (_err or "")) and ("放弃" in (_err or "")), repr(_err)[:220])
 
 # 无 key → 配置指引(不崩)
 os.environ.pop("TTS_API_KEY", None)

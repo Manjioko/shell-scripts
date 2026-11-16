@@ -42,7 +42,7 @@ messages = (
 | `TTS_MODEL` | `mimo-v2.5-tts` | TTS 模型名 |
 | `TTS_VOICE` | `mimo_default` | 预置音色 ID;可改 `冰糖`/`茉莉`/`苏打`/`白桦`/`Mia`… |
 | `TTS_FORMAT` | `wav` | v1 仅 `wav` |
-| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | **完整的 POST 端点**(原样使用,代码不拼路径)。换供应商只改这一行(如 OpenAI: `https://api.openai.com/v1/audio/speech`)。仅"只填到 `/v1`"(官方 base_url 写法)时兜底补 `/chat/completions` |
+| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | 供应商的**完整 TTS POST 端点,原样使用,代码不做任何拼接/兜底**。换供应商只改这一行(如 OpenAI: `https://api.openai.com/v1/audio/speech`)。只填到 `/v1` 会 404 —— 这是刻意的:路径由你(config)负责 |
 | `TTS_TIMEOUT` | `120` | 单次请求秒数 |
 | `TTS_API_KEY` | **(见下,不写死)** | TTS 专供 key |
 
@@ -117,13 +117,13 @@ parameters:
 
 ## 8. 风险 / 备注
 
-- **端点语义(关键设计,2026-11 用户提出并采纳)**:`TTS_BASE_URL` 是**完整 POST 端点、原样使用**,
-  **代码绝不在路径上做拼接**。理由:不同供应商的 TTS 端点路径不同(mimo `/v1/chat/completions`、
-  OpenAI `/v1/audio/speech`),在代码里拼 `/chat/completions` 换供应商必错(旧实现会把
-  `.../v1/audio/speech` 拼成 `.../v1/audio/speech/v1/chat/completions` → 404)。所以路径差异
-  **完全收敛到 config 里的一行**,错误可控、可读。唯一兜底:`TTS_BASE_URL` 只到 `/v1`(官方
-  `base_url=.../v1` 那种没写到端点的写法)时补 `/chat/completions`,免得照官方示例填就 404;
-  任何带真实路径的端点一律原样。404 时错误文案会带上当前端点并提示"该填完整端点"。
+- **端点语义(关键设计,2026-11 用户最终定调)**:`TTS_BASE_URL` 是**完整 POST 端点,原样使用,
+  代码不做任何兜底/拼接/归一**(连"只填到 /v1 就补 /chat/completions"也**撤掉**了)。理由:不同供应商
+  TTS 路径不同(mimo `/v1/chat/completions`、OpenAI `/v1/audio/speech`),代码拼一次换供应商就错;路径
+  必须由用户在 config 写全,**错误可控在 config**。
+- **出错时的行为(用户要求)**:调用失败(HTTP 错误/网络/返回无音频)**不重试、不猜别的地址**;工具把
+  真实错误 + 当前 `TTS_BASE_URL` 原样交回模型,并**明确要求模型把错误解释给用户、由用户决定补充/修正
+  URL 还是放弃**。
 - **输出到工作根之外(如 Windows 桌面 `/mnt/c/...`)**:out_path 走 `_path_guard("rw")`,正常(非 auto)
   模式会弹一次「工作目录外写」确认,放行后记住该目录;auto 档需 `--allow-write` 白名单否则 P2 拒。
   这与 write_file 一致,属预期。
