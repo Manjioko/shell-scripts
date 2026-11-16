@@ -33,6 +33,46 @@ DEFAULT_FORMAT = "wav"
 # 代码一拼换供应商就错,所以端点必须由用户在 config 写全。这里只是"没配时的默认值"。
 DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
+# 语音复刻(voiceclone):复刻模式强制用这个模型,voice 换成样本 data-uri。
+CLONE_MODEL = "mimo-v2.5-tts-voiceclone"
+_MAX_SAMPLE_B64 = 10 * 1024 * 1024          # 接口限:base64 串 ≤ 10MB
+_SAMPLE_CACHE = {}                          # (realpath, mtime, size) -> data-uri
+
+
+def build_voice_datauri(path):
+    """读本地音频样本 → `data:{mime};base64,<...>`(voiceclone 的 audio.voice)。
+
+    校验:存在、扩展名 wav/mp3、base64 串 ≤ 10MB。失败抛 ValueError(调用方转成给用户的话、不重试)。
+    按 (实路径, mtime, size) 缓存,避免每次几 MB 反复 base64。**样本只在内部用,绝不进 messages/日志。**
+    """
+    p = os.path.expanduser(str(path or "").strip())
+    if not p:
+        raise ValueError("TTS_VOICE_SAMPLE 为空")
+    if not os.path.isabs(p):
+        p = os.path.join(os.environ.get("WORK_ROOT") or os.getcwd(), p)
+    if not os.path.isfile(p):
+        raise ValueError("语音样本文件不存在: %s" % path)
+    ext = os.path.splitext(p)[1].lower()
+    mime = {".wav": "audio/wav", ".mp3": "audio/mpeg"}.get(ext)
+    if not mime:
+        raise ValueError("语音样本仅支持 .wav/.mp3(收到 %r)" % (ext or "无扩展名"))
+    try:
+        st = os.stat(p)
+        key = (os.path.realpath(p), int(st.st_mtime), int(st.st_size))
+    except OSError:
+        key = None
+    if key is not None and key in _SAMPLE_CACHE:
+        return _SAMPLE_CACHE[key]
+    with open(p, "rb") as f:
+        raw = f.read()
+    datauri = "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+    if len(datauri) > _MAX_SAMPLE_B64:
+        raise ValueError("语音样本过大:base64 串 %d 字节 > 10MB 上限(原始约 %.1fMB),请换更短的样本"
+                         % (len(datauri), len(raw) / 1048576.0))
+    if key is not None:
+        _SAMPLE_CACHE[key] = datauri
+    return datauri
+
 
 def build_body(model, text, voice, style="", fmt="wav"):
     """组 mimo TTS 的 chat.completions 请求体。

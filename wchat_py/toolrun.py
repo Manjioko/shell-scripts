@@ -631,12 +631,23 @@ def _run_tool(name, args_json):
         _text = a.get("text") or ""
         if not str(_text).strip():
             return "错误:text 为空,没有可合成的文本"
-        _model = os.environ.get("TTS_MODEL") or _tts.DEFAULT_MODEL
-        _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
         _style = a.get("style") or ""
         _fmt = (a.get("format") or os.environ.get("TTS_FORMAT") or "wav")
         if _fmt != "wav":                       # v1 只做非流式 wav
             return "错误:v1 只支持 format=wav(收到 %r)" % _fmt
+        # 语音复刻开关:设了 TTS_VOICE_SAMPLE(本地样本路径)就走复刻;否则普通预置音色。
+        _sample = (os.environ.get("TTS_VOICE_SAMPLE") or "").strip()
+        if _sample:
+            # 复刻模式:模型**强制** voiceclone;voice 用样本 data-uri;工具 voice 参数忽略(用户已确认)。
+            try:
+                _voice = _tts.build_voice_datauri(_sample)
+            except Exception as _e:             # noqa: BLE001
+                return ("错误:%s。请不要重试,把这条告诉用户:TTS_VOICE_SAMPLE(语音复刻样本)有问题,"
+                        "让用户决定修正样本(路径/格式/大小)还是改用普通预置音色(TTS_VOICE)。" % _e)
+            _model = _tts.CLONE_MODEL
+        else:
+            _model = os.environ.get("TTS_MODEL") or _tts.DEFAULT_MODEL
+            _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
         _key = _tts.resolve_key()
         if not _key:
             return ("错误:未配置 TTS key。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
@@ -693,7 +704,10 @@ def _run_tool(name, args_json):
                 _f.write(_audio)
         except Exception as _e:                 # noqa: BLE001
             return "错误:写入音频文件失败: %s" % _e
-        return _tts.fmt_result(_op, len(_audio), _voice, _model)
+        # 回给模型的文案里**绝不能带样本 data-uri**(那是几 MB 的声纹 base64,会进对话/日志)。
+        # 复刻模式只显示"复刻音色";普通模式显示预置音色名。
+        _voice_disp = "复刻音色(voiceclone)" if _sample else _voice
+        return _tts.fmt_result(_op, len(_audio), _voice_disp, _model)
     if name == "run_shell_command":
         from wchat_py import audit as _audit
         cmd = a.get("command") or ""

@@ -194,5 +194,110 @@ ck("e2e:无 key 返回配置指引(提到 TTS_API_KEY)", "TTS_API_KEY" in (_no o
 _empty = toolrun._run_tool("text_to_speech", json.dumps({"text": "   "}))
 ck("e2e:空 text 报错", _empty.startswith("错误:"), repr(_empty)[:80])
 
+print("=== 7. 语音复刻(voiceclone):样本 data-uri + 复刻模式 ===")
+# 造小 wav/mp3 样本
+_swav = os.path.join(_work, "sample.wav")
+_smp3 = os.path.join(_work, "sample.mp3")
+_sbad = os.path.join(_work, "sample.txt")
+_wav_bytes = b"RIFF" + b"\x00" * 200
+with open(_swav, "wb") as f:
+    f.write(_wav_bytes)
+with open(_smp3, "wb") as f:
+    f.write(b"ID3" + b"\x00" * 100)
+with open(_sbad, "wb") as f:
+    f.write(b"hello")
+
+_du = T.build_voice_datauri(_swav)
+ck("wav 样本 → data:audio/wav;base64 前缀", _du.startswith("data:audio/wav;base64,"), _du[:40])
+ck("data-uri 解码等于文件字节",
+   base64.b64decode(_du.split(",", 1)[1]) == _wav_bytes)
+_du2 = T.build_voice_datauri(_smp3)
+ck("mp3 样本 → data:audio/mpeg", _du2.startswith("data:audio/mpeg;base64,"), _du2[:40])
+ck("缓存:同文件两次返回同一对象", T.build_voice_datauri(_swav) is _du)
+
+
+def _raises_val(fn, *a):
+    try:
+        fn(*a)
+        return False
+    except ValueError:
+        return True
+    except Exception:
+        return False
+
+
+ck("不存在的样本 → ValueError", _raises_val(T.build_voice_datauri, os.path.join(_work, "nope.wav")))
+ck("不支持的扩展名(.txt)→ ValueError", _raises_val(T.build_voice_datauri, _sbad))
+# 超限:临时把上限调小,验证大小校验(用一个**未被缓存过**的新文件,否则缓存命中会短路)
+_sbig = os.path.join(_work, "sample2.wav")
+with open(_sbig, "wb") as f:
+    f.write(b"RIFF" + b"\x00" * 200)
+_orig_max = T._MAX_SAMPLE_B64
+T._MAX_SAMPLE_B64 = 10
+try:
+    ck("超限 → ValueError", _raises_val(T.build_voice_datauri, _sbig))
+finally:
+    T._MAX_SAMPLE_B64 = _orig_max
+
+# 复刻模式经 toolrun:模型强制 voiceclone,voice=样本 data-uri,工具 voice 参数被忽略
+os.environ["TTS_API_KEY"] = "k-e2e"
+os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1/chat/completions"
+os.environ["TTS_VOICE_SAMPLE"] = _swav
+os.environ["TTS_MODEL"] = "mimo-v2.5-tts"
+os.environ["TTS_VOICE"] = "冰糖"
+_cap = {}
+
+
+class _Resp2(_FakeResp):
+    pass
+
+
+def _fake_capture(req, timeout=None):
+    try:
+        _cap["body"] = json.loads(req.data.decode("utf-8"))
+    except Exception:
+        _cap["body"] = {}
+    return _FakeResp(json.dumps({"choices": [{"message": {"audio": {"data": _enc2}}}]}).encode())
+
+
+_urlreq.urlopen = _fake_capture
+try:
+    _co = toolrun._run_tool("text_to_speech", json.dumps(
+        {"text": "hi", "voice": "茉莉", "out_path": os.path.join(_work, "clone.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+_bb = _cap.get("body", {})
+ck("复刻模式:模型强制 voiceclone", _bb.get("model") == T.CLONE_MODEL, _bb.get("model"))
+ck("复刻模式:voice=样本 data-uri(不是预置音色)",
+   str((_bb.get("audio") or {}).get("voice", "")).startswith("data:audio/wav;base64,"),
+   str((_bb.get("audio") or {}).get("voice", ""))[:40])
+ck("复刻模式:工具 voice 参数被忽略(不是茉莉)",
+   (_bb.get("audio") or {}).get("voice") != "茉莉")
+ck("复刻模式:可正常生成(返回含路径)", (".wav" in (_co or "")), repr(_co)[:120])
+ck("复刻模式:返回文案**不含样本 data-uri**(不泄露声纹/不爆上下文)",
+   "data:audio" not in (_co or "") and "base64" not in (_co or ""), repr(_co)[:160])
+ck("复刻模式:返回文案显示『复刻音色』", "复刻音色" in (_co or ""), repr(_co)[:160])
+
+# 普通模式(不设 TTS_VOICE_SAMPLE):模型=TTS_MODEL、voice=预置
+os.environ.pop("TTS_VOICE_SAMPLE", None)
+_cap.clear()
+_urlreq.urlopen = _fake_capture
+try:
+    toolrun._run_tool("text_to_speech", json.dumps({"text": "hi", "voice": "茉莉",
+                                                    "out_path": os.path.join(_work, "norm.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+_bn = _cap.get("body", {})
+ck("普通模式:模型=TTS_MODEL", _bn.get("model") == "mimo-v2.5-tts", _bn.get("model"))
+ck("普通模式:voice=预置音色(茉莉)", (_bn.get("audio") or {}).get("voice") == "茉莉",
+   (_bn.get("audio") or {}).get("voice"))
+
+# 复刻样本缺失 → 报错且提示不重试
+os.environ["TTS_VOICE_SAMPLE"] = os.path.join(_work, "missing.wav")
+_me = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "m.wav")}))
+os.environ.pop("TTS_VOICE_SAMPLE", None)
+ck("复刻样本缺失 → 报错提到 TTS_VOICE_SAMPLE", "TTS_VOICE_SAMPLE" in (_me or ""), repr(_me)[:160])
+ck("复刻样本缺失 → 提示不重试", "不要重试" in (_me or ""), repr(_me)[:160])
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
