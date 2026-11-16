@@ -183,5 +183,23 @@
                     "required": ["command"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "text_to_speech",
+                "description": "把给定的文本合成为语音并保存为音频文件(mimo TTS)。用于用户要求「把这段读出来 / 生成语音 / 配音 / 念一下」等场景。合成的是参数 text 的原文,不会朗读当前对话内容。默认音色取配置 TTS_VOICE,可传 voice 覆盖。返回生成的音频文件路径(供后续播放或引用)。目前只支持 format=wav。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "要合成的文本(原样念出来)"},
+                        "voice": {"type": "string", "description": "音色 ID,如 mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean;省略则用配置 TTS_VOICE"},
+                        "style": {"type": "string", "description": "可选的自然语言风格指令,如「轻快上扬、语速稍快」「温柔低沉」,省略则用默认语气"},
+                        "out_path": {"type": "string", "description": "输出音频路径,省略则默认 <WORK_ROOT>/tts_out/tts-<时间戳>.wav;相对路径基于工作目录"},
+                        "format": {"type": "string", "enum": ["wav"], "description": "音频格式,目前仅 wav"}
+                    },
+                    "required": ["text"]
+                }
+            }
         }
     ]

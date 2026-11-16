@@ -23,7 +23,7 @@ ck "无变换: 末尾无换行" "$(tail -c 1 "$W/a.out" | od -c | head -1 | grep
 
 tb none 0 "" > "$W/b.out"
 ck "provider=none: 不含 web_search" "$(jq '[.[]|select(.function.name=="web_search")]|length' "$W/b.out")" "0"
-ck "provider=none: 工具数 11→10" "$(jq 'length' "$W/b.out")" "10"
+ck "provider=none: 工具数 12→11" "$(jq 'length' "$W/b.out")" "11"
 jq -c 'map(select(.function.name != "web_search"))' "$SPEC" > "$W/b.ref"
 ck "provider=none: 对齐 jq -c(去尾换行)" "$(python3 -c "
 a=open('$W/b.ref','rb').read().rstrip(b'\n'); b=open('$W/b.out','rb').read()
@@ -31,7 +31,7 @@ print('same' if a==b else 'diff')")" "same"
 
 printf '[{"type":"function","function":{"name":"mcp_x","parameters":{}}}]' > "$W/mcp.json"
 tb x 1 "$W/mcp.json" > "$W/c.out"
-ck "MCP 追加: 工具数 11→12" "$(jq 'length' "$W/c.out")" "12"
+ck "MCP 追加: 工具数 12→13" "$(jq 'length' "$W/c.out")" "13"
 ck "MCP 追加: 最后一个就是追加的" "$(jq -r '.[-1].function.name' "$W/c.out")" "mcp_x"
 
 tb none 1 "$W/mcp.json" > "$W/d.out"
@@ -40,4 +40,3 @@ ck "组合: 且 web_search 已剔除" "$(jq '[.[]|select(.function.name=="web_se
 
 printf 'RESULT total=%d pass=%d fail=%d\n' "$((pass+fail))" "$pass" "$fail"
 [[ $fail -eq 0 ]]
-

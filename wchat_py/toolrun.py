@@ -624,6 +624,63 @@ def _run_tool(name, args_json):
             return _resp["choices"][0]["message"].get("content") or ""
         except (KeyError, IndexError, TypeError):
             return "错误:联网搜索返回格式异常"
+    if name == "text_to_speech":
+        import json as _json
+        import urllib.request as _ur
+        from wchat_py import tts as _tts
+        _text = a.get("text") or ""
+        if not str(_text).strip():
+            return "错误:text 为空,没有可合成的文本"
+        _model = os.environ.get("TTS_MODEL") or _tts.DEFAULT_MODEL
+        _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
+        _style = a.get("style") or ""
+        _fmt = (a.get("format") or os.environ.get("TTS_FORMAT") or "wav")
+        if _fmt != "wav":                       # v1 只做非流式 wav
+            return "错误:v1 只支持 format=wav(收到 %r)" % _fmt
+        _base = os.environ.get("TTS_BASE_URL") or _tts.DEFAULT_BASE_URL
+        _key = _tts.resolve_key()
+        if not _key:
+            return ("错误:未配置 TTS key。请在 ~/.ct/config 加一行 TTS_API_KEY=\"<mimo 平台的 key>\""
+                    "(或 export TTS_API_KEY=...),或把主对话切到 mimo 组后再试。")
+        _body = _tts.build_body(_model, _text, _voice, _style, _fmt)
+        _hdrs = {"Content-Type": "application/json", "Authorization": "Bearer " + _key,
+                 "api-key": _key}
+        # 关键:TTS_BASE_URL 可能是**根地址**(官方 SDK 习惯填 .../v1),统一归一成完整
+        # /chat/completions 端点再 POST;否则会打到 .../v1 得到 HTTP 404(用户实报过)。
+        _url = _tts.normalize_endpoint(_base)
+        _req = _ur.Request(_url, data=_json.dumps(_body, ensure_ascii=False).encode("utf-8"),
+                           headers=_hdrs)
+        try:
+            with _ur.urlopen(_req, timeout=int(os.environ.get("TTS_TIMEOUT", "120"))) as _r:
+                _resp = _json.loads(_r.read().decode("utf-8", "replace"))
+        except Exception as _e:                 # noqa: BLE001 —— HTTPError/URLError/超时都归一
+            _code = getattr(_e, "code", None)
+            if _code == 401:
+                return "错误:TTS key 无效或缺失(HTTP 401,检查 TTS_API_KEY)"
+            return "错误:语音生成失败: %s" % _e
+        try:
+            _audio = _tts.parse_audio(_resp)
+        except Exception as _e:                 # noqa: BLE001
+            return "错误:%s" % _e
+        _op = a.get("out_path") or ""
+        if _op:
+            _op = os.path.expanduser(_op)
+            if not os.path.isabs(_op):
+                _op = os.path.join(os.environ.get("WORK_ROOT") or os.getcwd(), _op)
+        else:
+            _op = _tts.default_out_path(os.environ.get("WORK_ROOT") or os.getcwd())
+        _deny = _path_guard(_op, "rw")           # 与 write_file 同一道越界写闸
+        if _deny:
+            return _deny
+        try:
+            _dir = os.path.dirname(_op)
+            if _dir:
+                os.makedirs(_dir, exist_ok=True)
+            with open(_op, "wb") as _f:
+                _f.write(_audio)
+        except Exception as _e:                 # noqa: BLE001
+            return "错误:写入音频文件失败: %s" % _e
+        return _tts.fmt_result(_op, len(_audio), _voice, _model)
     if name == "run_shell_command":
         from wchat_py import audit as _audit
         cmd = a.get("command") or ""

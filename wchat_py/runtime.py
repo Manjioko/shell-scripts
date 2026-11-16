@@ -146,6 +146,15 @@ def _apply_runtime_defaults():
     _wp = os.environ.get("WEB_SEARCH_PROVIDER", "")
     if _wp in ("", "auto"):
         os.environ["WEB_SEARCH_PROVIDER"] = _detect_web_provider()
+    # ── TTS(文本转语音)默认值(见 docs/tts-tool.md)──────────────────────────
+    # 供应商可替换:BASE/KEY 独立于主对话,默认打头阵 mimo;用户可在 ~/.ct/config 里覆盖
+    # TTS_VOICE / TTS_MODEL / TTS_API_KEY 等(任意 KEY=value 行会被 _load_ct_config 读入)。
+    # **key 不在这里写死**(项目铁律:明文 key 不进仓库),解析见 tts.resolve_key。
+    os.environ.setdefault("TTS_MODEL", "mimo-v2.5-tts")
+    os.environ.setdefault("TTS_VOICE", "mimo_default")
+    os.environ.setdefault("TTS_FORMAT", "wav")
+    os.environ.setdefault("TTS_BASE_URL", "https://api.xiaomimimo.com/v1")
+    os.environ.setdefault("TTS_TIMEOUT", "120")
 
 
 def _runtime_fallback():

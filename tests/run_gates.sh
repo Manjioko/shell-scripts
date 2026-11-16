@@ -193,6 +193,13 @@ GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('共享 markdown 主题(mdstyle):H1 左对齐+bold 无下划线/正文不灰/行内代码无 bold·无黑底/分隔线用 ─/mdrender 子进程左对齐')
 
+# TTS 工具(文本转语音):请求体角色反转/解码/异常归一/key 解析/e2e 落盘。全离线(桩 urlopen)。
+GATE_NAMES+=('语音合成')
+GATE_CMDS+=('python3 tests/tts_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('TTS 工具:请求体角色反转(user=风格/assistant=文本)/base64 解码与异常归一/key 解析(显式>同host复用>空,无写死)/默认落盘路径/e2e 经 toolrun 落 wav')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。
