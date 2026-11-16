@@ -130,9 +130,19 @@ async def run_checks():
         W, H = app.screen.size.width, app.screen.size.height
         ck("屏幕 80×24", (W, H) == (80, 24), "%dx%d" % (W, H))
 
+        # 输入行结构:外层 #inputrow(带边框,贴底整宽)内 = 常驻 ❯ 提示符 + 可编辑 TextArea。
+        ibox = app.query_one("#inputrow")
+        prompt = app.query_one("#prompt")
+        ck("有常驻提示符 ❯(#prompt)", str(getattr(prompt, "content", "")) == "❯",
+           repr(str(getattr(prompt, "content", ""))))
+        ck("提示符 ❯ 在输入框内、左沿", ibox.region.x <= prompt.region.x < inp.region.x,
+           "ibox=%r prompt=%r input=%r" % (ibox.region, prompt.region, inp.region))
+        ck("输入框 TextArea 在 ❯ 右侧(#prompt 与 #input 同一行)",
+           prompt.region.y == inp.region.y, "prompt.y=%d input.y=%d" % (prompt.region.y, inp.region.y))
+
         # ---- 2) 输入框贴底、整宽、在内容区之下 ----
         print("=== 2. 输入框贴底(底部工具条不被顶走的回归锁) ===")
-        ir = inp.region
+        ir = ibox.region
         cr = cont.region
         ck("输入框贴底:region.bottom == 屏幕高", ir.bottom == H, "input.region=%r H=%d" % (ir, H))
         ck("输入框整宽:region.x==0 且 width==屏宽", ir.x == 0 and ir.width == W, repr(ir))
@@ -175,7 +185,7 @@ async def run_checks():
                 ck("resize %dx%d 不抛异常" % (w, h), False, repr(e))
                 continue
             await pilot.pause()
-            i2 = app.query_one("#input", TextArea).region
+            i2 = app.query_one("#inputrow").region
             c2 = app.query_one("#content", VerticalScroll).region
             SW, SH = app.screen.size.width, app.screen.size.height
             ck("resize %dx%d:仍恰好 1 输入框" % (w, h), len(app.query(TextArea)) == 1)
@@ -216,7 +226,7 @@ async def run_checks():
             app._refresh_status()
             await pilot.pause()
             sr = st.region
-            i3 = app.query_one("#input", TextArea).region
+            i3 = app.query_one("#inputrow").region
             c3 = app.query_one("#content", VerticalScroll).region
             ck("auto 开:状态区高度 > 0(常驻可见)", sr.height > 0, repr(sr))
             ck("auto 开:状态区在内容区之下(status.y ≥ 内容区底)", sr.y >= c3.bottom,

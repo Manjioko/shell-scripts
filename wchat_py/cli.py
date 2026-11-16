@@ -374,7 +374,9 @@ def _shell_approved(cmd, strict=True, reason=None):
 
     提示块走 `render.confirm_block`(与 `⏺ shell · …` 同一个块形状)。
     **命令正文与处置建议都不上屏**:横幅已给过命令,建议是给模型的。
-    `cmd`/`reason` 仍保留在签名里供审计与将来使用,不用于屏幕显示。"""
+    `cmd`/`reason`:`reason` 是初审(`_auth_think`)不放行的理由(形如 "N2:外部写入"),
+    作为确认块的**命中提示**上屏(与硬墙/路径确认块同一个 `,命中: xxx` 形状);`cmd` 保留在
+    签名里供审计/将来使用,不上屏(横幅已给过命令)。"""
     if os.environ.get("AUTO_MODE") == "full":
         return True
     if os.environ.get("WCHAT_AUTO_ASSUME_YES") == "1":
@@ -385,7 +387,7 @@ def _shell_approved(cmd, strict=True, reason=None):
     except Exception:
         return False
     from wchat_py.render import confirm_block
-    return confirm_block("需要人工确认", strict=strict)
+    return confirm_block("需要人工确认", strict=strict, mark=(reason or ""))
 
 
 from wchat_py.prompts import AUTO_FINAL_SYS as _AFS, AUTH_HEAD as _AH, AUTH_TAIL as _AT

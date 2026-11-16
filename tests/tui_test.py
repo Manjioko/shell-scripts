@@ -1343,5 +1343,84 @@ except Exception as _e:
     ck("终端应答过滤无异常", False, repr(_e))
 
 
+# ---- 20) 三项:输入框 ❯ 常驻 / 多行粘贴折叠 / 授权弹窗显示命中 ----
+print("=== 20. ❯ 常驻 / 多行粘贴折叠 / 授权弹窗命中 ===")
+
+
+async def _input_paste_confirm_check():
+    import types
+    app = tui.make_app(lambda *a: None)
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        # --- T1: ❯ 常驻(输入非空时提示符仍在;placeholder 只由 TextArea 空态控制) ---
+        ck("T1 初始就有常驻提示符 ❯",
+           str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
+        inp.text = "abc"
+        await pilot.pause()
+        ck("T1 输入非空时 ❯ 仍在(placeholder 消失它不走)",
+           str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
+        ck("T1 输入非空时 #input 有内容(placeholder 已隐藏)",
+           inp.text == "abc")
+        inp.text = ""
+        await pilot.pause()
+        # --- T2: 多行粘贴折叠成占位 + 提交换回;单行原样 ---
+        await inp._on_paste(types.SimpleNamespace(text="x\ny\nz\n"))
+        ck("T2 多行粘贴折叠成『已粘贴 3 行文本内容』占位",
+           "📋 [已粘贴 3 行文本内容]" in inp.text, repr(inp.text))
+        ck("T2 折叠后占位独占一行(前面没有挤进正文)",
+           inp.text.strip().startswith("📋"), repr(inp.text))
+        _restored = inp._restore_pastes(inp.text)
+        ck("T2 提交换回粘贴全文", "x\ny\nz" in _restored, repr(_restored))
+        inp.text = ""
+        await inp._on_paste(types.SimpleNamespace(text="just one line"))
+        ck("T2 单行粘贴原样插入(不折叠)", inp.text == "just one line", repr(inp.text))
+        inp.text = ""
+        # --- T3: 授权弹窗显示命中(mark) ---
+        import threading
+        _res = {}
+
+        def _worker():
+            _res["r"] = app._confirm_blocking("需要人工确认", "N2:外部写入(疑似外发)", "是否执行")
+        _th = threading.Thread(target=_worker)
+        _th.start()
+        for _ in range(100):
+            await pilot.pause()
+            await asyncio.sleep(0.02)
+            if app.screen.__class__.__name__ == "ConfirmModal":
+                break
+        ck("T3 授权弹窗(ConfirmModal)已弹出",
+           app.screen.__class__.__name__ == "ConfirmModal")
+        _svg = app.export_screenshot()
+        ck("T3 弹窗显示『命中』标签", "命中" in _svg, "命中 in svg=%s" % ("命中" in _svg))
+        ck("T3 弹窗显示出命中的具体内容(N2:外部写入)",
+           "N2:外部写入" in _svg, "mark in svg=%s" % ("N2:外部写入" in _svg))
+        try:
+            await pilot.press("n")
+        except Exception:
+            pass
+        _th.join(timeout=3)
+
+
+try:
+    asyncio.run(_input_paste_confirm_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("三项(❯/粘贴/命中)无异常", False, repr(_e))
+
+# 接线锁:授权命中必须真的从 toolrun/cli 传到 confirm(否则弹窗永远空着——用户实报的 bug)。
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_tr = open(os.path.join(_REPO, "wchat_py", "toolrun.py"), encoding="utf-8").read()
+_cl = open(os.path.join(_REPO, "wchat_py", "cli.py"), encoding="utf-8").read()
+ck("T3 接线:toolrun read 档 confirm 传 mark=_auth_reason",
+   "mark=_auth_reason" in _tr)
+ck("T3 接线:toolrun 普通档 _shell_approved 传 reason=_auth_reason",
+   "reason=_auth_reason" in _tr)
+ck("T3 接线:cli _shell_approved 把 reason 塞进 mark",
+   'mark=(reason or "")' in _cl)
+ck("T3 接线:初审无理由时也有兜底命中文案",
+   "初审未自动放行" in _tr or "初审不可用" in _tr)
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

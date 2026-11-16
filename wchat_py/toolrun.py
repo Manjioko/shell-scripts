@@ -709,15 +709,24 @@ def _run_tool(name, args_json):
             else:
                 _av2, _ars2 = _seam()._auth_think(cmd)
             if _av2 != "Y":
+                # 命中提示:初审(_auth_think)之所以不放行(形如 "N2:外部写入"),正是
+                # 本条命令需要人工确认的原因 —— 它就是给人看的"命中依据"(与硬墙/路径
+                # 确认块同一个 `,命中: xxx` 形状)。没有理由时(初审拒绝但没给原因 / 初审
+                # 异常判不出)也必须**明说兜底**,否则弹窗只剩一句"需要人工确认",用户
+                # 根本不知道为啥要授权(用户实报)。
+                _auth_reason = (_ars2 or "").strip()
+                if not _auth_reason:
+                    _auth_reason = ("初审未自动放行(未给出具体原因)" if _av2 == "N"
+                                    else "初审不可用(安全兜底)")
                 if os.environ.get("AUTO_MODE") == "read":
                     from wchat_py.render import confirm_block as _confirm2
-                    if not _confirm2("需要人工确认"):
+                    if not _confirm2("需要人工确认", mark=_auth_reason):
                         _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                                       decision="deny", reason="human-n", cmd=cmd)
                         return "用户未批准(转人工): %s" % cmd
                     _APPROVED_CMDS.add(_ck)
                     _note_path_grants(cmd, "rw")
-                elif not _seam()._shell_approved(cmd, strict=False):
+                elif not _seam()._shell_approved(cmd, strict=False, reason=_auth_reason):
                     _audit.record(os.environ.get("AUTO_AUDIT_LOG", ""), "shell",
                                   decision="deny", reason="no-approval", cmd=cmd)
                     return ("用户未批准执行命令: %s\n(非 auto 档需人工确认;"

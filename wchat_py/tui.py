@@ -245,6 +245,50 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self.value = value
                 super().__init__()
 
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # 多行粘贴折叠:占位令牌 → 粘贴全文(提交前换回)。与**非 TUI** inputbox 同一语义
+            # (那边是 prompt_toolkit 的 BracketedPaste 处理,超过一行就折叠成
+            # `📋 [已粘贴 N 行文本内容]`,内容存侧表、提交时换回)。TUI 之前是"如实粘贴",
+            # 十几行粘进来把输入框撑爆、上下已输入的内容被顶走,故搬过来。
+            self._pastes = {}
+            self._paste_seq = 0
+
+        async def _on_paste(self, event):
+            """终端粘贴(含括号粘贴):单行原样插入;**多行折叠成一行占位** `📋 [已粘贴 N 行文本内容]`,
+            全文存 `self._pastes`,提交时由 `_restore_pastes` 换回。占位行带零宽标记 ⇒ 复用一个退格
+            即可整行删除(与图片/文件占位同一套原子删除)。"""
+            if self.read_only:
+                return
+            data = (getattr(event, "text", "") or "").replace("\r\n", "\n").replace("\r", "\n")
+            if data == "":
+                return
+            if "\n" not in data:
+                # 单行:交回默认插入(走 Textual 原生路径)
+                await super()._on_paste(event)
+                return
+            # 末尾的 \n 是粘贴终止符非内容(与旧流/非 TUI 一致,剥一个)
+            if data.endswith("\n"):
+                data = data[:-1]
+            n_lines = data.count("\n") + 1
+            self._paste_seq += 1
+            # 令牌尾部拼 N 个零宽空格作**唯一标记**(同非 TUI):提交时按整串换回,多次同规模
+            # 粘贴互不混淆;末尾标记也让 _placeholder_rows 认出这一行、退格整行删除。
+            token = "📋 [已粘贴 %d 行文本内容]" % n_lines + self._PH_MARK * self._paste_seq
+            self._pastes[token] = data
+            try:
+                self._insert_placeholder_line(token)
+            except Exception:
+                pass
+
+        def _restore_pastes(self, text):
+            """提交前把占位令牌换回粘贴全文(逐串精确替换,与非 TUI 同法)。
+            占位被部分编辑过→令牌匹配不上,原样留下(与非 TUI 同样的已知边界)。"""
+            for token, content in self._pastes.items():
+                if token in text:
+                    text = text.replace(token, content)
+            return text
+
         def action_insert_newline(self):
             """Shift+Enter:在当前光标处插入一个换行(多行输入),不提交。"""
             try:
@@ -267,6 +311,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 except Exception:
                     pass
                 return
+            text = self._restore_pastes(text)     # 粘贴占位 → 全文(在清空前、投递前换回)
             self.text = ""
             try:
                 self.cursor_location = (0, 0)
@@ -407,10 +452,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._question = question
 
         def compose(self):
-            head = self._title + (("  " + self._mark) if self._mark else "")
+            # 命中提示:与**非 TUI** 的 confirm_block 统一成「标题，命中: xxx」的措辞(见 render._titled_line),
+            # 只是弹窗自带边框、不再加 `└─ ` 前缀也不染红。用户原话:"弹窗里没有任何命中的文案,
+            # 根本不知道为啥要授权" —— 所以命中(mark)必须**单独、带标签**地显示,且不截断(可换行)。
+            head = self._title + (("，命中: " + self._mark) if self._mark else "")
             with Container(classes="dialog"):
-                yield Label(Text(head[:78], style="bold"))
-                yield Label(Text(self._question[:78]))
+                yield Label(Text(head, style="bold"))
+                yield Label(Text(self._question))
                 yield Label(Text("y/回车=是  n/Esc=否", style="dim"))
                 with Horizontal(classes="btns"):
                     yield Button("是", variant="success", id="yes")
@@ -571,12 +619,18 @@ def make_app(handle_line, *, banner="", on_meta=None):
         /* 与输入框 placeholder 同一灰 + 斜体(#6a6a6a italic),深色终端上也看得清。
            旧值是 #666666:auto 标记又被 \033[2m(dim) 压暗成 ~#494949,几乎看不见。 */
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #6a6a6a; text-style: italic; }
-        #input { height: auto; max-height: 12; background: transparent; border: round #6a6a6a; }
+        #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
+                    background: transparent; padding: 0 1; align-vertical: top; }
+        /* 常驻提示符 ❯:独立 widget,输入/清空都在,placeholder 消失它也不走(像 claude code)。
+           宽度 2 给字符后留一格;height:auto 让多行输入时它停在第一行顶部。 */
+        #prompt { width: 2; height: auto; color: #6a6a6a; padding: 0; }
+        #input { width: 1fr; height: auto; max-height: 12; background: transparent;
+                 border: none; padding: 0; }
         #input:focus { background: transparent; }
         /* placeholder 与思考文本同档灰、斜体,用户好区分(默认 $text 40% 偏亮) */
         #input .text-area--placeholder { color: #6a6a6a; text-style: italic; }
         ConfirmModal { align: center middle; background: $background 60%; }
-        ConfirmModal .dialog { width: 64; height: auto; max-height: 12; border: thick $warning;
+        ConfirmModal .dialog { width: 72; height: auto; max-height: 16; border: thick $warning;
                                background: $surface; padding: 1 2; }
         ConfirmModal .btns { height: auto; }
         ConfirmModal Button { min-width: 10; }
@@ -614,7 +668,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 yield VerticalScroll(id="content")
                 yield Static(self._welcome_text(), id="welcome")
             yield Static("", id="status")
-            yield ChatInput(id="input", placeholder="请输入问题,回车发送")
+            with Horizontal(id="inputrow"):
+                yield Static("❯", id="prompt")
+                yield ChatInput(id="input", placeholder="请输入问题,回车发送")
 
         # ---- 空态欢迎提示 ----
         @staticmethod
