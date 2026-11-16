@@ -153,7 +153,7 @@ def _apply_runtime_defaults():
     os.environ.setdefault("TTS_MODEL", "mimo-v2.5-tts")
     os.environ.setdefault("TTS_VOICE", "mimo_default")
     os.environ.setdefault("TTS_FORMAT", "wav")
-    os.environ.setdefault("TTS_BASE_URL", "https://api.xiaomimimo.com/v1")
+    os.environ.setdefault("TTS_BASE_URL", "https://api.xiaomimimo.com/v1/chat/completions")
     os.environ.setdefault("TTS_TIMEOUT", "120")
 
 

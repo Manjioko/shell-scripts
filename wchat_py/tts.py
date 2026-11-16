@@ -30,7 +30,9 @@ DEFAULT_VOICE = "mimo_default"
 DEFAULT_FORMAT = "wav"
 # 官方文档的 `base_url`(SDK 根地址,不是完整端点):OpenAI(base_url=...) 本身就是 /v1 根,
 # create() 时由 SDK 拼 `/chat/completions`。我们的 `TTS_BASE_URL` 遵循同一语义。
-DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
+# ⚠ TTS_BASE_URL 的**推荐值是完整端点** `.../v1/chat/completions`(见 normalize_endpoint 注释:
+#   路径不能由代码硬拼,否则换供应商会拼错);默认给完整端点,只填到 `/v1` 也能兜底。
+DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1/chat/completions"
 
 
 def build_body(model, text, voice, style="", fmt="wav"):
@@ -90,25 +92,23 @@ def _host(u):
 
 
 def normalize_endpoint(url):
-    """把 `TTS_BASE_URL`(**SDK 语义的 base_url 根**,如 `https://api.xiaomimimo.com/v1`)
-    拼成真正要 POST 的 `chat/completions` 端点 —— 等价于官方 SDK `OpenAI(base_url=...).chat.completions.create()`。
+    """把 `TTS_BASE_URL` 归一成真正要 POST 的端点。
 
-    语义定调(踩过的坑,2026-11 用户实报 404):`TTS_BASE_URL` 与官方 `base_url` **同义**,是**根**,
-    不是完整端点;工具负责拼 `/chat/completions`(如同 SDK)。之前错误地把 TTS_BASE_URL 当完整端点
-    直接 POST,于是 POST 到 `.../v1` → HTTP 404。这里保持"根"语义,兼容几种写法:
-      · 已经误填成完整端点 `.../chat/completions` → 原样(不双拼);
-      · `.../v1`(官方 base_url)→ `.../v1/chat/completions`;
-      · 裸主机 `https://host` → `https://host/v1/chat/completions`;
-      · 空 → 用默认 base_url 再拼。
+    **设计结论(2026-11 用户指出并采纳):路径不能由代码硬拼。**
+    不同供应商的 TTS 端点路径不同 —— mimo 走 `/v1/chat/completions`,而 OpenAI 的真 TTS 其实是
+    `/v1/audio/speech`。在代码里拼 `/chat/completions`(旧实现),换供应商必错:实测把
+    `https://api.openai.com/v1/audio/speech` 拼成 `.../v1/audio/speech/v1/chat/completions` → 404。
+    所以 `TTS_BASE_URL` **就当作完整 POST 端点,原样使用**;换供应商只改这一行配置,错误可控在 config。
+
+    唯一兜底:值只到 `/v1`(官方文档 `base_url=.../v1` 那种"没写到端点"的写法)时,补一个
+    `/chat/completions`,免得照着官方示例填就 404。**任何带真实路径的端点一律原样、绝不拼。**
     """
     u = (url or "").strip().rstrip("/")
     if not u:
-        u = DEFAULT_BASE_URL
-    if u.endswith("/chat/completions"):
-        return u
-    if u.endswith("/v1"):
+        return DEFAULT_BASE_URL
+    if u.endswith("/v1"):                 # 官方 base_url 写法(明显没写到端点)→ 兜底补一次
         return u + "/chat/completions"
-    return u + "/v1/chat/completions"
+    return u                              # 其余一律原样(完整端点;不同供应商各自路径)
 
 
 def resolve_key(base_url=None, tts_base_url=None):

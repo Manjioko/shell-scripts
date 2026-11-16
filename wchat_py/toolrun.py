@@ -657,7 +657,11 @@ def _run_tool(name, args_json):
             _code = getattr(_e, "code", None)
             if _code == 401:
                 return "错误:TTS key 无效或缺失(HTTP 401,检查 TTS_API_KEY)"
-            return "错误:语音生成失败: %s" % _e
+            if _code == 404:
+                return ("错误:TTS 端点 404(地址: %s)。请检查 TTS_BASE_URL 是否为该供应商的**完整**端点"
+                        "(mimo: https://api.xiaomimimo.com/v1/chat/completions;OpenAI: https://api.openai.com/v1/audio/speech)。"
+                        "换供应商时把它的完整 TTS 端点填进来即可,不用改代码。" % _url)
+            return "错误:语音生成失败: %s(端点: %s)" % (_e, _url)
         try:
             _audio = _tts.parse_audio(_resp)
         except Exception as _e:                 # noqa: BLE001

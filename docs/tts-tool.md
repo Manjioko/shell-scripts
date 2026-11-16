@@ -42,7 +42,7 @@ messages = (
 | `TTS_MODEL` | `mimo-v2.5-tts` | TTS 模型名 |
 | `TTS_VOICE` | `mimo_default` | 预置音色 ID;可改 `冰糖`/`茉莉`/`苏打`/`白桦`/`Mia`… |
 | `TTS_FORMAT` | `wav` | v1 仅 `wav` |
-| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1` | **SDK 语义的 base_url(根),与官方 `OpenAI(base_url=...)` 一致**;工具负责拼 `/chat/completions`(如同 SDK)。换供应商改这个(也兼容误填成完整端点 `.../chat/completions`,不双拼) |
+| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | **完整的 POST 端点**(原样使用,代码不拼路径)。换供应商只改这一行(如 OpenAI: `https://api.openai.com/v1/audio/speech`)。仅"只填到 `/v1`"(官方 base_url 写法)时兜底补 `/chat/completions` |
 | `TTS_TIMEOUT` | `120` | 单次请求秒数 |
 | `TTS_API_KEY` | **(见下,不写死)** | TTS 专供 key |
 
@@ -117,11 +117,13 @@ parameters:
 
 ## 8. 风险 / 备注
 
-- **端点语义(已修正,踩过的坑)**:`TTS_BASE_URL` 与官方 `base_url` **同义,是根地址**(如
-  `https://api.xiaomimimo.com/v1`),`chat.completions.create()` 由 SDK/工具拼 `/chat/completions`。
-  最初实现**把它当完整端点直接 POST**,于是打到 `.../v1` → **HTTP 404**(用户实报,历史
-  `/home/wzk/.ct/history/车门防磕文案转语音并放桌面.json`)。现 `tts.normalize_endpoint` 负责拼端点
-  (并兼容误填成完整端点)。**用户填 `.../v1` 是对的,不用改配置。**
+- **端点语义(关键设计,2026-11 用户提出并采纳)**:`TTS_BASE_URL` 是**完整 POST 端点、原样使用**,
+  **代码绝不在路径上做拼接**。理由:不同供应商的 TTS 端点路径不同(mimo `/v1/chat/completions`、
+  OpenAI `/v1/audio/speech`),在代码里拼 `/chat/completions` 换供应商必错(旧实现会把
+  `.../v1/audio/speech` 拼成 `.../v1/audio/speech/v1/chat/completions` → 404)。所以路径差异
+  **完全收敛到 config 里的一行**,错误可控、可读。唯一兜底:`TTS_BASE_URL` 只到 `/v1`(官方
+  `base_url=.../v1` 那种没写到端点的写法)时补 `/chat/completions`,免得照官方示例填就 404;
+  任何带真实路径的端点一律原样。404 时错误文案会带上当前端点并提示"该填完整端点"。
 - **输出到工作根之外(如 Windows 桌面 `/mnt/c/...`)**:out_path 走 `_path_guard("rw")`,正常(非 auto)
   模式会弹一次「工作目录外写」确认,放行后记住该目录;auto 档需 `--allow-write` 白名单否则 P2 拒。
   这与 write_file 一致,属预期。

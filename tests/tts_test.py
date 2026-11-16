@@ -73,22 +73,23 @@ ck("缺 audio.data → ValueError", _raises(T.parse_audio, {"choices": [{"messag
 ck("空 audio.data → ValueError", _raises(T.parse_audio, {"choices": [{"message": {"audio": {"data": ""}}}]}))
 ck("坏 base64 → ValueError", _raises(T.parse_audio, {"choices": [{"message": {"audio": {"data": "!!!notb64!!!"}}}]}))
 
-print("=== 3b. normalize_endpoint:TTS_BASE_URL 是 base_url(根),拼 /chat/completions ===")
-ck("官方 base_url .../v1 → 拼 /chat/completions",
-   T.normalize_endpoint("https://api.xiaomimimo.com/v1")
-   == "https://api.xiaomimimo.com/v1/chat/completions", T.normalize_endpoint("https://api.xiaomimimo.com/v1"))
-ck("尾斜杠 .../v1/ → 拼",
-   T.normalize_endpoint("https://api.xiaomimimo.com/v1/")
-   == "https://api.xiaomimimo.com/v1/chat/completions")
-ck("误填成完整端点 → 原样(不双拼)",
+print("=== 3b. normalize_endpoint:完整端点原样(provider 各自路径),只给 /v1 兜底 ===")
+ck("完整端点 .../chat/completions → 原样",
    T.normalize_endpoint("https://api.xiaomimimo.com/v1/chat/completions")
    == "https://api.xiaomimimo.com/v1/chat/completions")
-ck("裸主机 → 补 /v1/chat/completions",
-   T.normalize_endpoint("https://host.example")
-   == "https://host.example/v1/chat/completions", T.normalize_endpoint("https://host.example"))
-ck("空 → 默认 base_url 再拼 = .../v1/chat/completions",
-   T.normalize_endpoint("") == "https://api.xiaomimimo.com/v1/chat/completions", T.normalize_endpoint(""))
-ck("默认 base_url 是 /v1 根(与官方一致)", T.DEFAULT_BASE_URL == "https://api.xiaomimimo.com/v1", T.DEFAULT_BASE_URL)
+ck("别的供应商完整路径 .../v1/audio/speech → **原样不拼**(换供应商不错)",
+   T.normalize_endpoint("https://api.openai.com/v1/audio/speech")
+   == "https://api.openai.com/v1/audio/speech", T.normalize_endpoint("https://api.openai.com/v1/audio/speech"))
+ck("任意完整路径 .../tts/synthesize → 原样",
+   T.normalize_endpoint("https://other.example/tts/synthesize")
+   == "https://other.example/tts/synthesize")
+ck("仅到 .../v1(官方 base_url 写法)→ 兜底补 /chat/completions",
+   T.normalize_endpoint("https://api.xiaomimimo.com/v1")
+   == "https://api.xiaomimimo.com/v1/chat/completions", T.normalize_endpoint("https://api.xiaomimimo.com/v1"))
+ck("尾斜杠 .../v1/ → 兜底补",
+   T.normalize_endpoint("https://api.xiaomimimo.com/v1/")
+   == "https://api.xiaomimimo.com/v1/chat/completions")
+ck("空 → 默认(完整端点)", T.normalize_endpoint("") == T.DEFAULT_BASE_URL == "https://api.xiaomimimo.com/v1/chat/completions")
 
 print("=== 3. resolve_key:显式 > 同 host 复用 > 空 ===")
 for k in ("TTS_API_KEY", "WCHAT_API_KEY", "API_KEY", "TTS_BASE_URL", "BASE_URL"):
