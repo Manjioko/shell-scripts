@@ -239,8 +239,14 @@ def _gh_contents(repo, path):
             "--jq", "{c:.content,s:.sha}"], check=False)
     if r.returncode != 0:
         return "", ""
+    s = r.stdout or ""
+    # 容忍 stdout 前后夹带非 JSON 的噪声(gh 偶发告警打到 stdout 会让裸 json.loads 失败 →
+    # 误判成"文件不存在/sha 空",进而 PUT 时 422 "sha wasn't supplied")。取最外层 {…}。
+    i, j = s.find("{"), s.rfind("}")
+    if i < 0 or j < i:
+        return "", ""
     try:
-        d = json.loads(r.stdout or "{}")
+        d = json.loads(s[i:j + 1])
     except ValueError:
         return "", ""
     raw = d.get("c") or ""
@@ -269,21 +275,30 @@ def update_tap_repo(tap_repo, formula_text, version, dry):
             return
         ok("已创建 %s" % tap_repo)
     path = "Formula/wchat.rb"
-    old, sha = _gh_contents(tap_repo, path)
-    if old == formula_text:
-        ok("tap 上的 Formula 已是最新,跳过")
-        return
-    payload = {"message": "tap: wchat %s" % version,
-               "content": base64.b64encode(formula_text.encode("utf-8")).decode("ascii")}
-    if sha:
-        payload["sha"] = sha
-    p = subprocess.run(["gh", "api", "-X", "PUT",
-                        "repos/%s/contents/%s" % (tap_repo, path), "--input", "-"],
-                       input=json.dumps(payload), capture_output=True, text=True)
-    if p.returncode != 0:
-        warn("推送 Formula 到 tap 失败: %s" % (p.stderr or "").strip()[:160])
-        return
-    ok("已更新 %s/%s" % (tap_repo, path))
+    content_b64 = base64.b64encode(formula_text.encode("utf-8")).decode("ascii")
+    # 更新已存在文件必须带 blob sha,否则 GitHub 回 422 "sha wasn't supplied"。实测:读 sha
+    # 偶发瞬时空(gh/API 抖动),会把"本该更新"误判成失败、tap 静默停在旧版(发布完 brew 仍装旧版)。
+    # 故失败且确与 sha 相关时**重读一次再试**(至多两轮),仍不行才报错。
+    last_err = ""
+    for _attempt in range(2):
+        old, sha = _gh_contents(tap_repo, path)
+        if old == formula_text:
+            ok("tap 上的 Formula 已是最新,跳过")
+            return
+        payload = {"message": "tap: wchat %s" % version, "content": content_b64}
+        if sha:
+            payload["sha"] = sha
+        p = subprocess.run(["gh", "api", "-X", "PUT",
+                            "repos/%s/contents/%s" % (tap_repo, path), "--input", "-"],
+                           input=json.dumps(payload), capture_output=True, text=True)
+        if p.returncode == 0:
+            ok("已更新 %s/%s" % (tap_repo, path))
+            return
+        last_err = (p.stderr or "").strip()
+        if _attempt == 0 and "sha" in last_err.lower():
+            continue          # 大概率是读 sha 抖动:重读再试一次
+        break
+    warn("推送 Formula 到 tap 失败: %s" % last_err[:160])
 
 
 def update_tap_branch(branch, formula_text, version, dry):
