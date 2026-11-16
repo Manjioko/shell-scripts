@@ -559,7 +559,10 @@ def make_app(handle_line, *, banner="", on_meta=None):
                    scrollbar-background: transparent;
                    scrollbar-background-hover: transparent;
                    scrollbar-background-active: transparent; }
-        #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
+                 #content .reason { text-wrap: nowrap; text-overflow: ellipsis; }
+         /* -tf=on 的思考是**忠实多行**:允许自然折行、不裁字(否则 nowrap+ellipsis 会把每行
+            掐成一截,且补空格会互相顶——正是要修掉的观感)。两条同特异性,后者覆盖前者。 */
+         #content .reason-full { text-wrap: wrap; text-overflow: clip; }
         /* 逻辑块之间空一行(用户要求:内容/输入回显/思考/工具块之间别太挤)。
            用 margin-top 而不是插空 Static:空 Static 会被"无纯空白子件"的闸门判红,
            且会污染消息列表。continuation(工具块的框线/状态行)不加 .blk。 */
@@ -811,7 +814,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 content = _repl._msg_content_text(m.get("content"))
                 reasoning = m.get("reasoning_content") or ""
                 if reasoning.strip():
-                    self._mount(self._render_reason(reasoning), classes="reason")
+                    self._mount(self._render_reason(reasoning), classes=self._reason_classes())
                 if role == "tool":
                     name = tc_names.get(m.get("tool_call_id") or "")
                     self._mount(Text(("tool → %s" % name) if name else "tool", style="dim"))
@@ -873,13 +876,33 @@ def make_app(handle_line, *, banner="", on_meta=None):
             return txt
 
         def _render_reason(self, text):
-            """思考渲染:默认**折叠成一行**(▸ + 首个非空行、压空白);单行由 CSS
-            (`.reason { text-wrap:nowrap; text-overflow:ellipsis }`)保证,超宽自动 … 截断。
-            -tf=on 时整段(render_reason)。"""
+            """思考渲染(两档):
+            · 默认(-tf=off):**折叠成一行**(▸ + 首个非空行、压空白);单行由 CSS
+              (`.reason { text-wrap:nowrap; text-overflow:ellipsis }`)保证,超宽自动 … 截断。
+            · -tf=on:**按原始分行忠实展示**。不再走 render_reason→render_markdown 那趟
+              markdown 重排(它会把思考自带的换行当软换行合并成一段、还把每行补行尾空格到满宽
+              → "整段重排 + 补空格 + 流式到定稿形态跳变")。这里只保留模型给的行结构(含内部
+              空行),每行两格缩进、整块 dim;超宽由 `.reason-full { text-wrap: wrap }` 自然
+              折行,内容一字不丢、也不补行尾空格。"""
             try:
-                from wchat_py.render import think_full, render_reason as _rr
+                from wchat_py.render import think_full
                 if think_full():
-                    return Text.from_ansi(_rr(text))
+                    lines = (text or "").splitlines()
+                    # 去掉首尾纯空行(避免块首/块尾多余空白),**内部空行保留**(段落结构)
+                    while lines and not lines[0].strip():
+                        lines.pop(0)
+                    while lines and not lines[-1].strip():
+                        lines.pop()
+                    if not lines:
+                        return Text("")
+                    t = Text()
+                    t.append("▸", style="dim")
+                    for ln in lines:
+                        if ln.strip():
+                            t.append("\n  " + ln, style="dim")
+                        else:
+                            t.append("\n", style="dim")   # 内部空行:不补缩进空格
+                    return t
                 first = ""
                 for ln in (text or "").splitlines():
                     s = " ".join(ln.split())
@@ -891,6 +914,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 return Text("▸ " + first, style="dim")
             except Exception:
                 return Text(text or "", style="dim")
+
+        def _reason_classes(self):
+            """reason 块要挂的 class:-tf=on 用 `reason reason-full`(可折行);
+            默认只用 `reason`(nowrap+ellipsis,折叠单行)。"""
+            try:
+                from wchat_py.render import think_full
+                return "reason reason-full" if think_full() else "reason"
+            except Exception:
+                return "reason"
 
         def _finalize_live(self):
             """定稿 live 缓冲:移除临时 widget;思考按折叠档、正文按 Markdown 各挂一段。"""
@@ -905,7 +937,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             if reason.strip():
-                self._mount(self._render_reason(reason), classes="reason")
+                self._mount(self._render_reason(reason), classes=self._reason_classes())
             if answer.strip():
                 try:
                     self._mount_markdown(answer)
@@ -961,6 +993,13 @@ def make_app(handle_line, *, banner="", on_meta=None):
                         # 每个 write 挂成一个 Static;去掉尾部换行(Static 带尾换行会多渲染一空行,
                         # 造成横幅与结果之间/块之间多出空行),纯空白写入直接丢弃(不挂空行)。
                         t = t.rstrip("\n")
+                        # 去掉行尾的 **裸 \r**:toolrun 展开档按真终端习惯逐行写 `...\r\n`
+                        # (终端里 \r 是回车,无妨;但 TUI 把每次 write 当一条 log,交给
+                        # rich `Text.from_ansi` 渲染 —— venv 的 rich 15.0.0 对**结尾带 \r** 的串
+                        # 直接返回空串,于是 `-tf=on` 的每一行 shell 输出都变成空白,整段框"没显示"。
+                        # 命令真实输出里的 \r 早已被 termwin.clean_line 清掉,这里的 \r 只有行尾这一个,
+                        # 去掉它不丢任何内容。\x1b[2K 之类的清行码 from_ansi 本就会静默忽略,无需处理。
+                        t = t.replace("\r", "")
                         if not t.strip():
                             continue
                         self._finalize_live()

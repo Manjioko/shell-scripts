@@ -889,6 +889,53 @@ except Exception as _e:
     traceback.print_exc()
     ck("流式思考/正文换行无异常", False, repr(_e))
 
+# ---- 18b) 思考档(TUI):off 折叠单行 / on 忠实多行;shell 展开框行尾 \r 不再变空 ----
+print("=== 18b. 思考档 off 折叠 / on 忠实多行;shell 展开框行尾 \\r 守卫 ===")
+
+
+async def _reason_cr_check():
+    _app = tui.make_app(lambda *a: None, banner="")
+    _src = "第一行思考\n第二行：多看几步\n第三行：结论 A\n第四行：结论 B"
+    _old = os.environ.get("WCHAT_THINK_FULL")
+    try:
+        # ---- -tf=off(默认):折叠成一行,单 Text、无换行、▸ 前缀,class 用 nowrap 档 ----
+        os.environ["WCHAT_THINK_FULL"] = "0"
+        _off = _app._render_reason(_src)
+        ck("18b off:折叠单行(无换行)", "\n" not in _off.plain, repr(_off.plain[:40]))
+        ck("18b off:▸ 前缀", _off.plain.startswith("▸ "), repr(_off.plain[:16]))
+        ck("18b off:class=reason(nowrap)", _app._reason_classes() == "reason", _app._reason_classes())
+        # ---- -tf=on:忠实多行(保留原始分行、两格缩进、不补行尾空格、class 可折行)----
+        os.environ["WCHAT_THINK_FULL"] = "1"
+        _on = _app._render_reason(_src)
+        _onl = _on.plain.split("\n")
+        ck("18b on:保留原始分行(每行独立,不被 markdown 重排成一段)",
+           all(p in _on.plain for p in ("第一行思考", "第二行", "第三行", "第四行"))
+           and len(_onl) == 1 + len(_src.splitlines()), repr(_on.plain[:90]))
+        _l1 = _onl[1] if len(_onl) > 1 else ""
+        ck("18b on:每行两格缩进", _l1.startswith("  "), repr(_l1[:12]))
+        ck("18b on:不补行尾空格", all(ln == ln.rstrip() for ln in _onl), repr(_on.plain[:90]))
+        ck("18b on:class=reason reason-full(可折行)",
+           _app._reason_classes() == "reason reason-full", _app._reason_classes())
+        _on2 = _app._render_reason("段一\n\n段二")
+        ck("18b on:内部空行保留(段落结构)", _on2.plain.count("\n") == 3, repr(_on2.plain))
+    finally:
+        if _old is None:
+            os.environ.pop("WCHAT_THINK_FULL", None)
+        else:
+            os.environ["WCHAT_THINK_FULL"] = _old
+    # ---- shell 展开框:toolrun 逐行写 "...│ 行...\r\n";行尾裸 \r 曾让 rich 15 的
+    #      Text.from_ansi 整行返回空 → -tf=on 的框"没显示"。修法在 _drain 里 strip \r。----
+    async with _app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        _app._q.put(("log", "\x1b[2K\x1b[2m   │ L1\x1b[0m\r\n", None))
+        _app._drain()
+        await pilot.pause()
+        _ct = _content_text(_app)
+        ck("18b shell:展开框行(带行尾 \\r)不再渲染成空", "│ L1" in _ct, repr(_ct[-60:]))
+
+
+asyncio.run(_reason_cr_check())
+
 # ---- 19) 占位行(选图/粘贴图)原子删除:一个退格删掉整行,不用逐字符删 ----
 print("=== 19. 占位行原子删除:退格/删除一次删整行 ===")
 
