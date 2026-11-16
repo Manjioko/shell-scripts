@@ -513,6 +513,26 @@ ck("auto 拒绝用统一前缀且是灰的", R3.STATUS_PREFIX in _s10 and GREY i
 ck("auto 拒绝仍把话术交给模型(替代建议没丢)", "替代" in _ret10, repr(_ret10)[:200])
 ck("auto 拒绝只有一行(不摊成两段)", len(_pl10) == 1, repr(_pl10))
 
+print("=== 10b. 命中片段:常见权限弹窗必须给出『命中什么』(H5 重定向 / H14 普通安装) ===")
+# 用户实报:"有些权限弹窗依旧没有命中信息"。根因是两个规则的话术没拼 (命中: …):
+#   · H5 重定向写 dotfile(`_frag` 原本在"目标不干净"时直接 return "")→ `echo x > ~/.bashrc` 无命中;
+#   · H14 普通安装(`_h14_msg` 根本没拼命中,只有换源那支拼了)。
+# 这里直接对**真实** detail() 取 mark_of,钉住"这两类弹窗一定有命中片段"。
+_c10b = [
+    ("echo x > ~/.bashrc", "~/.bashrc"),
+    ("echo x >> ~/.zshrc", "~/.zshrc"),
+    ("echo y > ~/.gitconfig", "~/.gitconfig"),
+    ("pip install requests", "requests"),
+    ("brew install jq", "jq"),
+]
+for _c, _want in _c10b:
+    try:
+        _rr, _ss, _mm = _real_hd(_c, auto=False)
+        _mk = R4.mark_of(_mm)
+    except Exception as _e:
+        _rr, _mk = None, "EXC:%r" % (_e,)
+    ck("10b %r 命中=%r" % (_c, _want), _mk == _want, "rule=%r mark=%r" % (_rr, _mk))
+
 print("=== 11. 所有 yes/no 提问共用一种语法 ===")
 # 用户要求:提示文本/提示输入样式统一。以前屏幕上有五种写法:
 #   `[y/N]`、`[Y/n]`、`(y/N)`、`(y 或 yes,n/回车 = 取消)`、`(必须逐字 yes,…)`。

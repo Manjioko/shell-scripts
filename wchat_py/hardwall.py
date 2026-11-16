@@ -476,8 +476,7 @@ def _frag(rid, c):
     if rid == "H4":
         return first(("hd_re_disk",), _safe(hd.mask_readonly, c))
     if rid == "H5":
-        # 近似 hd_has_write 的 BASH_REMATCH：先抹 dev_sink/fd，若残留 '>' 且目标不干净 → 早返(片段空)；
-        # 否则片段取写动词匹配。
+        # 近似 hd_has_write 的 BASH_REMATCH：先抹 dev_sink/fd，若残留 '>' 且目标不干净 → 取**目标**做命中。
         s = c
         while True:
             mm = re.search(R.hd_re_dev_sink, s, _ASCII)
@@ -490,7 +489,14 @@ def _frag(rid, c):
                 break
             s = s.replace(mm.group(0), "", 1)
         if ">" in s and not _redir_targets_all_clean(s):
-            return ""
+            # 命中 = 被写入的**重定向目标**(人要知道会覆盖哪个文件)。原来这里直接 return "",
+            # 于是最常见的 `echo x > ~/.bashrc` / `>> ~/.zshrc` 在确认弹窗里**没有命中信息**
+            # (用户实报的"有些权限弹窗没有命中信息")。提不出目标时至少给重定向符。
+            for mm in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", s):
+                tgt = mm.group(1).strip("'\"")
+                if tgt and not _redir_targets_all_clean(">" + tgt):
+                    return tgt
+            return ">"
         mm = re.search(getattr(R, "hd_re_write_verb"), c, _ASCII)
         return mm.group(0) if mm else ""
     if rid == "H6":
@@ -557,7 +563,11 @@ def detail(cmd, auto=False):
         mm = re.search(r"--index-url|--registry|--extra-index-url|--find-links", c)
         if mm:
             return r, s, _MSGS.get("H14REG", "") + "(命中: %s)" % mm.group(0)
-        return r, s, _h14_msg(_h14_hint(c))
+        _hint = _h14_hint(c)
+        # 普通安装(brew/pip/npm …):命中 = 要装的**包名**。原来 _h14_msg 根本没拼 (命中: …),
+        # 弹窗里只有规则号、没有"命中什么"(用户实报"有些权限弹窗没有命中信息")。
+        _show = _hint if _hint and not _hint.startswith("<") else "安装命令"
+        return r, s, _h14_msg(_hint) + ("(命中: %s)" % _show)
     if r == "P3":
         base = _MSGS.get("P3", "")
         pre = (base.split("--allow-write '")[0] + "--allow-write '") if "--allow-write '" in base else base

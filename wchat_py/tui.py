@@ -473,17 +473,20 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._question = question
 
         def compose(self):
-            # 命中提示:与**非 TUI** 的 confirm_block 统一成「标题，命中: xxx」的措辞(见 render._titled_line),
-            # 只是弹窗自带边框、不再加 `└─ ` 前缀也不染红。用户原话:"弹窗里没有任何命中的文案,
-            # 根本不知道为啥要授权" —— 所以命中(mark)必须**单独、带标签**地显示,且不截断(可换行)。
-            head = self._title + (("，命中: " + self._mark) if self._mark else "")
+            # 三段式(用户给的样式参考):①标题(大字)→ ②`命中: xxx` 一行(单独、带标签、
+            # 可换行,不截断;用户原话"弹窗里没有任何命中的文案,根本不知道为啥要授权")→
+            # ③底部一行:左侧提问「是否执行?」、右侧「是 (y/Enter)」「否 (n/Esc)」两个按钮。
             with Container(classes="dialog"):
-                yield Label(Text(head, style="bold"))
-                yield Label(Text(self._question))
-                yield Label(Text("y/回车=是  n/Esc=否", style="dim"))
-                with Horizontal(classes="btns"):
-                    yield Button("是", variant="success", id="yes")
-                    yield Button("否", variant="error", id="no")
+                yield Label(Text(self._title, style="bold"), classes="title")
+                if self._mark:
+                    yield Label(Text("命中: " + self._mark), classes="mark")
+                with Horizontal(classes="row"):
+                    _q = self._question or ""
+                    _q = _q if _q.endswith(("?", "？")) else (_q + "?")
+                    yield Label(Text(_q), classes="ask")
+                    with Horizontal(classes="btns"):
+                        yield Button("是 (y/Enter)", variant="success", id="yes")
+                        yield Button("否 (n/Esc)", variant="error", id="no")
 
         def on_button_pressed(self, event):
             self.dismiss(event.button.id == "yes")
@@ -651,10 +654,16 @@ def make_app(handle_line, *, banner="", on_meta=None):
         /* placeholder 与思考文本同档灰、斜体,用户好区分(默认 $text 40% 偏亮) */
         #input .text-area--placeholder { color: #6a6a6a; text-style: italic; }
         ConfirmModal { align: center middle; background: $background 60%; }
-        ConfirmModal .dialog { width: 72; height: auto; max-height: 16; border: thick $warning;
+        /* 三段式布局(参考用户给的图):标题 / 命中 / 底行(提问 + 两个按钮)。加宽、放宽高度上限,
+           让命中(可能是长路径)能换行显示完整;命中用灰、提问正常亮度。 */
+        ConfirmModal .dialog { width: 76; height: auto; max-height: 16; border: round $warning;
                                background: $surface; padding: 1 2; }
-        ConfirmModal .btns { height: auto; }
-        ConfirmModal Button { min-width: 10; }
+        ConfirmModal .title { width: 1fr; text-style: bold; color: $text; }
+        ConfirmModal .mark { width: 1fr; color: #6a6a6a; margin-top: 1; }
+        ConfirmModal .row { height: auto; margin-top: 1; }
+        ConfirmModal .ask { width: 1fr; height: 3; content-align: left middle; color: $text; }
+        ConfirmModal .btns { width: auto; height: auto; }
+        ConfirmModal .btns Button { min-width: 14; margin: 0 0 0 1; }
         InputModal { align: center middle; background: $background 60%; }
         InputModal .dialog { width: 64; height: auto; max-height: 14; border: thick $accent;
                              background: $surface; padding: 1 2; }

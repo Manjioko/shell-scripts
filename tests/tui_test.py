@@ -1418,6 +1418,14 @@ async def _input_paste_confirm_check():
             ck("T3 弹窗显示『命中』标签", "命中" in _svg, "命中 in svg=%s" % ("命中" in _svg))
             ck("T3 弹窗显示出命中的具体内容(N2:外部写入)",
                "N2:外部写入" in _svg, "mark in svg=%s" % ("N2:外部写入" in _svg))
+            # 新样式(参考用户给的三段式图):命中单独一行 + 提问 + 两个带快捷键的按钮。
+            from textual.widgets import Button as _Btn
+            _btns = list(app.screen.query(_Btn))
+            ck("T3 弹窗有 2 个按钮(是/否)", len(_btns) == 2, repr([b.id for b in _btns]))
+            ck("T3 按钮带快捷键提示(y/Enter, n/Esc)",
+               any("Enter" in str(b.label) for b in _btns) and any("Esc" in str(b.label) for b in _btns),
+               repr([str(b.label) for b in _btns]))
+            ck("T3 弹窗显示提问(是否执行)", "是否执行" in _svg, "q in svg=%s" % ("是否执行" in _svg))
             try:
                 await pilot.press("n")
             except Exception:
