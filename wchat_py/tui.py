@@ -257,15 +257,36 @@ def make_app(handle_line, *, banner="", on_meta=None):
         async def _on_paste(self, event):
             """终端粘贴(含括号粘贴):单行原样插入;**多行折叠成一行占位** `📋 [已粘贴 N 行文本内容]`,
             全文存 `self._pastes`,提交时由 `_restore_pastes` 换回。占位行带零宽标记 ⇒ 复用一个退格
-            即可整行删除(与图片/文件占位同一套原子删除)。"""
+            即可整行删除(与图片/文件占位同一套原子删除)。
+
+            ⚠ 必须自己清空 `event.text`(见下方注释):Textual 的 `_get_dispatch_methods` 会**遍历整个
+            MRO**,对每个类 `__dict__` 里的 `_on_paste` 各调一次(ChatInput 的 + TextArea 基类的),
+            不是只调最派生的那个。基类 `_on_paste` 会用 `event.text` 把原文再插一遍 → 占位+原文双写。"""
             if self.read_only:
                 return
             data = (getattr(event, "text", "") or "").replace("\r\n", "\n").replace("\r", "\n")
+            # 关键:先记下 data,再把 event.text 清空 —— 随后按 MRO 还会跑 TextArea 基类的 `_on_paste`,
+            # 它读 event.text(现已空)→ `_replace_via_keyboard("")` 是空操作,不会再插原文。
+            try:
+                event.text = ""
+            except Exception:
+                pass
             if data == "":
+                # 空粘贴 = 剪贴板无文本、很可能装的是**图片**(终端把图片粘贴过来时就是空文本)。
+                # 非 TUI 输入框正是这个约定(Keys.BracketedPaste data==""→嗅探剪贴板图片)。
+                # 关键:WSL2 的 Windows Terminal 等会把 Ctrl+V 在**终端层**接管成"粘贴",app 收不到
+                # ctrl+v 键 → action_paste_image 永远不触发,只能靠这条空粘贴路径去抓图,否则按了没反应。
+                try:
+                    self.action_paste_image()
+                except Exception:
+                    pass
                 return
             if "\n" not in data:
-                # 单行:交回默认插入(走 Textual 原生路径)
-                await super()._on_paste(event)
+                # 单行:自己插(不再 await super(),否则会与 MRO 里的基类 _on_paste 各插一遍)。
+                r = self._replace_via_keyboard(data, *self.selection)
+                if r:
+                    self.move_cursor(r.end_location)
+                    self.focus()
                 return
             # 末尾的 \n 是粘贴终止符非内容(与旧流/非 TUI 一致,剥一个)
             if data.endswith("\n"):
@@ -683,7 +704,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 "直接输入你的问题,按回车发送\n"
                 "输入 -h 显示更多用法\n"
                 "输入 -q 离开 WCHAT\n"
-                "Ctrl+F 选择文件 · Ctrl+V 粘贴截图"
+                "Ctrl+F 选择文件 · Ctrl+G 粘贴图片(Ctrl+V 被终端占用时用 Ctrl+G)"
             )
 
         def _set_welcome(self, show):

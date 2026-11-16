@@ -1348,58 +1348,83 @@ print("=== 20. ❯ 常驻 / 多行粘贴折叠 / 授权弹窗命中 ===")
 
 
 async def _input_paste_confirm_check():
-    import types
-    app = tui.make_app(lambda *a: None)
-    async with app.run_test(size=(80, 24)) as pilot:
-        await pilot.pause()
-        inp = app.query_one("#input", TextArea)
-        # --- T1: ❯ 常驻(输入非空时提示符仍在;placeholder 只由 TextArea 空态控制) ---
-        ck("T1 初始就有常驻提示符 ❯",
-           str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
-        inp.text = "abc"
-        await pilot.pause()
-        ck("T1 输入非空时 ❯ 仍在(placeholder 消失它不走)",
-           str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
-        ck("T1 输入非空时 #input 有内容(placeholder 已隐藏)",
-           inp.text == "abc")
-        inp.text = ""
-        await pilot.pause()
-        # --- T2: 多行粘贴折叠成占位 + 提交换回;单行原样 ---
-        await inp._on_paste(types.SimpleNamespace(text="x\ny\nz\n"))
-        ck("T2 多行粘贴折叠成『已粘贴 3 行文本内容』占位",
-           "📋 [已粘贴 3 行文本内容]" in inp.text, repr(inp.text))
-        ck("T2 折叠后占位独占一行(前面没有挤进正文)",
-           inp.text.strip().startswith("📋"), repr(inp.text))
-        _restored = inp._restore_pastes(inp.text)
-        ck("T2 提交换回粘贴全文", "x\ny\nz" in _restored, repr(_restored))
-        inp.text = ""
-        await inp._on_paste(types.SimpleNamespace(text="just one line"))
-        ck("T2 单行粘贴原样插入(不折叠)", inp.text == "just one line", repr(inp.text))
-        inp.text = ""
-        # --- T3: 授权弹窗显示命中(mark) ---
-        import threading
-        _res = {}
-
-        def _worker():
-            _res["r"] = app._confirm_blocking("需要人工确认", "N2:外部写入(疑似外发)", "是否执行")
-        _th = threading.Thread(target=_worker)
-        _th.start()
-        for _ in range(100):
+    import wchat_py.inputbox as _ibo
+    _clin = _ibo._clip_image_file
+    _ibo._clip_image_file = lambda d: None       # 隔离真实剪贴板:默认"无图",T4 单独造图
+    try:
+        app = tui.make_app(lambda *a: None)
+        async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            await asyncio.sleep(0.02)
-            if app.screen.__class__.__name__ == "ConfirmModal":
-                break
-        ck("T3 授权弹窗(ConfirmModal)已弹出",
-           app.screen.__class__.__name__ == "ConfirmModal")
-        _svg = app.export_screenshot()
-        ck("T3 弹窗显示『命中』标签", "命中" in _svg, "命中 in svg=%s" % ("命中" in _svg))
-        ck("T3 弹窗显示出命中的具体内容(N2:外部写入)",
-           "N2:外部写入" in _svg, "mark in svg=%s" % ("N2:外部写入" in _svg))
-        try:
-            await pilot.press("n")
-        except Exception:
-            pass
-        _th.join(timeout=3)
+            inp = app.query_one("#input", TextArea)
+            from textual import events as _ev
+            # --- T1: ❯ 常驻(输入非空时提示符仍在;placeholder 只由 TextArea 空态控制) ---
+            ck("T1 初始就有常驻提示符 ❯",
+               str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
+            inp.text = "abc"
+            await pilot.pause()
+            ck("T1 输入非空时 ❯ 仍在(placeholder 消失它不走)",
+               str(getattr(app.query_one("#prompt"), "content", "")) == "❯")
+            ck("T1 输入非空时 #input 有内容(placeholder 已隐藏)",
+               inp.text == "abc")
+            inp.text = ""
+            await pilot.pause()
+            # --- T2: 多行粘贴折叠成占位 + 提交换回;单行原样;**不双写原文** ---
+            # 走**真实入口** app.post_message(Paste):App 会 forward 给聚焦控件,触发 MRO 里
+            # 每个 _on_paste(正是双写 bug 的现场)。直接 inp.post_message / 直接调 _on_paste 都
+            # 绕过真实分发,测不出双写(曾经假绿)。
+            inp.text = ""
+            app.post_message(_ev.Paste("x\ny\nz\n"))
+            for _ in range(20):
+                await pilot.pause()
+            ck("T2 多行粘贴折叠成『已粘贴 3 行文本内容』占位",
+               "📋 [已粘贴 3 行文本内容]" in inp.text, repr(inp.text))
+            ck("T2 折叠后不含原文(不双写 x/y/z —— 防 MRO 双分发回归)",
+               "x\ny\nz" not in inp.text, repr(inp.text))
+            _restored = inp._restore_pastes(inp.text)
+            ck("T2 提交换回粘贴全文", "x\ny\nz" in _restored, repr(_restored))
+            inp.text = ""
+            app.post_message(_ev.Paste("just one line"))
+            for _ in range(20):
+                await pilot.pause()
+            ck("T2 单行粘贴原样插入(不折叠、不双写)",
+               inp.text == "just one line", repr(inp.text))
+            # --- T4: 空粘贴 = 剪贴板图片(终端 Ctrl+V 粘贴图片的真实形态)→ 嗅探并插图片占位 ---
+            _ibo._clip_image_file = lambda d: "/tmp/probe_img.png"
+            inp.text = ""
+            app.post_message(_ev.Paste(""))
+            for _ in range(30):
+                await pilot.pause()
+                await asyncio.sleep(0.01)
+            ck("T4 空粘贴触发剪贴板图片抓取(插 📋[图片] 占位)",
+               "📋 [图片] /tmp/probe_img.png" in inp.text, repr(inp.text))
+            _ibo._clip_image_file = lambda d: None
+            inp.text = ""
+            # --- T3: 授权弹窗显示命中(mark) ---
+            import threading
+            _res = {}
+
+            def _worker():
+                _res["r"] = app._confirm_blocking("需要人工确认", "N2:外部写入(疑似外发)", "是否执行")
+            _th = threading.Thread(target=_worker)
+            _th.start()
+            for _ in range(100):
+                await pilot.pause()
+                await asyncio.sleep(0.02)
+                if app.screen.__class__.__name__ == "ConfirmModal":
+                    break
+            ck("T3 授权弹窗(ConfirmModal)已弹出",
+               app.screen.__class__.__name__ == "ConfirmModal")
+            _svg = app.export_screenshot()
+            ck("T3 弹窗显示『命中』标签", "命中" in _svg, "命中 in svg=%s" % ("命中" in _svg))
+            ck("T3 弹窗显示出命中的具体内容(N2:外部写入)",
+               "N2:外部写入" in _svg, "mark in svg=%s" % ("N2:外部写入" in _svg))
+            try:
+                await pilot.press("n")
+            except Exception:
+                pass
+            _th.join(timeout=3)
+    finally:
+        _ibo._clip_image_file = _clin
 
 
 try:
