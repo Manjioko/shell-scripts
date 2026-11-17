@@ -43,7 +43,7 @@ messages = (
 | `TTS_VOICE` | `mimo_default` | 普通模式的预置音色 ID;可改 `冰糖`/`茉莉`/`苏打`/`白桦`/`Mia`…(复刻模型忽略) |
 | `TTS_VOICE_SAMPLE` | (空) | **仅当 `TTS_MODEL` 是复刻(clone)模型时使用**:该声音样本的**本地文件路径**(`.wav`/`.mp3`)。普通模型下即使设了也忽略。见 §10 |
 | `TTS_FORMAT` | `wav` | v1 仅 `wav` |
-| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | 供应商的**完整 TTS POST 端点,原样使用,代码不做任何拼接/兜底**。换供应商只改这一行(如 OpenAI: `https://api.openai.com/v1/audio/speech`)。只填到 `/v1` 会 404 —— 这是刻意的:路径由你(config)负责 |
+| `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | 供应商的**完整 TTS POST 端点,原样使用,代码不做任何拼接/兜底**。**provider 由它的 host 判定**:含 `deepseek` → DeepSeek(见 §11),否则 mimo。换供应商只改这一行(OpenAI TTS 则为 `https://api.openai.com/v1/audio/speech`) |
 | `TTS_TIMEOUT` | `120` | 单次请求秒数 |
 | `TTS_API_KEY` | **(见下,不写死)** | TTS 专供 key |
 
@@ -164,3 +164,27 @@ parameters:
   调用均 HTTP 200 出音频;user 风格指令照常生效。
 - **实现**:`tts.is_voice_clone_model(model)`(模型名含 clone);`tts.build_voice_datauri(path)`(读→校验→
   base64→data-uri,带缓存);`toolrun` 的 TTS 分支按 `TTS_MODEL` 分派。
+
+## 11. DeepSeek 供应商(v1.2)
+
+DeepSeek 也提供 TTS,但**是与 mimo 完全不同的协议**,同一工具内做 provider 分派(共用配置变量名,不新增变量)。
+
+- **端点**:`https://api.deepseek.com/v1/tools/tts`(专用工具端点,不是 chat/completions)。
+- **请求体**:`{text, voice_id, format, filter_markdown}` —— 无 `model`、无 `messages`、**无风格/语速/复刻**。
+- **音色**:`voice_id` 仅 `stella`(女,默认) / `tide`(男);配置里用 `TTS_VOICE` 指定。
+- **响应**:**裸音频字节**(`audio/wav`),不是 JSON。工具按字节直接落盘。
+- **语种**:无参数,按文本自动识别。**计费**:每万字符 3 元(限时 1.5),汉字算 2 字符。
+
+**如何切换(不新增变量,provider 由 `TTS_BASE_URL` host 判定)**:
+```
+TTS_BASE_URL="https://api.deepseek.com/v1/tools/tts"
+TTS_API_KEY="<deepseek 的 key>"      # 或 ~/.ct 里不设 TTS_API_KEY,靠同 host 复用 BASE_URL 的 WCHAT_API_KEY
+TTS_VOICE="stella"                   # 或 tide
+# TTS_MODEL 在 deepseek 下不需要(可留空);复刻只属于 mimo
+```
+- **注意**:`resolve_key` 里 `TTS_API_KEY` **显式优先**。若你同时留着 mimo 的 `TTS_API_KEY`,切到 deepseek 会把 mimo key 发过去 → 401。切换供应商时要么改 `TTS_API_KEY`,要么删掉它(同 host 自动复用主对话 key)。
+- **差异**:DeepSeek 无复刻、无风格指令;`style` 参数在 deepseek 下被忽略;`format` 仅 wav/pcm(我们只用 wav)。
+- **provider 判定**:`tts.detect_provider(url)`(host 含 `deepseek` → deepseek,否则 mimo),与 `runtime._detect_web_provider` 同思路。
+- **实测(2026-11)**:`{text,voice_id:"stella"}` 打 `/v1/tools/tts` → HTTP 200、`audio/wav` 裸字节;工具落盘为合法 wav;
+  用 mimo 形状(body 带 model/messages)打过去 → `400 missing field 'text'`(证明必须分派)。
+- **TTS_MODEL 必填的放宽**:mimo 仍必填(模型名决定普通/复刻);deepseek **不需要** `TTS_MODEL`。

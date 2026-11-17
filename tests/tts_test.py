@@ -317,5 +317,72 @@ ck("8.5 普通:即使设了 TTS_VOICE_SAMPLE 也忽略(不传 data-uri)",
 # 8.6 清理
 os.environ.pop("TTS_VOICE_SAMPLE", None)
 
+print("=== 9. DeepSeek 供应商:协议分派(raw wav 字节 / {text,voice_id,format}) ===")
+# 9.1 detect_provider
+ck("detect_provider: deepseek url", T.detect_provider("https://api.deepseek.com/v1/tools/tts") == "deepseek")
+ck("detect_provider: mimo url", T.detect_provider("https://api.xiaomimimo.com/v1/chat/completions") == "mimo")
+# 9.2 build_body_deepseek 形状:无 model/messages,有 text/voice_id/format
+_dsb = T.build_body_deepseek("你好", "tide", "wav")
+ck("deepseek 体:字段=text/voice_id/format/filter_markdown",
+   set(_dsb.keys()) == {"text", "voice_id", "format", "filter_markdown"}, repr(_dsb))
+ck("deepseek 体:无 model", "model" not in _dsb)
+ck("deepseek 体:无 messages", "messages" not in _dsb)
+ck("deepseek 体:text 原样", _dsb["text"] == "你好")
+ck("deepseek 体:voice_id=tide", _dsb["voice_id"] == "tide")
+ck("deepseek 体:空 voice → 默认 stella", T.build_body_deepseek("x", "", "wav")["voice_id"] == T.DEEPSEEK_DEFAULT_VOICE)
+
+# 9.3 e2e:deepseek provider 走 raw 字节响应;TTS_MODEL 不要求
+_work2 = tempfile.mkdtemp(prefix="tts_ds_")
+os.environ["WORK_ROOT"] = _work2
+os.environ["TTS_BASE_URL"] = "https://api.deepseek.com/v1/tools/tts"
+os.environ["TTS_API_KEY"] = "k-ds"
+os.environ.pop("TTS_MODEL", None)          # deepseek 不需要 TTS_MODEL
+os.environ.pop("TTS_VOICE_SAMPLE", None)
+_ds_audio = b"RIFF" + b"DEEPSEEK-WAV-BYTES" + b"\x00" * 50
+_cap2 = {}
+
+
+def _fake_ds(req, timeout=None):
+    _cap2["url"] = req.full_url
+    _cap2["body"] = json.loads(req.data.decode("utf-8"))
+    _cap2["hdrs"] = dict(req.headers)
+    return _FakeResp(_ds_audio)
+
+
+_urlreq.urlopen = _fake_ds
+try:
+    _dso = toolrun._run_tool("text_to_speech", json.dumps(
+        {"text": "你好 DeepSeek", "voice": "tide", "style": "应被忽略",
+         "out_path": os.path.join(_work2, "ds.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+_opath2 = os.path.join(_work2, "ds.wav")
+ck("9.3 deepseek:POST 到 TTS_BASE_URL", _cap2.get("url") == "https://api.deepseek.com/v1/tools/tts", _cap2.get("url"))
+ck("9.3 deepseek:无 TTS_MODEL 也能用", ".wav" in (_dso or ""), repr(_dso)[:120])
+ck("9.3 deepseek:请求体是 {text,voice_id,format}",
+   set((_cap2.get("body") or {}).keys()) == {"text", "voice_id", "format", "filter_markdown"},
+   repr(_cap2.get("body")))
+ck("9.3 deepseek:voice_id=tide", (_cap2.get("body") or {}).get("voice_id") == "tide")
+ck("9.3 deepseek:body 不含 style(model 无 messages)", "messages" not in (_cap2.get("body") or {}))
+ck("9.3 deepseek:响应 raw 字节写入文件且字节相等",
+   os.path.isfile(_opath2) and open(_opath2, "rb").read() == _ds_audio,
+   "len=%d" % (os.path.getsize(_opath2) if os.path.isfile(_opath2) else -1))
+ck("9.3 deepseek:返回含路径", _opath2 in (_dso or ""), repr(_dso)[:120])
+
+# 9.4 deepseek:空响应 → 报错不崩
+def _fake_ds_empty(req, timeout=None):
+    return _FakeResp(b"")
+
+
+_urlreq.urlopen = _fake_ds_empty
+try:
+    _dse = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work2, "e.wav")}))
+finally:
+    _urlreq.urlopen = _orig_urlopen
+ck("9.4 deepseek:空音频报错", (_dse or "").startswith("错误:"), repr(_dse)[:100])
+
+# 清理
+os.environ.pop("TTS_API_KEY", None)
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

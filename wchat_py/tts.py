@@ -102,6 +102,41 @@ def is_voice_clone_model(model):
     return "clone" in str(model or "").lower()
 
 
+# ── 供应商适配(DeepSeek / mimo)──────────────────────────────────────────────
+# 两家是**不同的 TTS 协议**:
+#   · mimo   :chat.completions,请求 {model,messages,audio},响应 JSON 内 base64 音频;
+#   · deepseek:专用工具端点 /v1/tools/tts,请求 {text,voice_id,format},响应是**裸 wav 字节**。
+# 工具/配置变量名统一(TTS_BASE_URL/KEY/VOICE/MODEL),provider 由 TTS_BASE_URL 的 host 判定
+# (与 runtime._detect_web_provider 同思路,不新增配置项)。
+DEEPSEEK_DEFAULT_VOICE = "stella"
+DEEPSEEK_VOICES = ("stella", "tide")
+
+
+def detect_provider(url):
+    """按 TTS_BASE_URL 的 host 判定供应商。deepseek → 'deepseek',其余 → 'mimo'(默认)。"""
+    h = _host(url)
+    if "deepseek" in h:
+        return "deepseek"
+    return "mimo"
+
+
+def build_body_deepseek(text, voice, fmt="wav"):
+    """DeepSeek TTS 请求体:{text, voice_id, format, filter_markdown}。无 model / 无 messages / 无风格。"""
+    return {
+        "text": text or "",
+        "voice_id": voice or DEEPSEEK_DEFAULT_VOICE,
+        "format": (fmt or "wav"),
+        "filter_markdown": True,
+    }
+
+
+def build_body_for(provider, model, text, voice, style="", fmt="wav"):
+    """按 provider 组请求体(统一入口)。deepseek → 专用体;其余 → mimo chat 体。"""
+    if (provider or "mimo") == "deepseek":
+        return build_body_deepseek(text, voice, fmt)
+    return build_body(model, text, voice, style, fmt)
+
+
 def parse_audio(resp):
     """从响应 dict 取 `choices[0].message.audio.data` 并 base64 解码为 bytes。
     结构缺失/空/解码失败 → 抛 ValueError(带可读信息,由调用方转成给模型的话)。"""

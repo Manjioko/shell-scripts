@@ -635,48 +635,55 @@ def _run_tool(name, args_json):
         _fmt = (a.get("format") or os.environ.get("TTS_FORMAT") or "wav")
         if _fmt != "wav":                       # v1 只做非流式 wav
             return "错误:v1 只支持 format=wav(收到 %r)" % _fmt
-        # TTS_MODEL **必填、无默认**:模型名决定行为(也是供应商接入点),不替用户瞎猜模型。
-        _model = (os.environ.get("TTS_MODEL") or "").strip()
-        if not _model:
-            return ("错误:未配置 TTS_MODEL,无法提供语音合成服务。请不要重试,提示用户在 ~/.ct/config 设置 "
-                    "TTS_MODEL(普通:如 mimo-v2.5-tts;声音复刻:如 mimo-v2.5-tts-voiceclone),由用户决定。")
-        # 是否为声音复刻模型**由 TTS_MODEL 决定**(模型名含 clone),而不是看有没有样本变量。
-        if _tts.is_voice_clone_model(_model):
-            _sample = (os.environ.get("TTS_VOICE_SAMPLE") or "").strip()
-            if not _sample:
-                return ("错误:TTS_MODEL=%s 是声音复刻模型,但未配置 TTS_VOICE_SAMPLE(本地 wav/mp3 样本路径)。"
-                        "请不要重试,提示用户补充 TTS_VOICE_SAMPLE 后再试,由用户决定。" % _model)
-            try:
-                _voice = _tts.build_voice_datauri(_sample)
-            except Exception as _e:             # noqa: BLE001
-                return ("错误:声音复刻样本读取失败: %s。请不要重试,提示用户完善 TTS_VOICE_SAMPLE"
-                        "(路径/格式 wav·mp3/大小)后再试,由用户决定。" % _e)
-            _voice_disp = "复刻音色(%s)" % _model   # 显示用;**绝不把 data-uri 回显**
-        else:
-            if "voicedesign" in _model.lower():
-                return ("错误:暂不支持 voicedesign 模型(%s)。请不要重试,提示用户改用普通模型"
-                        "(如 mimo-v2.5-tts)或声音复刻模型(如 mimo-v2.5-tts-voiceclone)。" % _model)
-            _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
-            _voice_disp = _voice
-        _key = _tts.resolve_key()
-        if not _key:
-            return ("错误:未配置 TTS key。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
-                    "TTS_API_KEY,或把主对话切到同一供应商的组;由用户决定继续还是放弃。")
-        # TTS_BASE_URL **原样使用,不做任何兜底/拼接**。路径是供应商特有的,代码一拼换供应商就错;
-        # 端点必须由用户在 config 里写全(如 https://api.xiaomimimo.com/v1/chat/completions)。
+        # TTS_BASE_URL **原样使用,不做任何兜底/拼接**;provider 由它的 host 判定(deepseek / mimo)。
         _url = (os.environ.get("TTS_BASE_URL") or "").strip()
         if not _url:
             return ("错误:未配置 TTS_BASE_URL。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
-                    "TTS_BASE_URL 为该供应商的**完整** TTS 端点(mimo: "
-                    "https://api.xiaomimimo.com/v1/chat/completions);由用户决定补全还是放弃。")
-        _body = _tts.build_body(_model, _text, _voice, _style, _fmt)
-        _hdrs = {"Content-Type": "application/json", "Authorization": "Bearer " + _key,
-                 "api-key": _key}
+                    "TTS_BASE_URL 为供应商的**完整** TTS 端点"
+                    "(mimo: https://api.xiaomimimo.com/v1/chat/completions;"
+                    "deepseek: https://api.deepseek.com/v1/tools/tts);由用户决定补全还是放弃。")
+        _provider = _tts.detect_provider(_url)
+        if _provider == "deepseek":
+            # DeepSeek TTS:无 model、无风格、无复刻;voice_id = stella/tide(默认 stella)。
+            _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEEPSEEK_DEFAULT_VOICE)
+            _voice_disp = _voice
+            _model = "deepseek-tts"              # 仅显示用
+        else:
+            # mimo:TTS_MODEL **必填、无默认**(模型名决定行为:含 clone=复刻,否则普通)。
+            _model = (os.environ.get("TTS_MODEL") or "").strip()
+            if not _model:
+                return ("错误:未配置 TTS_MODEL,无法提供语音合成服务。请不要重试,提示用户在 ~/.ct/config 设置 "
+                        "TTS_MODEL(普通:如 mimo-v2.5-tts;声音复刻:如 mimo-v2.5-tts-voiceclone),由用户决定。")
+            if _tts.is_voice_clone_model(_model):
+                _sample = (os.environ.get("TTS_VOICE_SAMPLE") or "").strip()
+                if not _sample:
+                    return ("错误:TTS_MODEL=%s 是声音复刻模型,但未配置 TTS_VOICE_SAMPLE(本地 wav/mp3 样本路径)。"
+                            "请不要重试,提示用户补充 TTS_VOICE_SAMPLE 后再试,由用户决定。" % _model)
+                try:
+                    _voice = _tts.build_voice_datauri(_sample)
+                except Exception as _e:         # noqa: BLE001
+                    return ("错误:声音复刻样本读取失败: %s。请不要重试,提示用户完善 TTS_VOICE_SAMPLE"
+                            "(路径/格式 wav·mp3/大小)后再试,由用户决定。" % _e)
+                _voice_disp = "复刻音色(%s)" % _model   # 显示用;**绝不把 data-uri 回显**
+            else:
+                if "voicedesign" in _model.lower():
+                    return ("错误:暂不支持 voicedesign 模型(%s)。请不要重试,提示用户改用普通模型"
+                            "(如 mimo-v2.5-tts)或声音复刻模型(如 mimo-v2.5-tts-voiceclone)。" % _model)
+                _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
+                _voice_disp = _voice
+        _key = _tts.resolve_key()
+        if not _key:
+            return ("错误:未配置 TTS key。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
+                    "TTS_API_KEY(该供应商的 key),或把主对话切到同一供应商的组;由用户决定继续还是放弃。")
+        _body = _tts.build_body_for(_provider, _model, _text, _voice, _style, _fmt)
+        _hdrs = {"Content-Type": "application/json", "Authorization": "Bearer " + _key}
+        if _provider != "deepseek":
+            _hdrs["api-key"] = _key            # mimo 网关兼容头;deepseek 不需要
         _req = _ur.Request(_url, data=_json.dumps(_body, ensure_ascii=False).encode("utf-8"),
                            headers=_hdrs)
         try:
             with _ur.urlopen(_req, timeout=int(os.environ.get("TTS_TIMEOUT", "120"))) as _r:
-                _resp = _json.loads(_r.read().decode("utf-8", "replace"))
+                _raw = _r.read()
         except Exception as _e:                 # noqa: BLE001 —— HTTPError/URLError/超时都归一
             _code = getattr(_e, "code", None)
             try:
@@ -689,13 +696,28 @@ def _run_tool(name, args_json):
             # 明确要求:不重试、不猜别的地址,把真实错误交给用户定夺。
             return ("错误:调用 TTS 接口失败(%s)。当前 TTS_BASE_URL = %s。"
                     "**不要重试,也不要猜测或改用别的地址**;请把这条错误如实告诉用户,"
-                    "让用户决定是补充/修正 TTS_BASE_URL(需为该供应商的完整端点)还是放弃本次语音合成。"
+                    "让用户决定是补充/修正 TTS_BASE_URL 还是放弃本次语音合成。"
                     % (_detail, _url))
-        try:
-            _audio = _tts.parse_audio(_resp)
-        except Exception as _e:                 # noqa: BLE001
-            return ("错误:%s。接口返回了内容但取不到音频。请不要重试,"
-                    "把这条告诉用户,由用户决定是否检查 TTS_BASE_URL/模型后重来或放弃。" % _e)
+        if _provider == "deepseek":
+            # DeepSeek 返回**裸音频字节**(audio/wav);200 下拿到的就是音频。空 → 报错。
+            if not _raw:
+                return ("错误:DeepSeek TTS 返回空音频。请不要重试,把这条告诉用户,由用户决定是否检查配置后重来或放弃。")
+            # 极少数情况 200 却回 JSON 文本(错误),识别出来给出可读信息。
+            if _raw[:1] == b"{" and len(_raw) < 2000:
+                try:
+                    _json.loads(_raw.decode("utf-8", "replace"))
+                    return ("错误:DeepSeek TTS 返回了文本而非音频: %s。请不要重试,"
+                            "把这条告诉用户,由用户决定。" % _raw.decode("utf-8", "replace")[:200])
+                except Exception:
+                    pass
+            _audio = _raw
+        else:
+            try:
+                _resp = _json.loads(_raw.decode("utf-8", "replace"))
+                _audio = _tts.parse_audio(_resp)
+            except Exception as _e:             # noqa: BLE001
+                return ("错误:%s。接口返回了内容但取不到音频。请不要重试,"
+                        "把这条告诉用户,由用户决定是否检查 TTS_BASE_URL/模型后重来或放弃。" % _e)
         _op = a.get("out_path") or ""
         if _op:
             _op = os.path.expanduser(_op)
