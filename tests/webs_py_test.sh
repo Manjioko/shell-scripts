@@ -36,7 +36,15 @@ wfe() { python3 "$RLDIR/wchat_py/_run.py" webs fetch_error "$1" "$2"; }
 echo "=== web_search_build_body 语义 ==="
 ck "mimo → tools/web_search" "$(wsb mimo q m | jq -r '.tools[0].type')" "web_search"
 ck "qwen → 关思考开联网" "$(wsb qwen q m | jq -c '{es:.enable_search,et:.enable_thinking}')" '{"es":true,"et":false}'
+ck "deepseek → tools/deepseek_web_search + 关思考" "$(wsb deepseek q m | jq -c '{t:.tools[0].type,th:.thinking.type}')" '{"t":"deepseek_web_search","th":"disabled"}'
+ck "deepseek → 空 model 兜底 deepseek-flash" "$(wsb deepseek q '' | jq -r '.model')" "deepseek-flash"
 ck "未知 provider rc=1" "$(wsb nope q m >/dev/null 2>&1; echo $?)" "1"
+
+echo "=== provider 探测(决定是否保留 web_search) ==="
+detect() { BASE_URL="$1" FLASH_MODEL= python3 -c "import sys; sys.path.insert(0,'$RLDIR'); from wchat_py import runtime; print(runtime._detect_web_provider())"; }
+ck "detect: deepseek" "$(detect https://api.deepseek.com/chat/completions)" "deepseek"
+ck "detect: mimo"     "$(detect https://api.xiaomimimo.com/v1)" "mimo"
+ck "detect: qwen"     "$(detect https://dashscope.aliyuncs.com/api/v1)" "qwen"
 
 echo "=== fetch_error 语义 ==="
 ck "000 → 无法连接" "$(wfe 000 http://x/ | grep -c 无法连接)" "1"
@@ -67,4 +75,3 @@ ck "默认 → rc=0(可用)" "$(run_build 1)" "0"
 
 echo "RESULT total=$((pass + fail)) pass=$pass fail=$fail"
 [[ "$fail" -eq 0 ]]
-

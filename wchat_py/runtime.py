@@ -114,6 +114,9 @@ def _detect_web_provider():
     if any(k in base for k in ("maas.aliyuncs.com", "dashscope", "aliyuncs.com")) \
             or fm.startswith("qwen") or fm.startswith("qwq"):
         return "qwen"
+    if "deepseek" in base or fm.startswith("deepseek"):
+        # DeepSeek 也提供对话内联网工具(deepseek_web_search),走 chat/completions,见 webs.build_body。
+        return "deepseek"
     return "none"
 
 

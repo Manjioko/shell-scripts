@@ -49,6 +49,18 @@ def build_body(provider: str, query: str, model: str):
             "search_options": {"forced_search": True, "enable_source": False},
             "stream": False,
         }
+    if provider == "deepseek":
+        # DeepSeek 联网工具:在 chat/completions 上声明服务端工具 deepseek_web_search;
+        # 搜索/抓取都在服务端完成,模型带引用作答,响应仍是 choices[0].message.content
+        # (与 qwen/mimo 同构,故 toolrun 的 web_search 解析无需改)。默认关思考=普通联网搜索。
+        # 注意:该服务端工具不能与其它 tools 同时声明 —— 我们是**单独发一个隔离请求**去搜,合规。
+        return {
+            "model": model or "deepseek-flash",
+            "messages": [{"role": "user", "content": query}],
+            "tools": [{"type": "deepseek_web_search"}],
+            "thinking": {"type": "disabled"},
+            "stream": False,
+        }
     return None
 
 
