@@ -85,11 +85,21 @@ def build_body(model, text, voice, style="", fmt="wav"):
         msgs.append({"role": "user", "content": str(style)})
     msgs.append({"role": "assistant", "content": text or ""})
     return {
-        "model": model or DEFAULT_MODEL,
+        "model": model,
         "messages": msgs,
-        "audio": {"format": (fmt or DEFAULT_FORMAT), "voice": (voice or DEFAULT_VOICE)},
+        "audio": {"format": (fmt or DEFAULT_FORMAT), "voice": voice},
         "stream": False,
     }
+
+
+def is_voice_clone_model(model):
+    """该模型是否为**声音复刻(voiceclone)**模型 —— 由**模型名**判定,这是供应商接入点。
+
+    约定:模型名含 "clone" 即视为复刻模型(此时 audio.voice 需传样本 data-uri)。
+    普通模型(如 mimo-v2.5-tts)不含 clone → 预置音色模式。
+    voicedesign(音色设计,需文本描述)不在 v1 支持范围,由调用方另判并报错。
+    """
+    return "clone" in str(model or "").lower()
 
 
 def parse_audio(resp):
@@ -119,7 +129,7 @@ def fmt_result(path, nbytes, voice, model):
     """组装回给模型的文案。时长按 wav 24kHz/16bit/mono 粗估(bytes/(24000*2)),只是提示。"""
     secs = (nbytes / (24000.0 * 2.0)) if nbytes else 0.0
     return ("✅ 已生成语音: %s(%d 字节 · 约 %.1f 秒 · 音色=%s · 模型=%s)"
-            % (path, nbytes, secs, voice or DEFAULT_VOICE, model or DEFAULT_MODEL))
+            % (path, nbytes, secs, voice, model))
 
 
 def _host(u):

@@ -39,9 +39,9 @@ messages = (
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `TTS_MODEL` | `mimo-v2.5-tts` | 普通模式模型名。**复刻模式忽略它**,强制用 `mimo-v2.5-tts-voiceclone` |
-| `TTS_VOICE` | `mimo_default` | 普通模式的预置音色 ID;可改 `冰糖`/`茉莉`/`苏打`/`白桦`/`Mia`…(**复刻模式忽略**) |
-| `TTS_VOICE_SAMPLE` | (空=不复刻) | **设了=语音复刻模式**:值是该声音样本的**本地文件路径**(`.wav`/`.mp3`);没设=普通预置音色模式。见 §10 |
+| `TTS_MODEL` | **(必填,无默认)** | TTS 模型名,**必填**。模型名决定行为(供应商接入点):含 `clone` = 声音复刻模型(如 `mimo-v2.5-tts-voiceclone`),否则普通 TTS(如 `mimo-v2.5-tts`)。**没配 = 不提供 TTS 服务**(报错,AI 不得擅自重试) |
+| `TTS_VOICE` | `mimo_default` | 普通模式的预置音色 ID;可改 `冰糖`/`茉莉`/`苏打`/`白桦`/`Mia`…(复刻模型忽略) |
+| `TTS_VOICE_SAMPLE` | (空) | **仅当 `TTS_MODEL` 是复刻(clone)模型时使用**:该声音样本的**本地文件路径**(`.wav`/`.mp3`)。普通模型下即使设了也忽略。见 §10 |
 | `TTS_FORMAT` | `wav` | v1 仅 `wav` |
 | `TTS_BASE_URL` | `https://api.xiaomimimo.com/v1/chat/completions` | 供应商的**完整 TTS POST 端点,原样使用,代码不做任何拼接/兜底**。换供应商只改这一行(如 OpenAI: `https://api.openai.com/v1/audio/speech`)。只填到 `/v1` 会 404 —— 这是刻意的:路径由你(config)负责 |
 | `TTS_TIMEOUT` | `120` | 单次请求秒数 |
@@ -139,25 +139,28 @@ parameters:
 
 - key 来源是否接受 §3 的设计(不在仓库写死,靠 `TTS_API_KEY` / 同 host 复用 / config 行)。若坚持"默认就用某把 mimo key",请提供为环境/config 注入方式,**不写进代码或文档**。
 
-## 10. 语音复刻(v1.1,已实现)
+## 10. 语音复刻(v1.1)
 
-供应商预置音色有限,用**语音复刻(voiceclone)**弥补。开关即"样本变量是否存在":
+供应商预置音色有限,用**语音复刻(voiceclone)**弥补。**模式由 `TTS_MODEL` 决定**(这是供应商接入点):
 
-- **`TTS_VOICE_SAMPLE=<本地文件路径>`**(仅本地文件,`.wav`/`.mp3`):
-  - **设了** → **复刻模式**:读该文件 → base64 → `data:{mime};base64,<...>` 作 `audio.voice`;**模型强制**
-    `mimo-v2.5-tts-voiceclone`;工具 `voice` 参数**忽略**(用户已确认)。
-  - **没设** → **普通模式**:预置音色(`TTS_VOICE` + `TTS_MODEL`),行为与 v1 完全一致。
+- `TTS_MODEL` 含 `clone`(如 `mimo-v2.5-tts-voiceclone`)→ **复刻模式**:
+  - 必须配 `TTS_VOICE_SAMPLE`(本地 `.wav`/`.mp3` 样本);没配或读取失败 → **报错、让 AI 提示用户完善设置、
+    不允许擅自重试**。
+  - 读样本 → base64 → `data:{mime};base64,<...>` 作 `audio.voice`;工具 `voice` 参数**忽略**。
+- `TTS_MODEL` 不含 clone(如 `mimo-v2.5-tts`)→ **普通模式**:预置音色(`TTS_VOICE`);即使设了
+  `TTS_VOICE_SAMPLE` 也**忽略**。
+- `TTS_MODEL` 未配置 → **不提供 TTS 服务**(报错,AI 不得擅自重试)。
+- `voicedesign`(音色设计,需文本描述)v1 **不支持**,遇到会明确报错。
 
 规则/边界:
-- **模型耦合**:复刻模式固定 voiceclone 模型(否则接口 400),`TTS_MODEL` 不生效。
 - **样本格式**:仅 `wav`/`mp3`;按扩展名定 MIME(`wav`→`audio/wav`,`mp3`→`audio/mpeg`)。
-- **大小**:接口限"base64 串 ≤ 10MB" → 原始文件 ≲7.5MB;超限/文件不存在/扩展名不符 → 直接报错(**解释给用户、
-  不重试**,沿用 §8 原则)。
-- **隐私**:样本含声纹,每次复刻生成都会把它发给供应商;这是复刻的固有代价。样本 data-uri **只在本机内部构造、
-  只用于发请求**,绝不进对话 messages / 日志 / 回显;**回给模型的文案里 `音色` 显示为"复刻音色",绝不打印 data-uri**
-  (否则几 MB base64 + 声纹会直接进上下文/历史)。
+- **大小**:接口限"base64 串 ≤ 10MB" → 原始文件 ≲7.5MB;超限/文件不存在/扩展名不符 → 直接报错
+  (**解释给用户、不重试**)。
+- **隐私**:样本含声纹,每次复刻生成都会把它发给供应商;这是复刻的固有代价。样本 data-uri **只在本机内部
+  构造、只用于发请求**,绝不进对话 messages / 日志 / 回显;**回给模型的文案里 `音色` 显示为"复刻音色",绝不
+  打印 data-uri**。
 - **缓存**:按 `(实路径, mtime, size)` 缓存 data-uri,避免每次几 MB 反复 base64。
-- **实测(2026-11)**:用本地 wav 作样本,`mimo-v2.5-tts-voiceclone` 仅 assistant 与 user 风格+assistant 两种调用均
-  HTTP 200 出音频;user 风格指令照常生效。
-- **实现**:`tts.build_voice_datauri(path)`(读→校验→base64→data-uri,带缓存);`toolrun` 的 TTS 分支检测
-  `TTS_VOICE_SAMPLE`:非空则走复刻(模型 voiceclone、voice=data-uri),否则现状。
+- **实测(2026-11)**:用本地 wav 作样本,`mimo-v2.5-tts-voiceclone` 仅 assistant 与 user 风格+assistant 两种
+  调用均 HTTP 200 出音频;user 风格指令照常生效。
+- **实现**:`tts.is_voice_clone_model(model)`(模型名含 clone);`tts.build_voice_datauri(path)`(读→校验→
+  base64→data-uri,带缓存);`toolrun` 的 TTS 分支按 `TTS_MODEL` 分派。

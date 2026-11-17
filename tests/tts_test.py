@@ -48,9 +48,12 @@ ck("stream=False(非流式)", _b["stream"] is False)
 _b2 = T.build_body("", "只念这句", "", "", "")
 ck("无 style:只有一条 assistant 消息", [m["role"] for m in _b2["messages"]] == ["assistant"],
    repr(_b2["messages"]))
-ck("空 model → 默认 mimo-v2.5-tts", _b2["model"] == T.DEFAULT_MODEL)
-ck("空 voice → 默认 mimo_default", _b2["audio"]["voice"] == T.DEFAULT_VOICE)
+ck("model 原样透传(build_body 不再注入默认;必填由调用方保证)", _b2["model"] == "")
+ck("voice 原样透传(不再注入默认)", _b2["audio"]["voice"] == "")
 ck("空 format → 默认 wav", _b2["audio"]["format"] == T.DEFAULT_FORMAT)
+ck("is_voice_clone_model: 普通模型 False", T.is_voice_clone_model("mimo-v2.5-tts") is False)
+ck("is_voice_clone_model: 复刻模型 True", T.is_voice_clone_model("mimo-v2.5-tts-voiceclone") is True)
+ck("is_voice_clone_model: 大小写无关", T.is_voice_clone_model("X-VoiceClone") is True)
 
 print("=== 2. parse_audio:base64 往返 / 异常 ===")
 _raw = b"\x00\x01\x02WAVDATA\xff"
@@ -113,7 +116,9 @@ _work = tempfile.mkdtemp(prefix="tts_work_")
 os.environ["WORK_ROOT"] = _work
 os.environ["TTS_API_KEY"] = "k-for-e2e"
 os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1/chat/completions"
+os.environ["TTS_MODEL"] = "mimo-v2.5-tts"          # 必填(普通模式)
 os.environ["TTS_VOICE"] = "冰糖"
+os.environ.pop("TTS_VOICE_SAMPLE", None)
 _audio = b"RIFF-fake-wav-bytes-1234567890"
 _enc2 = base64.b64encode(_audio).decode()
 _orig_urlopen = _urlreq.urlopen
@@ -194,7 +199,7 @@ ck("e2e:无 key 返回配置指引(提到 TTS_API_KEY)", "TTS_API_KEY" in (_no o
 _empty = toolrun._run_tool("text_to_speech", json.dumps({"text": "   "}))
 ck("e2e:空 text 报错", _empty.startswith("错误:"), repr(_empty)[:80])
 
-print("=== 7. 语音复刻(voiceclone):样本 data-uri + 复刻模式 ===")
+print("=== 7. build_voice_datauri(样本 → data-uri) ===")
 # 造小 wav/mp3 样本
 _swav = os.path.join(_work, "sample.wav")
 _smp3 = os.path.join(_work, "sample.mp3")
@@ -228,7 +233,7 @@ def _raises_val(fn, *a):
 
 ck("不存在的样本 → ValueError", _raises_val(T.build_voice_datauri, os.path.join(_work, "nope.wav")))
 ck("不支持的扩展名(.txt)→ ValueError", _raises_val(T.build_voice_datauri, _sbad))
-# 超限:临时把上限调小,验证大小校验(用一个**未被缓存过**的新文件,否则缓存命中会短路)
+# 超限:用一个**未被缓存过**的新文件,否则缓存命中会短路
 _sbig = os.path.join(_work, "sample2.wav")
 with open(_sbig, "wb") as f:
     f.write(b"RIFF" + b"\x00" * 200)
@@ -239,17 +244,8 @@ try:
 finally:
     T._MAX_SAMPLE_B64 = _orig_max
 
-# 复刻模式经 toolrun:模型强制 voiceclone,voice=样本 data-uri,工具 voice 参数被忽略
-os.environ["TTS_API_KEY"] = "k-e2e"
-os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1/chat/completions"
-os.environ["TTS_VOICE_SAMPLE"] = _swav
-os.environ["TTS_MODEL"] = "mimo-v2.5-tts"
-os.environ["TTS_VOICE"] = "冰糖"
+print("=== 8. 模式由 TTS_MODEL 决定(必填;含 clone=复刻,否则普通) ===")
 _cap = {}
-
-
-class _Resp2(_FakeResp):
-    pass
 
 
 def _fake_capture(req, timeout=None):
@@ -260,44 +256,66 @@ def _fake_capture(req, timeout=None):
     return _FakeResp(json.dumps({"choices": [{"message": {"audio": {"data": _enc2}}}]}).encode())
 
 
-_urlreq.urlopen = _fake_capture
-try:
-    _co = toolrun._run_tool("text_to_speech", json.dumps(
-        {"text": "hi", "voice": "茉莉", "out_path": os.path.join(_work, "clone.wav")}))
-finally:
-    _urlreq.urlopen = _orig_urlopen
+def _run_cap(args):
+    _cap.clear()
+    _urlreq.urlopen = _fake_capture
+    try:
+        return toolrun._run_tool("text_to_speech", json.dumps(args))
+    finally:
+        _urlreq.urlopen = _orig_urlopen
+
+
+# 8.1 TTS_MODEL 未设 → 不提供 TTS 服务(报错在发请求之前,不会走网络)
+os.environ["TTS_API_KEY"] = "k-e2e"
+os.environ["TTS_BASE_URL"] = "https://api.xiaomimimo.com/v1/chat/completions"
+os.environ.pop("TTS_VOICE_SAMPLE", None)
+os.environ.pop("TTS_MODEL", None)
+_nt = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "nt.wav")}))
+ck("8.1 未配置 TTS_MODEL → 报错提到 TTS_MODEL", "TTS_MODEL" in (_nt or ""), repr(_nt)[:160])
+ck("8.1 未配置 TTS_MODEL → 提示不重试", "不要重试" in (_nt or ""), repr(_nt)[:160])
+
+# 8.2 复刻模型 + 无样本 → 报错提示补 TTS_VOICE_SAMPLE,不重试
+os.environ["TTS_MODEL"] = T.CLONE_MODEL
+os.environ.pop("TTS_VOICE_SAMPLE", None)
+_cn = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "cn.wav")}))
+ck("8.2 复刻模型无样本 → 报错提到 TTS_VOICE_SAMPLE", "TTS_VOICE_SAMPLE" in (_cn or ""), repr(_cn)[:160])
+ck("8.2 复刻模型无样本 → 提示不重试", "不要重试" in (_cn or ""), repr(_cn)[:160])
+
+# 8.3 复刻模型 + 样本存在 → voice=data-uri,忽略 voice 参数
+os.environ["TTS_VOICE"] = "冰糖"
+os.environ["TTS_VOICE_SAMPLE"] = _swav
+_co = _run_cap({"text": "hi", "voice": "茉莉", "out_path": os.path.join(_work, "clone.wav")})
 _bb = _cap.get("body", {})
-ck("复刻模式:模型强制 voiceclone", _bb.get("model") == T.CLONE_MODEL, _bb.get("model"))
-ck("复刻模式:voice=样本 data-uri(不是预置音色)",
+ck("8.3 复刻:模型=TTS_MODEL(-voiceclone)", _bb.get("model") == T.CLONE_MODEL, _bb.get("model"))
+ck("8.3 复刻:voice=样本 data-uri",
    str((_bb.get("audio") or {}).get("voice", "")).startswith("data:audio/wav;base64,"),
    str((_bb.get("audio") or {}).get("voice", ""))[:40])
-ck("复刻模式:工具 voice 参数被忽略(不是茉莉)",
-   (_bb.get("audio") or {}).get("voice") != "茉莉")
-ck("复刻模式:可正常生成(返回含路径)", (".wav" in (_co or "")), repr(_co)[:120])
-ck("复刻模式:返回文案**不含样本 data-uri**(不泄露声纹/不爆上下文)",
+ck("8.3 复刻:工具 voice 参数被忽略", (_bb.get("audio") or {}).get("voice") != "茉莉")
+ck("8.3 复刻:可正常生成(返回含路径)", ".wav" in (_co or ""), repr(_co)[:120])
+ck("8.3 复刻:返回**不含样本 data-uri**(不泄露声纹/不爆上下文)",
    "data:audio" not in (_co or "") and "base64" not in (_co or ""), repr(_co)[:160])
-ck("复刻模式:返回文案显示『复刻音色』", "复刻音色" in (_co or ""), repr(_co)[:160])
+ck("8.3 复刻:返回显示『复刻音色』", "复刻音色" in (_co or ""), repr(_co)[:160])
 
-# 普通模式(不设 TTS_VOICE_SAMPLE):模型=TTS_MODEL、voice=预置
-os.environ.pop("TTS_VOICE_SAMPLE", None)
-_cap.clear()
-_urlreq.urlopen = _fake_capture
-try:
-    toolrun._run_tool("text_to_speech", json.dumps({"text": "hi", "voice": "茉莉",
-                                                    "out_path": os.path.join(_work, "norm.wav")}))
-finally:
-    _urlreq.urlopen = _orig_urlopen
-_bn = _cap.get("body", {})
-ck("普通模式:模型=TTS_MODEL", _bn.get("model") == "mimo-v2.5-tts", _bn.get("model"))
-ck("普通模式:voice=预置音色(茉莉)", (_bn.get("audio") or {}).get("voice") == "茉莉",
-   (_bn.get("audio") or {}).get("voice"))
-
-# 复刻样本缺失 → 报错且提示不重试
+# 8.4 复刻模型 + 样本读取失败(不存在)→ 报错,不重试
 os.environ["TTS_VOICE_SAMPLE"] = os.path.join(_work, "missing.wav")
-_me = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "m.wav")}))
+_ce = toolrun._run_tool("text_to_speech", json.dumps({"text": "x", "out_path": os.path.join(_work, "ce.wav")}))
+ck("8.4 复刻样本读取失败 → 报错提到 TTS_VOICE_SAMPLE", "TTS_VOICE_SAMPLE" in (_ce or ""), repr(_ce)[:160])
+ck("8.4 复刻样本读取失败 → 不重试", "不要重试" in (_ce or ""), repr(_ce)[:160])
+
+# 8.5 普通模型 + 即使设了样本 → 忽略样本,用预置音色
+os.environ["TTS_MODEL"] = "mimo-v2.5-tts"
+os.environ["TTS_VOICE_SAMPLE"] = _swav
+_nm = _run_cap({"text": "hi", "voice": "茉莉", "out_path": os.path.join(_work, "norm.wav")})
+_bn = _cap.get("body", {})
+ck("8.5 普通:模型=TTS_MODEL", _bn.get("model") == "mimo-v2.5-tts", _bn.get("model"))
+ck("8.5 普通:voice=预置音色(茉莉)", (_bn.get("audio") or {}).get("voice") == "茉莉",
+   (_bn.get("audio") or {}).get("voice"))
+ck("8.5 普通:即使设了 TTS_VOICE_SAMPLE 也忽略(不传 data-uri)",
+   not str((_bn.get("audio") or {}).get("voice", "")).startswith("data:"),
+   str((_bn.get("audio") or {}).get("voice"))[:30])
+
+# 8.6 清理
 os.environ.pop("TTS_VOICE_SAMPLE", None)
-ck("复刻样本缺失 → 报错提到 TTS_VOICE_SAMPLE", "TTS_VOICE_SAMPLE" in (_me or ""), repr(_me)[:160])
-ck("复刻样本缺失 → 提示不重试", "不要重试" in (_me or ""), repr(_me)[:160])
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

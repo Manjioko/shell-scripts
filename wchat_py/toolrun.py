@@ -635,19 +635,29 @@ def _run_tool(name, args_json):
         _fmt = (a.get("format") or os.environ.get("TTS_FORMAT") or "wav")
         if _fmt != "wav":                       # v1 只做非流式 wav
             return "错误:v1 只支持 format=wav(收到 %r)" % _fmt
-        # 语音复刻开关:设了 TTS_VOICE_SAMPLE(本地样本路径)就走复刻;否则普通预置音色。
-        _sample = (os.environ.get("TTS_VOICE_SAMPLE") or "").strip()
-        if _sample:
-            # 复刻模式:模型**强制** voiceclone;voice 用样本 data-uri;工具 voice 参数忽略(用户已确认)。
+        # TTS_MODEL **必填、无默认**:模型名决定行为(也是供应商接入点),不替用户瞎猜模型。
+        _model = (os.environ.get("TTS_MODEL") or "").strip()
+        if not _model:
+            return ("错误:未配置 TTS_MODEL,无法提供语音合成服务。请不要重试,提示用户在 ~/.ct/config 设置 "
+                    "TTS_MODEL(普通:如 mimo-v2.5-tts;声音复刻:如 mimo-v2.5-tts-voiceclone),由用户决定。")
+        # 是否为声音复刻模型**由 TTS_MODEL 决定**(模型名含 clone),而不是看有没有样本变量。
+        if _tts.is_voice_clone_model(_model):
+            _sample = (os.environ.get("TTS_VOICE_SAMPLE") or "").strip()
+            if not _sample:
+                return ("错误:TTS_MODEL=%s 是声音复刻模型,但未配置 TTS_VOICE_SAMPLE(本地 wav/mp3 样本路径)。"
+                        "请不要重试,提示用户补充 TTS_VOICE_SAMPLE 后再试,由用户决定。" % _model)
             try:
                 _voice = _tts.build_voice_datauri(_sample)
             except Exception as _e:             # noqa: BLE001
-                return ("错误:%s。请不要重试,把这条告诉用户:TTS_VOICE_SAMPLE(语音复刻样本)有问题,"
-                        "让用户决定修正样本(路径/格式/大小)还是改用普通预置音色(TTS_VOICE)。" % _e)
-            _model = _tts.CLONE_MODEL
+                return ("错误:声音复刻样本读取失败: %s。请不要重试,提示用户完善 TTS_VOICE_SAMPLE"
+                        "(路径/格式 wav·mp3/大小)后再试,由用户决定。" % _e)
+            _voice_disp = "复刻音色(%s)" % _model   # 显示用;**绝不把 data-uri 回显**
         else:
-            _model = os.environ.get("TTS_MODEL") or _tts.DEFAULT_MODEL
+            if "voicedesign" in _model.lower():
+                return ("错误:暂不支持 voicedesign 模型(%s)。请不要重试,提示用户改用普通模型"
+                        "(如 mimo-v2.5-tts)或声音复刻模型(如 mimo-v2.5-tts-voiceclone)。" % _model)
             _voice = (a.get("voice") or os.environ.get("TTS_VOICE") or _tts.DEFAULT_VOICE)
+            _voice_disp = _voice
         _key = _tts.resolve_key()
         if not _key:
             return ("错误:未配置 TTS key。请不要重试,把这条告诉用户:需要在 ~/.ct/config 设置 "
@@ -705,8 +715,6 @@ def _run_tool(name, args_json):
         except Exception as _e:                 # noqa: BLE001
             return "错误:写入音频文件失败: %s" % _e
         # 回给模型的文案里**绝不能带样本 data-uri**(那是几 MB 的声纹 base64,会进对话/日志)。
-        # 复刻模式只显示"复刻音色";普通模式显示预置音色名。
-        _voice_disp = "复刻音色(voiceclone)" if _sample else _voice
         return _tts.fmt_result(_op, len(_audio), _voice_disp, _model)
     if name == "run_shell_command":
         from wchat_py import audit as _audit
