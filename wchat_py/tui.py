@@ -702,6 +702,41 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 yield Static("❯", id="prompt")
                 yield ChatInput(id="input", placeholder="请输入问题,回车发送")
 
+        async def on_event(self, event):
+            """应用级接管终端**粘贴/拖拽**:无论焦点在不在输入框,都把 Paste 内容送进 #input。
+
+            为什么需要(用户实报):从文件管理器把文件/图片**拖拽**进 wchat,非 TUI(PTK inline,
+            没有鼠标捕获)由终端把路径当"粘贴"插进输入框;而 TUI 是 Textual 全屏,App 的 on_event
+            会把 Paste **只转给当前焦点控件** —— 焦点若不在输入框,Paste 就落到别处、输入框收不到,
+            现象是"拖了个寂寞"。这里在 App 层拦下 Paste,直接喂给 ChatInput 的粘贴处理(单行路径=
+            插入;多行=占位;空=抓图,全沿用原语义),再回焦输入框。
+
+            仅在**主屏**(screen_stack 只有 1 层,无弹窗)时接管:InputModal/HistoryPickModal 里也有
+            Input,那些场景的粘贴应归弹窗自己的输入框,不能被这里抢走。
+            """
+            try:
+                from textual import events as _ev
+            except Exception:
+                _ev = None
+            if _ev is not None and isinstance(event, _ev.Paste) \
+                    and not getattr(event, "is_forwarded", False):
+                try:
+                    _base_only = len(self.screen_stack) == 1
+                except Exception:
+                    _base_only = True
+                if _base_only:
+                    try:
+                        _inp = self.query_one("#input", ChatInput)
+                        await _inp._on_paste(event)      # 复用其单行插入/多行占位/空粘贴抓图语义
+                        try:
+                            _inp.focus()
+                        except Exception:
+                            pass
+                        return
+                    except Exception:
+                        pass
+            await super().on_event(event)
+
         # ---- 空态欢迎提示 ----
         @staticmethod
         def _welcome_text():
@@ -1279,7 +1314,16 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
 def run_tui(handle_line, *, banner="", on_meta=None):
     try:
-        make_app(handle_line, banner=banner, on_meta=on_meta).run()
+        _app = make_app(handle_line, banner=banner, on_meta=on_meta)
+        # 鼠标捕获开关:Textual 全屏默认开鼠标捕获(\x1b[?1000h 等),终端会把"文件拖拽"当
+        # 鼠标事件(=拖了没反应),而非像非 TUI 那样当"粘贴"发路径。设 WCHAT_TUI_MOUSE=0 关掉
+        # 捕获 → 拖拽恢复为粘贴路径(配合 App.on_event 的粘贴接管,路径落入输入框);代价是
+        # 失去鼠标滚轮/点选。默认保持开(不改现有 UX)。
+        _mouse = True
+        _me = os.environ.get("WCHAT_TUI_MOUSE")
+        if _me is not None:
+            _mouse = str(_me).strip().lower() not in ("0", "false", "no", "off")
+        _app.run(mouse=_mouse)
     finally:
         try:
             from wchat_py import render as _render

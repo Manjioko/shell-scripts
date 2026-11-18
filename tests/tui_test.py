@@ -1455,5 +1455,44 @@ ck("T3 接线:cli _shell_approved 把 reason 塞进 mark",
 ck("T3 接线:初审无理由时也有兜底命中文案",
    "初审未自动放行" in _tr or "初审不可用" in _tr)
 
+# ---- 21) 应用级粘贴接管:无论焦点在不在输入框,拖拽/粘贴都落进 #input ----
+print("=== 21. 应用级粘贴接管(焦点不在输入框也能落进 #input) ===")
+
+
+async def _app_paste_check():
+    from textual import events as _ev21
+    from textual.widgets import TextArea as _TA21
+    app = tui.make_app(lambda *a: None)
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", _TA21)
+        # 焦点放到内容区(模拟拖拽时焦点不在输入框)
+        inp.text = ""
+        app.query_one("#content").focus()
+        await pilot.pause()
+        app.post_message(_ev21.Paste("C:\\Users\\Manjioko\\Desktop\\叮当.png"))
+        for _ in range(20):
+            await pilot.pause()
+        ck("21 焦点在内容区时粘贴 → 路径进输入框",
+           "叮当.png" in inp.text, repr(inp.text[:50]))
+        ck("21 粘贴后焦点回到输入框", type(app.focused).__name__ == "ChatInput",
+           type(app.focused).__name__)
+        # 聚焦输入框时粘贴不双写
+        inp.text = ""
+        inp.focus()
+        await pilot.pause()
+        app.post_message(_ev21.Paste("/home/u/a.txt"))
+        for _ in range(20):
+            await pilot.pause()
+        ck("21 聚焦输入框粘贴不双写", inp.text == "/home/u/a.txt", repr(inp.text))
+
+
+try:
+    asyncio.run(_app_paste_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("21 应用级粘贴接管无异常", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
