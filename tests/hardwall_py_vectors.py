@@ -42,6 +42,22 @@ def main():
         cmd = " ".join(toks[2:])
         rows.append((want, cmd))
 
+    # 内联回归:多行 heredoc 在 test_hardwall.sh 的单行 `expect` 表里放不下(shlex 按行抽),
+    # 这里直接挂几条真形状向量。锁 H5 误判修复(2026-11):
+    #  · 运行 wchat 自带 venv 解释器、脚本正文里含**未加引号**的 `>`(如 w>1)→ 不该判 H5(掩掉 .ct/venv);
+    #  · `bash <<EOF` 里的真重定向到 dotfile → 必须仍判 H5(证明只掩 venv、没放过真写)。
+    rows.append((
+        "NP",
+        "cd /home/u/proj && ~/.ct/venv/bin/python - <<'PY' 2>&1\n"
+        "import sys\n"
+        "print('高度>1 应折行')\n"
+        "PY",
+    ))
+    rows.append((
+        "H5",
+        "bash <<'EOF'\necho pwned > ~/.bashrc\nEOF",
+    ))
+
     p = f = 0
     for want, cmd in rows:
         want_set = want.split("|")

@@ -65,6 +65,27 @@ def _redir_targets_all_clean(s):
     return True
 
 
+def _mask_toolchain(s):
+    """把 `$HOME/.ct/venv/...`(wchat 自带的 pip 解释器目录)**等长掩码**掉,用于 H5 的
+    "dotfile 存在性"判定。原因(2026-11 实报误判):H5 的 dotfile 名单含 `.ct`,于是
+    `~/.ct/venv/bin/python ...`(只是**运行解释器**)被当成"碰敏感 dotfile";再叠加脚本正文里的
+    `>`(如 python 比较 `x>1`)被 `_has_write` 当成重定向,二者一与 → 纯只读探针脚本被误判 H5、
+    且"命中"碎成 `1`/`,`。`venv` 是工具链目录、不是配置文件/凭据,掩掉它的**存在性**判定最外科:
+    `.ct/config` / `.bashrc` 等真 dotfile 照常命中,`bash heredoc` 里的真重定向照常拦(本函数只掩
+    `.ct/venv`,且只用于 dotfile 判定,不改 `_has_write`/规则本身)。
+    """
+    try:
+        home = os.environ.get("HOME", "") or ""
+        alts = [r"~", r"\$HOME", r"\$\{HOME\}"]
+        if home:
+            alts.append(re.escape(home))
+        alts += [r"/Users/[^/\s]+", r"/home/[^/\s]+"]
+        pat = r"(?:" + "|".join(alts) + r")/\.ct/venv"
+        return re.sub(pat, lambda m: "x" * len(m.group(0)), s)
+    except Exception:
+        return s
+
+
 def _has_write(c):
     """bash hd_has_write：抹掉丢弃型 sink 与 fd 复制后，残留 > 且目标不干净，或命中写动词。"""
     s = c
@@ -303,7 +324,7 @@ def rule(cmd, auto=False, work_root=None, home=None):
         return "H3", ""
     if _m("hd_re_disk", c) and _recheck(c, hd.mask_readonly, ("hd_re_disk",)):
         return "H4", ""
-    if (_m("hd_re_dotfile", c) or _m("hd_re_dotfile_cfg", c)) and _has_write(c):
+    if (_m("hd_re_dotfile", _mask_toolchain(c)) or _m("hd_re_dotfile_cfg", c)) and _has_write(c):
         return "H5", ""
     if (_m("hd_re_secret_dir", c) or _m("hd_re_keychain", c) or _m("hd_re_keyfile", c) or _m("hd_re_shadow", c)) \
             and _recheck(c, _mask_msg_search, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
