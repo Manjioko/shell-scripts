@@ -976,6 +976,30 @@ def main(argv):
         seed_system(_s, base=_system_prompt_text(), append_mcp=False)
         if not getattr(_s, "model", ""):
             _s.model = os.environ.get("FLASH_MODEL", "") or os.environ.get("WCHAT_MODEL", "")
+        # ── 历史保存:每答完一整轮后台落盘 + 退出不再询问(author: 用户 2026-11)──
+        # 固定同一个 name → 整个会话始终同一个历史文件,每轮覆盖;避免"每轮一个新文件"。
+        import time as _time0
+        _hist_dir = os.environ.get("WCHAT_HISTORY_DIR", "")
+        _t0 = os.environ.get("WCHAT_CHAT_TITLE", "")
+        # name 用作**文件名**:优先显式 WCHAT_HISTORY_NAME;否则用有意义标题;但排除兜底名
+        # "未命名对话"(否则多会话都会写成同一个"未命名对话.json"互相覆盖)——那种情况用
+        # 带时间戳的唯一名,保证每个会话一个文件。
+        _hist_name = (os.environ.get("WCHAT_HISTORY_NAME")
+                      or (_t0 if _t0 and _t0 != "未命名对话" else "")
+                      or ("chat-%d" % int(_time0.time())))
+        _saver = None
+        if _hist_dir and os.environ.get("WCHAT_FORGET") != "1":
+            from wchat_py.session import HistorySaver
+            _saver = HistorySaver(_hist_dir, _hist_name, os.environ.get("WCHAT_CHAT_TITLE", ""))
+
+        def _save_turn(_session=None):
+            # 每轮结束调用(可能在线程里):后台保存,绝不影响主流程。
+            if _saver is not None:
+                try:
+                    _saver.save_async(_s.messages_json)
+                except Exception:
+                    pass
+
         from wchat_py.repl import _default_meta as _dm
 
         def _meta(action, arg):
@@ -989,17 +1013,8 @@ def main(argv):
                 _d = os.environ.get("WCHAT_HISTORY_DIR", "")
                 if not _d:
                     return
-                _do_save = True
-                if sys.stdin.isatty():
-                    # 默认保存:回车 = 是,只有明确打 n/no 才不保存(与 master 一致)。
-                    # 提示语必须留"保存对话"四个字 —— e2e 探针靠它判断该答 n 了。
-                    from wchat_py.render import confirm_block
-                    if not confirm_block("退出前保存对话", default_yes=True,
-                                         ask="是否保存", no_word="不保存"):
-                        sys.stdout.write("未保存对话\n"); sys.stdout.flush()
-                        _do_save = False
-                if not _do_save:
-                    return
+                # 不再询问是否保存:**一律保存**(用户要求:终端常突然关闭,长上下文不能丢)。
+                # 每轮已后台存过;这里退出时**同步**再存一次兜底,并补一个语义标题(调一次模型)。
                 import time as _t
                 from wchat_py.session import save_history as _sh
                 _title = os.environ.get("WCHAT_CHAT_TITLE", "")
@@ -1008,8 +1023,8 @@ def main(argv):
                         _title = _gen_title(_s.messages_json)
                     except Exception:
                         _title = ""
-                _name = os.environ.get("WCHAT_HISTORY_NAME") or _title or (
-                    "chat-%d" % int(_t.time()))
+                # name 用**固定的会话名**(与每轮后台保存同一个文件),不拿标题当 name(否则会另起一份)。
+                _name = os.environ.get("WCHAT_HISTORY_NAME") or _hist_name
                 try:
                     _sh(_d, _s.messages_json, _name, _title)
                     sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
@@ -1052,7 +1067,8 @@ def main(argv):
                         return _out
 
                     _h2 = session_text_handler(_s, _cl_stream_tui, _run_tool_tui,
-                                               write_final=False, poll_queue=_poll_queue)
+                                               write_final=False, poll_queue=_poll_queue,
+                                               on_turn_done=_save_turn)
                     _h2(_text)
 
                 try:
@@ -1140,7 +1156,8 @@ def main(argv):
                 _sync_runtime(_s)
 
             _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
-                                      write_final=False, on_final=_finish, on_abort=_abort)
+                                      write_final=False, on_final=_finish, on_abort=_abort,
+                                      on_turn_done=_save_turn)
             _first = os.environ.pop("WCHAT_FIRST_TURN", "")
             if _first:
                 _h(_first)
@@ -1151,7 +1168,8 @@ def main(argv):
             _sync_runtime(_s)
 
         _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a),
-                                  write_final=False, on_final=_finish_plain)
+                                  write_final=False, on_final=_finish_plain,
+                                  on_turn_done=_save_turn)
         _first = os.environ.pop("WCHAT_FIRST_TURN", "")
         if _first:
             _h(_first)

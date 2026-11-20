@@ -65,6 +65,7 @@ for _ in range(50):
 
 env = dict(os.environ, BASE_URL="http://127.0.0.1:%d/v1/chat/completions" % port,
            WCHAT_API_KEY="sk-stub", WCHAT_TUI="0",
+           CT_HOME=os.path.join(d, "ct"), WCHAT_HISTORY_DIR=os.path.join(d, "hist"),
            PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""), TERM="xterm-256color")
 master, slave = pty.openpty()
 p = subprocess.Popen([PY, "-m", "wchat_py.cli", "repl"],
@@ -76,7 +77,6 @@ try:
     os.write(master, b"hi\n")
     deadline = time.time() + 20
     sent_q = False
-    sent_n = False
     while time.time() < deadline:
         r, _, _ = select.select([master], [], [], 0.2)
         if master in r:
@@ -90,13 +90,7 @@ try:
             if b"HELLO-PY" in out and not sent_q:
                 os.write(master, b"-q\n")
                 sent_q = True
-            # -q 之后会问"退出前保存对话? [Y/n]"(tty 下与 master 一致)。
-            # 不答这一问,进程会**停在那里等输入**,测试只能 terminate 它,
-            # 拿到的 rc 是 -15(SIGTERM)—— 看起来像"repl 退不出去"的产品缺陷,
-            # 实际是探针漏了一步。对照 tests/interrupt_e2e.py 的同名处理。
-            if sent_q and not sent_n and b"\xe4\xbf\x9d\xe5\xad\x98\xe5\xaf\xb9\xe8\xaf\x9d" in out:
-                os.write(master, b"n\n")
-                sent_n = True
+            # 注:退出不再询问"是否保存"(-q 一律保存),故无需再答本问;进程保存后自行退出。
         if p.poll() is not None:
             break
 finally:

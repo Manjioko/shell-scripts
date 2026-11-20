@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass, field
 import os
 import sys
+import threading
 
 
 @dataclass
@@ -171,6 +172,78 @@ def save_history(history_dir, messages_json, name, title=""):
     _hist.strip_injected(msgs, _marks)
     msgstore.save_doc(path, {"messages": msgs, "title": title})
     return path
+
+
+class HistorySaver:
+    """**每轮后台落盘**的历史保存器(不阻塞主线程)。
+
+    改动背景(2026-11 用户要求):以前只在 `-q` 退出时(询问后)保存一次;终端突然关闭/崩溃/
+    误关会话,很长的上下文就全丢了。现改为:**模型每答完一整轮就保存一次**(后台线程写盘),
+    且退出时不再询问、一律保存。同一会话**始终写同一个文件**(name 固定),每轮覆盖;
+    退出时再同步保存一次兜底(顺带用语义标题更新 title)。
+
+    - `save_async(json)`:起 daemon 线程写盘,立即返回,不阻塞 UI。内容与上次相同则跳过。
+    - `save(json)`:同步写(退出兜底)。
+    - `WCHAT_FORGET=1`(单轮/-st 等)或消息数 ≤1(只有 system)时跳过。
+    """
+
+    def __init__(self, history_dir, name, title=""):
+        self._dir = history_dir or ""
+        self._name = name or ""
+        self._title = title or ""
+        self._lock = threading.Lock()
+        self._last = None                      # 上次已保存的 messages_json(去重)
+        self._threads = []
+
+    def set_title(self, title):
+        self._title = title or ""
+
+    def _skip(self, messages_json):
+        if not self._dir or not self._name:
+            return True
+        if os.environ.get("WCHAT_FORGET") == "1":
+            return True
+        try:
+            if len(json.loads(messages_json or "[]")) <= 1:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def save(self, messages_json):
+        """同步保存(退出兜底)。返回落盘路径,跳过/失败返回 ''。"""
+        if self._skip(messages_json):
+            return ""
+        with self._lock:
+            try:
+                p = save_history(self._dir, messages_json, self._name, self._title)
+                self._last = messages_json
+                return p
+            except Exception:
+                return ""
+
+    def save_async(self, messages_json):
+        """后台线程保存(每轮结束用),不阻塞;内容未变则跳过。"""
+        if self._skip(messages_json):
+            return
+        if messages_json == self._last:
+            return
+        snap = messages_json
+
+        def _work():
+            with self._lock:
+                if snap == self._last:
+                    return
+                try:
+                    save_history(self._dir, snap, self._name, self._title)
+                    self._last = snap
+                except Exception:
+                    pass
+
+        self._threads = [t for t in self._threads if t.is_alive()]   # 清掉已结束的引用
+        t = threading.Thread(target=_work, daemon=True)
+        self._threads.append(t)
+        t.start()
 
 
 def compact_status(s):

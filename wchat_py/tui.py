@@ -653,6 +653,11 @@ def make_app(handle_line, *, banner="", on_meta=None):
         #input:focus { background: transparent; }
         /* placeholder 与思考文本同档灰、斜体,用户好区分(默认 $text 40% 偏亮) */
         #input .text-area--placeholder { color: #6a6a6a; text-style: italic; }
+        /* 选中文字高对比:默认 ansi-dark 用 ansi_bright_blue,部分终端配色下几乎看不见(用户实报
+           "选中色十分暗,基本看不到")。改用不依赖终端 ansi 映射的固定蓝底白字,深色终端也清晰。
+           输入框(text-area--selection)与内容区(Screen 选中)统一同一套。 */
+        #input .text-area--selection { background: #3a6df0; color: #ffffff; }
+        Screen > .screen--selection { background: #3a6df0; color: #ffffff; }
         ConfirmModal { align: center middle; background: $background 60%; }
         /* 三段式布局(参考用户给的图):标题 / 命中 / 底行(提问 + 两个按钮)。加宽、放宽高度上限,
            让命中(可能是长路径)能换行显示完整;命中用灰、提问正常亮度。 */
@@ -673,7 +678,15 @@ def make_app(handle_line, *, banner="", on_meta=None):
         HistoryPickModal #hist_list { height: auto; max-height: 12; }
         HistoryPickModal #hist_page { height: auto; margin-top: 1; }
         """
-        BINDINGS = [("ctrl+c", "maybe_quit", "退出"), ("ctrl+d", "maybe_quit", "退出")]
+        # 复制/退出:mac 常规 cmd+c=super+c 复制选中(内容区或输入框);ctrl+c 有选中则复制、
+        # 无选中则按原逻辑(空闲退出/生成中打断)。**priority=True** 让 App 优先于 TextArea 的
+        # ctrl+c/super+c,统一在一处判断"先复制选区",避免被输入框的 copy 吞掉(用户实报:
+        # 内容区选中后 cmd+c 复制不了、只剩个别机器 ctrl-c 能用)。
+        BINDINGS = [
+            Binding("ctrl+c", "ctrl_c", "复制/退出", priority=True, show=False),
+            Binding("super+c", "copy_selection", "复制", priority=True, show=False),
+            Binding("ctrl+d", "maybe_quit", "退出"),
+        ]
         # 加载历史时最多原生渲染这么多条(其余折叠;见 _mount_history)。避免整份几百条塞进
         # 内容区导致布局/渲染爆掉(那是 TUI 下"切换提示有了、正文空白"的真因)。
         HIST_MAX = 60
@@ -1308,6 +1321,43 @@ def make_app(handle_line, *, banner="", on_meta=None):
                     pass
                 return
             self._force_quit()
+
+        def _copy_selection(self):
+            """把当前选区复制到剪贴板:先内容区(Screen 选区),再输入框内选区。返回是否复制了。"""
+            try:
+                sel = self.screen.get_selected_text()
+            except Exception:
+                sel = None
+            if sel:
+                try:
+                    self.copy_to_clipboard(sel)
+                    return True
+                except Exception:
+                    pass
+            try:
+                inp = self.query_one("#input", ChatInput)
+                t = getattr(inp, "selected_text", "") or ""
+                if t:
+                    self.copy_to_clipboard(t)
+                    return True
+            except Exception:
+                pass
+            return False
+
+        def action_copy_selection(self):
+            """mac 常规 cmd+c(super+c):只复制选中,不退出。弹窗打开时不接管。"""
+            if len(self.screen_stack) > 1:
+                return
+            self._copy_selection()
+
+        def action_ctrl_c(self):
+            """Ctrl+C:有选中→复制(不退出);无选中→按原逻辑(空闲退出 / 生成中打断)。"""
+            if len(self.screen_stack) > 1:
+                # 弹窗里不接管 Ctrl+C(弹窗用 y/n/Esc;这里不退出以免误关)。
+                return
+            if self._copy_selection():
+                return
+            self.action_maybe_quit()
 
     return WchatApp()
 

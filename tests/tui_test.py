@@ -1494,5 +1494,63 @@ except Exception as _e:
     traceback.print_exc()
     ck("21 应用级粘贴接管无异常", False, repr(_e))
 
+
+# ---- 22) 内容区选中复制 + 选中色高对比(mac cmd+c / ctrl+c)----
+async def _copy_selection_check():
+    from textual.geometry import Offset as _Off
+    from textual.selection import Selection as _Sel
+    _app = tui.make_app(lambda *a: None)
+    async with _app.run_test(size=(90, 28)) as pilot:
+        await pilot.pause()
+        _app._mount("COPY-SELECT-TEXT")
+        await pilot.pause()
+        _w = list(_app.query_one("#content").children)[-1]
+        _app.screen.selections = {_w: _Sel(_Off(0, 0), _Off(6, 0))}
+        await pilot.pause()
+        ck("22 内容区选区可被 get_selected_text 取出", _app.screen.get_selected_text() == "COPY-S", repr(_app.screen.get_selected_text()))
+        # super+c(cmd+c)复制内容区选区
+        _app._clipboard = ""
+        await pilot.press("super+c")
+        ck("22 cmd+c(super+c) 复制内容区选中文本", _app.clipboard == "COPY-S", repr(_app.clipboard))
+        # ctrl+c 有选中 → 复制、不退出
+        _ex = {"v": False}
+        _oe = _app.exit
+        _app.exit = lambda *a, **k: (_ex.__setitem__("v", True) or _oe(*a, **k))
+        _app._clipboard = ""
+        await pilot.press("ctrl+c")
+        ck("22 ctrl+c 有选中 → 复制且不退出", _app.clipboard == "COPY-S" and not _ex["v"], repr(_app.clipboard))
+        # ctrl+c 无选中 → 退出(走 maybe_quit)
+        _app.screen.selections = {}
+        await pilot.pause()
+        _ex["v"] = False
+        await pilot.press("ctrl+c")
+        ck("22 ctrl+c 无选中 → 退出", _ex["v"] is True, str(_ex["v"]))
+    # 选中色高对比:输入框与内容区都设了固定蓝底白字(不依赖终端 ansi)
+    _css = tui.make_app(lambda *a: None).CSS
+    ck("22 输入框选中色高对比(text-area--selection)",
+       "#input .text-area--selection" in _css and "#3a6df0" in _css and "#ffffff" in _css)
+    ck("22 内容区选中色高对比(screen--selection)",
+       ".screen--selection" in _css and "background: #3a6df0" in _css)
+    # 复制键位已接管(=copy_selection / ctrl_c),不再直接绑 maybe_quit
+    _b = tui.make_app(lambda *a: None).BINDINGS
+    _keys = {(k if isinstance(k, str) else k.key): (v if isinstance(v, str) else v.action) for k, v in
+             ((b if isinstance(b, tuple) else (b.key, b.action)) for b in _b)}
+    ck("22 super+c → 复制动作", _keys.get("super+c") == "copy_selection", str(_keys))
+    ck("22 ctrl+c → 复制/退出统一动作", _keys.get("ctrl+c") == "ctrl_c", str(_keys))
+
+
+try:
+    asyncio.run(_copy_selection_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("22 复制/选中色检查无异常", False, repr(_e))
+
+# 接线(静态):三处 handler(TUI/旧交互/plain)都接每轮后台保存;退出不再询问"是否保存"。
+_cli_src = open(os.path.join(_REPO, "wchat_py", "cli.py"), encoding="utf-8").read()
+ck("22 cli 三处 handler 都接 on_turn_done(每轮后台保存)",
+   _cli_src.count("on_turn_done=_save_turn") == 3, str(_cli_src.count("on_turn_done=_save_turn")))
+ck("22 退出不再询问是否保存(一律保存)", "退出前保存对话" not in _cli_src)
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

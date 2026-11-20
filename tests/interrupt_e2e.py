@@ -179,10 +179,7 @@ try:
     ck("空提示符 Ctrl+C 后仍能对话", "结束".encode() in got3, repr(got3[-200:]))
 
     os.write(master, b"-q\n")
-    # -q 之后会问"退出前保存对话? [Y/n]"(tty 下与 master 一致),答 n 再退
-    ask = drain(b"", 8, want="保存对话".encode())
-    if "保存对话".encode() in ask:
-        os.write(master, b"n\n")
+    # 退出不再询问"是否保存"(-q 一律保存),保存后自行退出。
     for _ in range(100):
         if poll() is not None:
             break

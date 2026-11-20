@@ -61,6 +61,35 @@ ck("save 落盘", os.path.exists(path), path)
 ck("load 回读等值", msgstore.load(path) == messages_list(mj), repr(msgstore.load(path)))
 ck("messages_list 容错", messages_list("not json") == [])
 
+# HistorySaver:每答完一轮后台保存(不阻塞)+ 退出同步兜底;WCHAT_FORGET/仅system 跳过
+from wchat_py.session import HistorySaver  # noqa: E402
+import time as _t2  # noqa: E402
+_hd = tempfile.mkdtemp()
+_hs = HistorySaver(_hd, "conv-1", "标题")
+_mj2 = '[{"role":"system","content":"s"},{"role":"user","content":"hi"},{"role":"assistant","content":"yo"}]'
+_hp = _hs.save(_mj2)
+ck("HistorySaver.save 同步落盘", bool(_hp) and os.path.exists(_hp), str(_hp))
+ck("HistorySaver 落盘含3条消息", (len(msgstore.load(_hp)) == 3) if _hp else False)
+ck("HistorySaver 跳过仅 system(<=1)", _hs.save('[{"role":"system","content":"s"}]') == "")
+_oe = os.environ.get("WCHAT_FORGET")
+os.environ["WCHAT_FORGET"] = "1"
+try:
+    ck("HistorySaver WCHAT_FORGET=1 跳过", _hs.save(_mj2) == "")
+finally:
+    if _oe is None:
+        os.environ.pop("WCHAT_FORGET", None)
+    else:
+        os.environ["WCHAT_FORGET"] = _oe
+_mj3 = '[{"role":"system","content":"s"},{"role":"user","content":"q2"},{"role":"assistant","content":"a2"}]'
+_hs.save_async(_mj3)
+for _ in range(100):
+    if _hs._last == _mj3:
+        break
+    _t2.sleep(0.02)
+ck("HistorySaver.save_async 后台落盘且更新", _hs._last == _mj3 and msgstore.load(_hp)[-1]["content"] == "a2",
+   repr(_hs._last)[:40])
+ck("HistorySaver 空串跳过", _hs.save("") == "")
+
 # compact_status: cur>=threshold => due
 s3 = Session.from_env({"TOKEN_THRESHOLD": "100", "WCHAT_LAST_PROMPT_TOKENS": "200"})
 cur, th, due = compact_status(s3)

@@ -527,7 +527,7 @@ def _grant_read(path):
 
 
 def session_text_handler(session, call_llm, run_tool, out=None, write_final=True, on_final=None,
-                         on_abort=None, poll_queue=None):
+                         on_abort=None, poll_queue=None, on_turn_done=None):
     """返回 on_text 处理器：正文 → orchestrate(Session, ...) → 输出最终文本。
 
     write_final=False 时不在末尾整段输出（正文已由 call_llm 的 on_text 流式画过）。
@@ -535,10 +535,19 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
     on_abort(exc) 若给：Ctrl+C 打断本轮时调用（收口流箱 + 提示"已保留"，exc 是 Aborted）；
     不给则打印与 master 同款但**保留**语义的提示。**打断不是错误**：本轮已完成的工具轮
     与临中断前流出的半截正文都保留在上下文里（不再整轮丢弃），用户补充后可直接接着跑。
+    on_turn_done(session) 若给：**每答完一整轮**(orchestrate 正常返回,或被打断保留后)调用一次，
+    用于后台保存历史(不能阻塞；实现里是起 daemon 线程)。异常一律吞掉，绝不影响主流程。
     Session 跨轮持久（messages 累积），这是 REPL 与 ask_ai 编排的接线点。
     """
     from wchat_py.session import orchestrate, Aborted
     out = out if out is not None else sys.stdout
+
+    def _turn_done():
+        if on_turn_done is not None:
+            try:
+                on_turn_done(session)
+            except Exception:
+                pass
 
     def handler(text):
         text, _imgs = parse_placeholders(text)
@@ -550,6 +559,7 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
         try:
             r = orchestrate(session, text, call_llm, run_tool, poll_queue=poll_queue)
         except Aborted as _ab:
+            _turn_done()                      # 打断也保存:已保留的部分值得落盘
             if on_abort is not None:
                 on_abort(_ab)
             else:
@@ -557,6 +567,7 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
                           % getattr(_ab, "kept_msgs", 0))
                 out.flush()
             return
+        _turn_done()                          # 每答完一整轮 → 后台保存(不阻塞)
         if on_final is not None:
             on_final(r)
         elif write_final:

@@ -561,7 +561,7 @@ for _f in ("cli.py", "repl.py", "mcp_boot.py", "mcp_cmd.py", "skillinstall.py",
 # 提问动词必须贴切:默认的 `是否执行` 只配 shell 执行。别的动作(保存/授权/安装/
 # 写入/放行)若照抄默认值,屏幕上就是"退出前保存对话 … 是否执行?",读着像问错了。
 _VERBS = {
-    "cli.py": ('ask="是否保存"',),
+    # cli.py 已移出:退出不再询问是否保存(改为一律保存+每轮后台保存),cli 里不再有确认提问。
     "repl.py": ('ask="是否保存"',),
     "mcp_boot.py": ('ask="是否授权"',),
     "skillinstall.py": ('ask="是否继续"',),
