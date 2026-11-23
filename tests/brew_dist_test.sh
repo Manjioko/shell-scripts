@@ -227,10 +227,10 @@ for line in open(os.path.join(sys.argv[1], "requirements.txt")):
     # 剥掉 extras(httpx[socks] -> httpx):extras 是"可选附加",不是模块名,
     # 带着它 import_module 必然 ModuleNotFoundError,会把测试自己搞红。
     pkg = pkg.split("[")[0].strip()
-    # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips);
-    # textual(全屏 TUI)也是**可降级**的:缺它 `WCHAT_TUI=1` 自动回退旧交互。且本机 3.9
-    # 测试解释器通常没装、又受 H5 限制不能装。两者都仍写进 requirements(让 brew 装进 venv),
-    # 只是不强制本机 import。
+    # pillow 是有意做成**可选**的(缺它只影响图片缩放,退回 macOS 的 sips)。
+    # textual(全屏 TUI)**是交互唯一依赖**(无降级回退),
+    # 必须由 brew 装进 venv;但本机 3.9 测试解释器通常没装、又受 H5 限制不能装,故此处的
+    # import 检查仍跳过 textual(不代表它可选)。两者都写进 requirements 让 brew 装进 venv。
     if pkg.lower() in ("pillow", "textual"):
         continue
     names.append(pkg.replace("-", "_"))

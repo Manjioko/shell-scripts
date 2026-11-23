@@ -56,7 +56,7 @@ post = SRC[SRC.index("POSTINST = "):SRC.index("PRERM = ")]
 ck("pip 走 --no-index(运行期无网)", "--no-index" in post, post[:400])
 ck("pip 指向包内 wheels", "--find-links" in post and "wheels" in post, post[:400])
 ck("装依赖前先探一次 import(幂等,升级不重装)",
-   "import openai, httpx, prompt_toolkit, rich, PIL" in post, post[:400])
+   "import openai, httpx, textual, rich, PIL" in post, post[:400])
 ck("建 venv 失败要 exit 1(不许带着半成品继续)", "exit 1" in post)
 ck("没有裸 pip install(会去网上下)", re.search(r"pip\"?\s+install(?![^\n]*--no-index)", post) is None,
    "postinst 里有不带的 --no-index 的 pip install")

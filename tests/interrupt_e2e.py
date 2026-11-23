@@ -1,74 +1,24 @@
 #!/usr/bin/env python3
-"""Ctrl+C 打断流式输出的 e2e(pty 驱动真实入口 + 桩网关慢速流)。
+"""Ctrl+C 打断的"保留语义"闸门(直接测 orchestrate 层,不依赖 TUI/pty/真信号)。
 
-用户报的故障:AI 输出中途按 Ctrl+C,master 是"取消这次输出、回输入框等着";
-迁移版直接抛 KeyboardInterrupt traceback 退出会话。
+为什么是这一层:直接测 orchestrate 层的打断保留(不依赖 pty/真信号)。
+TUI 里 Ctrl+C 的**交互行为**(busy 打断不退出 / idle 退出 / "正在中断")由
+`tests/tui_test.py` 的第 13/16 节覆盖;这里只锁**产品级保证**:打断后本轮已完成的部分
+不白扔,且半截 tool_calls 绝不落库(否则下一轮网关 400)。
 
-断言(全部行为化,不看源码):
-  1. 中断后进程**还活着**(不是 rc≠0 退出);
-  2. 输出里有"已中断"提示,且**没有 Traceback**(父子两侧都不许刷栈);
-  3. 中断后还能继续用:再发一句能得到新回复;
-  4. 被打断的那一轮**已完成的部分被保留进上下文**(保留语义),且**无孤儿 tool 消息**;
-     用户那句保留,后续那句能接着用这份上下文。
-  5. -q 能正常退出 rc=0。
+断言:
+  1. 模型流式中途被 Aborted,orchestrate 把异常**原样抛出**(上层据此提示,不吞成 traceback);
+  2. 已流出的半截正文作为一条 **无 tool_calls** 的 assistant 消息**保留**在上下文里;
+  3. 半截/未执行的 tool_calls **绝不落库**(上下文里任何消息都不得带 tool_calls 键);
+  4. kept_msgs 如实回填(供上层说"保留了几条")。
 
-⚠ 必须用 `pty.fork()`:Ctrl+C 不是"往 master 写一个 \x03 字节"就行 —— tty 行规程
-只对**该 tty 的前台进程组**发 SIGINT,而 `subprocess.Popen(stdin=slave)` 起的子进程
-没有把 slave 设成控制终端(没有 setsid+TIOCSCTTY),于是 \x03 只是被当成普通字节
-读走,进程照跑到流结束(第一版测试就栽在这:断言"没中断"其实是测试没发出信号)。
+不联网、不依赖 TUI。末行 RESULT ...。
 """
-import json
 import os
-import pty
-import select
-import socket
-import subprocess
 import sys
-import tempfile
-import time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-d = tempfile.mkdtemp()
-rp = os.path.join(d, "r.json")
-open(rp, "w").write(json.dumps([
-    {"type": "text", "text": "SLOWCHUNK-" * 12},
-    {"type": "text", "text": "SECOND-OK"},
-], ensure_ascii=False))
-
-sk = socket.socket(); sk.bind(("127.0.0.1", 0)); port = sk.getsockname()[1]; sk.close()
-log = os.path.join(d, "log.jsonl")
-stub = subprocess.Popen(
-    [sys.executable, os.path.join(REPO, "tests/stub_gateway.py"), str(port)],
-    env=dict(os.environ, STUB_LOG=log, STUB_REPLY=rp, STUB_SLOW_MS="8000",
-             # ⚠ 按"用户说了什么"选回复,不按"第几次请求"。
-             #   真实服务端一定按内容答;而按序号答会把**中间任何一次额外请求**
-             #   (标题、摘要、重试)当成一轮吃掉 —— 容器里 `again` 那轮于是拿到默认
-             #   文案 `结束`,断言"没得到 SECOND-OK"就红了,像产品第二轮不渲染。
-             STUB_REPLY_MAP=json.dumps({"hi": "SLOWCHUNK-" * 12, "again": "SECOND-OK",
-                                       "third": "结束"}, ensure_ascii=False),
-             STUB_MAP_DEFAULT="结束",
-             STUB_AUTH_DENY_IF="", STUB_FINAL_DENY_IF=""),
-    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-for _ in range(50):
-    try:
-        socket.create_connection(("127.0.0.1", port), 0.2).close(); break
-    except OSError:
-        time.sleep(0.1)
-
-env = dict(os.environ,
-           BASE_URL="http://127.0.0.1:%d/v1/chat/completions" % port,
-           WCHAT_API_KEY="sk-stub",
-           WCHAT_TUI="0",   # 本闸门测的是**旧 prompt_toolkit 路径**的 Ctrl+C 语义;钉死走老路
-           PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""),
-           CT_HOME=os.path.join(d, "ct"),
-           WCHAT_HISTORY_DIR=os.path.join(d, "hist"),
-           # 本闸门测的是 Ctrl-C 打断行为,不是运行时自举。floor 抬到 3.10 后,若宿主 python
-           # 是 3.9,跑真 wchat 入口会触发 bootstrap 去建 3.12 venv(与本题无关且拖慢/失败)。
-           # 关掉自举,让 repl 直接用宿主解释器跑(产品代码仍兼容 3.9),专注验证中断语义。
-           WCHAT_NO_BOOTSTRAP="1",
-           TERM="xterm-256color")
-for k in ("AUTO_MODE", "WCHAT_AUTO_MODE", "MAX_TOOL_ROUNDS", "WCHAT_MODEL", "WCHAT_THINKING"):
-    env.pop(k, None)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from wchat_py.session import Session, Aborted, orchestrate, messages_list  # noqa: E402
 
 p = f = 0
 
@@ -83,139 +33,40 @@ def ck(name, ok, detail=""):
         print("  FAIL %s%s" % (name, (": " + detail) if detail else ""))
 
 
-pid, master = pty.fork()
-if pid == 0:                                  # 子进程:控制终端就是这块 pty
-    try:
-        os.chdir(d)
-        os.execvpe(sys.executable, [sys.executable, os.path.join(REPO, "wchat"), "repl"], env)
-    finally:
-        os._exit(127)
-
-_status = {"rc": None}
+_TC = [{"id": "call_1", "name": "run_shell_command", "arguments": "{\"command\": \"true\"}"}]
 
 
-def poll():
-    """非阻塞收尸:返回 rc / None(仍在跑)。"""
-    if _status["rc"] is not None:
-        return _status["rc"]
-    wpid, st = os.waitpid(pid, os.WNOHANG)
-    if wpid == pid:
-        _status["rc"] = (os.WEXITSTATUS(st) if os.WIFEXITED(st)
-                         else -os.WTERMSIG(st))
-        return _status["rc"]
-    return None
+def _interrupting_llm(msgs):
+    # 模拟"流式输出到一半被 Ctrl+C":抛出 Aborted,携带半截正文 + 半截 tool_calls。
+    raise Aborted(text="半截正文ABC", tool_calls=_TC)
 
 
-def drain(until, deadline_s, want=None, collect=True):
-    """读到 until(b"") 出现 / 超时 / 进程退出;返回这段时间的输出。
-
-    顺带**扮演真终端回答 CPR**(`ESC[6n` = "光标在哪?"):prompt_toolkit 起来时会问一次,
-    真终端回 `ESC[<行>;<列>R`。这个 pty 夹具原来不回答,于是某些版本(容器里的较新
-    prompt_toolkit)会卡到超时并打印 `WARNING: your terminal doesn't support cursor
-    position requests (CPR)`,把紧跟着的那一轮对话吃掉 —— 本机旧版不发声,所以
-    macOS 上绿、Linux 上红(2026-10 实测)。补上应答后两侧一致,而且更接近真终端。
-    """
-    global out
-    buf = b""
-    deadline = time.time() + deadline_s
-    while time.time() < deadline:
-        r, _, _ = select.select([master], [], [], 0.2)
-        if master in r:
-            try:
-                data = os.read(master, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            if b"\x1b[6n" in data:          # CPR 询问 → 按真终端格式回答
-                try:
-                    os.write(master, b"\x1b[1;1R")
-                except OSError:
-                    pass
-            buf += data
-            if collect:
-                out += data
-            if want is not None and want in buf:
-                break
-        elif poll() is not None:
-            break
-    return buf
-
-
-# 等待窗口:桩的慢速流按 STUB_SLOW_MS=8000 分 8 片吐,单跑 25s 够;但**整套闸门顺序跑**时
-# 容器里前面几十道套件刚跑完,负载高,pty 读写与 8s 慢流叠加会超 25s(实测:
-# 单独 `run-as-user.sh tests/interrupt_e2e.py` 12/12,整套里 11/12,红的都是"等不到后续轮回复")。
-# 窗口放宽到 45s —— 它只影响"等多久才判失败",不放宽任何判据。
-_WAIT = 45
-out = b""
+_s = Session()
+_ab = None
 try:
-    drain(b"", 3.0)                                   # 等 REPL 起来
-    os.write(master, b"hi\n")
-    pre = drain(b"", _WAIT, want=b"SLOWCHUNK")
-    ck("中断前已开始流式输出", b"SLOWCHUNK" in pre, repr(pre[-120:]))
+    orchestrate(_s, "hello", _interrupting_llm, lambda n, a: "OUT")
+except Aborted as e:
+    _ab = e
+except Exception as e:  # 不应走到这里
+    ck("打断以 Aborted 抛出(不是其它异常/裸栈)", False, repr(e))
 
-    os.write(master, b"\x03")                         # 真 Ctrl+C(SIGINT)
-    tail = drain(b"", 15, want="已中断".encode())
+ck("打断以 Aborted 抛出(原样向上)", _ab is not None)
+ck("Aborted 携带半截正文", _ab is not None and _ab.text == "半截正文ABC", repr(getattr(_ab, "text", None)))
 
-    ck("进程仍存活(未因 KeyboardInterrupt 退出)", poll() is None,
-       "rc=%r tail=%r" % (poll(), tail[-200:]))
-    ck("有'已中断'提示", "已中断".encode() in tail, repr(tail[-300:]))
-    txt = out.decode("utf-8", "replace")
-    ck("没有 Traceback(父子都不刷栈)", "Traceback" not in txt, repr(txt[-300:]))
-    ck("没有 KeyboardInterrupt 裸栈", "KeyboardInterrupt" not in txt)
+_ml = messages_list(_s.messages_json)
+_roles = [m.get("role") for m in _ml]
+ck("用户那句保留(user 在上下文里)", "hello" in [m.get("content") for m in _ml if m.get("role") == "user"],
+   repr(_roles))
 
-    os.write(master, b"again\n")
-    got = drain(b"", _WAIT, want=b"SECOND-OK")
-    ck("中断后仍可继续对话(得到新回复)", b"SECOND-OK" in got,
-       repr(got[-300:]))
+# 半截正文作为无 tool_calls 的 assistant 保留
+_assist = [m for m in _ml if m.get("role") == "assistant"]
+ck("半截正文保留为 assistant 消息", any("半截正文ABC" in (m.get("content") or "") for m in _assist),
+   repr([m.get("content") for m in _assist]))
+ck("保留的 assistant 不带 tool_calls(无孤儿)",
+   all("tool_calls" not in m for m in _ml),
+   repr([("tool_calls" in m) for m in _ml]))
 
-    # 输入行上按 Ctrl+C(没有流):master 是清掉这行回提示符,同样不许退出
-    time.sleep(0.5)
-    os.write(master, b"\x03")
-    drain(b"", 3.0)
-    ck("空提示符 Ctrl+C 不退出", poll() is None, "rc=%r" % (poll(),))
-    os.write(master, b"third\n")
-    got3 = drain(b"", _WAIT)          # 桩脚本第 3 条是缺省回复(结束)
-    ck("空提示符 Ctrl+C 后仍能对话", "结束".encode() in got3, repr(got3[-200:]))
+ck("kept_msgs 如实回填(=1)", _ab is not None and _ab.kept_msgs == 1, repr(getattr(_ab, "kept_msgs", None)))
 
-    os.write(master, b"-q\n")
-    # 退出不再询问"是否保存"(-q 一律保存),保存后自行退出。
-    for _ in range(100):
-        if poll() is not None:
-            break
-        drain(b"", 0.2)
-    ck("-q 正常退出(rc=0)", poll() == 0, "rc=%r" % (poll(),))
-finally:
-    if poll() is None:
-        try:
-            os.kill(pid, 9)
-        except OSError:
-            pass
-    try:
-        os.close(master)
-    except OSError:
-        pass
-
-recs = []
-try:
-    with open(log) as fh:
-        recs = [json.loads(x) for x in fh if x.strip()]
-except OSError:
-    pass
-mains = [r for r in recs if r.get("kind") == "main"]
-ck("两次请求都到达网关", len(mains) >= 2, str(len(mains)))
-if len(mains) >= 2:
-    # 保留语义(本改动):被打断那轮**已完成的部分保留**。本场景中断发生在慢速正文流式途中,
-    # 已流出至少一片正文 → 作为一条无 tool_calls 的 assistant 消息保留。
-    # 第二轮 n_messages = 第一轮 + 用户第二句(+1) + 保留的半截 assistant(+1) = +2。
-    # (旧语义是"整轮丢弃"→ +1;本次改动就是要它变成 +2,即不再白扔已产出的上下文。)
-    ck("被打断那轮已完成部分被保留(+2:用户句+半截 assistant)",
-       mains[1]["n_messages"] == mains[0]["n_messages"] + 2,
-       "first=%s second=%s" % (mains[0]["n_messages"], mains[1]["n_messages"]))
-    ck("每轮无孤儿 tool 消息(半截/未执行的 tool_calls 绝不落库)",
-       all(r.get("orphan_tools", 0) == 0 for r in mains),
-       str([r.get("orphan_tools") for r in mains]))
-
-stub.terminate()
 print("RESULT total=%d pass=%d fail=%d" % (p + f, p, f))
 sys.exit(0 if f == 0 else 1)

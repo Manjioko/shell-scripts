@@ -79,7 +79,7 @@ if [ ! -x "$LIB/venv/bin/python" ]; then
 fi
 
 # 幂等:已装齐就不再跑 pip(apt 重装/升级时会再调一次 postinst)
-if ! "$LIB/venv/bin/python" -c 'import openai, httpx, prompt_toolkit, rich, PIL' 2>/dev/null; then
+if ! "$LIB/venv/bin/python" -c 'import openai, httpx, textual, rich, PIL' 2>/dev/null; then
     "$LIB/venv/bin/pip" install -q --no-index --find-links="$LIB/wheels" \
         --disable-pip-version-check --no-warn-script-location \
         -r "$LIB/requirements.txt" || {

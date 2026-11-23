@@ -4,9 +4,8 @@ openai>=2.0,<3
 # [socks]:国内常见 ALL_PROXY/HTTPS_PROXY=socks5://…;只装 httpx 时 SDK 一构造就抛
 # ImportError("'socksio' package is not installed"),在 WSL/Linux 上表现为"一用就报错"。
 httpx[socks]>=0.24
-prompt_toolkit>=3
 rich>=13
 pillow>=9
-# 全屏 TUI 前端(docs/tui-redesign.md)。缺它时 `WCHAT_TUI=1` 会自动回退旧交互,
-# 但正常安装随包带入,保证开了开关就开箱可用。锁 8.x(与验证过的 8.2.8 同大版本)。
+# 全屏 TUI 前端(docs/tui-redesign.md)。交互模式**只有**它(旧 prompt_toolkit 交互已废弃),
+# 缺它无法启动交互;正常安装随包带入,保证开箱可用。锁 8.x(与验证过的 8.2.8 同大版本)。
 textual>=8,<9

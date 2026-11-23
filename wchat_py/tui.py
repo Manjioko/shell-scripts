@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Textual 全屏交互前端。设计见 docs/tui-redesign.md。
+"""Textual 全屏交互前端(交互唯一入口;缺 textual 无法交互)。
 
-用成熟 TUI 框架(Textual)取代"prompt_toolkit 内联 + StreamBox 相对重绘",从根本上
-消除输入框 resize/切 tab 残影与流箱漂移。
+基于 Textual 构建,从根本上消除旧内联输入框的 resize/切 tab 残影与流箱漂移。
 
 M0:外壳 + 输出路由 + 输入→一轮。
 M1:流式 —— 模型增量逐字进入**内容框内**的 live 区(#live 嵌在带边框的 #contentbox 里,
@@ -50,13 +49,12 @@ def available():
 #   Textual 会**正常消费**(实测:0 事件,或正确的 CursorPosition / TerminalSupportsSynchronizedOutput),
 #   而且它靠这些做终端能力与光标探测;照搬非 TUI 输入框那套"四类全丢"会破坏键盘协议/同步输出/
 #   光标定位。wchat 自身从不发这类查询(测试 T17 有静态守卫),应答只可能来自子进程残留,剥离安全。
-# 与非 TUI 输入框(inputbox.py 的 _guarded_input)同口径:**在读者侧堵**,不追谁查询;只丢整段
-#   可识别应答,判不动的一律放行(误吞一个按键比漏一条应答严重得多)。
+# **在读者侧堵**,不追谁查询;只丢整段可识别应答,判不动的一律放行(误吞一个按键比漏一条应答严重得多)。
 _OSC_DCS_RESP_RE = re.compile(r"\x1b[\]PX^_][^\x1b\x07]*(?:\x1b\\|\x07)")
 
-# 提示行(dim │ 前缀)剥离:旧的非 TUI 输出给每行提示都用 `\033[2m│\033[0m ` 加一根暗色竖线来
-# **模拟"次要/说明"样式**(见 cli.inp_msg、render.BAR)。TUI 里不再需要这根竖线 —— 统一改成
-# "思考内容灰 + 斜体"(见 WchatApp._hint_text),既干净又和 placeholder/状态行同档。
+# 提示行(dim │ 前缀)剥离:提示行用 `\033[2m│\033[0m ` 加一根暗色竖线来模拟"次要/说明"样式
+# (见 cli.inp_msg、render.BAR)。TUI 里不需要这根竖线 —— 统一改成"思考内容灰 + 斜体"
+# (见 WchatApp._hint_text),既干净又和 placeholder/状态行同档。
 # 只匹配行首这一种 hint 前缀;工具框线的 `   │ `(3 空格 + 裸竖线,无 ANSI)不受影响。
 _HINT_BAR_RE = re.compile(r"^\x1b\[2m│\x1b\[0m ?")
 
@@ -143,7 +141,7 @@ class _SimplestStdout:
         return False
 
 
-def make_app(handle_line, *, banner="", on_meta=None):
+def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
     """构造(不 run)WchatApp。handle_line(text, emit, stream, reason[, poll_pending]):
        emit(s)   -> log 通道(横幅/工具/错误)
        stream(s) -> live 区正文(普通亮度)
@@ -151,6 +149,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
     第 5 个可选参数 poll_pending():返回运行期补充消息列表(M4 边输出边输入)。只有
     handle_line 接受 5 参时才传,否则按 4 参调用(向后兼容)。
     on_meta(action, arg) 处理元命令(-q 之外的 -u/-n/... );-q 由 app 直接退出。
+    first_turn:非空时,进入后自动把这句话作为**第一轮**发出去(对应 `wchat "内容"`)。
     textual 缺失抛 RuntimeError。"""
     if not available():
         raise RuntimeError("textual 未安装")
@@ -269,10 +268,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            # 多行粘贴折叠:占位令牌 → 粘贴全文(提交前换回)。与**非 TUI** inputbox 同一语义
-            # (那边是 prompt_toolkit 的 BracketedPaste 处理,超过一行就折叠成
-            # `📋 [已粘贴 N 行文本内容]`,内容存侧表、提交时换回)。TUI 之前是"如实粘贴",
-            # 十几行粘进来把输入框撑爆、上下已输入的内容被顶走,故搬过来。
+            # 多行粘贴折叠:占位令牌 → 粘贴全文(提交前换回)。超过一行就折叠成
+            # `📋 [已粘贴 N 行文本内容]`,内容存侧表、提交时换回。如实粘贴会把输入框撑爆、
+            # 上下已输入的内容被顶走,故折叠。
             self._pastes = {}
             self._paste_seq = 0
 
@@ -458,16 +456,16 @@ def make_app(handle_line, *, banner="", on_meta=None):
 
         def action_paste_image(self):
             """Ctrl+V/Ctrl+G:从系统剪贴板抓图片,插入 `📋 [图片] <路径>` 占位行。
-            提交时 session 的 parse_placeholders 会把它读进 input_images(与老 inputbox 同管线)。"""
+            提交时 session 的 parse_placeholders 会把它读进 input_images(与 clipimg 同管线)。"""
             try:
-                from wchat_py import inputbox as _ibo
+                from wchat_py import clipimg as _cimg
                 from wchat_py import repl as _repl
             except Exception:
                 return
             ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
             clip_dir = os.path.join(ct, "clip")
             try:
-                path = _ibo._clip_image_file(clip_dir)
+                path = _cimg._clip_image_file(clip_dir)
             except Exception:
                 path = None
             if path:
@@ -1002,6 +1000,20 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 _render.set_history_hook(self._render_loaded_history)
             except Exception:
                 pass
+            # `wchat "内容"`:进入后自动把这句话作为第一轮发出去(旧 plain/PTK 交互曾用
+            # WCHAT_FIRST_TURN 消费;TUI 以前漏了这条,导致内容被静默丢弃 —— 现补上)。
+            if first_turn:
+                self.set_timer(0.05, lambda: self._inject_initial(first_turn))
+
+        def _inject_initial(self, text):
+            """把预置首轮当作一次用户提交(text 分支:回显 + 起一轮)。"""
+            text = (text or "").strip()
+            if not text or getattr(self, "_busy", False):
+                return
+            self._mount(Text("❯ " + text, style="reverse"))
+            self._busy = True
+            self._simplest_begin()
+            self._run_turn(text)
 
         def _confirm_blocking(self, title, mark, question):
             if threading.current_thread() is threading.main_thread():
@@ -1517,9 +1529,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
     return WchatApp()
 
 
-def run_tui(handle_line, *, banner="", on_meta=None):
+def run_tui(handle_line, *, banner="", on_meta=None, first_turn=""):
     try:
-        _app = make_app(handle_line, banner=banner, on_meta=on_meta)
+        _app = make_app(handle_line, banner=banner, on_meta=on_meta, first_turn=first_turn)
         # 鼠标捕获开关:Textual 全屏默认开鼠标捕获(\x1b[?1000h 等),终端会把"文件拖拽"当
         # 鼠标事件(=拖了没反应),而非像非 TUI 那样当"粘贴"发路径。设 WCHAT_TUI_MOUSE=0 关掉
         # 捕获 → 拖拽恢复为粘贴路径(配合 App.on_event 的粘贴接管,路径落入输入框);代价是

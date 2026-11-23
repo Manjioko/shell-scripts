@@ -247,7 +247,7 @@ wchat 内部会做转换；写成根会被再拼一层，表现为 404。
 
 `wchat` 启动时先做一次依赖检查：
 
-1. 系统 Python 里 `openai`/`prompt_toolkit`/`rich` 都在 → 直接跑，**零安装**；
+1. 系统 Python 里 `openai`/`textual`/`rich` 都在 → 直接跑，**零安装**；
 2. 缺任何一个 → 在 `~/.ct/venv` 建虚拟环境、`pip install -r requirements.txt`，然后
    re-exec 进这个 venv。多个终端并发启动由文件锁串行化，只有第一个真正装。
 3. `~/.ct/venv/.ready` 里记着 `requirements.txt` 的哈希 + Python 版本；匹配就跳过检查，
@@ -371,7 +371,7 @@ ls ~/.ct/auto/backup/            # 回滚点
 
 ```bash
 wchat -h                                    # 包是否完整
-python3 -c "import openai, prompt_toolkit, rich; print('deps ok')"
+python3 -c "import openai, textual, rich; print('deps ok')"
 bash tests/brew_dist_test.sh                # 在源码仓库里:发行包端到端验收
 ```
 

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Textual TUI **视觉/布局**闸门(M3①,见 docs/tui-redesign.md §6.4)。
+"""Textual TUI **视觉/布局**闸门(headless run_test 真布局引擎)。
 
-为什么要有这道闸门:老 UI 的视觉闸门(``tests/inputbox_layout_test.py``)守的是
-"输入框别被顶到屏幕最后一行 / resize 别出残影 / 别叠出多个框"。换成 Textual 全屏后,
-这些缺陷的**形态变了**,老闸门守的是 prompt_toolkit 的字节流,管不到新渲染。于是这里用
+为什么要有这道闸门:输入框"别被顶到屏幕最后一行 / resize 别出残影 / 别叠出多个框"
+这些缺陷在 Textual 全屏下的**形态变了**,字节流层看不见。于是这里用
 Textual 自己的 ``App.run_test()``(Pilot)在 headless 下跑**真布局引擎**,直接读每个 widget
 布局后的 ``region``(= 屏幕坐标,就是"画到哪一格")做断言——不是手搓 VT 模拟屏。
 

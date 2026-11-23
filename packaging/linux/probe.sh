@@ -85,7 +85,7 @@ print(\"_base_python() =\", bootstrap._base_python())
     step "5. 第三方依赖是否齐(影响 -st / 真实会话)"
     python3 - <<"PY"
 import importlib.util, sys
-need = ["openai", "httpx", "prompt_toolkit", "rich"]
+need = ["openai", "httpx", "textual", "rich"]
 miss = [n for n in need if importlib.util.find_spec(n) is None]
 print("  缺:", miss or "无")
 sys.exit(1 if miss else 0)
@@ -99,4 +99,3 @@ exit $(( FAILED > 0 ? 1 : 0 ))
 rc=$?
 echo "══ docker rc=$rc ══"
 exit $rc
-

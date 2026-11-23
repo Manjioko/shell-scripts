@@ -165,7 +165,7 @@ print("=== 7. 顶层不再有 bash 时代的散装脚本(入口只有 wchat) ===
 STRAY = ["input_helper.py", "render_helper.py", "setup.py", "wchat.sh", "release.sh"]
 present = [f for f in STRAY if os.path.exists(os.path.join(REPO, f))]
 ck("顶层无遗留脚本", not present, repr(present))
-for rel in ("wchat_py/inputbox.py", "wchat_py/mdrender.py", "wchat_py/installdeps.py"):
+for rel in ("wchat_py/clipimg.py", "wchat_py/mdrender.py", "wchat_py/installdeps.py"):
     ck("已收进包内:%s" % rel.split("/")[-1], os.path.isfile(os.path.join(REPO, rel)))
 
 print("=== 8. 包内引用路径必须跟着搬(写死旧路径 = 静默降级) ===")
@@ -180,8 +180,8 @@ for rel in prod:
             if old in s:
                 stale.append("%s:%d %s" % (rel, i, s[:60]))
 ck("生产代码不再引用顶层旧文件名", not stale, repr(stale[:3]))
-ck("inputbox 路径指到包内",
-   os.path.isfile(os.path.join(REPO, "wchat_py", "inputbox.py")))
+ck("clipimg 路径指到包内",
+   os.path.isfile(os.path.join(REPO, "wchat_py", "clipimg.py")))
 
 print("=== 9. `if __name__ == \"__main__\"` 必须在门面之后(否则 -m 跑就 NameError) ===")
 # 真事故(2026-10,重构 cli.py 时引入):`__main__` 块留在文件**中间**,而兼容门面

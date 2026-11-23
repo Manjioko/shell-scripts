@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Python 入口 e2e 探针：pty 驱动 `python -m wchat_py.cli repl`，喂 hi / -q，桩网关。
+"""Python 入口 e2e 探针。非 TUI 交互废弃后,交互只剩 TUI(由 tui_term_test 用真终端覆盖)。
 
-断言：交互入口能起来、回复出现、-q 退出 rc=0。这是把 wchat 切到 Python 入口前的必要条件；
-完整的"vs bash 逐场景差异集"是后续（本探针只证 Python 入口在 pty 下可交互运行）。
+本探针覆盖**可脚本化**的入口行为(用桩网关,不需真终端):
+  A. 单轮 `-st "hi"`:能把一轮问答跑通,答案出现在 stdout,退出码 0;
+  B. 非 TTY 且不带 -st(`python -m wchat_py.cli`,stdin 为管道)→ 不再进交互,
+     打印"需要真终端 / 用 -st"的清晰提示,退出码 2。
+
+要真跑一轮,必须用能 import openai 的解释器(同旧版)。
 """
 import os
-import pty
-import select
 import socket
 import subprocess
 import sys
@@ -15,11 +17,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# 本探针要真跑一轮对话,所以**必须用能 import openai 的解释器**。
-# 系统 python3 没有 openai 时不是产品坏了,而是"这个解释器跑不了 wchat 的 LLM 子进程"
-# —— 直接红会让人以为入口有问题(实测:报的是"缺少 openai 依赖",看着像产品缺陷)。
-# 依次试:自己 → brew 装的 wchat venv → PATH 上的 python3.x。都不可用才明示跳过。
+
 def _pick_python():
+    """挑一个能 import openai 的解释器(系统 python3 没装时不是产品坏了)。"""
     import glob
     import shutil
     cands = [sys.executable]
@@ -43,6 +43,19 @@ def _pick_python():
     return None
 
 
+P = F = 0
+
+
+def ck(name, ok, detail=""):
+    global P, F
+    if ok:
+        P += 1
+        print("  ok   %s" % name)
+    else:
+        F += 1
+        print("  FAIL %s%s" % (name, (": " + detail) if detail else ""))
+
+
 PY = _pick_python()
 if PY is None:
     print("  NOTE ⚠ 没有能 import openai 的解释器,跳过本探针(需先装依赖;不假绿)")
@@ -52,61 +65,46 @@ if PY is None:
 d = tempfile.mkdtemp()
 rp = os.path.join(d, "r.json")
 open(rp, "w").write('[{"type":"text","text":"HELLO-PY"}]')
-sk = socket.socket(); sk.bind(("127.0.0.1", 0)); port = sk.getsockname()[1]; sk.close()
+sk = socket.socket()
+sk.bind(("127.0.0.1", 0))
+port = sk.getsockname()[1]
+sk.close()
 stub = subprocess.Popen([PY, os.path.join(REPO, "tests/stub_gateway.py"), str(port)],
                         env=dict(os.environ, STUB_LOG=os.path.join(d, "log"), STUB_REPLY=rp,
                                  STUB_AUTH_DENY_IF="", STUB_FINAL_DENY_IF=""),
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(50):
     try:
-        socket.create_connection(("127.0.0.1", port), 0.2).close(); break
+        socket.create_connection(("127.0.0.1", port), 0.2).close()
+        break
     except OSError:
         time.sleep(0.1)
 
 env = dict(os.environ, BASE_URL="http://127.0.0.1:%d/v1/chat/completions" % port,
-           WCHAT_API_KEY="sk-stub", WCHAT_TUI="0",
+           WCHAT_API_KEY="sk-stub", WCHAT_NO_SETUP="1",
            CT_HOME=os.path.join(d, "ct"), WCHAT_HISTORY_DIR=os.path.join(d, "hist"),
            PYTHONPATH=REPO + ":" + os.environ.get("PYTHONPATH", ""), TERM="xterm-256color")
-master, slave = pty.openpty()
-p = subprocess.Popen([PY, "-m", "wchat_py.cli", "repl"],
-                     stdin=slave, stdout=slave, stderr=slave, env=env, cwd=d)
-os.close(slave)
-out = b""
+for k in ("AUTO_MODE", "WCHAT_AUTO_MODE", "MAX_TOOL_ROUNDS", "WCHAT_MODEL", "WCHAT_THINKING"):
+    env.pop(k, None)
+
 try:
-    time.sleep(0.3)
-    os.write(master, b"hi\n")
-    deadline = time.time() + 20
-    sent_q = False
-    while time.time() < deadline:
-        r, _, _ = select.select([master], [], [], 0.2)
-        if master in r:
-            try:
-                data = os.read(master, 65536)
-            except OSError:
-                break
-            if not data:
-                break
-            out += data
-            if b"HELLO-PY" in out and not sent_q:
-                os.write(master, b"-q\n")
-                sent_q = True
-            # 注:退出不再询问"是否保存"(-q 一律保存),故无需再答本问;进程保存后自行退出。
-        if p.poll() is not None:
-            break
+    # A. 单轮 -st:能跑通一轮,答案上屏,退出码 0
+    a = subprocess.run([PY, "-m", "wchat_py.cli", "-st", "hi"],
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                       env=env, cwd=d, timeout=60)
+    ck("-st 单轮 rc=0", a.returncode == 0, "rc=%r err=%r" % (a.returncode, a.stderr[-200:]))
+    ck("-st 单轮答案出现在 stdout", "HELLO-PY" in (a.stdout or ""), repr((a.stdout or "")[-200:]))
+
+    # B. 非 TTY 且不带 -st:不再进交互,清晰报错 + rc=2
+    b = subprocess.run([PY, "-m", "wchat_py.cli"],
+                       stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                       env=env, cwd=d, timeout=30)
+    _err = (b.stderr or "") + (b.stdout or "")
+    ck("非 TTY 交互 rc=2", b.returncode == 2, "rc=%r" % (b.returncode,))
+    ck("非 TTY 交互提示要求真终端并指 -st", ("TTY" in _err and "-st" in _err), repr(_err[-200:]))
 finally:
-    if p.poll() is None:
-        p.terminate()
-    try:
-        p.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        p.kill()
-    os.close(master)
     stub.terminate()
 
-text = out.decode("utf-8", "replace")
-rr = 0 if ("HELLO-PY" in text and p.returncode == 0) else 1
-print("rc=%r 含回复=%s" % (p.returncode, "HELLO-PY" in text))
-if rr:
-    print("out tail:", repr(text[-300:]))
-print("RESULT total=1 pass=%d fail=%d" % (1 if rr == 0 else 0, rr))
-sys.exit(rr)
+print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
+sys.exit(0 if F == 0 else 1)
+

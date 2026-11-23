@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Textual TUI 前端闸门(M0,见 docs/tui-redesign.md §6.1)。
+"""Textual TUI 前端闸门(headless run_test)。
 
 用 Textual 的 headless `App.run_test()`(Pilot)在**不需要真终端**的情况下验证:
   1. TuiStdout:write/drain 线程安全缓冲,isatty 归 False(不误判交互)。
@@ -401,7 +401,7 @@ async def _meta_path_check():
 
         # Ctrl+V 粘贴图片:桩 _clip_image_file 返回路径 → 插入 📋[图片] 占位行
         try:
-            import wchat_py.inputbox as _ibo
+            import wchat_py.clipimg as _ibo
             _oc = _ibo._clip_image_file
             _ibo._clip_image_file = lambda d: "/tmp/probe_img.png"
             try:
@@ -943,7 +943,7 @@ print("=== 19. 占位行原子删除:退格/删除一次删整行 ===")
 async def _atomic_del_check():
     import tempfile as _tf
     from wchat_py import repl as _repl
-    from wchat_py import inputbox as _ibo
+    from wchat_py import clipimg as _ibo
 
     app = tui.make_app(lambda *a: None, banner="")
     async with app.run_test(size=(80, 24)) as pilot:
@@ -1348,7 +1348,7 @@ print("=== 20. ❯ 常驻 / 多行粘贴折叠 / 授权弹窗命中 ===")
 
 
 async def _input_paste_confirm_check():
-    import wchat_py.inputbox as _ibo
+    import wchat_py.clipimg as _ibo
     _clin = _ibo._clip_image_file
     _ibo._clip_image_file = lambda d: None       # 隔离真实剪贴板:默认"无图",T4 单独造图
     try:
@@ -1546,10 +1546,10 @@ except Exception as _e:
     traceback.print_exc()
     ck("22 复制/选中色检查无异常", False, repr(_e))
 
-# 接线(静态):三处 handler(TUI/旧交互/plain)都接每轮后台保存;退出不再询问"是否保存"。
+# 接线(静态):交互只剩 TUI 一个 handler,它接每轮后台保存;退出不再询问"是否保存"。
 _cli_src = open(os.path.join(_REPO, "wchat_py", "cli.py"), encoding="utf-8").read()
-ck("22 cli 三处 handler 都接 on_turn_done(每轮后台保存)",
-   _cli_src.count("on_turn_done=_save_turn") == 3, str(_cli_src.count("on_turn_done=_save_turn")))
+ck("22 cli 唯一 handler(TUI)接 on_turn_done(每轮后台保存)",
+   _cli_src.count("on_turn_done=_save_turn") == 1, str(_cli_src.count("on_turn_done=_save_turn")))
 ck("22 退出不再询问是否保存(一律保存)", "退出前保存对话" not in _cli_src)
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))

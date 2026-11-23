@@ -8,7 +8,7 @@
 #     断言:每次恰好 **1 个**输入框、宽=新宽、**贴底**(顶角在倒数第 3 行)。tmux 是货真价实的终端
 #     模拟器(有 alt-screen/重绘),故能抓住"resize 出残影/多框"——手搓 VT 屏抓不住(见 README)。
 #
-# 仍需用户在 Terminal.app / iTerm2 / Ghostty 上肉眼验(见 docs/tui-redesign.md §6.4 M3②);
+# 仍需用户在 Terminal.app / iTerm2 / Ghostty 上肉眼验;
 # 本闸门是能自动化的那一层回归锁。
 #
 # 依赖 tmux + 带 textual 的解释器;缺任一 → 打印 SKIP + exit 77(run_gates 约定:环境性缺席)。
@@ -32,7 +32,7 @@ trap cleanup EXIT
 cleanup
 # 在 detached 会话里跑 TUI 自测 demo(真 tmux 终端 = 真 PTY + 真终端模拟器)
 tmux new-session -d -s "$S" -x 100 -y 30 \
-    "env -u AUTO_MODE -u WCHAT_AUTO_MODE -u WCHAT_AUTO_ASSUME_YES WCHAT_NO_SETUP=1 WCHAT_TUI=1 $PYPY -m wchat_py.tui" \
+    "env -u AUTO_MODE -u WCHAT_AUTO_MODE -u WCHAT_AUTO_ASSUME_YES WCHAT_NO_SETUP=1 $PYPY -m wchat_py.tui" \
     2>/dev/null || { echo "SKIP: tmux new-session 失败(可能需要 TTY;在纯 CI 容器里跳过)"; exit 77; }
 sleep 2.5
 tmux send-keys -t "$S" "hi" 2>/dev/null || true
@@ -60,4 +60,3 @@ done
 
 echo "RESULT total=$((P + F)) pass=$P fail=$F"
 [ "$F" -eq 0 ]
-

@@ -217,8 +217,8 @@ ck("_ver_ok: == 精确匹配", B._ver_ok("2.0", "==2.0") is True)
 # _deps_ok 必须看版本,不能只看 find_spec
 with Sandbox() as sb:
     def fake_ver(name):
-        return {"openai": "1.30.0", "prompt_toolkit": "3.0.52",
-                "rich": "15.0.0", "httpx": "0.28.1", "textual": "8.2.8"}.get(name, "0.0")
+        return {"openai": "1.30.0", "rich": "15.0.0",
+                "httpx": "0.28.1", "textual": "8.2.8"}.get(name, "0.0")
 
     sb.stub("_installed_version", fake_ver)
     ck("装着 openai 1.x 时 _deps_ok 为 False(要建 venv)", B._deps_ok() is False)

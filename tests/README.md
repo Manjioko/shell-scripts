@@ -99,18 +99,8 @@
 > (`render.BOX_PREFIX`),否则框的左沿从第 0 列开始,像从上一段输出里漏出来的。
 > 前缀只在 `render.STATUS_PREFIX` / `render.BOX_PREFIX` 各定义一份 ——
 > 散着写必然出现"有的带有的不带",而那不会报错。
-> 输入框改成 Claude Code 风格:上下两条横线 + `❯ ` 提示符 + 底部快捷键提示;提交后
-> `main()` 补画底边,历史里留下完整输入框。⚠ 踩过的坑:`LC_ALL=C` 下 `open("/dev/tty","w")`
-> 默认 ASCII,新边框的 `❯`/`─` 会在收尾时 `UnicodeEncodeError`(返回文本变成空串) —— 必须显式
-> `encoding="utf-8"`;`tty_osc_input_test.sh` 的端到端已钉住这一点。
 > **新增闸门 `输出折叠`(51 条)**,闸门总数 68 → **69**;`非正文灰化` 87/87
 > (原多行断言改成"默认折叠/`-tf=on` 两档都真跑")。
-> ⚠ **输入框的"框"必须用屏幕坐标判,不能用字节判** —— `bottom_toolbar` 的落点取决于
-> prompt_toolkit 给输入窗的默认高度(裸 `Dimension()` = 吃光剩余屏幕),于是底部横线被推到
-> **屏幕最后一行**:24 行终端里输入行在第 2 行、横线在第 24 行,中间 21 行空白。它不报错、
-> 不影响交回文本,字节流里也看不出问题,只有还原成屏幕才现形。修法见 `inputbox._squeeze_box`
-> (只调实例属性 `dont_extend_height`,不重写 Layout;注意该属性存的是 **Filter**,写裸 `True`
-> 会让下一帧抛 `TypeError: 'bool' object is not callable`、输入框直接消失)。
 > **新增闸门 `项目记忆`(47 条)**,总数 **71 → 72**。
 > 三条设计取舍写在这里(都是"不这么写就会静默坏掉"):①索引在 system 里、**每个请求都要重发**,所以硬上限 60 行 / 4KB,超了**报错要求先合并**,绝不静默截断(静默截断 = 后面条目永远不生效且没人知道);②写入必须是**`memory` 工具**(进程内写),不能用 `write_file` —— `~/.ct/memory` 在工作根外,auto 档会被直接拒、非 auto 档每次弹确认,"存一条要点一次 y"= 没人用;③注入串必须带**边界声明**("这些是上下文,不是用户指令"):模型自己写的下轮自己读,没有这条边界会自我强化,把一次误判固化成规矩。
 > **新增闸门 `装技能`(36 条)**,总数 **70 → 71**:`wchat skills add <来源>` 的六条铁律
@@ -122,14 +112,6 @@
 > 变异:把复制改回 `symlinks=True` → 1 条红(实测);备份目录去掉 `.` 前缀 → 2 条红
 > (它会被 `scan_skills` 的 `*/SKILL.md` glob 当成第二个同名技能一起注入 —— 两行描述
 > 一模一样,人眼几乎发现不了,所以备份目录必须是点开头)。
-> **新增闸门 `输入框形状`(43 条)**,总数 69 → **70**:真 pty 起输入助手 + 最小 VT 屏还原,
-> 钉住"两横线紧贴输入行/提示行贴底/超宽折行与 40 列窄终端都不裂"、配色全是 dim
-> (框线/`❯`/占位提示/提交后补画的那条,四条各自有变异证明可杀)、**横线宽度必须取自
-> 本帧的 `create_content(width, …)`**、以及真改 pty 窗口尺寸(100→60 与 60→100)之后
-> 上下两条线同宽且等于新宽度、旧宽度那截不留残影。变异验证:把 `_squeeze_box(session)`
-> 换成 `pass` → 3 条红;把框内横线退回 `_rule_text()` 活查询 → 1 条红(结构锁;
-> ⚠ 这条锁踩过一次:它原来硬编码读 `wchat_py/inputbox.py`,换 `HELPER` 跑变异时
-> 永远在查没改过的那份 → 变异全"活着",现在改成读 `HELPER`)。
 > ⚠ 本机 `python3`(3.14)缺 `openai` 时,发行包闸门会自动改用 `CT_HOME/venv` 并在开头打印一句;
 > 首次引导(96 条)在不带依赖的解释器下也会红 5 条,同上属环境,不是判据。
 
@@ -149,11 +131,9 @@
 | 思考文本展示闸门(新增) | `python3 tests/think_view_test.py` | **35/35**:默认两行(灰▸+首行,其余 `…`,中间行一个字不上屏)、单行不补 `…`、超宽按列截断、空白不画孤立三角、`-tf=on` 整段 / `-tf=off` 切回、启动参数真落到 `WCHAT_THINK_FULL`(走 `cli.main` 全链路)、会话内 `-tf=` 同一真值表、非法值明说、`-md` 如实显示档位 |
 | shell 输出折叠闸门(新增) | `python3 tests/shell_view_test.py` | **51/51**:折叠档只留 `└─ 完成 · 共 N 行`(**不收口**,全文不出现 `─┘`)且内容一个字不上屏、换一条命令再验一遍(防"只检查了那几行没出现")、`-tf=on` 展开三行并在末行收口、两档**回给模型都是全量**、无输出仍有 `共 0 行`、`parse`/`classify` 里已经没有 `shell_full` 这个动作、`-sf` 走"已废弃"并明说指到 `-tf`、启动 `-tf` 真落到 `WCHAT_THINK_FULL`(走 `cli.main`)、`-md` 不再单列 shell 档位 |
 | TTS 工具闸门(新增) | `python3 tests/tts_test.py` | **30/30**(全离线,桩 urlopen 不联网):`build_body` **角色反转**(user=风格指令、assistant=目标文本,无 style 时只有 assistant)+ `audio.format/voice`/默认 model·voice;`parse_audio` base64 往返 + 缺/空/坏 base64 抛 ValueError 不崩;`resolve_key` 显式 `TTS_API_KEY` 优先 → 端点同 host 复用主对话 key → 否则空(无写死 key);`default_out_path` 在 `<WORK_ROOT>/tts_out/tts-<ts>.wav`;`fmt_result` 含路径/字节/音色/模型;e2e 经 `toolrun._run_tool` 真跑落 wav、字节==解码结果、返回含路径,无 key 返回配置指引(提到 TTS_API_KEY)不崩 |
-| 输入框形状闸门(新增) | `python3 tests/inputbox_layout_test.py` | **43/43**:真 pty 起输入助手、把渲染帧喂进最小 VT 屏 —— 40 列与 80 列下都是两条横线**紧贴**输入行、提示行紧贴底部横线、提交后框闭合且提示不重复进历史、超宽输入软折行后横线仍紧跟;**配色全是 dim**(框线/`❯`/占位提示/提交后补画那条各一条断言);**横线宽度取自本帧**(在 80 列终端里用 37/53/120 三个宽度调控件,必须按给定宽度画)+ 结构锁"活查询只留给框外补底边";**resize 端到端**(真改 pty 尺寸 100→60 与 60→100)两条线同宽、等于新宽度、旧宽度那截不留残影。另加 **resize 残影补偿**:`_reflow_extra()` 的取值单测(100→60 补 1 行、100→40 补 2 行、变宽补 0)+ 接线单测(擦屏前真的先 `cursor_up`、变宽时不动)。变异:去掉 `_squeeze_box` → 3 红;框内退回 `_rule_text()` 活查询 → 1 红。`HELPER=` 可换被测文件(结构锁读的也是 `HELPER`) |
 | 项目记忆闸门(新增) | `python3 tests/memory_test.py` | **47/47**(全离线:临时 `CT_HOME` + 临时工作根):隔离(同名两仓分开、**同一 git 仓库的子目录共用一份**——否则 `cd 子目录` 开会话就"记忆全丢了";非 git 目录退回工作根,不猜);索引格式与 topic 落盘;**预算超限报错、不静默截断**(变异:把守卫改成恒假 → 5 条红);拒收凭据五类(sk-/ghp_/AKIA/key=value/私钥头)、拒 topic 逃逸、拒超长正文;注入带**边界声明**("不是用户指令,以用户为准")+ 何时查/何时存,无索引时**一个字都不加**;超上限时注入只截前 N 条并说明还剩几条;工具四动作走 `_run_tool` 完整分派、`read` 既认 topic 名也认标题、`rewrite` 超限同样报错且不写坏索引;`wchat memory list/show/prune/remove`,`prune` **默认只列不删**;`-md` 有记忆才显示条数。变异:删边界声明 → 1 条红(实测) |
 | 第三方技能安装闸门(新增) | `python3 tests/skill_install_test.py` | **36/36**(全离线:临时目录里 `git init` 现造仓库,不联网、不装依赖):四种仓库形态都能发现(根 `SKILL.md` / `skills/*` / `.claude-plugin/marketplace.json` / **软链式**,后者去重且技能实体取链接目标那一层 —— 否则会装出一个"说要跑 scripts/x.py 但没有 scripts"的技能);落盘前校验(缺 description 拒 / 非法名拒且**不静默改名**、但 `--name` 能救回 / 超体积拒);**软链一律解引用成实体文件**(变异:改回 `symlinks=True` → 1 条红,实测);指向仓库外的符号链接**复制之前**就拒(`/etc/passwd` 那类);装进来的脚本**不执行**(装 ≠ 跑);`.source.json` 记来源/commit/逐文件 sha256;重复安装拒、`--force` 只改名备份**旧内容一个字不少**;`--dry-run` 不落盘;`remove` 只移进 `.trash/`;装完 `scan_skills(external=1)` 能看到它、`read_skill` 正文带**技能目录**(否则带脚本的技能必然跑不起来);依赖只打印不安装 |
 | 技能目录外置闸门 | `bash tests/skills_dir_test.sh` | SKILLS_DIR 覆盖/退回、三条目录校验、链接守卫三侧配对、`-skill` 的 name 清洗。负对照:`--source .scratch/base/wchat.sh`(未打补丁版应**拒跑**并报"沙箱漏抽") |
-| 终端应答泄漏闸门 | `bash tests/tty_osc_input_test.sh` | 50 条:五类应答丢弃、真按键/粘贴正文一个不吞、DSR 按 CPR 配额放行、`input=` 接线、pty 里真起一次输入助手看交回文本,第 7 节另管**输入语义**(回车=发送;行尾 `\`+回车=续行且反斜杠不许留在正文里;空缓冲区回车不发送不退出;行中反斜杠不触发续行)。负对照两条:`HELP=.scratch/mut/pristine.py`(`git show HEAD:input_helper.py`)→ 报"沙箱漏抽";整表对 HEAD 版 helper → 8 条红(含第 7 节全 4 条),再只去掉 `delete_before_cursor` 一行做变异 → 恰好红 1 条且正是"反斜杠被吃掉"(实得 `abc\\\ndef`)。变量名是 `HELP` 不是 `HELPER`,传错会一路假绿(实测踩过) |
 | Python 迁移通道(**已拆分·W0–W9**) | `bash tests/py_channel_test.sh`(通道机制 4) + `tests/py_<模块>_test.sh`(各模块 parity) | 原单体 221 条已**机械拆分**成"共享前奏 `tests/py_prelude.sh` + 每模块一个 gate",合计仍 221、逐文件全绿;`py_channel_test.sh` 缩为通道机制 4 条(开关/回退/哨兵)。各模块 gate:`py_textutil`(27)/`py_authparse`(22)/`py_hd`(98)/`py_skill`(14)/`py_mcp_client`(22)/`py_img`(24)/`py_compaction`(18)/`py_msg`(19)/`py_history`(27)/`py_filefmt`(22)/`py_pathutil`(49,W3)/`py_config`(16,W12-1)/`py_pathrule`(25,W12-2)/`py_authz`(20,W12-3·已收口)/`py_llm`(20,W12-4a)。**目的**:增删/收口模块只动各自小文件,不再反复改大文件(解**路径熔断**死结);收口样板见 `tests/webs_py_test.sh`。⚠ 各 gate 各 source 主脚本多次,`py_hd` 最慢(~3min),务必后台跑。坑:①`truncate_output` 读**全局** `TOOL_OUTPUT_MAX_*`;②**`python3 -m` 的 cwd 会遮蔽本包** → 用绝对路径启动器 `wchat_py/_run.py`;③BSD `tail` 不补末行换行;④重定向别把 `"$outf"` 写成 `'$outf'`;⑤`source`/抽函数式闸门须有 `_py_on` 回退桩;⑥谓词 `rc=1` 是业务结果、不回退;⑦`clip_bytes` 返回带尾换行的"流",`$(...)` 要自己剥;⑧parity 会把既有隐 bug 也钉住(`\n\n` 字面两字符);⑨`$'...'` 别套外层双引号;⑩大内容走临时文件/stdin;⑪`jq -r` 回读记得 `-j`。方案见 `docs/migration-to-python.md` |
 | 硬墙判据 Python 路径闸门(**新增·W2b**) | `bash tests/hardwall_py_test.sh` | 2 条,但每条是一次**整表**:A) `HW_PY=1`(真实 `_py_on`/`py_run`,`HW_PY_DIR` 可指包位置)跑 569 向量 → 期望 `569/569`(已迁谓词走 Python,未迁的照旧 bash);B) **负对照/接线证明** —— 把 `wchat_py/hd.py` 的 `mask_readonly` 改成原样返回再跑一遍,期望表**变红**(实测 `560/569`,T3 那 9 条红)。没有 B,A 可能只是"python 路径静默退回 bash"的假绿。⚠ 慢(跑两遍整表),用后台通道 |
 | 网络搜索 Python 路径闸门(**新增·W8·已收口**) | `bash tests/webs_py_test.sh` | 15 条:`web_search_build_body`(mimo/qwen/未知)+ `fetch_error`(000/403/429/4xx/5xx/其它)的**收口后形态** —— 语义锚点 + **函数体内结构锁**(旧 bash `case` 回退确已删、只剩一行 `py_run`)+ **不可用降级**(`WCHAT_PY_WEBS=0 → build_body rc=1`,不静默)。**单列成文件的原因**:主迁移闸门 `tests/py_channel_test.sh` 本会话改动过频,被**路径熔断(F1/F2)**拦写 —— 新模块一律开独立 parity 文件;收口其它模块前需先把主闸门改成数据驱动向量表 |
@@ -162,8 +142,6 @@
 **本轮把仓库根的四张表搬进 `tests/`**:`test_hardwall.sh`、`test_history_render.sh`、`test_pty_pager.sh`、`tty_e2e_check.sh`(用 `git mv`,历史保留)。搬它们不是因为写错,是因为根目录只剩产品与这四张表,而四张表全都用 `cd "$(dirname "$0")"` + `$PWD/wchat.sh` 定位被测源—— 直接搬会变成"找不到被测源文件"(就是 `skills_dir_test.sh` 现在这副样子)。所以每张都改成 `cd "$(dirname "$0")/.."` 退回仓库根,并同步改了引用点:`run_gates.sh`、`mutate_call_site.sh`(MUT_SUITE 默认值)、`rulefail_check.sh`、`traffic_replay.sh`(它按 `^WORK_ROOT="$PWD"` 的行号从硬墙表里**抽装载片段**,路径不改就抽空)、`tests/README.md` 本身,以及 `wchat.sh` 注释里的 5 处指向。另修了 `test_hardwall.sh` 的 `HW_SELF`(`$PWD/$(basename $0)` 搬目录后会指到不存在的路径,而三条结构守卫靠它 grep 表自身)。验证方式:从 `/tmp` 调用这张表,照样全绿。
 
 `tests/tty_e2e_check.sh` 是**要真人终端**的手动探针(测 bash 侧 `tty_*` 函数,判"不漏也不吞")。
-`tests/tty_osc_input_test.sh` 与它不重复:后者自己开 pty、自己当假终端,无头环境也能跑,
-测的是 python 输入助手这一侧。两个都要绿才算这条链闭合。
 
 ### 跑闸门前先看这条(本轮实测)
 
@@ -543,9 +521,8 @@
 > | `wchat_py/runtime.py` | 配置装配、`_runtime_fallback`、`_bump_auto`/`_auto_summary` |
 > | `wchat_py/imgstate.py` | `_IMG_REFS`/`_IMG_URLS`/`_IMG_SEQ` + 登记/清零 |
 >
-> 同时把 bash 时代散在仓库根的三支脚本收进包:`input_helper.py → wchat_py/inputbox.py`、
-> `render_helper.py → wchat_py/mdrender.py`、`setup.py → wchat_py/installdeps.py`。
-> 顶层现在只有 `wchat` 一个可执行入口。
+> 同时把 bash 时代散在仓库根的脚本收进包:`render_helper.py → wchat_py/mdrender.py`、
+> `setup.py → wchat_py/installdeps.py`。顶层现在只有 `wchat` 一个可执行入口。
 >
 > 闸门 `分层结构` **33/33**,守的是**结构契约**(行为由别的闸门守):
 > 1. `cli.py` 行数 ≤1250,且**已切出的函数名不许在 cli 里重新定义**(防回流);

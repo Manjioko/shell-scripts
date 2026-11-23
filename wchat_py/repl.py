@@ -421,7 +421,7 @@ def _default_meta(action, arg, session=None):
         inp_msg("✅ 已开始新会话")
         return True
     # 兜底:目前 cmdline.classify 能产出的动作**全部**在 _default_meta 有分支
-    # (外加 quit 由 run_repl_loop 处理),所以这行实际是死代码。保留它作为安全网:
+    # (外加 quit 由 TUI(app.exit)处理),所以这行实际是死代码。保留它作为安全网:
     # 将来给 classify 新增动作却忘了在这里补分支时,至少会大声说一句,而不是静默吞掉。
     sys.stdout.write("[元命令 %s] 无对应处理(若刚给 cmdline.classify 新增了动作,请在 _default_meta 补分支)\n"
                      % action)
@@ -584,61 +584,6 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
     return handler
 
 
-def run_repl_loop(next_line, on_text, on_meta=None, on_quit=None):
-    """核心循环：next_line()->str|None(EOF)。可注入，便于单测交互与非交互两种来源。
-
-    on_quit() 在读到 -q 时、返回前调用一次（用于退出保存历史）。
-    """
-    on_meta = on_meta or _default_meta
-    while True:
-        if os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE"):
-            if os.environ.pop("WCHAT_AUTO_MARKER_ALREADY", "") != "1":
-                try:
-                    from wchat_py.auto_enable import marker_text
-                    _m = marker_text()
-                    if _m:
-                        sys.stdout.write(_m + "\n"); sys.stdout.flush()
-                except Exception:
-                    pass
-        try:
-            line = next_line()
-        except KeyboardInterrupt:
-            # 输入行上按 Ctrl+C:取消这一行输入,回提示符(与 master 的 input_aborted 同一语义)。
-            # 不接住的话异常会一路冒到 main 变成 traceback 退出,而用户只是想清掉这行。
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-            continue
-        if line is None:
-            return 0
-        line = line.rstrip("\n")
-        if line == "":
-            continue
-        action, arg = classify(line)
-        if action == "quit":
-            if on_quit is not None:
-                on_quit()
-            return 0
-        if action == "text":
-            # Ctrl+C 兜底:流式读循环自己会转成 Aborted(见 cli._call_llm),这里是
-            # 工具执行/渲染等其它路径上的中断。**绝不带着 traceback 退出**——master
-            # 的语义是"取消本轮,回输入框等下一句",用户按 Ctrl+C 只是想打断,不是想
-            # 关掉整个会话(用户实测:迁移版直接崩到 KeyboardInterrupt 栈)。
-            try:
-                on_text(arg)
-            except KeyboardInterrupt:
-                sys.stdout.write("\n\033[2m⏹ 已中断(-q 可退出)\033[0m\n\n")
-                sys.stdout.flush()
-                continue
-        else:
-            if on_meta(action, arg) is False:
-                return 0
-
-
-def run_repl(stream, on_text, on_meta=None, on_quit=None):
-    it = iter(stream)
-    return run_repl_loop(lambda: next(it, None), on_text, on_meta, on_quit)
-
-
 _IMG_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
 # 文档:二进制,但 read_file 内部会转成 Markdown 再读。@ 选择时也必须放行,
 # 否则会被下面的 \0 嗅探判成"非文本/跳过",模型就永远读不到 docx/pdf。
@@ -670,7 +615,7 @@ def _is_text_file(p):
 
 def _is_wsl_env():
     """是否运行在 WSL 下:WSL_DISTRO_NAME 或 /proc/version 含 microsoft
-    (与 inputbox._is_wsl 同一判据)。"""
+    (与 clipimg._is_wsl 同一判据)。"""
     if os.environ.get("WSL_DISTRO_NAME"):
         return True
     try:
@@ -775,78 +720,3 @@ def _file_placeholder(path):
     else:
         tag = "📋 [跳过] "
     return tag + path + "\u200b"
-
-
-def run_interactive(on_text, on_meta=None, prompt="❯ ", on_quit=None):
-    """交互式：经 wchat_py/inputbox.py(prompt_toolkit) 读行；缺文件时退回 input()。
-
-    Ctrl-F(rc=4) 按 master 逻辑:弹系统文件选择器 → 把占位行带回输入框继续编辑;
-    取消且输入为空 → 本轮无输入。
-    """
-    _repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _helper = os.path.join(_repo, "wchat_py", "inputbox.py")
-    _ct = os.environ.get("CT_HOME") or os.path.join(os.environ.get("HOME", ""), ".ct")
-    _hist = os.path.join(_ct, "input_history")
-    _clip = os.path.join(_ct, "clip")
-
-    def nxt():
-        if os.path.isfile(_helper):
-            default = ""
-            while True:
-                from wchat_py import cli as _cli
-                from wchat_py.runtime import _runtime_fallback
-                argv = [_runtime_fallback(), _helper, "--history", _hist,
-                        "--clip-dir", _clip, "--no-commands"]
-                if default:
-                    argv += ["--default", default]
-                try:
-                    p = subprocess.run(argv, capture_output=True, text=True)
-                except OSError:
-                    p = None
-                if p is None:
-                    break
-                if p.returncode == 4:
-                    cur = (p.stdout or "")
-                    if cur.endswith("\n"):
-                        cur = cur[:-1]
-                    path = _pick_file()
-                    if not path or path == "CANCELLED" or not os.path.isfile(path):
-                        if not cur:
-                            return ""
-                        default = cur
-                    else:
-                        default = cur + ("\n" if cur else "") + _file_placeholder(path)
-                    continue
-                if p.returncode == 1:
-                    return None
-                if p.returncode != 0:
-                    # **非受控退出码**一律不重开输入框:缺依赖(2)、被信号杀(<0 或
-                    # 128+信号:挂起/解挂、终端 detach 的 SIGHUP、系统休眠……)、或其它异常。
-                    # 旧实现只挡了 2;其余(3/-1/-9/130/137)都被当"空行提交"→ run_repl_loop
-                    # 见空串即 continue → 输入助手**无限重启**,每重启一次就重绘一个空框,
-                    # 屏幕上叠出一堆 `❯ 问点什么`(实测)。退回内置 input() 并说明原因。
-                    _why = (p.stderr or "").strip().splitlines()
-                    sys.stderr.write("  (输入框异常退出 rc=%s,已退回基础输入。%s)\n"
-                                     % (p.returncode, _why[-1] if _why else ""))
-                    sys.stderr.flush()
-                    break
-                _t = (p.stdout or "")
-                if _t.endswith("\n"):
-                    _t = _t[:-1]
-                if not _t.strip():
-                    # rc=0 却没有任何内容:同样不正常(正常提交不会是空;空缓冲区回车不发送)。
-                    # 绝不当"空行"重开,否则又是无限重启叠空框。
-                    sys.stderr.write("  (输入框返回空内容,已退回基础输入)\n")
-                    sys.stderr.flush()
-                    break
-                return _t
-        try:
-            return input(prompt)
-        except EOFError:
-            return None
-    return run_repl_loop(nxt, on_text, on_meta, on_quit)
-
-
-if __name__ == "__main__":
-    from wchat_py.cli import run_turn
-    sys.exit(run_repl(sys.stdin, lambda t: run_turn(t)))

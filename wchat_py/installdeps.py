@@ -76,15 +76,15 @@ def main():
     if sys.version_info < (3, 10):
         fail("需要 Python 3.10+,当前 %s" % sys.version.split()[0]); return 1
 
-    # Python 组件(输入框 / markdown / 图片缩放)
-    if run([sys.executable, "-c", "import prompt_toolkit, rich, PIL"]) == 0:
-        ok("prompt_toolkit + rich + pillow 已就绪")
+    # Python 组件(TUI / markdown / 图片缩放)
+    if run([sys.executable, "-c", "import textual, rich, PIL"]) == 0:
+        ok("textual + rich + pillow 已就绪")
     else:
-        step("pip install --user prompt_toolkit rich pillow")
-        if pip_install("prompt_toolkit", "rich", "pillow"):
+        step("pip install --user textual rich pillow")
+        if pip_install("textual", "rich", "pillow"):
             ok("Python 组件安装完成")
         else:
-            fail("安装失败:请手动执行 pip3 install --user prompt_toolkit rich pillow"); rc = 1
+            fail("安装失败:请手动执行 pip3 install --user textual rich pillow"); rc = 1
 
     # 外部命令:git 用于回滚点/版本信息;npx 仅 MCP 需要(可选)
     for cmd, why in (("git", "回滚点/版本信息"), ("npx", "MCP(可选)")):

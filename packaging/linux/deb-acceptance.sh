@@ -19,7 +19,7 @@ dpkg -i "$DEB" > /tmp/install.log 2>&1 || { cat /tmp/install.log; exit 1; }
 tail -3 /tmp/install.log
 
 echo '=== 2. 依赖到位(离线,无 --index) ==='
-/usr/lib/wchat/venv/bin/python -c 'import openai, httpx, prompt_toolkit, rich, PIL; print("  ok 五个依赖可导入")'
+/usr/lib/wchat/venv/bin/python -c 'import openai, httpx, textual, rich, PIL; print("  ok 五个依赖可导入")'
 if [ -x /usr/lib/wchat/venv/bin/python ]; then echo '  ok venv 已由 postinst 建好'; else echo '✗ venv 没建'; exit 1; fi
 if [ -d /usr/lib/wchat/wheels ]; then echo '  ok wheel 随包落地'; else echo '✗ 没有 wheels'; exit 1; fi
 
@@ -55,4 +55,3 @@ fi
 echo '  ok 可执行已移除'
 echo
 echo 'DEB-ACCEPTANCE-OK'
-

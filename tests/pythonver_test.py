@@ -60,7 +60,7 @@ def read(rel):
 
 print("=== 1. shebang 只有一种形态,最低版本只有一个出处 ===")
 SHEBANG = "#!/usr/bin/env python3"
-ENTRIES = ["wchat", "configs/ctmodel.py", "wchat_py/inputbox.py",
+ENTRIES = ["wchat", "configs/ctmodel.py", "wchat_py/clipimg.py",
            "wchat_py/mdrender.py", "wchat_py/installdeps.py"]
 for rel in ENTRIES:
     first = read(rel).split("\n")[0].strip()
@@ -154,7 +154,7 @@ ck("版本门在依赖检查之前",
    _gate in bs and "if _deps_ok()" in bs and bs.index(_gate) < bs.index("if _deps_ok()"),
    "顺序反了:3.9 上'依赖齐全'会掩盖'不该用这个解释器'")
 # 回归锁:曾经换完解释器就置 WCHAT_BOOTSTRAPPED=1,新进程在函数开头直接 return,
-# 于是"裸 3.12 无 openai/prompt_toolkit"直接进业务代码 → 输入框退码 2 → REPL 空转卡死。
+# 于是"裸 3.12 无 openai/textual"直接进业务代码 → 缺依赖交互无法进入。
 ck("换解释器只跳过版本门(WCHAT_PY_SWITCHED),依赖/venv 仍自举",
    "WCHAT_PY_SWITCHED" in bs, "换解释器后又跳过了依赖自举 → 裸解释器直接跑业务")
 ck("_base_python 每个候选都过 _suitable", "_suitable(c)" in bs)

@@ -35,7 +35,7 @@ sh packaging/linux/run-as-user.sh tests/py_pathrule_test.sh   # 单道，看全�
 - `compileall` 全包通过；`import wchat_py.cli`；`wchat -h`；`_run.py filefmt read`；
 - `MIN_PYTHON` 判据 `(3,10)` 通过；
 - 依赖全部用 manylinux wheel 装进 `/work/.venv`，**不需要编译**：
-  `openai 2.54.0 / httpx 0.28.1 / pillow 13.0.0 / prompt_toolkit / rich`。
+  `openai 2.54.0 / httpx 0.28.1 / pillow 13.0.0 / textual / rich`。
   这否掉了"发行版 python3-openai 版本对不上"这条顾虑 —— 自带 venv + wheel 是可行路线。
 
 ## 已修（按发现顺序；每条都标了"这是夹具还是产品"）
@@ -49,7 +49,7 @@ sh packaging/linux/run-as-user.sh tests/py_pathrule_test.sh   # 单道，看全�
 | `路径裁决` 2 条：`HOME 隐藏配置 → P2` 在容器里空 | 判定顺序是 `tmp → SYS → HOME`，而容器/CI 里 `HOME=/tmp/xxx` → `~/.bashrc`、`~/.config/*` 被 `/tmp` 豁免整段吞掉，**P2 保护静默消失** | **产品** | `pathrule.hard_deny_path` 把"主目录保护"提到 tmp 豁免**之前**（与 P1 `~/.ssh` 本就在 tmp 前口径对齐）；bash 降级粗判据同步 |
 | 同上的一半：macOS 上 `HOME=/tmp/x` 前缀也对不上 | 路径一侧做了物理归一（消解软链），`home` 一侧仍是原样字符串 → `np=/private/tmp/x/...` 与 `home=/tmp/x` 前缀不匹配 | **产品** | 新增 `home_n = os.path.realpath(home)`，P1/P2 的前缀比对统一用它（`HOME` 挂在软链后是常见布局，同一个洞） |
 | `内联图片` 24 红 | ① `prepare_delivery` 缩图只写了 `sips`/`ffmpeg` 两条兜底，Linux 上两者皆无 → 2600px 原样交付（token 按面积计费）；② 夹具自造的 2600px PNG **结构非法**（1556 行短行），严格解码器 Pillow 直接 `OSError`，而 macOS 的 sips 宽容；③ 夹具用 `base64 -D`（BSD 旗标，GNU 报错但 exit 0 输出空） | **产品 + 夹具** | ① 补第三条 PIL 兜底（与 `prepare_image` 对齐）；② 生成器改为定长行；③ 改 `python3 -c` 解 base64，并把 `.url` 末字节断言从"必须是 `=`"改成"是合法 base64 收尾"（好 PNG 出来的 JPEG 长度可能整除 3，没有 padding） |
-| `Ctrl-C中断` 1 条：中断后第二轮回复不渲染 | **与 Ctrl+C 无关**：一个不按 Ctrl+C 的纯两轮 pty 探针在容器里同样失败（网关收到 3 个请求：`n_messages=2`、`4`、`4` —— 第二轮同一份上下文被发了两次，渲染的是第二次的答复） | 待查 | 已排除：CPR 应答缺失（答了也一样）、单线程桩网关阻塞（改 `ThreadingHTTPServer` 后仍一样）。下一步该在容器里对 `_retry_after_compact` 与 `inputbox` 子进程两条路径加日志 |
+| `Ctrl-C中断` 1 条：中断后第二轮回复不渲染 | **与 Ctrl+C 无关**：一个不按 Ctrl+C 的纯两轮 pty 探针在容器里同样失败（网关收到 3 个请求：`n_messages=2`、`4`、`4` —— 第二轮同一份上下文被发了两次，渲染的是第二次的答复） | 待查 | 已排除：CPR 应答缺失（答了也一样）、单线程桩网关阻塞（改 `ThreadingHTTPServer` 后仍一样）。下一步该在容器里对 `_retry_after_compact` 与交互子进程两条路径加日志 |
 
 ## SKIP 约定（环境不具备时的唯一合法表达）
 

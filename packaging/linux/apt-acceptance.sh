@@ -54,7 +54,7 @@ echo '=== 6. 装完能不能用(从 /tmp 跑,不依赖 cwd) ==='
 cd /tmp
 wchat --version
 wchat -h > /tmp/h.txt 2>&1 && grep -q '使用方法' /tmp/h.txt && echo '  ok -h 正常'
-/usr/lib/wchat/venv/bin/python -c 'import openai, httpx, prompt_toolkit, rich, PIL; print("  ok 依赖齐全")'
+/usr/lib/wchat/venv/bin/python -c 'import openai, httpx, textual, rich, PIL; print("  ok 依赖齐全")'
 
 echo '=== 7. apt remove 清干净 ==='
 apt-get remove -y wchat > /tmp/rm.log 2>&1 || { cat /tmp/rm.log; exit 1; }
@@ -64,4 +64,3 @@ echo '  ok 已清干净'
 
 echo
 echo 'APT-ACCEPTANCE-OK'
-

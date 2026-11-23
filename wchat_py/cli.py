@@ -968,7 +968,7 @@ def main(argv):
         os.environ["WCHAT_HISTORY_DIR"] = os.path.join(_ct, "history")
     if argv and argv[0] == "repl":
         from wchat_py.session import Session, seed_system
-        from wchat_py.repl import run_repl, session_text_handler
+        from wchat_py.repl import session_text_handler
         _s = Session.from_env()
         # system 只由 `_system_prompt_text()` 一处构建:技能清单(含标题)/项目记忆/MCP
         # 三段都在里面。以前这里复制了一份 `scan_skills` 调用,后果是 REPL 启动的 system
@@ -1001,7 +1001,6 @@ def main(argv):
 
         def _meta(action, arg):
             return _dm(action, arg, session=_s)
-        from wchat_py.repl import run_interactive
 
         def _on_quit():
             try:
@@ -1020,144 +1019,52 @@ def main(argv):
         _first_act = os.environ.pop("WCHAT_FIRST_ACTION", "")
         if _first_act:
             _meta(_first_act, "")
-        # ── Textual 全屏 TUI(见 docs/tui-redesign.md;M0–M4 已完成)──
-        # **默认开启**(M4 收尾):交互 TTY + 未显式关闭 + textual 可用 → 走 TUI。
-        # 关闭方式:`WCHAT_TUI=0`(或 false/no/off)→ 走旧 prompt_toolkit 路径。
-        # 非 TTY / 管道 / 子命令 / `-st` 天然不进这里(isatty 门);textual 不可用则**静默回退**旧交互。
-        _tui_env = os.environ.get("WCHAT_TUI")
-        _tui_on = True
-        if _tui_env is not None:
-            _tui_on = str(_tui_env).strip().lower() not in ("0", "false", "no", "off")
-        if sys.stdin.isatty() and _tui_on:
-            from wchat_py import tui as _tui
-            if _tui.available():
-                from wchat_py.toolrun import _banner_text as _tui_banner
+        # ── 交互模式:**只有 Textual 全屏 TUI** ──
+        # 交互必须真终端(TTY);非 TTY(管道)不再支持交互,提示改用 -st 单轮。
+        if not sys.stdin.isatty():
+            sys.stderr.write("⚠ 交互模式需要真终端(TTY)。非交互请用 `-st \"内容\"` 跑单轮。\n")
+            sys.stderr.flush()
+            return 2
+        from wchat_py import tui as _tui
+        if not _tui.available():
+            sys.stderr.write("⚠ 未安装 textual,无法启动交互界面。请 `pip install textual`"
+                             "(或 `brew reinstall wchat`)。\n")
+            sys.stderr.flush()
+            return 1
+        from wchat_py.toolrun import _banner_text as _tui_banner
 
-                def _tui_handle_line(_text, _emit, _stream, _reason, _poll_queue=None):
-                    # 一轮 turn,**流式**:正文→stream、思考→reason(暗色);工具横幅经 stdout shim 进 log。
-                    def _cl_stream_tui(_m):
-                        _t, _tc, _err = _call_llm(_m, "", on_text=_stream, on_reason=_reason)
-                        if _err:
-                            sys.stderr.write("API 请求失败: %s\n" % _err)
-                        return _t, _tc, _err
-
-                    def _run_tool_tui(_n, _a):
-                        try:
-                            sys.stdout.write(_tui_banner(_n, _a)); sys.stdout.flush()
-                        except Exception:
-                            pass
-                        _out = _run_tool(_n, _a)
-                        sys.stdout.write("\n"); sys.stdout.flush()
-                        return _out
-
-                    _h2 = session_text_handler(_s, _cl_stream_tui, _run_tool_tui,
-                                               write_final=False, poll_queue=_poll_queue,
-                                               on_turn_done=_save_turn)
-                    _h2(_text)
-
-                try:
-                    _rc = _tui.run_tui(_tui_handle_line,
-                                       on_meta=lambda _a, _g: _meta(_a, _g))
-                    _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原)
-                    return _rc
-                except Exception as _te:
-                    sys.stderr.write("⚠ TUI 启动失败(%r),回退到基础交互\n" % (_te,))
-                    sys.stderr.flush()
-            else:
-                # 默认开但没装 textual:静默回退旧交互(不该每次启动都吓人)。
-                # 只有用户**显式**要 TUI(WCHAT_TUI=1/true)却没装时才提示一句。
-                if _tui_env is not None and _tui_on:
-                    sys.stderr.write("⚠ WCHAT_TUI 已开启但未安装 textual(`pip install textual`),回退基础交互\n")
-                    sys.stderr.flush()
-        if sys.stdin.isatty():
-            from wchat_py.render import StreamBox, render_reason, render_markdown
-            _box = StreamBox(int(os.environ.get("STREAM_WIN", "10")))
-            _reason_acc = []
-            _text_acc = []
-
-            def _cl_stream(m):
-                def _emit(d):
-                    _text_acc.append(d)
-                    _box.append(d)
-                    sys.stdout.write(_box.paint_full())
-                    sys.stdout.flush()
-
-                def _emit_reason(d):
-                    _reason_acc.append(d)
-                    _box.append(d)
-                    sys.stdout.write(_box.paint_full())
-                    sys.stdout.flush()
-                _t, _tc, _err = _call_llm(m, "", on_text=_emit, on_reason=_emit_reason)
+        def _tui_handle_line(_text, _emit, _stream, _reason, _poll_queue=None):
+            # 一轮 turn,**流式**:正文→stream、思考→reason(暗色);工具横幅经 stdout shim 进 log。
+            def _cl_stream_tui(_m):
+                _t, _tc, _err = _call_llm(_m, "", on_text=_stream, on_reason=_reason)
                 if _err:
-                    sys.stderr.write("API 请求失败: %s\n" % _err); sys.stderr.flush()
+                    sys.stderr.write("API 请求失败: %s\n" % _err)
                 return _t, _tc, _err
 
-            def _finish(r):
-                sys.stdout.write(_box.close()); sys.stdout.flush()
-                if _reason_acc:
-                    sys.stdout.write(render_reason("".join(_reason_acc)))
-                    _reason_acc.clear()
-                sys.stdout.write(render_markdown(r or "")); sys.stdout.write("\n")
-                sys.stdout.flush()
-                _text_acc.clear()
-                _sync_runtime(_s)
-
-            def _run_tool_boxed(n, a):
-                # 工具执行/权限提示前关箱并 flush 思考,避免提示被下一帧 paint 擦掉;
-                # 横幅必须在关箱**之后**打印,否则刚打到箱内就被 close 擦掉(用户实测)。
-                sys.stdout.write(_box.close()); sys.stdout.flush()
-                if _reason_acc:
-                    sys.stdout.write(render_reason("".join(_reason_acc)))
-                    _reason_acc.clear()
-                # tool_calls 之前的前导正文:流箱已擦,这里补渲染
-                if _text_acc:
-                    sys.stdout.write(render_markdown("".join(_text_acc)))
-                    sys.stdout.write("\n"); sys.stdout.flush()
-                    _text_acc.clear()
-                # 横幅后**不留空行**(2026-12 用户要求):横幅与它下面那行
-                # `└─ 已读取…` 是同一个工具块的两半,中间空一行会让它们看着不相关。
-                # 块与块之间的空行由块**末尾**的 `sys.stdout.write("\n")` 负责。
-                sys.stdout.write(_banner_text(n, a))
-                sys.stdout.flush()
-                out = _run_tool(n, a)
+            def _run_tool_tui(_n, _a):
+                try:
+                    sys.stdout.write(_tui_banner(_n, _a)); sys.stdout.flush()
+                except Exception:
+                    pass
+                _out = _run_tool(_n, _a)
                 sys.stdout.write("\n"); sys.stdout.flush()
-                return out
+                return _out
 
-            def _abort(exc=None):
-                # 保留语义:关箱收口,但**不再丢弃**已产出的半截正文——把它正式落屏。
-                # (它已经作为一条无 tool_calls 的 assistant 消息写进上下文,见 session.orchestrate;
-                #  这里落屏是为了让用户看到"停在哪、已保留到哪",别出现"屏上没了但上下文还在"的割裂。)
-                sys.stdout.write(_box.close()); sys.stdout.flush()
-                _partial = (getattr(exc, "text", "") or "").rstrip()
-                if _partial:
-                    sys.stdout.write("\033[2m(已中断,以下为已产出的部分,已一并保留在上下文)\033[0m\n")
-                    sys.stdout.write(_partial + "\n")
-                _reason_acc.clear()
-                _text_acc.clear()
-                _kept = getattr(exc, "kept_msgs", 0)
-                sys.stdout.write("\n\033[2m⏹ 已中断。本轮已完成的部分已保留 %d 条,可直接补充后继续(-q 可退出)\033[0m\n\n" % _kept)
-                sys.stdout.flush()
-                _sync_runtime(_s)
+            _h2 = session_text_handler(_s, _cl_stream_tui, _run_tool_tui,
+                                       write_final=False, poll_queue=_poll_queue,
+                                       on_turn_done=_save_turn)
+            _h2(_text)
 
-            _h = session_text_handler(_s, _cl_stream, _run_tool_boxed,
-                                      write_final=False, on_final=_finish, on_abort=_abort,
-                                      on_turn_done=_save_turn)
-            _first = os.environ.pop("WCHAT_FIRST_TURN", "")
-            if _first:
-                _h(_first)
-            return run_interactive(_h, on_meta=_meta, on_quit=_on_quit)
-        def _finish_plain(r):
-            if r:
-                sys.stdout.write(r + "\n"); sys.stdout.flush()
-            _sync_runtime(_s)
-
-        _h = session_text_handler(_s, lambda m: _call_llm(m, ""), lambda n, a: _run_tool(n, a),
-                                  write_final=False, on_final=_finish_plain,
-                                  on_turn_done=_save_turn)
-        _first = os.environ.pop("WCHAT_FIRST_TURN", "")
-        if _first:
-            _h(_first)
-        return run_repl(sys.stdin, _h, on_meta=_meta, on_quit=_on_quit)
+        try:
+            # `wchat "内容"` 的首轮经 first_turn 注入(旧 plain/PTK 曾用 WCHAT_FIRST_TURN 消费)。
+            _rc = _tui.run_tui(_tui_handle_line, on_meta=lambda _a, _g: _meta(_a, _g),
+                               first_turn=os.environ.pop("WCHAT_FIRST_TURN", ""))
+        except Exception as _te:
+            sys.stderr.write("⚠ TUI 运行失败(%r)\n" % (_te,)); sys.stderr.flush()
+            _on_quit()
+            return 1
+        _on_quit()          # TUI 退出后:保存对话 + auto 小结(终端已还原)
+        return _rc
     if argv and argv[0] == "run-st":
         st = parse(argv[1:])
         from wchat_py import audit as _audit
