@@ -977,28 +977,25 @@ def main(argv):
         if not getattr(_s, "model", ""):
             _s.model = os.environ.get("FLASH_MODEL", "") or os.environ.get("WCHAT_MODEL", "")
         # ── 历史保存:每答完一整轮后台落盘 + 退出不再询问(author: 用户 2026-11)──
-        # 固定同一个 name → 整个会话始终同一个历史文件,每轮覆盖;避免"每轮一个新文件"。
+        # 落盘名不再启动时冻结成 chat-<epoch>(缺陷:启动无标题,冻结后 -l 加载带标题的历史
+        # 退出会另起 md5 相同的 epoch 副本)。改为落盘时按当时标题解析(session.resolve_hist_name):
+        # 有标题用标题名更新原文件;全新对话首轮答完生成标题再存;生成失败才退回 epoch 防撞名。
         import time as _time0
         _hist_dir = os.environ.get("WCHAT_HISTORY_DIR", "")
-        _t0 = os.environ.get("WCHAT_CHAT_TITLE", "")
-        # name 用作**文件名**:优先显式 WCHAT_HISTORY_NAME;否则用有意义标题;但排除兜底名
-        # "未命名对话"(否则多会话都会写成同一个"未命名对话.json"互相覆盖)——那种情况用
-        # 带时间戳的唯一名,保证每个会话一个文件。
-        _hist_name = (os.environ.get("WCHAT_HISTORY_NAME")
-                      or (_t0 if _t0 and _t0 != "未命名对话" else "")
-                      or ("chat-%d" % int(_time0.time())))
+        _epoch_name = "chat-%d" % int(_time0.time())
         _saver = None
         if _hist_dir and os.environ.get("WCHAT_FORGET") != "1":
             from wchat_py.session import HistorySaver
-            _saver = HistorySaver(_hist_dir, _hist_name, os.environ.get("WCHAT_CHAT_TITLE", ""))
+            _saver = HistorySaver(_hist_dir, _epoch_name, os.environ.get("WCHAT_CHAT_TITLE", ""))
 
         def _save_turn(_session=None):
-            # 每轮结束调用(可能在线程里):后台保存,绝不影响主流程。
-            if _saver is not None:
-                try:
-                    _saver.save_async(_s.messages_json)
-                except Exception:
-                    pass
+            # 每轮结束调用(可能在线程里):先确保有标题(全新对话首轮在此生成),再后台保存。
+            if _saver is None:
+                return
+            try:
+                _saver.save_turn(_s, _gen_title)
+            except Exception:
+                pass
 
         from wchat_py.repl import _default_meta as _dm
 
@@ -1010,26 +1007,13 @@ def main(argv):
             try:
                 if _s.msg_count <= 1 or os.environ.get("WCHAT_FORGET") == "1":
                     return
-                _d = os.environ.get("WCHAT_HISTORY_DIR", "")
-                if not _d:
-                    return
-                # 不再询问是否保存:**一律保存**(用户要求:终端常突然关闭,长上下文不能丢)。
-                # 每轮已后台存过;这里退出时**同步**再存一次兜底,并补一个语义标题(调一次模型)。
-                import time as _t
-                from wchat_py.session import save_history as _sh
-                _title = os.environ.get("WCHAT_CHAT_TITLE", "")
-                if not _title:
-                    try:
-                        _title = _gen_title(_s.messages_json)
-                    except Exception:
-                        _title = ""
-                # name 用**固定的会话名**(与每轮后台保存同一个文件),不拿标题当 name(否则会另起一份)。
-                _name = os.environ.get("WCHAT_HISTORY_NAME") or _hist_name
-                try:
-                    _sh(_d, _s.messages_json, _name, _title)
-                    sys.stdout.write("保存记录 %s\n" % os.path.join(_d, _name)); sys.stdout.flush()
-                except Exception as _e:
-                    sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
+                # 不再询问是否保存:一律保存;每轮已按标题后台存过,这里同步兜底一次(用标题名)。
+                from wchat_py.session import save_history_sync as _shs
+                _p = _shs(_s, os.environ.get("WCHAT_HISTORY_DIR", ""), _epoch_name, _gen_title)
+                if _p:
+                    sys.stdout.write("保存记录 %s\n" % _p); sys.stdout.flush()
+            except Exception as _e:
+                sys.stderr.write("保存失败: %s\n" % _e); sys.stderr.flush()
             finally:
                 _auto_summary()
 

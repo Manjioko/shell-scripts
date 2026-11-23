@@ -559,19 +559,27 @@ def session_text_handler(session, call_llm, run_tool, out=None, write_final=True
         try:
             r = orchestrate(session, text, call_llm, run_tool, poll_queue=poll_queue)
         except Aborted as _ab:
-            _turn_done()                      # 打断也保存:已保留的部分值得落盘
-            if on_abort is not None:
-                on_abort(_ab)
-            else:
-                out.write("\n⏹ 已中断。本轮已完成的部分已保留 %d 条,可直接补充后继续(-q 可退出)\n\n"
-                          % getattr(_ab, "kept_msgs", 0))
-                out.flush()
+            # 打断:先收口(on_abort 里旧交互路径会顺带生成标题),再保存(此时标题已就绪)。
+            try:
+                if on_abort is not None:
+                    on_abort(_ab)
+                else:
+                    out.write("\n⏹ 已中断。本轮已完成的部分已保留 %d 条,可直接补充后继续(-q 可退出)\n\n"
+                              % getattr(_ab, "kept_msgs", 0))
+                    out.flush()
+            finally:
+                _turn_done()                  # 打断也保存:已保留的部分值得落盘
             return
-        _turn_done()                          # 每答完一整轮 → 后台保存(不阻塞)
-        if on_final is not None:
-            on_final(r)
-        elif write_final:
-            out.write((r or "") + "\n")
+        # **先最终渲染、再落盘**:on_final 里旧交互路径会调 _sync_runtime 顺带生成标题,
+        # 这样保存时标题已就绪(用标题名),且生成标题的网络调用不会卡住最终渲染。
+        # 纯 TUI 没有 on_final,标题改由 _save_turn 在后台线程里生成(见 cli.py)。
+        try:
+            if on_final is not None:
+                on_final(r)
+            elif write_final:
+                out.write((r or "") + "\n")
+        finally:
+            _turn_done()                      # 每答完一整轮 → 后台保存(不阻塞)
 
     return handler
 

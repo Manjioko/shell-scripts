@@ -90,6 +90,109 @@ ck("HistorySaver.save_async 后台落盘且更新", _hs._last == _mj3 and msgsto
    repr(_hs._last)[:40])
 ck("HistorySaver 空串跳过", _hs.save("") == "")
 
+# ── 落盘名解析:不再冻结 chat-<epoch>(修复 -l 加载带标题历史退出另存 epoch 副本)──
+# 用户定的口径:已有标题用旧标题名(更新原文件);全新对话首轮答完生成标题再存;
+# 生成失败(空/"未命名对话")才退回 chat-<epoch> 防撞名;显式 WCHAT_HISTORY_NAME 最高优先。
+from wchat_py.session import resolve_hist_name, ensure_title, save_history_sync  # noqa: E402
+
+
+class _Sess:                       # 轻量会话桩(只需 messages_json / chat_title)
+    def __init__(self, mj, title=""):
+        self.messages_json = mj
+        self.chat_title = title
+
+
+def _iso(fn, name=None):
+    """隔离跑 fn:临时清掉 WCHAT_CHAT_TITLE(生成过的标题会留在 env,污染后续用例),
+    并把 WCHAT_HISTORY_NAME 设为 name(默认清空);结束后两者都还原。"""
+    _on = os.environ.get("WCHAT_HISTORY_NAME")
+    _ot = os.environ.get("WCHAT_CHAT_TITLE")
+    if name is None:
+        os.environ.pop("WCHAT_HISTORY_NAME", None)
+    else:
+        os.environ["WCHAT_HISTORY_NAME"] = name
+    os.environ.pop("WCHAT_CHAT_TITLE", None)
+    try:
+        return fn()
+    finally:
+        for _k, _v in (("WCHAT_HISTORY_NAME", _on), ("WCHAT_CHAT_TITLE", _ot)):
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+
+
+rv = _iso(lambda: resolve_hist_name(_Sess(_mj2), "EPOCH", lambda m: "生成标题"),
+          name="explicit-name")
+ck("resolve: 显式 WCHAT_HISTORY_NAME 最高优先", rv == ("explicit-name", True), repr(rv))
+
+_c2 = []
+rv2 = _iso(lambda: resolve_hist_name(_Sess(_mj2, "老标题.json"), "EPOCH",
+                                     lambda m: (_c2.append(1), "不该生成")[1]))
+ck("resolve: 已有标题直接用(更新原文件,不新建 epoch,且不再调 gen)",
+   rv2[0] == "老标题.json" and _c2 == [], repr((rv2, _c2)))
+
+_sn = _Sess(_mj2)
+_ng = []
+rv3 = _iso(lambda: resolve_hist_name(_sn, "EPOCH", lambda m: (_ng.append(1), "新标题")[1]))
+ck("resolve: 全新对话生成标题并落回会话/env",
+   rv3 == ("新标题", True) and _sn.chat_title == "新标题" and _ng == [1], repr((rv3, _sn.chat_title)))
+
+rv4 = _iso(lambda: resolve_hist_name(_Sess(_mj2), "chat-123", lambda m: "未命名对话"))
+ck("resolve: 生成失败兜底名 → 退回 chat-<epoch> 防撞名", rv4 == ("chat-123", False), repr(rv4))
+
+_so = _Sess(_mj2)
+_no = [0]
+
+
+def _gen_once(m):
+    _no[0] += 1
+    return "只生成一次"
+
+
+_iso(lambda: (ensure_title(_so, _gen_once), ensure_title(_so, _gen_once)))
+ck("ensure_title 每会话只生成一次(第二次走缓存)", _no[0] == 1, str(_no))
+
+# save_turn:已有标题 → 落盘名=标题,且不产生 chat-<epoch> 副本(复现用户看到的重复文件)
+_hd2 = tempfile.mkdtemp()
+_hs3 = HistorySaver(_hd2, "chat-999", "")
+_s_loaded = _Sess(_mj2, "标题A")
+_iso(lambda: _hs3.save_turn(_s_loaded, _gen_once))
+for _ in range(100):
+    if _hs3._last == _mj2:
+        break
+    _t2.sleep(0.02)
+ck("HistorySaver.save_turn 用标题名落盘(无 chat-999 epoch 副本)",
+   sorted(os.listdir(_hd2)) == ["标题A.json"], repr(sorted(os.listdir(_hd2))))
+
+# save_turn 在**无标题**时自行生成并据此落盘 —— 纯 TUI 路径没有 _sync_runtime,
+# 以前靠这里兜底才第一次有标题;否则 TUI 会话期内永远无标题、退出只能存 epoch 名。
+_hd4 = tempfile.mkdtemp()
+_hs4 = HistorySaver(_hd4, "chat-777", "")
+_s_empty = _Sess(_mj2)                       # 无标题
+_gen_calls = []
+
+
+def _gen_new(m):
+    _gen_calls.append(1)
+    return "TUI生成标题"
+
+
+_iso(lambda: _hs4.save_turn(_s_empty, _gen_new))
+for _ in range(100):
+    if _hs4._last == _mj2:
+        break
+    _t2.sleep(0.02)
+ck("save_turn 无标题时自行生成(纯 TUI 无 _sync_runtime 也能带标题落盘)",
+   _gen_calls == [1] and sorted(os.listdir(_hd4)) == ["TUI生成标题.json"]
+   and _s_empty.chat_title == "TUI生成标题",
+   repr((_gen_calls, sorted(os.listdir(_hd4)), _s_empty.chat_title)))
+
+# save_history_sync:退出兜底也按标题名(不另起 epoch)
+_hd3 = tempfile.mkdtemp()
+_sp = _iso(lambda: save_history_sync(_Sess(_mj2, "标题B"), _hd3, "chat-888", _gen_once))
+ck("save_history_sync 退出兜底按标题名落盘", os.path.basename(_sp) == "标题B.json", repr(_sp))
+
 # compact_status: cur>=threshold => due
 s3 = Session.from_env({"TOKEN_THRESHOLD": "100", "WCHAT_LAST_PROMPT_TOKENS": "200"})
 cur, th, due = compact_status(s3)

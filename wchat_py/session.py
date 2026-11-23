@@ -174,16 +174,66 @@ def save_history(history_dir, messages_json, name, title=""):
     return path
 
 
+def _current_title(session):
+    """当前对话标题:优先 env(WCHAT_CHAT_TITLE,加载历史/已生成时会写),再看会话字段。"""
+    return os.environ.get("WCHAT_CHAT_TITLE", "") or getattr(session, "chat_title", "")
+
+
+def ensure_title(session, gen_title):
+    """返回当前标题;没有就调一次模型生成并写回会话/env(每会话只生成一次)。
+
+    gen_title(msgs_json)->str 是标题生成器(通常 cli._gen_title)。生成失败(空)不写回,
+    返回 "";若生成器返回兜底名(如 "未命名对话")会照常写回 —— 避免每轮重复烧全量输入
+    (见 cli._gen_title 注释里那次实测:"4 轮对话白烧 4 次全量输入")。
+    """
+    t = _current_title(session)
+    if t:
+        return t
+    try:
+        t = gen_title(session.messages_json)
+    except Exception:
+        t = ""
+    if t:
+        session.chat_title = t
+        os.environ["WCHAT_CHAT_TITLE"] = t
+    return t or ""
+
+
+def resolve_hist_name(session, epoch_name, gen_title, fallback="未命名对话"):
+    """按当时已知标题解析落盘名;返回 (name, meaningful)。
+
+    优先级:WCHAT_HISTORY_NAME 显式 → 已有标题(非兜底名) → epoch 兜底名。
+    meaningful=False 表示只有 epoch 兜底名(没有可用标题),用于区分"真标题"与"仅防撞名"。
+    """
+    explicit = os.environ.get("WCHAT_HISTORY_NAME", "")
+    if explicit:
+        return explicit, True
+    t = ensure_title(session, gen_title)
+    if t and t != fallback:
+        return t, True
+    return epoch_name, False
+
+
+def save_history_sync(session, history_dir, epoch_name, gen_title):
+    """退出兜底:确保标题、按标题解析名字、同步落盘。返回落盘路径(目录为空返回 '')。"""
+    if not history_dir:
+        return ""
+    name, _ = resolve_hist_name(session, epoch_name, gen_title)
+    return save_history(history_dir, session.messages_json, name, _current_title(session))
+
+
 class HistorySaver:
     """**每轮后台落盘**的历史保存器(不阻塞主线程)。
 
     改动背景(2026-11 用户要求):以前只在 `-q` 退出时(询问后)保存一次;终端突然关闭/崩溃/
     误关会话,很长的上下文就全丢了。现改为:**模型每答完一整轮就保存一次**(后台线程写盘),
-    且退出时不再询问、一律保存。同一会话**始终写同一个文件**(name 固定),每轮覆盖;
-    退出时再同步保存一次兜底(顺带用语义标题更新 title)。
+    且退出时不再询问、一律保存。同一会话**始终写同一个文件**(名字按当时标题解析、会话内稳定),
+    每轮覆盖;退出时再同步保存一次兜底(顺带用语义标题更新 title)。
 
-    - `save_async(json)`:起 daemon 线程写盘,立即返回,不阻塞 UI。内容与上次相同则跳过。
-    - `save(json)`:同步写(退出兜底)。
+    - `save_async(json, name=None)`:起 daemon 线程写盘,立即返回,不阻塞 UI。内容+名字都没变则跳过。
+    - `save(json, name=None)`:同步写(退出兜底)。
+    - `name` 不传时用构造时的固定名;传了就用传的 —— 用于"落盘名按当时标题解析"
+      (见本模块 `resolve_hist_name`;`save_turn` 已封装"确保标题→解析名字→后台保存")。
     - `WCHAT_FORGET=1`(单轮/-st 等)或消息数 ≤1(只有 system)时跳过。
     """
 
@@ -193,13 +243,21 @@ class HistorySaver:
         self._title = title or ""
         self._lock = threading.Lock()
         self._last = None                      # 上次已保存的 messages_json(去重)
+        self._last_name = None                 # 上次落盘用的 name(去重;name 变了要重写)
         self._threads = []
 
     def set_title(self, title):
         self._title = title or ""
 
-    def _skip(self, messages_json):
-        if not self._dir or not self._name:
+    def save_turn(self, session, gen_title):
+        """每轮结束:确保标题→按标题解析名字→后台保存(不阻塞)。"""
+        name, _ = resolve_hist_name(session, self._name, gen_title)
+        self.set_title(_current_title(session))
+        self.save_async(session.messages_json, name)
+
+    def _skip(self, messages_json, name=None):
+        name = name or self._name
+        if not self._dir or not name:
             return True
         if os.environ.get("WCHAT_FORGET") == "1":
             return True
@@ -210,33 +268,37 @@ class HistorySaver:
             pass
         return False
 
-    def save(self, messages_json):
+    def save(self, messages_json, name=None):
         """同步保存(退出兜底)。返回落盘路径,跳过/失败返回 ''。"""
-        if self._skip(messages_json):
+        name = name or self._name
+        if self._skip(messages_json, name):
             return ""
         with self._lock:
             try:
-                p = save_history(self._dir, messages_json, self._name, self._title)
+                p = save_history(self._dir, messages_json, name, self._title)
                 self._last = messages_json
+                self._last_name = name
                 return p
             except Exception:
                 return ""
 
-    def save_async(self, messages_json):
-        """后台线程保存(每轮结束用),不阻塞;内容未变则跳过。"""
-        if self._skip(messages_json):
+    def save_async(self, messages_json, name=None):
+        """后台线程保存(每轮结束用),不阻塞;内容+落盘名都未变则跳过。"""
+        name = name or self._name
+        if self._skip(messages_json, name):
             return
-        if messages_json == self._last:
+        if messages_json == self._last and name == self._last_name:
             return
         snap = messages_json
 
         def _work():
             with self._lock:
-                if snap == self._last:
+                if snap == self._last and name == self._last_name:
                     return
                 try:
-                    save_history(self._dir, snap, self._name, self._title)
+                    save_history(self._dir, snap, name, self._title)
                     self._last = snap
+                    self._last_name = name
                 except Exception:
                     pass
 
