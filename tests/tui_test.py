@@ -305,12 +305,21 @@ async def run_app_checks():
         ck("历史原生渲染:子件数受控(≤ HIST_MAX*2+2)", _nkids <= app.HIST_MAX * 2 + 2, "n=%d" % _nkids)
 
 
+# 默认档现在是极简(-tf=0,隐藏思考/工具)。这段 E2E 验的是"思考/正文/工具横幅**能上屏**"的
+# 渲染机制,故显式置 off(-tf=1)来跑,验完还原(后面 _render_reason 等块自带 WCHAT_THINK_FULL)。
+_old_tf = os.environ.get("WCHAT_TF")
+os.environ["WCHAT_TF"] = "1"
 try:
     asyncio.run(run_app_checks())
 except Exception as e:
     import traceback
     traceback.print_exc()
     ck("headless 跑通(无异常)", False, repr(e))
+finally:
+    if _old_tf is None:
+        os.environ.pop("WCHAT_TF", None)
+    else:
+        os.environ["WCHAT_TF"] = _old_tf
 
 
 # ---- 7) render.confirm_block 走钩子(不 readline) ----

@@ -34,8 +34,12 @@ def working_text(frame):
 
 
 def enabled():
-    """`-simplest` 是否开启(读环境变量 WCHAT_SIMPLEST)。"""
-    return os.environ.get("WCHAT_SIMPLEST") == "1"
+    """是否极简档。单一真源在 render.tf_mode():`-tf=0`(或旧 `-simplest`/`WCHAT_SIMPLEST=1`)。"""
+    try:
+        from wchat_py.render import simplest_on
+        return simplest_on()
+    except Exception:
+        return os.environ.get("WCHAT_SIMPLEST") == "1"
 
 
 class _Null:

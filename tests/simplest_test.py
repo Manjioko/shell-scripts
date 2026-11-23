@@ -37,24 +37,33 @@ def ck(name, ok, detail=""):
 from wchat_py import simplest  # noqa: E402
 
 
-def _envw(v, fn):
-    old = os.environ.get("WCHAT_SIMPLEST")
-    if v is None:
-        os.environ.pop("WCHAT_SIMPLEST", None)
-    else:
-        os.environ["WCHAT_SIMPLEST"] = v
+_TFKEYS = ("WCHAT_TF", "WCHAT_SIMPLEST", "WCHAT_THINK_FULL")
+
+
+def _tfw(mode, fn):
+    """临时设 WCHAT_TF=mode(None=清空→默认 0/极简);同时清 WCHAT_SIMPLEST/THINK_FULL,结束后还原。"""
+    old = {k: os.environ.get(k) for k in _TFKEYS}
+    for k in _TFKEYS:
+        os.environ.pop(k, None)
+    if mode is not None:
+        os.environ["WCHAT_TF"] = mode
     try:
         return fn()
     finally:
-        if old is None:
-            os.environ.pop("WCHAT_SIMPLEST", None)
-        else:
-            os.environ["WCHAT_SIMPLEST"] = old
+        for k in _TFKEYS:
+            if old[k] is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = old[k]
 
 
-ck("默认关闭(enabled=False)", _envw(None, simplest.enabled) is False)
-ck("WCHAT_SIMPLEST=1 → enabled=True", _envw("1", simplest.enabled) is True)
-ck("WCHAT_SIMPLEST=0 → enabled=False", _envw("0", simplest.enabled) is False)
+# 三档派生态:0/默认=极简,1=off,2=on;旧 WCHAT_SIMPLEST=1 仍兼容
+ck("默认(无 env)= 极简 enabled=True", _tfw(None, simplest.enabled) is True)
+ck("WCHAT_TF=0(极简)→ enabled=True", _tfw("0", simplest.enabled) is True)
+ck("WCHAT_TF=1(off)→ enabled=False", _tfw("1", simplest.enabled) is False)
+ck("WCHAT_TF=2(on)→ enabled=False", _tfw("2", simplest.enabled) is False)
+ck("旧 WCHAT_SIMPLEST=1 → enabled=True(兼容)",
+   _tfw(None, lambda: (os.environ.__setitem__("WCHAT_SIMPLEST", "1"), simplest.enabled())[1]) is True)
 
 # 状态行"跑马灯"帧:结尾点数 1→2→3→1 循环
 _wt = [simplest.working_text(i) for i in range(4)]
@@ -80,8 +89,8 @@ def _quiet_writes():
     return buf.getvalue(), restored
 
 
-_got, _restored = _envw("1", _quiet_writes)
-ck("simplest 开:quiet_stdout 吞掉 stdout 写", _got == "", repr(_got))
+_got, _restored = _tfw("0", _quiet_writes)
+ck("简化档:quiet_stdout 吞掉 stdout 写", _got == "", repr(_got))
 ck("simplest 开:quiet_stdout 退出后恢复 sys.stdout", _restored is True)
 
 
@@ -97,7 +106,7 @@ def _quiet_passthru():
     return buf.getvalue()
 
 
-ck("simplest 关:quiet_stdout 是 no-op(写透传)", _envw(None, _quiet_passthru) == "VISIBLE")
+ck("非极简(-tf=1):quiet_stdout 是 no-op(写透传)", _tfw("1", _quiet_passthru) == "VISIBLE")
 
 
 def _run_tool_quiet():
@@ -111,12 +120,12 @@ def _run_tool_quiet():
     return r, out.getvalue()
 
 
-_r_ret, _r_out = _envw("1", _run_tool_quiet)
-ck("simplest 开:run_tool 吞工具 stdout", _r_out == "", repr(_r_out))
-ck("simplest 开:run_tool 仍返回工具结果", _r_ret == "RET", repr(_r_ret))
+_r_ret, _r_out = _tfw("0", _run_tool_quiet)
+ck("简化档:run_tool 吞工具 stdout", _r_out == "", repr(_r_out))
+ck("简化档:run_tool 仍返回工具结果", _r_ret == "RET", repr(_r_ret))
 
-_r_ret2, _r_out2 = _envw(None, _run_tool_quiet)
-ck("simplest 关:run_tool 原样(输出透传+结果不变)", _r_out2 == "TOOL-OUT" and _r_ret2 == "RET",
+_r_ret2, _r_out2 = _tfw("1", _run_tool_quiet)
+ck("非极简(-tf=1):run_tool 原样(输出透传+结果不变)", _r_out2 == "TOOL-OUT" and _r_ret2 == "RET",
    repr((_r_out2, _r_ret2)))
 
 
@@ -166,10 +175,9 @@ def _content_text(app):
 
 
 async def _run_once(simplest_on):
-    if simplest_on:
-        os.environ["WCHAT_SIMPLEST"] = "1"
-    else:
-        os.environ.pop("WCHAT_SIMPLEST", None)
+    os.environ.pop("WCHAT_SIMPLEST", None)
+    os.environ.pop("WCHAT_THINK_FULL", None)
+    os.environ["WCHAT_TF"] = "0" if simplest_on else "1"   # 0=极简 1=off
 
     def handle_line(text, emit, stream, reason):
         reason("(思考中…)")                       # 思考:simplest 下应隐藏
@@ -214,7 +222,7 @@ async def _anim_check():
     不依赖真实定时器/墙钟(handle_line 瞬回,定时器来不及跑),直接调 _simplest_tick(),
     证明"每帧把结尾点推进一位并循环"这条逻辑 + widget 更新是通的。
     """
-    os.environ["WCHAT_SIMPLEST"] = "1"
+    os.environ["WCHAT_TF"] = "0"
     app = tui.make_app(lambda *a: None)
     seq = []
     async with app.run_test() as pilot:
@@ -229,7 +237,7 @@ async def _anim_check():
         app._simplest_done()
         await pilot.pause()
         seq.append(_content_text(app))
-    os.environ.pop("WCHAT_SIMPLEST", None)
+    os.environ.pop("WCHAT_TF", None)
     return seq
 
 
@@ -271,7 +279,7 @@ except Exception as _e:
 
 # ---- C. 一回合内"正文↔工具"交替 → 状态行逐段循环(正在处理中 → 处理完成,逐段重来)----
 async def _run_segments():
-    os.environ["WCHAT_SIMPLEST"] = "1"
+    os.environ["WCHAT_TF"] = "0"
 
     def handle_line(text, emit, stream, reason):
         reason("(思考中…)")
@@ -308,6 +316,7 @@ except Exception as _e:
     import traceback
     traceback.print_exc()
     ck("逐段循环检查无异常", False, repr(_e))
+
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

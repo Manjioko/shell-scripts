@@ -210,10 +210,12 @@ ma = Session.from_env({"WCHAT_MODEL": "stub-pro", "WCHAT_THINKING": "enabled",
                        "WCHAT_TOOL_ROUND": "2", "MAX_TOOL_ROUNDS": "25",
                        "WCHAT_AUTO_CK_NOTE": "ck-1", "WCHAT_BACKUP_COUNT": "4",
                        "WCHAT_AUDIT_LOG": "/a.log", "WCHAT_RO_COUNT": "2", "WCHAT_RW_COUNT": "1"})
+os.environ["WCHAT_TF"] = "1"      # 固定档位,不随宿主环境漂(off=两行+折叠)
 j = "\n".join(model_status_lines(ma))
 ck("md 模型/思考", "模型: stub-pro" in j and "思考: enabled" in j, j)
-ck("md 思考显示(默认两行)", "思考显示: 两行(默认;-tf=on 展开)" in j, j)
+ck("md 展示档位(tf=1 两行+折叠)", "展示档位:" in j and "两行+折叠" in j, j)
 ck("md 不再单列 shell 档位(跟 -tf 走,不做第二个开关)", "shell输出" not in j, j)
+os.environ.pop("WCHAT_TF", None)
 ck("md 联网/阈值", "联网搜索: openai(超时 9s)" in j and "压缩阈值: 50000 tokens" in j)
 ck("md auto 开", "auto: full 档 · 已自动放行 3/50 次 · 本轮工具 2/25 轮" in j, j)
 ck("md 回滚点/备份/审计", "回滚点: ck-1 · 备份 4 份 · 审计 /a.log" in j)

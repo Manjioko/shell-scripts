@@ -121,17 +121,17 @@ def _detect_web_provider():
 
 
 def apply_think_flag(value):
-    """把 `-tf=on|off` 落到环境变量(思考文本:整段 / 两行)。
+    """把 `-tf=0|1|2`(或别名 on/off)落到环境变量(展示档位)。
 
-    属于"用户以为开了却还是两行"那类**不报错**的故障,所以非法值必须说出来;
-    但它也不该拦住启动 —— 告警后按默认(两行)继续。
+    属于"用户以为切了档却还是原样"那类**不报错**的故障,所以非法值必须说出来;
+    但它也不该拦住启动 —— 告警后按默认(极简 0)继续。
     """
     v = str(value or "").strip()
     if not v:
         return
-    from wchat_py.render import set_think_full
-    if set_think_full(v) is None:
-        sys.stderr.write("⚠ -tf 只接受 on/off(收到 %r),本次按默认:只展示两行\n" % v)
+    from wchat_py.render import set_tf_mode
+    if set_tf_mode(v) is None:
+        sys.stderr.write("⚠ -tf 只接受 0/1/2(或 on/off)(收到 %r),本次按默认:极简\n" % v)
 
 
 def _apply_runtime_defaults():

@@ -50,7 +50,7 @@ os.environ["COLUMNS"] = "50"          # 写死宽度:闸门不能随本地窗口
 os.environ["LINES"] = "40"
 
 from wchat_py.render import (render_reason, set_think_full, think_full,  # noqa: E402
-                             display_width)
+                             display_width, set_tf_mode)
 
 THINK3 = "第一行思考内容\n第二行不该出现\n第三行也不该出现"
 LONG1 = "这是一行很长的思考内容" * 8
@@ -102,11 +102,12 @@ print("=== 5. 启动参数真的落到环境变量(走 main 的接线,不是只�
 _d = tempfile.mkdtemp(prefix="thinkview_")
 _env = dict(os.environ, HOME=_d, CT_HOME=os.path.join(_d, ".ct"), WCHAT_NO_SETUP="1")
 _env.pop("WCHAT_THINK_FULL", None)      # 子进程从"未设置"起步,才测得出 -tf 的接线
+_env.pop("WCHAT_TF", None)
 _code = ("import os,sys\n"
          "sys.path.insert(0, %r)\n"
          "from wchat_py import cli\n"
          "rc = cli.main(['-tf=%s', '-u'])\n"
-         "print('ENV=', os.environ.get('WCHAT_THINK_FULL'), 'RC=', rc)\n")
+         "print('ENV=', os.environ.get('WCHAT_TF'), 'RC=', rc)\n")
 
 
 def _run(flag):
@@ -115,11 +116,13 @@ def _run(flag):
     return r.stdout + r.stderr
 
 
-ck("-tf=on → WCHAT_THINK_FULL=1", "ENV= 1" in _run("on"), _run("on")[-200:])
-ck("-tf=off → WCHAT_THINK_FULL=0", "ENV= 0" in _run("off"), _run("off")[-200:])
+ck("-tf=on → WCHAT_TF=2(整段)", "ENV= 2" in _run("on"), _run("on")[-200:])
+ck("-tf=off → WCHAT_TF=1(两行)", "ENV= 1" in _run("off"), _run("off")[-200:])
+ck("-tf=0 → WCHAT_TF=0(极简)", "ENV= 0" in _run("0"), _run("0")[-200:])
+ck("-tf=2 → WCHAT_TF=2", "ENV= 2" in _run("2"), _run("2")[-200:])
 _bad = _run("maybe")
-ck("非法 -tf 值明说并按默认(两行)走",
-   "-tf 只接受 on/off" in _bad and "ENV= None" in _bad, _bad[-300:])
+ck("非法 -tf 值明说并按默认(极简)走",
+   "-tf 只接受 0/1/2" in _bad and "ENV= None" in _bad, _bad[-300:])
 
 print("=== 6. 会话内 -tf=(交互模式同一套) ===")
 from wchat_py.cmdline import classify  # noqa: E402
@@ -129,32 +132,45 @@ from wchat_py.session import model_status_lines  # noqa: E402
 
 ck("-tf=on 被识别为元命令", classify("-tf=on") == ("think_full", "on"), repr(classify("-tf=on")))
 ck("-tf=off 被识别为元命令", classify("-tf=off") == ("think_full", "off"))
+ck("-tf=0 被识别为元命令", classify("-tf=0") == ("think_full", "0"))
 ck("裸 -tf 按 on", classify("-tf") == ("think_full", "on"))
 ck("-tf=on 不会被当正文发给模型", classify("-tf=on")[0] != "text")
 
-set_think_full("off")
+# 会话内切档(三档:0=极简 1=两行 2=整段),状态落在 WCHAT_TF
+set_tf_mode("1")
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
-    _default_meta("think_full", "on", Session())
-ck("会话内 -tf=on 生效", os.environ.get("WCHAT_THINK_FULL") == "1", show(_buf.getvalue()))
-ck("会话内 -tf=on 有回执", "整段" in _buf.getvalue(), show(_buf.getvalue()))
+    _default_meta("think_full", "2", Session())
+ck("会话内 -tf=2 生效", os.environ.get("WCHAT_TF") == "2", show(_buf.getvalue()))
+ck("会话内 -tf=2 有回执", "整段" in _buf.getvalue(), show(_buf.getvalue()))
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
-    _default_meta("think_full", "off", Session())
-ck("会话内 -tf=off 生效", os.environ.get("WCHAT_THINK_FULL") == "0")
-ck("会话内 -tf=off 有回执", "两行" in _buf.getvalue(), show(_buf.getvalue()))
+    _default_meta("think_full", "1", Session())
+ck("会话内 -tf=1 生效", os.environ.get("WCHAT_TF") == "1")
+ck("会话内 -tf=1 有回执", "两行" in _buf.getvalue(), show(_buf.getvalue()))
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _default_meta("think_full", "0", Session())
+ck("会话内 -tf=0 生效(极简)", os.environ.get("WCHAT_TF") == "0")
+ck("会话内 -tf=0 有回执", "极简" in _buf.getvalue(), show(_buf.getvalue()))
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
     _default_meta("think_full", "whatever", Session())
 ck("会话内非法值给用法、不改状态",
-   "用法" in _buf.getvalue() and os.environ.get("WCHAT_THINK_FULL") == "0",
+   "用法" in _buf.getvalue() and os.environ.get("WCHAT_TF") == "0",
    show(_buf.getvalue()))
 
 print("=== 7. -md 如实显示当前档位 ===")
-_j = "\n".join(model_status_lines(Session.from_env({"WCHAT_THINK_FULL": "1"})))
-ck("-md 显示整段", "思考显示: 整段(-tf=on)" in _j, _j)
-_j = "\n".join(model_status_lines(Session.from_env({"WCHAT_THINK_FULL": "0"})))
-ck("-md 显示两行", "思考显示: 两行(默认;-tf=on 展开)" in _j, _j)
+os.environ["WCHAT_TF"] = "2"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示整段", "整段+展开" in _j, _j)
+os.environ["WCHAT_TF"] = "1"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示两行", "两行+折叠" in _j, _j)
+os.environ["WCHAT_TF"] = "0"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示极简", "极简" in _j, _j)
+os.environ.pop("WCHAT_TF", None)
 os.environ.pop("WCHAT_THINK_FULL", None)
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))

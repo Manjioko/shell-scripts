@@ -27,7 +27,7 @@ import tempfile
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
-from wchat_py.render import set_think_full, think_full  # noqa: E402
+from wchat_py.render import set_think_full, think_full, set_tf_mode  # noqa: E402
 
 P = F = 0
 
@@ -74,13 +74,17 @@ class _Env:
 
 
 os.environ.pop("WCHAT_THINK_FULL", None)
+os.environ.pop("WCHAT_TF", None)
 
-print("=== 1. 档位真值表(只有 -tf 一套) ===")
-ck("默认 = 两行 / shell 折叠", think_full() is False, repr(think_full()))
-for v in ("on", "1", "true", "yes", "y", "ON"):
-    ck("set(%r) → True" % v, set_think_full(v) is True and think_full() is True)
-for v in ("off", "0", "false", "no", "n", "OFF"):
-    ck("set(%r) → False" % v, set_think_full(v) is False and think_full() is False)
+print("=== 1. 档位真值表(单一真源 WCHAT_TF;0/1/2 + on/off 别名) ===")
+ck("默认 = 极简(think_full False / shell 折叠)", think_full() is False, repr(think_full()))
+for v in ("on", "2", "true", "yes", "y", "ON"):
+    ck("set(%r) → True(整段)" % v, set_think_full(v) is True and think_full() is True)
+for v in ("off", "1", "0", "false", "no", "n", "OFF"):
+    ck("set(%r) → False(非整段)" % v, set_think_full(v) is False and think_full() is False)
+ck("数字 1 = off、数字 2 = on(档位不随字符串漂移)",
+   set_think_full("1") is False and set_think_full("2") is True)
+set_think_full("off")   # 归位到 off,再验"非法值不改状态"
 ck("非法值返回 None 且不改动状态", set_think_full("maybe") is None and think_full() is False)
 
 print("=== 2. toolrun:折叠只留收尾行;`-tf=on` 展开;回给模型都是全量 ===")
@@ -103,7 +107,7 @@ def run_shell(cmd, **envkv):
 
 
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", AUTO_AUDIT_LOG=AUDIT):
-    out, screen = run_shell("printf 'A\\nB\\nC\\n'", WCHAT_THINK_FULL="0")
+    out, screen = run_shell("printf 'A\\nB\\nC\\n'", WCHAT_TF="1")
 vis = text_lines(screen)
 ck("折叠:三行内容一个字不上屏",
    not any(x in plain(screen) for x in ("A\n", "B\n", "C\n")) and "A" not in plain(screen)
@@ -116,7 +120,7 @@ ck("折叠:回给模型仍是全量", all(x in out for x in ("A", "B", "C")), re
 ck("折叠:收尾行是灰的", GREY in screen, repr(screen[:80]))
 
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", AUTO_AUDIT_LOG=AUDIT):
-    out, screen = run_shell("printf 'A\\nB\\nC\\n'", WCHAT_THINK_FULL="1")
+    out, screen = run_shell("printf 'A\\nB\\nC\\n'", WCHAT_TF="2")
 vis = text_lines(screen)
 ck("-tf=on:三行内容都上屏",
    sum(1 for ln in vis if plain(ln).strip().lstrip("│ ").strip() in ("A", "B", "C")) == 3,
@@ -134,7 +138,7 @@ for ln in [x for x in screen.split("\n") if plain(x).strip().endswith(("A", "B")
 
 # 换一条命令再验一遍折叠:上面写的是"那三行没出现",换个输出就是假绿的常见来源
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", AUTO_AUDIT_LOG=AUDIT):
-    out2, screen2 = run_shell("printf 'x1\\nx2\\n'", WCHAT_THINK_FULL="0")
+    out2, screen2 = run_shell("printf 'x1\\nx2\\n'", WCHAT_TF="1")
 ck("折叠(换命令):内容仍一个字不上屏",
    "x1" not in plain(screen2) and "x2" not in plain(screen2), repr(text_lines(screen2))[:160])
 ck("折叠(换命令):收尾行计数正确且不收口",
@@ -142,7 +146,7 @@ ck("折叠(换命令):收尾行计数正确且不收口",
 
 # 无输出也必须有一条汇总行(防静默成功),与档位无关。
 with _Env(AUTO_MODE="full", WCHAT_AUTO_ASSUME_YES="1", AUTO_AUDIT_LOG=AUDIT):
-    _o, _s = run_shell("true", WCHAT_THINK_FULL="0")
+    _o, _s = run_shell("true", WCHAT_TF="1")
 _sum = [ln for ln in text_lines(_s) if "└─" in ln and "共 0 行" in ln]
 ck("无输出:仍有一行『共 0 行』汇总", len(_sum) == 1, repr(_s)[:200])
 
@@ -173,11 +177,12 @@ print("=== 4. 启动参数真的落到环境变量(走 main 的接线) ===")
 _d = tempfile.mkdtemp(prefix="shellview_")
 _env = dict(os.environ, HOME=_d, CT_HOME=os.path.join(_d, ".ct"), WCHAT_NO_SETUP="1")
 _env.pop("WCHAT_THINK_FULL", None)
+_env.pop("WCHAT_TF", None)
 _code = ("import os,sys\n"
          "sys.path.insert(0, %r)\n"
          "from wchat_py import cli\n"
          "rc = cli.main(['-tf=%s', '-u'])\n"
-         "print('ENV=', os.environ.get('WCHAT_THINK_FULL'), 'RC=', rc)\n")
+         "print('ENV=', os.environ.get('WCHAT_TF'), 'RC=', rc)\n")
 
 
 def _run(flag):
@@ -187,48 +192,61 @@ def _run(flag):
 
 
 _o = _run("on")
-ck("-tf=on → WCHAT_THINK_FULL=1", "ENV= 1" in _o, _o[-200:])
+ck("-tf=on → WCHAT_TF=2(整段)", "ENV= 2" in _o, _o[-200:])
 _o = _run("off")
-ck("-tf=off → WCHAT_THINK_FULL=0", "ENV= 0" in _o, _o[-200:])
+ck("-tf=off → WCHAT_TF=1(两行)", "ENV= 1" in _o, _o[-200:])
+_o = _run("0")
+ck("-tf=0 → WCHAT_TF=0(极简)", "ENV= 0" in _o, _o[-200:])
 _bad = _run("maybe")
-ck("非法 -tf 值明说并按默认(两行 + 折叠)走",
-   "-tf 只接受 on/off" in _bad and "ENV= None" in _bad, _bad[-300:])
+ck("非法 -tf 值明说并按默认(极简)走",
+   "-tf 只接受 0/1/2" in _bad and "ENV= None" in _bad, _bad[-300:])
 
 print("=== 5. 会话内 -tf=(交互模式同一套,回执里说清 shell 同档) ===")
 
 ck("-tf=on 被识别为元命令", classify("-tf=on") == ("think_full", "on"), repr(classify("-tf=on")))
+ck("-tf=0 被识别为元命令", classify("-tf=0") == ("think_full", "0"))
 ck("裸 -tf 按 on", classify("-tf") == ("think_full", "on"))
 ck("-tf=on 不会被当正文发给模型", classify("-tf=on")[0] != "text")
 
-set_think_full("off")
+set_tf_mode("1")
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
-    _default_meta("think_full", "on", Session())
-ck("会话内 -tf=on 生效", os.environ.get("WCHAT_THINK_FULL") == "1", repr(_buf.getvalue()))
-ck("会话内 -tf=on 回执提到 shell 也展开", "shell" in _buf.getvalue() and "展开" in _buf.getvalue(),
+    _default_meta("think_full", "2", Session())
+ck("会话内 -tf=2 生效", os.environ.get("WCHAT_TF") == "2", repr(_buf.getvalue()))
+ck("会话内 -tf=2 回执提到 shell 也展开", "shell" in _buf.getvalue() and "展开" in _buf.getvalue(),
    repr(_buf.getvalue()))
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
-    _default_meta("think_full", "off", Session())
-ck("会话内 -tf=off 生效", os.environ.get("WCHAT_THINK_FULL") == "0")
-ck("会话内 -tf=off 回执提到 shell 只留收尾行", "shell" in _buf.getvalue(),
+    _default_meta("think_full", "1", Session())
+ck("会话内 -tf=1 生效", os.environ.get("WCHAT_TF") == "1")
+ck("会话内 -tf=1 回执提到 shell 只留收尾行", "shell" in _buf.getvalue(),
    repr(_buf.getvalue()))
+_buf = io.StringIO()
+with contextlib.redirect_stdout(_buf):
+    _default_meta("think_full", "0", Session())
+ck("会话内 -tf=0 生效(极简)", os.environ.get("WCHAT_TF") == "0")
+ck("会话内 -tf=0 回执提到极简", "极简" in _buf.getvalue(), repr(_buf.getvalue()))
 _buf = io.StringIO()
 with contextlib.redirect_stdout(_buf):
     _default_meta("think_full", "whatever", Session())
 ck("会话内非法值给用法、不改状态",
-   "用法" in _buf.getvalue() and os.environ.get("WCHAT_THINK_FULL") == "0",
+   "用法" in _buf.getvalue() and os.environ.get("WCHAT_TF") == "0",
    repr(_buf.getvalue()))
 
-print("=== 6. -md 不再单列 shell 档位(同一事实不说两遍) ===")
+print("=== 6. -md 如实显示档位(不再单列一行 shell) ===")
 from wchat_py.session import model_status_lines  # noqa: E402
-_j = "\n".join(model_status_lines(Session.from_env({"WCHAT_THINK_FULL": "1"})))
-ck("-md 显示整段", "思考显示: 整段(-tf=on)" in _j, _j)
+os.environ["WCHAT_TF"] = "2"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示整段", "整段+展开" in _j, _j)
 ck("-md 不另起一行讲 shell", "shell输出" not in _j, _j)
-_j = "\n".join(model_status_lines(Session.from_env({"WCHAT_THINK_FULL": "0"})))
-ck("-md 显示两行", "思考显示: 两行(默认;-tf=on 展开)" in _j, _j)
+os.environ["WCHAT_TF"] = "1"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示两行", "两行+折叠" in _j, _j)
+os.environ["WCHAT_TF"] = "0"
+_j = "\n".join(model_status_lines(Session()))
+ck("-md 显示极简", "极简" in _j, _j)
+os.environ.pop("WCHAT_TF", None)
 os.environ.pop("WCHAT_THINK_FULL", None)
 
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
-

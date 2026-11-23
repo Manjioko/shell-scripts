@@ -30,6 +30,9 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 os.environ["WCHAT_NO_SETUP"] = "1"
+# 默认档现在是极简(-tf=0,隐藏思考/工具)。本闸门验的是"思考/提示等能上屏 + 布局不变量",
+# 故显式置 off(-tf=1)来跑;极简默认的行为由 simplest_test/think_view_test 覆盖。
+os.environ["WCHAT_TF"] = "1"
 
 
 def _import_textual_ok(exe=None):

@@ -319,12 +319,15 @@ def compact_status(s):
 
 def model_status_lines(s):
     """复刻 bash `-md` 的模型状态行（不含 `│ ` 前缀）。"""
-    from wchat_py.render import think_full as _think_full
+    from wchat_py.render import tf_mode as _tf_mode
+    _m = _tf_mode()
+    _disp = {0: "极简(-tf=0:隐藏思考/工具,只留正文+状态行)",
+             1: "两行+折叠(-tf=1:▸+首行 / shell 收尾行)",
+             2: "整段+展开(-tf=2:-tf=on)"}.get(_m, "极简(-tf=0)")
     out = [
         "模型: %s" % s.model,
         "思考: %s" % s.thinking,
-        "思考显示: %s" % ("整段(-tf=on)" if _think_full(s.think_full)
-                          else "两行(默认;-tf=on 展开)"),
+        "展示档位: %s" % _disp,
         "联网搜索: %s(超时 %ss)" % (s.web_provider or "none", s.web_timeout),
         "压缩阈值: %d tokens" % s.token_threshold,
         "标题: %s" % (s.chat_title or "（空）"),

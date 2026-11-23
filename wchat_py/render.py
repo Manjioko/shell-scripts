@@ -216,34 +216,79 @@ def render_markdown(text):
     return text or ""
 
 
-# ── 思考文本的展示档位(`-tf=on` / `-tf=off`)──────────────────────────────────
-# 默认**只展示两行**:第一行是灰色三角,第二行是思考的第一个非空行,其余用 `…` 省略。
-# 完整的思考链照常累积、照常进 messages 回传给模型 —— 这里改的只是**屏幕占用**,
-# 不是"少想"。`-tf=on`(或 WCHAT_THINK_FULL=1)回到整段渲染。
-_THINK_ON = ("1", "on", "true", "yes", "y")
-_THINK_OFF = ("0", "off", "false", "no", "n")
+# ── 展示档位(单一真源 WCHAT_TF,三档)──────────────────────────────────────────
+#   0 = 极简(simplest):隐藏思考 + 工具调用/输出,只留模型正文 + 状态行
+#   1 = off:思考两行(▸ + 首行 …)+ shell 输出折叠成收尾行
+#   2 = on:思考整段 + shell 输出多行展开
+# **默认 0(极简)**。`-simplest` 是 `-tf=0` 的别名。完整思考链照常进 messages 回传模型,
+# 这里只改**屏幕占用**,不是"少想"。
+# 真值表只在这里定义一份:启动 `-tf=`、会话内 `-tf=`、`-md`、TUI/toolrun 的展示都派生自它。
+# 兼容:老 `WCHAT_THINK_FULL=1/0` 按旧义映射(1→on/2、0→off/1),**不**映射到极简(0);
+#      字符串 on/off 恒等于 2/1(不随数字重排漂移);裸数字 0/1/2 才走新档。
+_THINK_ON = ("on", "true", "yes", "y")
+_THINK_OFF = ("off", "false", "no", "n")
+_TF_DIGITS = ("0", "1", "2")
+
+
+def tf_mode():
+    """当前展示档位 0/1/2。WCHAT_TF 优先(数字或 on/off);否则老 WCHAT_THINK_FULL 按旧义;
+    都没有 → **默认 0(极简)**。"""
+    v = os.environ.get("WCHAT_TF")
+    if v is not None:
+        s = str(v).strip().lower()
+        if s in _TF_DIGITS:
+            return int(s)
+        if s in _THINK_ON:
+            return 2
+        if s in _THINK_OFF:
+            return 1
+        return 0
+    old = os.environ.get("WCHAT_THINK_FULL")
+    if old is not None:
+        s = str(old).strip().lower()
+        if s in _THINK_ON or s == "1":
+            return 2
+        if s in _THINK_OFF or s == "0":
+            return 1
+    return 0
 
 
 def think_full(value=None):
-    """思考是否整段展示。`value=None` 时读 WCHAT_THINK_FULL(未设 = 两行)。"""
-    v = os.environ.get("WCHAT_THINK_FULL", "") if value is None else value
-    return str(v if v is not None else "").strip().lower() in _THINK_ON
+    """思考是否**整段**展示(=档位 2)。`value=None` 时读当前档位;给了显式值按 on/off 判。"""
+    if value is None:
+        return tf_mode() == 2
+    return str(value if value is not None else "").strip().lower() in _THINK_ON
+
+
+def simplest_on():
+    """是否极简档(=档位 0)。兼容旧 `WCHAT_SIMPLEST=1`(等同 -tf=0)。"""
+    if os.environ.get("WCHAT_SIMPLEST") == "1":
+        return True
+    return tf_mode() == 0
+
+
+def set_tf_mode(value):
+    """设档位,返回新档位 0/1/2;非法返回 None(不改动)。接受 0/1/2 与 on/off(on→2 off→1)。"""
+    s = str(value if value is not None else "").strip().lower()
+    if s in _TF_DIGITS:
+        m = int(s)
+    elif s in _THINK_ON:
+        m = 2
+    elif s in _THINK_OFF:
+        m = 1
+    else:
+        return None
+    os.environ["WCHAT_TF"] = str(m)
+    os.environ.pop("WCHAT_THINK_FULL", None)      # 避免旧 env 盖过新档位
+    return m
 
 
 def set_think_full(value):
-    """把 on/off 写进环境变量；返回新的布尔状态,值不认识返回 None(不改动)。
-
-    真值表只在这里定义一份:启动参数 `-tf=`、会话内 `-tf=`、`-md` 的显示都走它。
-    分开写三份的下场是"on 的别名各认各的"——那种不一致没有任何报错。
-    """
-    v = str(value if value is not None else "").strip().lower()
-    if v in _THINK_ON:
-        os.environ["WCHAT_THINK_FULL"] = "1"
-        return True
-    if v in _THINK_OFF:
-        os.environ["WCHAT_THINK_FULL"] = "0"
-        return False
-    return None
+    """兼容旧名(on/off):设档位并返回 bool(on=2→True, off/0/1→False);非法返回 None。"""
+    m = set_tf_mode(value)
+    if m is None:
+        return None
+    return m == 2
 
 
 # ── shell 输出箱:**跟随 `-tf`**,不另设开关 ──────────────────────────────────

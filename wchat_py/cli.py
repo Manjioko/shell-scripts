@@ -75,7 +75,7 @@ def parse(argv):
             think_full = a.split("=", 1)[1] if "=" in a else "on"
         elif a == "-sf" or a.startswith("-sf="):
             # `-sf` 已并入 `-tf`:必须明说,别静默忽略(否则用户以为档位变了却毫无反应)。
-            sys.stderr.write("⚠ -sf 已并入 -tf(-tf=on 展开 / -tf=off 只留收尾行),本次忽略\n")
+            sys.stderr.write("⚠ -sf 已并入 -tf(-tf=2 展开 / -tf=1 折叠 / -tf=0 极简),本次忽略\n")
         elif a == "-p":
             model = os.environ.get("PRO_MODEL", "")
         elif a == "-dp":
@@ -900,7 +900,7 @@ def main(argv):
     # 工作根锁定:与 bash 一致按 pwd -P。缺省时 hardwall.detail 会退回 "/tmp",
     # 导致真实工作目录内命令被误判 P2(路径越界) —— 入口统一补齐。
     os.environ.setdefault("WORK_ROOT", os.path.realpath(os.getcwd()))
-    if "-simplest" in argv: os.environ["WCHAT_SIMPLEST"] = "1"   # 极简模式,见 simplest.py
+    if "-simplest" in argv: os.environ["WCHAT_TF"] = "0"   # 极简 = -tf=0(默认档);见 render.tf_mode
     _exe = _runtime_fallback()
     if _exe != sys.executable:
         sys.stderr.write("⚠ 当前解释器已不存在(多半是 brew 升级删了旧目录),"

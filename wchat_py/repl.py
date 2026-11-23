@@ -239,22 +239,23 @@ def _default_meta(action, arg, session=None):
         # `-sf` 已并入 `-tf`(2026-12:同一件事不要两个开关)。这里必须**明说**:
         # 静默把它当正文发给模型,用户会以为开关生效了,实际是把这串字发出去问了一遍。
         from wchat_py.cli import inp_msg
-        inp_msg("⚠ -sf 已并入 -tf(-tf=on 展开 / -tf=off 只留收尾行),本次未执行")
+        inp_msg("⚠ -sf 已并入 -tf(-tf=2 展开 / -tf=1 折叠 / -tf=0 极简),本次未执行")
         return True
     if action == "think_full":
-        # 会话内切换思考文本展示档位(渲染层每次调用都读 env,所以立刻生效)。
-        # shell 输出箱**跟随这一档**:同一句回执里说清楚,省得用户以为少了个开关。
+        # 会话内切换展示档位(渲染层每次调用都读 env,所以立刻生效):
+        # 0=极简(隐藏思考/工具) 1=两行+折叠 2=整段+展开。
         from wchat_py.cli import inp_msg
-        from wchat_py.render import set_think_full
-        _on = set_think_full(arg or "on")
-        if _on is None:
-            inp_msg("用法: -tf=on 整段展示思考内容与 shell 输出 / -tf=off 只展示两行、"
-                    "shell 只留收尾行(默认)")
-        elif _on:
-            inp_msg("✅ 思考内容:整段展示 · shell 输出:展开多行(-tf=off 可切回)")
+        from wchat_py.render import set_tf_mode
+        _m = set_tf_mode(arg or "2")
+        if _m is None:
+            inp_msg("用法: -tf=0 极简(隐藏思考与工具,只留正文+状态行) / -tf=1 思考两行+shell折叠 / "
+                    "-tf=2 思考整段+shell展开 ;也接受 on(=2)/off(=1)")
+        elif _m == 0:
+            inp_msg("✅ 已切到极简(-tf=0):隐藏思考与工具调用,只展示模型正文 + 状态行")
+        elif _m == 1:
+            inp_msg("✅ 已切到 off(-tf=1):思考两行(▸ + 首行,其余省略)· shell 输出只留收尾行")
         else:
-            inp_msg("✅ 思考内容:只展示两行(灰色三角 + 首行,其余省略) · "
-                    "shell 输出:只留收尾行")
+            inp_msg("✅ 已切到 on(-tf=2):思考整段展示 · shell 输出展开多行")
         return True
     if action in ("model_pro", "thinking_on", "model_flash"):
         from wchat_py.cli import inp_msg
