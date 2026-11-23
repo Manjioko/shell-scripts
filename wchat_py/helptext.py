@@ -26,6 +26,7 @@ def help_lines():
         "选项:",
         "  -t    启用思考模式",
         "  -tf=on|-off  展示档位:on=思考整段 + shell 输出多行;off=思考两行 + shell 只留收尾行(默认)",
+        "  -simplest  极简模式:隐藏思考与工具展示,只留一条状态行 + 正文(给非开发人员看)",
         "  -p    使用 deepseek-v4-pro 模型",
         "  -dp   启用思考模式并使用 deepseek-v4-pro 模型",
         "  -l    查看历史记录并选择加载",

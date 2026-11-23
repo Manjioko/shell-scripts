@@ -121,6 +121,28 @@ class TuiStdout:
         return False
 
 
+class _SimplestStdout:
+    """-simplest 回合内的 sys.stdout shim:工具横幅/结果/输出箱**不显示**,只当作"工具轮边界"信号。
+
+    投 ("simplest_log", ...) 事件;`_drain` 收到后不挂内容,只调 `_simplest_segment_end()`
+    (收尾当前正文段 + 在下方起一条新的等待状态行)。这样一轮里"正文↔工具"交替时,状态行能
+    像用户期望的那样逐段循环。stderr 仍走 TuiStdout(style='bold red') → 报错照常显示。
+    """
+
+    def __init__(self, app):
+        self._app = app
+
+    def write(self, s):
+        if s:
+            self._app._q.put(("simplest_log", str(s), None))
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
 def make_app(handle_line, *, banner="", on_meta=None):
     """构造(不 run)WchatApp。handle_line(text, emit, stream, reason[, poll_pending]):
        emit(s)   -> log 通道(横幅/工具/错误)
@@ -827,6 +849,123 @@ def make_app(handle_line, *, banner="", on_meta=None):
                 self._live_widget = w
                 self._has_blocks = True
 
+        def _simplest_on(self):
+            try:
+                from wchat_py.simplest import enabled
+                return enabled()
+            except Exception:
+                return False
+
+        def _simplest_status_text(self, phase):
+            """状态行文本:走马灯点(1→2→3 循环)+ 文字颜色滑动渐变(蓝→紫→蓝)。
+
+            phase 每帧 +1:既驱动结尾点循环(working_text 内部 %3),又驱动渐变相位(整串
+            颜色随之流动)。颜色是逐字符 style,plain 文本不变(不影响任何按 plain 取字的断言)。
+            """
+            from wchat_py.simplest import working_text
+            s = working_text(phase)
+            A = (120, 160, 255)          # 柔蓝
+            B = (232, 140, 255)          # 柔紫
+            period = 10.0                # 一串里约 10 个字符走完一个 A→B→A 的往返
+            t = Text()
+            for i, ch in enumerate(s):
+                frac = ((i + phase) % period) / period
+                wv = 1 - abs(2 * frac - 1)          # 三角波 0→1→0
+                r = int(A[0] + (B[0] - A[0]) * wv)
+                g = int(A[1] + (B[1] - A[1]) * wv)
+                b = int(A[2] + (B[2] - A[2]) * wv)
+                t.append(ch, style="italic #%02x%02x%02x" % (r, g, b))
+            return t
+
+        def _simplest_show_waiting(self):
+            """挂一条「正在处理中,请稍后.」状态行(带跑马灯点 + 颜色渐变),并起定时器让它动。
+
+            每进入一个"等待下一段正文"的阶段调用一次(turn 开始、每次正文段结束之后)。
+            """
+            try:
+                self._simplest_stop_timer()
+                cls = "blk" if getattr(self, "_has_blocks", False) else ""
+                self._set_welcome(False)
+                txt = self._simplest_status_text(0)
+                w = Static(txt, classes=cls) if cls else Static(txt)
+                self._content().mount(w)
+                self._simplest_status = w
+                self._simplest_phase = 0
+                self._has_blocks = True
+                self._scroll_end()
+                # 0.4s 一帧 → 点从 1 增到 3 再回到 1(约 1.2s 一轮)+ 颜色随相位流动。
+                self._simplest_timer = self.set_interval(0.4, self._simplest_tick)
+            except Exception:
+                pass
+
+        def _simplest_begin(self):
+            """-simplest:本轮开始挂一条等待状态行。"""
+            if not self._simplest_on():
+                return
+            self._simplest_show_waiting()
+
+        def _simplest_flip_done(self):
+            """把当前「正在处理中」状态行改成「处理完成」并停动画(正文一开始就调用)。"""
+            w = getattr(self, "_simplest_status", None)
+            self._simplest_status = None
+            self._simplest_stop_timer()
+            if w is None:
+                return
+            try:
+                from wchat_py.simplest import DONE
+                w.update(Text(DONE, style="dim italic"))
+            except Exception:
+                pass
+
+        def _simplest_segment_end(self):
+            """工具轮边界(该段正文已输出完):定稿当前正文块,再在下方起一条新的等待状态行。
+
+            幂等:若当前已在等待(_simplest_status 非空,即这段还没出正文),不做任何事,
+            避免一轮里多次工具调用/多行 stdout 反复打断。只有"正文已出来(status 已被翻成
+            处理完成)"且确有正文时,才收尾并开新段。
+            """
+            if not self._simplest_on():
+                return
+            if getattr(self, "_simplest_status", None) is not None:
+                return
+            if not (self._answer or "").strip() and not (self._reason or "").strip():
+                return
+            # 正文可能还没物化成 live widget(极快的连续事件在同一 tick 内到达)→ 先物化再定稿,
+            # 否则 _finalize_live 见 _live_widget 为 None 会直接返回,这段正文就丢了。
+            if self._live_widget is None:
+                self._ensure_live()
+                try:
+                    self._live_widget.update(self._live_display())
+                except Exception:
+                    pass
+            self._finalize_live()
+            self._simplest_show_waiting()
+
+        def _simplest_tick(self):
+            """定时器回调(事件循环/UI 线程):相位 +1,推进结尾点(1→2→3→1)与颜色渐变。"""
+            w = getattr(self, "_simplest_status", None)
+            if w is None:
+                self._simplest_stop_timer()
+                return
+            try:
+                self._simplest_phase = getattr(self, "_simplest_phase", 0) + 1
+                w.update(self._simplest_status_text(self._simplest_phase))
+            except Exception:
+                pass
+
+        def _simplest_stop_timer(self):
+            t = getattr(self, "_simplest_timer", None)
+            self._simplest_timer = None
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
+
+        def _simplest_done(self):
+            """-simplest:本轮结束,把仍在等待的状态行收成「处理完成」并停动画。"""
+            self._simplest_flip_done()
+
         def on_mount(self):
             if banner:
                 self._mount(Text.from_ansi(banner))
@@ -985,6 +1124,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._q.put(("live", str(s), False))
 
         def reason(self, s):
+            # -simplest:思考文本完全不展示(整轮只留状态行 + 正文)。
+            if self._simplest_on():
+                return
             self._q.put(("live", str(s), True))
 
         def _live_display(self):
@@ -1114,10 +1256,18 @@ def make_app(handle_line, *, banner="", on_meta=None):
             try:
                 while True:
                     ev = self._q.get_nowait()
+                    if ev[0] == "simplest_log":
+                        # -simplest:工具横幅/结果/输出箱不显示,只当"工具轮边界"信号
+                        # (收尾当前正文段 + 在下方起一条新的等待状态行;幂等)。
+                        self._simplest_segment_end()
+                        continue
                     if ev[0] == "live":
                         if ev[2]:
                             self._reason += ev[1]
                         else:
+                            # -simplest:正文一开始就出现 → 把上头的「正在处理中」翻成「处理完成」。
+                            if self._simplest_on() and getattr(self, "_simplest_status", None) is not None:
+                                self._simplest_flip_done()
                             self._answer += ev[1]
                         changed = True
                     else:  # log:先定稿 live 再挂内容;auto 标记行只进状态区(不进内容区)
@@ -1192,6 +1342,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
                             sep=False)
                 return
             self._busy = True
+            self._simplest_begin()
             self._run_turn(text)
 
         def _drain_pending(self):
@@ -1213,7 +1364,9 @@ def make_app(handle_line, *, banner="", on_meta=None):
             except Exception:
                 pass
             o_out, o_err = sys.stdout, sys.stderr
-            sys.stdout = TuiStdout(self)
+            # -simplest:本轮工具横幅/结果/输出箱等 stdout 不显示,但当作"工具轮边界"信号
+            # (转到 _SimplestStdout → _drain 里触发 segment 收尾+新状态行);stderr(报错)照常走 TuiStdout。
+            sys.stdout = _SimplestStdout(self) if self._simplest_on() else TuiStdout(self)
             sys.stderr = TuiStdout(self, style="bold red")
             try:
                 if _hl_takes_poll:
@@ -1263,6 +1416,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             self._drain()
             self._finalize_live()
             self._busy = False
+            self._simplest_done()
             # M4 兜底:本轮结束若还有排队消息(纯问答/最后一个小轮之后才到的),作为**下一轮**发出。
             # (有工具轮的场合,它们一般已在 orchestrate 的小轮边界被并入本轮,这里队列已空。)
             try:
@@ -1272,6 +1426,7 @@ def make_app(handle_line, *, banner="", on_meta=None):
             if _nxt is not None:
                 self._mount(Text("（发送排队消息）", style="dim"))
                 self._busy = True
+                self._simplest_begin()
                 self._run_turn(_nxt)
                 return
             try:
