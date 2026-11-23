@@ -86,24 +86,140 @@ def _mask_toolchain(s):
         return s
 
 
+# 把 `-c`/`--command` 后的串当**shell 代码**再解析的解释器名(`>` 在里头是真重定向,须保留)。
+# 非 shell 语言(python/perl/...)的 `-c` 串里 `>` 只是语言比较,不是 shell 重定向。
+_SHELL_C_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:sudo\s+|env\s+)?(?:[^\s;&|]*/)?(?:sh|bash|zsh|dash|ksh|ash|fish)\b"
+    r"[^\s;&|]*\s+(?:-[A-Za-z]*c[A-Za-z]*|--command)\s*$")
+# `[[ … ]]` / `(( … ))`(含 `$(( … ))` 的内层):这些上下文里 `>` 是**比较**,不是重定向。
+_ARITH_RE = re.compile(r"\[\[[\s\S]*?\]\]|\(\([\s\S]*?\)\)")
+
+
+# 只把**明确喂给非 shell 解释器**的 heredoc 正文当"非命令"(可安全掩掉)的解释器名。
+# shell 自己(sh/bash/zsh/…)、数据 sink(cat/tee/…)以及判不准的喂入者**都不在此**——
+# 它们的正文要保留参与判定(保守:宁可多拦,绝不放过 shell 会执行的 `>`)。数据 sink 另有
+# `hd.noncode_payload` 先剥,不需要这里重复。
+_NONSHELL_INTERP_RE = re.compile(
+    r"(?:^|[\s;&|(])(?:sudo\s+)?(?:[^\s;&|]*/)?"
+    r"(?:python[0-9.]*|pypy[0-9.]*|perl|ruby|node|nodejs|php|lua|rscript|deno|bun)\b", re.IGNORECASE)
+
+
+def _heredoc_body_spans(c):
+    """返回**明确喂给非 shell 解释器**(python/perl/ruby/node/… )的 heredoc 正文 [(start,end)} 区间。
+
+    这类正文是脚本/数据输入,不是 shell 命令行 —— 里头的 `>`、`{}`、`#` 都不是 shell 语法。
+    例:`python3 - <<'PY' … print(1>0); 'echo a > ~/.bashrc' … PY` 里的 `>` 只是 Python 代码/字符串。
+    只认**明确非 shell 解释器**喂入;shell 自己(data sink、`sh <<EOF`)一律不掩(其正文会被 shell
+    执行,`>` 是真重定向)。判不准也保留(保守:宁可多拦)。
+    """
+    spans = []
+    off = 0
+    tag = None
+    inbody = False
+    for line in c.split("\n"):
+        if inbody:
+            if line.lstrip(" \t") == tag:
+                inbody = False
+            else:
+                spans.append((off, off + len(line)))
+            off += len(line) + 1
+            continue
+        m = re.search(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", line)
+        if m and "<<<" not in line:
+            if _NONSHELL_INTERP_RE.search(line[:m.start()]):
+                tag = m.group(1)
+                inbody = True
+        off += len(line) + 1
+    return spans
+
+
+def _mask_non_shell_heredocs(c):
+    """把喂给非 shell 解释器的 heredoc 正文**等长抹成空格**(保留行结构与坐标)。"""
+    spans = _heredoc_body_spans(c)
+    if not spans:
+        return c
+    out = list(c)
+    n = len(out)
+    for a, b in spans:
+        for k in range(a, min(b, n)):
+            out[k] = " "
+    return "".join(out)
+
+
+def _write_view(c):
+    """把"**绝不可能是 shell 重定向**的 `>`"等长抹成空格,保留真重定向,供 H5 判写与提命中。
+
+    背景(2026-11 实报):旧 `_has_write` 把**任何残留 `>`** 当重定向,于是
+      `[[ $a > $b ]]`、`(( x > 1 ))`、引号内的 `>`(`grep 'x>y'`、`python3 -c "print(1>0)"`)、
+      `awk '{print $1>$2}'`、非 shell heredoc 正文里的 `>`,
+    全被当写 → 纯只读命令被误判 H5,且命中碎成 `1`/`>`/`$b` 这类垃圾(用户截图即此)。
+    这里只抹**确定不是重定向**的 `>`;真重定向(含 `sh -c "…>…"` 里的)原样留着交给
+    `_redir_targets_all_clean` 判目标。**等长替换**,保证 `_frag` 能用原坐标取目标。
+    原则:判不准的一律当**真重定向**(不抹)—— 宁可多拦,绝不放过(漏拦 = 绕过)。
+    """
+    n = len(c)
+    out = list(c)
+    # 1) 非 shell heredoc 正文 → 整段抹空(数据,不是命令)
+    for a, b in _heredoc_body_spans(c):
+        for k in range(a, min(b, n)):
+            out[k] = " "
+    s = "".join(out)
+    # 2) [[ ]] / (( )) 内 → 抹空(比较符,不是重定向)。区间用原文算,回写到同坐标。
+    for m in _ARITH_RE.finditer(c):
+        for k in range(m.start(), m.end()):
+            out[k] = " "
+    # 3) 逐字符扫:引号内的 `>` 抹掉(shell -c 串除外 —— 那是要执行的 shell 代码)
+    i = 0
+    q = ""
+    qstart = -1
+    while i < n:
+        ch = c[i]
+        if q:
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == q:
+                q = ""
+                i += 1
+                continue
+            if ch == ">" and out[i] == ">" and not _SHELL_C_RE.search(c[:qstart]):
+                out[i] = " "
+            i += 1
+            continue
+        if ch in "\"'":
+            q, qstart = ch, i
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            if c[i + 1] == ">" and out[i + 1] == ">":
+                out[i + 1] = " "          # 转义的 \> 是字面量
+            i += 2
+            continue
+        i += 1
+    s = "".join(out)
+    # 4) 去掉丢弃型 sink 与 fd 复制(与原口径一致;等长抹空保坐标)
+    s = re.sub(R.hd_re_dev_sink, lambda mm: " " * len(mm.group(0)), s, flags=_ASCII)
+    s = re.sub(r"[0-9]+>&[0-9-]|>&[0-9-]", lambda mm: " " * len(mm.group(0)), s)
+    return s
+
+
 def _has_write(c):
-    """bash hd_has_write：抹掉丢弃型 sink 与 fd 复制后，残留 > 且目标不干净，或命中写动词。"""
-    s = c
-    while True:
-        mm = re.search(R.hd_re_dev_sink, s, _ASCII)
-        if not mm:
-            break
-        s = s.replace(mm.group(0), "", 1)
-    while True:
-        mm = re.search(r"[0-9]+>&[0-9-]|>&[0-9-]", s)
-        if not mm:
-            break
-        s = s.replace(mm.group(0), "", 1)
-    if ">" in s and not _redir_targets_all_clean(s):
+    """H5 判"写":只看**真正的 shell 重定向**(引号/`[[ ]]`/算术/非 shell heredoc 里的 `>` 不算,
+    见 _write_view)与写动词。"""
+    view = _write_view(c)
+    if ">" in view and not _redir_targets_all_clean(view):
         return True
     if _m("hd_re_write_verb", c):
         return True
     return False
+
+
+def _strip_comments_safe(c):
+    """剥注释(失败则回退原文,绝不因辅助缺席而改变判定方向)。"""
+    try:
+        return hd.strip_comments(c)
+    except Exception:
+        return c
 
 
 def _is_cred_token(t):
@@ -301,12 +417,25 @@ def rule(cmd, auto=False, work_root=None, home=None):
     c = cmd or ""
     work_root = work_root or os.environ.get("WORK_ROOT") or "/tmp"
     home = home or os.environ.get("HOME") or ""
-    # 与 bash hard_deny_cmd 开头一致的预处理：先剥"数据型 heredoc"正文(非代码)，
-    # 再折行(续行→空格、裸换行→`;`)。fail-closed: 组件异常/无正文 → 保留原文。
+    # 判定前的预处理(对**所有规则**生效):
+    #   ① 剥"数据型 heredoc"正文(非代码)            —— 与 bash hard_deny_cmd 一致
+    #   ② 剥 `#` 注释(逐行、引号感知)                 —— 注释里的 `>`/`{}`/凭据路径只是叙述
+    #   ③ 掩非 shell 解释器(python/perl/…)喂入的 heredoc 正文 —— 那是脚本/数据,不是 shell 命令
+    #   ④ 折行(续行→空格、裸换行→`;`)
+    # 后三步是 2026-11 实报修复:H11/H10/H13 等原来只读原文,注释 / heredoc 里的 `>` 被当
+    # 重定向 → 纯只读命令被误判(截图 `命中:第7行 > /etc/hosts …`)。fail-closed:异常保留原文。
     try:
         _pl = hd.noncode_payload(c)
         if _pl is not None:
             c = _pl
+    except Exception:
+        pass
+    try:
+        c = hd.strip_comments(c)
+    except Exception:
+        pass
+    try:
+        c = _mask_non_shell_heredocs(c)
     except Exception:
         pass
     try:
@@ -324,11 +453,13 @@ def rule(cmd, auto=False, work_root=None, home=None):
         return "H3", ""
     if _m("hd_re_disk", c) and _recheck(c, hd.mask_readonly, ("hd_re_disk",)):
         return "H4", ""
-    if (_m("hd_re_dotfile", _mask_toolchain(c)) or _m("hd_re_dotfile_cfg", c)) and _has_write(c):
+    # H5/H6 只看"会执行的部分":先剥 `#` 注释(注释里的 `>`/`{}`/`~/.ssh` 只是叙述,不该触发)。
+    _cc = _strip_comments_safe(c)
+    if (_m("hd_re_dotfile", _mask_toolchain(_cc)) or _m("hd_re_dotfile_cfg", _cc)) and _has_write(_cc):
         return "H5", ""
-    if (_m("hd_re_secret_dir", c) or _m("hd_re_keychain", c) or _m("hd_re_keyfile", c) or _m("hd_re_shadow", c)) \
-            and _recheck(c, _mask_msg_search, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
-            and not _creds_all_exempt(c, work_root, home):
+    if (_m("hd_re_secret_dir", _cc) or _m("hd_re_keychain", _cc) or _m("hd_re_keyfile", _cc) or _m("hd_re_shadow", _cc)) \
+            and _recheck(_cc, _mask_msg_search, ("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow")) \
+            and not _creds_all_exempt(_cc, work_root, home):
         return "H6", ""
     if _m("hd_re_force_push", c) or _m("hd_re_history_rewrite", c):
         return "H7", ""
@@ -497,32 +628,22 @@ def _frag(rid, c):
     if rid == "H4":
         return first(("hd_re_disk",), _safe(hd.mask_readonly, c))
     if rid == "H5":
-        # 近似 hd_has_write 的 BASH_REMATCH：先抹 dev_sink/fd，若残留 '>' 且目标不干净 → 取**目标**做命中。
-        s = c
-        while True:
-            mm = re.search(R.hd_re_dev_sink, s, _ASCII)
-            if not mm:
-                break
-            s = s.replace(mm.group(0), "", 1)
-        while True:
-            mm = re.search(r"[0-9]+>&[0-9-]|>&[0-9-]", s)
-            if not mm:
-                break
-            s = s.replace(mm.group(0), "", 1)
-        if ">" in s and not _redir_targets_all_clean(s):
-            # 命中 = 被写入的**重定向目标**(人要知道会覆盖哪个文件)。原来这里直接 return "",
-            # 于是最常见的 `echo x > ~/.bashrc` / `>> ~/.zshrc` 在确认弹窗里**没有命中信息**
-            # (用户实报的"有些权限弹窗没有命中信息")。提不出目标时至少给重定向符。
-            for mm in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", s):
+        # 与 _has_write 同口径:在 _write_view(只留真重定向的 `>`)里找命中的**重定向目标**。
+        # 提不出干净目标时给写动词;再提不出给一句干净描述 —— 绝不再吐 `>`/`1`/`$b` 这类碎片。
+        cc = _strip_comments_safe(c)
+        view = _write_view(cc)
+        if ">" in view and not _redir_targets_all_clean(view):
+            for mm in re.finditer(r"(?:of=|(?<![0-9&])>{1,2})[ \t]*([^\s;&|<>()]+)", view):
                 tgt = mm.group(1).strip("'\"")
                 if tgt and not _redir_targets_all_clean(">" + tgt):
                     return tgt
-            return ">"
-        mm = re.search(getattr(R, "hd_re_write_verb"), c, _ASCII)
+            mm = re.search(getattr(R, "hd_re_write_verb"), cc, _ASCII)
+            return mm.group(0) if mm else "重定向写入"
+        mm = re.search(getattr(R, "hd_re_write_verb"), cc, _ASCII)
         return mm.group(0) if mm else ""
     if rid == "H6":
         return first(("hd_re_secret_dir", "hd_re_keychain", "hd_re_keyfile", "hd_re_shadow"),
-                     _safe(hd.mask_msg, c))
+                     _safe(hd.mask_msg, _strip_comments_safe(c)))
     if rid == "H7":
         return first(("hd_re_force_push", "hd_re_history_rewrite"), c)
     if rid == "H8":

@@ -196,6 +196,20 @@ GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
 GATE_NOTE+=('TTS 工具:请求体角色反转(user=风格/assistant=文本)/base64 解码与异常归一/key 解析(显式>同host复用>空,无写死)/默认落盘路径/e2e 经 toolrun 落 wav')
 
+# H5/H6 误判修复回归(2026-11):注释/引号/[[ ]]/(( ))/非 shell heredoc 里的 `>` 不算写、
+# 注释里的凭据路径不算读;真写/真读仍拦;H5 命中是目标/动词而非碎片。
+GATE_NAMES+=('H5H6误判')
+GATE_CMDS+=('python3 tests/hardwall_h5h6_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('硬墙 H5/H6/H11 误判修复:剥 # 注释(注释里的 >/{}·凭据路径不误拦)/_write_view 只认真重定向(引号·[[ ]]·(( ))·非shell heredoc 正文里的 > 不算写)/H11 扫注释·heredoc 不再误判/真写真读系统路径仍拦/命中给目标非碎片')
+
+GATE_NAMES+=('极简模式')
+GATE_CMDS+=('python3 tests/simplest_test.py')
+GATE_MODE+=('c')
+GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
+GATE_NOTE+=('-simplest:隐藏思考/工具/输出箱,只留正文流式 + 状态行(跑马灯点1→2→3+渐变,逐段循环:正文出现→处理完成,工具轮边界→新等待行);默认不受影响')
+
 # ⚠ 新闸门一律**追加在末尾**,别插在 主套件 之前:上面两处 `i == 9` 是按索引认主套件的
 #   (LIST_ONLY 与执行循环各一处),插中间会让"跳过慢闸门"的特例指到别的闸门上 ——
 #   这种"索引当身份证"的写法本就脆,但一次改动只治一个病,这里先不顺手重构。

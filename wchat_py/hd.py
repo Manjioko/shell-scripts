@@ -788,6 +788,16 @@ def strip_noncode(s: str) -> str:
     return "".join(out)
 
 
+def strip_comments(c: str) -> str:
+    """逐行剥 `#` 注释(引号感知,复用 strip_noncode),**逐行独立**、保留行数/换行。
+
+    用途:hardwall 判定 H5(dotfile 写)/ H6(凭据)前的预处理 —— 注释里出现的 `>`、`{}`、
+    `~/.ssh` 只是叙述,不该参与判定。与 H11 的 `strip_noncode` 同一套剥法(因此 `${X#y}`、
+    `a#b`、URL 的 `#` 不会被误剥)。逐行剥(不跨行)保证行号/行结构与原文一致。
+    """
+    return "\n".join(strip_noncode(ln) for ln in (c or "").split("\n"))
+
+
 def cmd_strip_noncode(argv) -> int:
     return _stdin_cmd(strip_noncode)
 
