@@ -119,12 +119,18 @@ class TuiStdout:
         return False
 
 
+# 前台耗时 shell 的倒计时:跑超过这么多秒仍未结束,才把状态行换成"倒计时 x 秒"
+# (快速命令不出现,避免"倒计时600闪一下")。
+_CD_THRESHOLD = 3.0
+
+
 class _SimplestStdout:
     """-simplest 回合内的 sys.stdout shim:工具横幅/结果/输出箱**不显示**,只当作"工具轮边界"信号。
 
     投 ("simplest_log", ...) 事件;`_drain` 收到后不挂内容,只调 `_simplest_segment_end()`
     (收尾当前正文段 + 在下方起一条新的等待状态行)。这样一轮里"正文↔工具"交替时,状态行能
     像用户期望的那样逐段循环。stderr 仍走 TuiStdout(style='bold red') → 报错照常显示。
+    另:前台 shell 的起止经 note_shell() 投 ("shell_countdown_start"/"end") 事件,驱动耗时倒计时。
     """
 
     def __init__(self, app):
@@ -133,6 +139,16 @@ class _SimplestStdout:
     def write(self, s):
         if s:
             self._app._q.put(("simplest_log", str(s), None))
+
+    def note_shell(self, phase, total=None):
+        """前台 shell 起(start,带限时秒数)/止(end):投事件给 _drain 驱动倒计时覆盖。"""
+        try:
+            if phase == "start":
+                self._app._q.put(("shell_countdown_start", float(total or 0), None))
+            else:
+                self._app._q.put(("shell_countdown_end", None, None))
+        except Exception:
+            pass
 
     def flush(self):
         pass
@@ -854,14 +870,15 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 return False
 
-        def _simplest_status_text(self, phase):
+        def _simplest_status_text(self, phase, remaining=None):
             """状态行文本:走马灯点(1→2→3 循环)+ 文字颜色滑动渐变(蓝→紫→蓝)。
 
-            phase 每帧 +1:既驱动结尾点循环(working_text 内部 %3),又驱动渐变相位(整串
-            颜色随之流动)。颜色是逐字符 style,plain 文本不变(不影响任何按 plain 取字的断言)。
+            phase 每帧 +1:既驱动结尾点循环(内部 %3),又驱动渐变相位(整串颜色随之流动)。
+            `remaining` 非 None 时显示"倒计时 x 秒"(耗时 shell 执行中);否则显示"正在处理中"。
+            颜色是逐字符 style,plain 文本不变(不影响任何按 plain 取字的断言)。
             """
-            from wchat_py.simplest import working_text
-            s = working_text(phase)
+            from wchat_py.simplest import working_text, countdown_text
+            s = countdown_text(remaining, phase) if remaining is not None else working_text(phase)
             A = (120, 160, 255)          # 柔蓝
             B = (232, 140, 255)          # 柔紫
             period = 10.0                # 一串里约 10 个字符走完一个 A→B→A 的往返
@@ -882,6 +899,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             """
             try:
                 self._simplest_stop_timer()
+                self._cd_active = False          # 新一段等待不继承上一段的倒计时
                 cls = "blk" if getattr(self, "_has_blocks", False) else ""
                 self._set_welcome(False)
                 txt = self._simplest_status_text(0)
@@ -939,15 +957,39 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._finalize_live()
             self._simplest_show_waiting()
 
+        def _simplest_shell_start(self, total):
+            """前台 shell 开始执行:记住起始时刻与限时(秒),到点后由 tick 切换成倒计时。
+
+            只在**跑起来且超过 _CD_THRESHOLD 秒仍未结束**时才真的显示倒计时 —— 快速命令
+            根本不会亮,避免"倒计时600闪一下"。
+            """
+            try:
+                self._cd_active = True
+                self._cd_start = __import__("time").monotonic()
+                self._cd_total = float(total or 0)
+            except Exception:
+                pass
+
+        def _simplest_shell_end(self):
+            """前台 shell 结束(未到/已到限时):撤掉倒计时,状态行回到覆盖前的样子(正在处理中)。"""
+            self._cd_active = False
+
         def _simplest_tick(self):
-            """定时器回调(事件循环/UI 线程):相位 +1,推进结尾点(1→2→3→1)与颜色渐变。"""
+            """定时器回调(UI 线程):相位 +1,推进跑马灯点与颜色渐变;耗时 shell 期间显示倒计时。"""
             w = getattr(self, "_simplest_status", None)
             if w is None:
                 self._simplest_stop_timer()
                 return
             try:
                 self._simplest_phase = getattr(self, "_simplest_phase", 0) + 1
-                w.update(self._simplest_status_text(self._simplest_phase))
+                _rem = None
+                if getattr(self, "_cd_active", False):
+                    import time as _t
+                    _el = _t.monotonic() - getattr(self, "_cd_start", 0.0)
+                    if _el >= _CD_THRESHOLD:            # 跑超过 ~3s 才亮倒计时
+                        import math as _math
+                        _rem = max(0, _math.ceil(getattr(self, "_cd_total", 0.0) - _el))
+                w.update(self._simplest_status_text(self._simplest_phase, _rem))
             except Exception:
                 pass
 
@@ -1268,6 +1310,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             try:
                 while True:
                     ev = self._q.get_nowait()
+                    if ev[0] == "shell_countdown_start":
+                        self._simplest_shell_start(ev[1]); continue
+                    if ev[0] == "shell_countdown_end":
+                        self._simplest_shell_end(); continue
                     if ev[0] == "simplest_log":
                         # -simplest:工具横幅/结果/输出箱不显示,只当"工具轮边界"信号
                         # (收尾当前正文段 + 在下方起一条新的等待状态行;幂等)。

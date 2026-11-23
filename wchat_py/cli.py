@@ -1046,7 +1046,23 @@ def main(argv):
                     sys.stdout.write(_tui_banner(_n, _a)); sys.stdout.flush()
                 except Exception:
                     pass
+                # 前台 shell → 通知 TUI(-simplest 下)挂"耗时倒计时"(快速命令因 >3s 才亮而不出现)。
+                try:
+                    if _n == "run_shell_command" and hasattr(sys.stdout, "note_shell"):
+                        import json as _j
+                        from wchat_py.toolrun import _effective_timeout as _et
+                        _ad = _j.loads(_a) if _a else {}
+                        if isinstance(_ad, dict) and not _ad.get("run_in_background"):
+                            _to, _ = _et(_ad)
+                            sys.stdout.note_shell("start", _to)
+                except Exception:
+                    pass
                 _out = _run_tool(_n, _a)
+                try:
+                    if hasattr(sys.stdout, "note_shell"):
+                        sys.stdout.note_shell("end")
+                except Exception:
+                    pass
                 sys.stdout.write("\n"); sys.stdout.flush()
                 return _out
 

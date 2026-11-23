@@ -33,6 +33,15 @@ def working_text(frame):
     return WORKING_BASE + "." * (int(frame) % 3 + 1)
 
 
+COUNTDOWN_BASE = "正在处理耗时任务,倒计时 %d 秒,请稍后"
+
+
+def countdown_text(remaining, frame):
+    """耗时 shell 在执行时的状态行:显示**剩余秒数**(从限时上限往下数)+ 同样的跑马灯点。"""
+    n = max(0, int(remaining))
+    return (COUNTDOWN_BASE % n) + "." * (int(frame) % 3 + 1)
+
+
 def enabled():
     """是否极简档。单一真源在 render.tf_mode():`-tf=0`(或旧 `-simplest`/`WCHAT_SIMPLEST=1`)。"""
     try:

@@ -318,5 +318,63 @@ except Exception as _e:
     ck("逐段循环检查无异常", False, repr(_e))
 
 
+# ---- D. 前台耗时 shell 倒计时(跑超过 ~3s 才亮,结束回退"正在处理中")----
+import time as _time  # noqa: E402
+
+
+def _last_line(app):
+    ls = [x for x in _content_text(app).split("\n") if x.strip()]
+    return ls[-1] if ls else ""
+
+
+# 文案单元
+ck("countdown_text 含'倒计时 N 秒'+跑马灯点",
+   simplest.countdown_text(600, 0) == "正在处理耗时任务,倒计时 600 秒,请稍后."
+   and simplest.countdown_text(0, 2) == "正在处理耗时任务,倒计时 0 秒,请稍后...",
+   repr(simplest.countdown_text(600, 0)))
+ck("countdown_text 负数归零", simplest.countdown_text(-5, 0).startswith("正在处理耗时任务,倒计时 0 秒"))
+
+
+async def _countdown_check():
+    os.environ["WCHAT_TF"] = "0"
+    app = tui.make_app(lambda *a: None)
+    seq = {}
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._simplest_begin()
+        await pilot.pause()
+        seq["init"] = _last_line(app)
+        # start(600) + 立即 tick(未到 3s)→ 仍是"正在处理中"(快速命令不亮)
+        app._simplest_shell_start(600)
+        app._simplest_tick()
+        await pilot.pause()
+        seq["quick"] = _last_line(app)
+        # 模拟已过 5s → 显示"倒计时 595 秒"
+        app._cd_start = _time.monotonic() - 5
+        app._simplest_tick()
+        await pilot.pause()
+        seq["countdown"] = _last_line(app)
+        # 结束 → 回退"正在处理中"
+        app._simplest_shell_end()
+        app._simplest_tick()
+        await pilot.pause()
+        seq["end"] = _last_line(app)
+    os.environ.pop("WCHAT_TF", None)
+    return seq
+
+
+try:
+    _sq = asyncio.run(_countdown_check())
+    ck("倒计时:初始是'正在处理中'", "正在处理中" in _sq["init"], repr(_sq["init"]))
+    ck("倒计时:快速命令(<3s)不亮倒计时", "正在处理中" in _sq["quick"] and "倒计时" not in _sq["quick"],
+       repr(_sq["quick"]))
+    ck("倒计时:超过 3s 后显示'倒计时 595 秒'(600-5)", "倒计时 595 秒" in _sq["countdown"], repr(_sq["countdown"]))
+    ck("倒计时:shell 结束回退'正在处理中'", "正在处理中" in _sq["end"] and "倒计时" not in _sq["end"],
+       repr(_sq["end"]))
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("倒计时检查无异常", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)
