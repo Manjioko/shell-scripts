@@ -715,12 +715,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                      scrollbar-background: transparent;
                      scrollbar-background-hover: transparent;
                      scrollbar-background-active: transparent; }
-        /* 选中项整行高亮(像 claude)。输入框持焦点时 OptionList 用 $block-cursor-blurred-background,
-           ansi-dark 下几乎与背景同色 → 看不清;这里显式给一个可见的底色 + 亮字(整行铺满)。
-           焦点变体(:focus)也统一成同款,避免鼠标点一下变成另一种颜色。 */
-        #slashlist > .option-list--option-highlighted { background: #2d3a52; color: #ffffff; text-style: bold; }
-        #slashlist:focus > .option-list--option-highlighted { background: #2d3a52; color: #ffffff; text-style: bold; }
-        #slashlist > .option-list--option-hover { background: #252a38; }
+        /* 选中项用**文字高亮**(加粗+提亮,像 claude code),不铺背景块。输入框持焦点时
+           OptionList 默认用 $block-cursor-blurred-background 铺底,这里显式去掉背景、只留字色/字重。 */
+        #slashlist > .option-list--option-highlighted { background: transparent; color: #ffffff; text-style: bold; }
+        #slashlist:focus > .option-list--option-highlighted { background: transparent; color: #ffffff; text-style: bold; }
+        #slashlist > .option-list--option-hover { background: transparent; color: #ffffff; }
         #slash_title { height: auto; color: $text; text-style: bold; padding: 0; }
         #slash_hint { height: auto; color: #6a6a6a; text-style: italic; padding: 0; }
         #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
@@ -877,22 +876,21 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
 
-        def _slash_item_text(self, i, item):
-            """渲染一行纯文案(带编号;选中态**交给 OptionList 原生高亮 + CSS**,像 claude 整行高亮)。
-            不再自绘 `❯` —— 实测自绘要每次 replace_option_prompt_at_index 重画全部行,会和
-            scroll_to_highlight 打架致选中项滚出视窗;原生 watch_highlighted 自带正确滚动。"""
+        def _slash_item_text(self, item):
+            """渲染一行文案(无编号,像 claude code):命令名(左列,按 _slash_namew 补齐) +
+            描述(右列,对齐到同一列)。选中态交给 CSS 做**文字高亮**(加粗提亮,不铺背景块)。"""
             t = Text()
-            t.append("%d. " % (i + 1), style="dim")
             if getattr(self, "_slash_level", 1) == 2:
                 _val, label, desc = item
                 t.append(label)
                 if desc:
-                    t.append("    ")
+                    t.append("   ")
                     t.append(desc, style="dim")
             else:
                 name, desc, _kind, _opts = item
-                t.append(name)
-                t.append("   ")
+                w = getattr(self, "_slash_namew", 0) or len(name)
+                t.append(name.ljust(w))         # 名字补空格 → 描述列对齐(claude 两列)
+                t.append("  ")
                 t.append(desc, style="dim")
             return t
 
@@ -966,9 +964,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_second = None
             self._slash_items = entries
             self._slash_open = True
+            # 命令名补到统一宽度 → 描述列对齐(像 claude code 两列)
+            self._slash_namew = max([len(e[0]) for e in entries] or [0])
             ol.clear_options()
-            for i, item in enumerate(entries):
-                ol.add_option(Option(self._slash_item_text(i, item), id=item[0]))
+            for item in entries:
+                ol.add_option(Option(self._slash_item_text(item), id=item[0]))
             panel.add_class("open")
             self._slash_size_list(ol)
             self._slash_set_labels("", "输入以过滤 · ↑↓ 选择 · Enter/Tab 确认 · Esc 关闭 · 也可鼠标点选")
@@ -984,9 +984,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_second = {"name": name, "opts": opts}
             self._slash_items = list(opts)
             self._slash_open = True
+            self._slash_namew = max([len(o[1]) for o in opts] or [0])
             ol.clear_options()
-            for i, item in enumerate(self._slash_items):
-                ol.add_option(Option(self._slash_item_text(i, item), id=item[0]))
+            for item in self._slash_items:
+                ol.add_option(Option(self._slash_item_text(item), id=item[0]))
             self._slash_size_list(ol)
             try:
                 from wchat_py.cmdline import SLASH_COMMANDS
