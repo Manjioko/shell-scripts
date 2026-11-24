@@ -1595,16 +1595,21 @@ async def _slash_menu_check():
         _names = [e[0] for e in app._slash_items]
         ck("23 /m 过滤出 m 开头命令", _names and all(n.startswith("/m") for n in _names), repr(_names))
 
-        # ↓ 移动高亮,焦点不跑
+        # ↓ 移动高亮,焦点不跑;自绘 `❯` 标记必须跟着从第 0 行移到第 1 行(真终端下这就是可见性)
         inp.text = "/"
         await pilot.pause()
+        ck("23 打开时第 0 行有 ❯ 标记",
+           "❯" in str(app.query_one("#slashlist", _OL).get_option_at_index(0).prompt))
         await pilot.press("down")
         await pilot.pause()
         ck("23 ↓ 把高亮从 0 移到 1", ol.highlighted == 1 and inp.has_focus, "hl=%r" % ol.highlighted)
+        ck("23 ↓ 后 ❯ 标记移到第 1 行(自绘选中,不靠自带高亮)",
+           "❯" not in str(ol.get_option_at_index(0).prompt)
+           and "❯" in str(ol.get_option_at_index(1).prompt))
 
         # Enter 选中一个无参命令(/u=usage)→ on_meta 收到,菜单收起,输入框清空
         _names = [e[0] for e in app._slash_items]
-        ol.highlighted = _names.index("/u")
+        app._slash_set_hl(_names.index("/u"))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1617,7 +1622,7 @@ async def _slash_menu_check():
         inp.text = "/n"
         await pilot.pause()
         _names = [e[0] for e in app._slash_items]
-        ol.highlighted = _names.index("/n")
+        app._slash_set_hl(_names.index("/n"))
         await pilot.pause()
         await pilot.press("tab")
         await pilot.pause()
@@ -1643,7 +1648,7 @@ async def _slash_menu_check():
         inp.text = "/img"
         await pilot.pause()
         _names = [e[0] for e in app._slash_items]
-        ol.highlighted = _names.index("/img")
+        app._slash_set_hl(_names.index("/img"))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1653,6 +1658,19 @@ async def _slash_menu_check():
         inp.text = ""
         await pilot.pause()
         ck("23 清空输入框不弹菜单", not app._slash_is_open())
+
+        # 鼠标点选(=投 OptionSelected 消息)能触发执行 —— 用户实报"双击/单击都发不出去"
+        inp.text = "/"
+        await pilot.pause()
+        _names = [e[0] for e in app._slash_items]
+        _ci = _names.index("/h")
+        _before = len(seen_meta)
+        app.post_message(_OL.OptionSelected(ol, ol.get_option_at_index(_ci), _ci))
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        ck("23 鼠标点选 /h → 触发元命令(与键盘同套)", ("help", "") in seen_meta[ _before: ] or ("help", "") in seen_meta,
+           repr(seen_meta[_before:]))
+        ck("23 鼠标点选后菜单收起", not app._slash_is_open())
 
 
 try:
@@ -1684,7 +1702,7 @@ async def _slash_second_check():
         # /tf → 一级选中 → 进二级(3 个档位)
         inp.text = "/tf"
         await pilot.pause()
-        ol.highlighted = [e[0] for e in app._slash_items].index("/tf")
+        app._slash_set_hl([e[0] for e in app._slash_items].index("/tf"))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1706,11 +1724,11 @@ async def _slash_second_check():
         ck("24 二级 Esc 回退一级且仍开着", app._slash_level == 1 and app._slash_is_open())
 
         # 再次进 /tf 二级,选「1 两行折叠」→ Enter → 执行 /tf=1
-        ol.highlighted = [e[0] for e in app._slash_items].index("/tf")
+        app._slash_set_hl([e[0] for e in app._slash_items].index("/tf"))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
-        ol.highlighted = 1
+        app._slash_set_hl(1)
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
@@ -1721,13 +1739,13 @@ async def _slash_second_check():
         # /auto → 二级 → 选 full → /auto=full
         inp.text = "/auto"
         await pilot.pause()
-        ol.highlighted = [e[0] for e in app._slash_items].index("/auto")
+        app._slash_set_hl([e[0] for e in app._slash_items].index("/auto"))
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
         ck("24 /auto 二级选项=read/sandbox/full",
            [o.id for o in ol._options] == ["read", "sandbox", "full"], repr([o.id for o in ol._options]))
-        ol.highlighted = 2
+        app._slash_set_hl(2)
         await pilot.pause()
         await pilot.press("enter")
         await pilot.pause()
