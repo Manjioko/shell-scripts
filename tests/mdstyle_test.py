@@ -135,6 +135,20 @@ try:
 except Exception as e:
     ck("行内代码样式", False, repr(e))
 
+# 6.5) 代码块背景透明(default,不填黑/白底 —— 用户嫌 github-dark 是"黑坨坨一大块")
+try:
+    from wchat_py.mdstyle import build_markdown, make_console
+    _c = make_console(width=50, force_terminal=True, highlight=False)
+    _csegs = list(_c.render(build_markdown("```python\nx = 1  # c\n```")))
+    def _bg_transparent(s):
+        _bg = getattr(getattr(s, "style", None), "bgcolor", None)
+        return _bg is None or str(_bg).startswith("Color('default'")
+    ck("代码块背景透明(default,不填黑/白底)", all(_bg_transparent(s) for s in _csegs),
+       repr([str(getattr(s.style, "bgcolor", None)) for s in _csegs
+             if getattr(s.style, "bgcolor", None) is not None][:3]))
+except Exception as e:
+    ck("代码块背景透明", False, repr(e))
+
 # 7) 分隔线用 `─` 而非 ASCII `-`
 try:
     segs, raw = _segments("上\n\n---\n\n下\n")

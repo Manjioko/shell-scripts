@@ -78,6 +78,7 @@ def _build_markdown_class():
     from rich.markdown import Markdown as _Markdown
     from rich.markdown import Heading as _Heading
     from rich.markdown import HorizontalRule as _HorizontalRule
+    from rich.markdown import CodeBlock as _CodeBlock
     from rich.text import Text
     from rich.rule import Rule
 
@@ -100,10 +101,25 @@ def _build_markdown_class():
             yield Rule(style=style, characters="─")
             yield Text()
 
+    class _TransparentCodeBlock(_CodeBlock):
+        """代码块**背景透明**(background_color="default" = 终端底色),只保留语法高亮前景色。
+        为什么:rich 默认用 pygments 主题的 background_color 把**整块代码区**填满(github-dark
+        是近黑 #0d1117、default 主题是白底),观感像"一坨黑/白块"。设 default 后真终端不输出
+        任何背景色码 = 与正文无缝,只有彩色 token。"""
+
+        def __rich_console__(self, console, options):
+            from rich.syntax import Syntax
+            code = str(self.text).rstrip()
+            yield Syntax(code, self.lexer_name, theme=self.theme,
+                         word_wrap=True, padding=1, background_color="default")
+
     class _WchatMarkdown(_Markdown):
         elements = dict(_Markdown.elements)
         elements["heading_open"] = _ModernHeading
         elements["hr"] = _ModernHR
+        # 代码块(围栏 / 缩进两种都覆盖)统一走透明背景,去"黑坨坨"
+        elements["fence"] = _TransparentCodeBlock
+        elements["code_block"] = _TransparentCodeBlock
 
     return _WchatMarkdown
 
@@ -115,7 +131,8 @@ def build_markdown(text):
     mdrender 用 `make_console()`(已带本主题);TUI 需在 app 上 push 本主题(
     `markdown_theme()`),见 tui.on_mount。
 
-    代码块语法高亮统一用 pygments 的 `github-dark`(比 monokai 更克制、更贴编辑器深色);
+    代码块语法高亮用 pygments 的 `github-dark`(比 monokai 更克制、更贴编辑器深色),且**背景透明**
+    (见 _TransparentCodeBlock,不再把整块填成黑/白底,避免"一坨"观感);
     行内代码不走语法高亮,颜色由 `markdown.code`(grey85)决定。
     """
     global _MD_CLASS
