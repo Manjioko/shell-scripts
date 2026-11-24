@@ -1662,5 +1662,85 @@ except Exception as _e:
     traceback.print_exc()
     ck("23 斜杠菜单检查无异常", False, repr(_e))
 
+# ---- 24) `/` 二级枚举菜单(/tf、/auto:进二级、↑↓、Enter 应用即执行、Esc 回退)----
+async def _slash_second_check():
+    from textual.widgets import OptionList as _OL2
+
+    def handle_line(text, emit, stream, reason):
+        stream("ok")
+
+    seen_meta = []
+
+    def on_meta(a, g):
+        seen_meta.append((a, g))
+
+    app = tui.make_app(handle_line, on_meta=on_meta)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        ol = app.query_one("#slashlist", _OL2)
+        inp.focus()
+
+        # /tf → 一级选中 → 进二级(3 个档位)
+        inp.text = "/tf"
+        await pilot.pause()
+        ol.highlighted = [e[0] for e in app._slash_items].index("/tf")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        ck("24 /tf 选中后进入二级菜单", app._slash_level == 2 and app._slash_is_open())
+        ck("24 /tf 二级有 3 个档位", ol.option_count == 3, "n=%d" % ol.option_count)
+        ck("24 /tf 二级选项=0/1/2",
+           [o.id for o in ol._options] == ["0", "1", "2"], repr([o.id for o in ol._options]))
+        _title = str(app.query_one("#slash_title").content)
+        ck("24 二级标题含 /tf", "/tf" in _title, repr(_title))
+
+        # ↓ 在二级里移动
+        await pilot.press("down")
+        await pilot.pause()
+        ck("24 二级 ↓ 把高亮移到 1", ol.highlighted == 1, repr(ol.highlighted))
+
+        # Esc 从二级回退到一级(不整关)
+        await pilot.press("escape")
+        await pilot.pause()
+        ck("24 二级 Esc 回退一级且仍开着", app._slash_level == 1 and app._slash_is_open())
+
+        # 再次进 /tf 二级,选「1 两行折叠」→ Enter → 执行 /tf=1
+        ol.highlighted = [e[0] for e in app._slash_items].index("/tf")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        ol.highlighted = 1
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        ck("24 /tf 选 1 → 执行 /tf=1", ("think_full", "1") in seen_meta, repr(seen_meta))
+        ck("24 应用后菜单收起且输入框清空", (not app._slash_is_open()) and inp.text == "")
+
+        # /auto → 二级 → 选 full → /auto=full
+        inp.text = "/auto"
+        await pilot.pause()
+        ol.highlighted = [e[0] for e in app._slash_items].index("/auto")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        ck("24 /auto 二级选项=read/sandbox/full",
+           [o.id for o in ol._options] == ["read", "sandbox", "full"], repr([o.id for o in ol._options]))
+        ol.highlighted = 2
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        ck("24 /auto 选 full → 执行 /auto=full", ("auto_on", "full") in seen_meta, repr(seen_meta))
+
+
+try:
+    asyncio.run(_slash_second_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("24 斜杠二级菜单检查无异常", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

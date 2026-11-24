@@ -304,7 +304,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 if k == "down":
                     app._slash_move(1); event.stop(); event.prevent_default(); return
                 if k == "escape":
-                    app._slash_close(); event.stop(); event.prevent_default(); return
+                    app._slash_back(); event.stop(); event.prevent_default(); return
                 if k == "tab":
                     app._slash_accept(); event.stop(); event.prevent_default(); return
             await super()._on_key(event)
@@ -710,6 +710,8 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         #slashpanel.open { display: block; }
         #slashlist { height: auto; max-height: 12; background: transparent; border: none;
                      padding: 0; scrollbar-size-vertical: 1; }
+        #slash_title { height: auto; color: $text; text-style: bold; padding: 0; }
+        #slash_hint { height: auto; color: #6a6a6a; text-style: italic; padding: 0; }
         #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
                     background: transparent; padding: 0 1; align-vertical: top; }
         /* 常驻提示符 ❯:独立 widget,输入/清空都在,placeholder 消失它也不走(像 claude code)。
@@ -772,10 +774,13 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._busy = False
             self._has_blocks = False        # 内容区是否已有"逻辑块"(决定是否加块间空行)
             self._pending = queue.Queue()   # M4:运行期补充消息(线程安全);worker 每小轮 poll 注入
-            # `/` 命令菜单状态(里程碑一:一级菜单)。_slash_items 是当前展示的 (命令,描述,kind,opts) 列表,
-            # 与 OptionList 的 option id 一一对应;索引即 OptionList.highlighted。
+            # `/` 命令菜单状态。_slash_level=1 一级(命令列表)/2 二级(枚举选项);
+            # _slash_items 是**当前展示**的列表(一级:catalog 条目;二级:选项元组);
+            # _slash_second 在二级时记录 {"name":命令,"opts":[...]},供回退/拼接。
             self._slash_open = False
+            self._slash_level = 1
             self._slash_items = []
+            self._slash_second = None
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
@@ -784,8 +789,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             yield Static("", id="status")
             # `/` 命令菜单:贴在输入框**正上方**的整宽带边框面板(默认隐藏,打 / 时弹出)。
             # 放 #status 与 #inputrow 之间 —— 出现时自然把内容区往上顶,像 claude code。
+            # 面板复用于一级菜单与二级枚举菜单:顶部标题、中间 OptionList、底部快捷键提示。
             with Vertical(id="slashpanel"):
+                yield Label("", id="slash_title")
                 yield OptionList(id="slashlist")
+                yield Label("", id="slash_hint")
             with Horizontal(id="inputrow"):
                 yield Static("❯", id="prompt")
                 yield ChatInput(id="input", placeholder="请输入问题,回车发送")
@@ -834,8 +842,8 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 "欢迎使用 WCHAT\n"
                 "\n"
                 "直接输入你的问题,按回车发送\n"
-                "输入 -h 显示更多用法\n"
-                "输入 -q 离开 WCHAT\n"
+                "输入 / 弹出命令菜单(如 /q 退出 · /h 帮助)\n"
+                "输入 /h 显示更多用法\n"
                 "Ctrl+F 选择文件 · Ctrl+G 粘贴图片(Ctrl+V 被终端占用时用 Ctrl+G)"
             )
 
@@ -847,12 +855,19 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
 
-        # ---- `/` 命令菜单(里程碑一:一级菜单) ----
+        # ---- `/` 命令菜单(一级命令列表 + 二级枚举菜单) ----
         def _slash_is_open(self):
             return getattr(self, "_slash_open", False)
 
+        def _slash_set_labels(self, title, hint):
+            try:
+                self.query_one("#slash_title", Label).update(Text(title or ""))
+                self.query_one("#slash_hint", Label).update(Text(hint or "", style="dim"))
+            except Exception:
+                pass
+
         def _slash_refresh(self, text):
-            """按输入框文本更新一级菜单。**仅**当单行、以 / 开头、且还没打空格时才显示;
+            """按输入框文本刷新**一级**命令菜单。**仅**当单行、以 / 开头、且还没打空格时才显示;
             一旦有空格/换行,视为转入正文或参数,收起(避免 /usr/bin、8/9、a b 被误弹)。"""
             try:
                 panel = self.query_one("#slashpanel")
@@ -870,6 +885,8 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             if not entries:
                 self._slash_close()
                 return
+            self._slash_level = 1
+            self._slash_second = None
             self._slash_items = entries
             self._slash_open = True
             ol.clear_options()
@@ -881,6 +898,40 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 t.append(desc, style="dim")
                 ol.add_option(Option(t, id=name))
             panel.add_class("open")
+            self._slash_set_labels("", "输入以过滤 · ↑↓ 选择 · Enter 选中 · Esc 关闭")
+            try:
+                ol.highlighted = 0
+                ol.scroll_to_highlight()
+            except Exception:
+                pass
+
+        def _slash_open_second(self, name, opts):
+            """进入二级枚举菜单(Claude `Select model` 那种):列出该命令的固定选项。"""
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+            except Exception:
+                return
+            self._slash_level = 2
+            self._slash_second = {"name": name, "opts": opts}
+            self._slash_items = list(opts)
+            self._slash_open = True
+            ol.clear_options()
+            for i, (val, label, desc) in enumerate(opts):
+                t = Text()
+                t.append("%d. " % (i + 1), style="dim")
+                t.append(label, style="bold")
+                if desc:
+                    t.append("    ")
+                    t.append(desc, style="dim")
+                ol.add_option(Option(t, id=val))
+            try:
+                # 标题用命令描述,更清楚
+                from wchat_py.cmdline import SLASH_COMMANDS
+                _desc = next((e[1] for e in SLASH_COMMANDS if e[0] == name), "")
+                self._slash_set_labels("选择:%s   %s" % (name, _desc),
+                                       "↑↓ 选择 · Enter 应用 · Esc 返回")
+            except Exception:
+                pass
             try:
                 ol.highlighted = 0
                 ol.scroll_to_highlight()
@@ -889,12 +940,27 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
 
         def _slash_close(self):
             self._slash_open = False
+            self._slash_level = 1
             self._slash_items = []
+            self._slash_second = None
             try:
                 self.query_one("#slashpanel").remove_class("open")
                 self.query_one("#slashlist", OptionList).clear_options()
             except Exception:
                 pass
+
+        def _slash_back(self):
+            """Esc:二级 → 回到一级(按当前输入文本重刷);一级 → 关闭。"""
+            if getattr(self, "_slash_level", 1) == 2:
+                try:
+                    t = self.query_one("#input", ChatInput).text
+                except Exception:
+                    t = ""
+                self._slash_level = 1
+                self._slash_second = None
+                self._slash_refresh(t)
+            else:
+                self._slash_close()
 
         def _slash_move(self, delta):
             if not getattr(self, "_slash_open", False):
@@ -911,9 +977,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 pass
 
         def _slash_accept(self):
-            """选中当前高亮命令;返回是否真的处理了(Enter/Tab 守卫据此决定是否吞掉)。"""
+            """选中当前高亮项;返回是否真的处理了(Enter/Tab 守卫据此决定是否吞掉)。"""
             if not getattr(self, "_slash_open", False):
                 return False
+            if getattr(self, "_slash_level", 1) == 2:
+                return self._slash_accept_second()
             try:
                 ol = self.query_one("#slashlist", OptionList)
                 idx = ol.highlighted
@@ -922,7 +990,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             items = getattr(self, "_slash_items", [])
             if idx is None or not (0 <= idx < len(items)):
                 return False
-            name, _desc, kind, _opts = items[idx]
+            name, _desc, kind, opts = items[idx]
             try:
                 inp = self.query_one("#input", ChatInput)
             except Exception:
@@ -945,7 +1013,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                     except Exception:
                         pass
                 return True
-            # run / enum:清空输入框后把命令交给统一入口(enum 的一级裸提交见里程碑二改造)
+            if kind == "enum":
+                # 带固定选项 → 进二级菜单(选中后自动执行)
+                self._slash_open_second(name, opts or [])
+                return True
+            # run:清空输入框后把命令交给统一入口
             self._slash_close()
             if inp is not None:
                 try:
@@ -956,6 +1028,32 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._handle_line_text(name)
             return True
 
+        def _slash_accept_second(self):
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+                idx = ol.highlighted
+            except Exception:
+                idx = None
+            sec = getattr(self, "_slash_second", None) or {}
+            opts = sec.get("opts") or []
+            name = sec.get("name") or ""
+            if idx is None or not (0 <= idx < len(opts)) or not name:
+                return False
+            val = opts[idx][0]
+            try:
+                inp = self.query_one("#input", ChatInput)
+            except Exception:
+                inp = None
+            self._slash_close()
+            if inp is not None:
+                try:
+                    inp.text = ""
+                    inp.cursor_location = (0, 0)
+                except Exception:
+                    pass
+            self._handle_line_text("%s=%s" % (name, val))   # 选中即执行(自动发送)
+            return True
+
         def on_text_area_changed(self, event):
             """输入框内容变化 → 刷新 `/` 菜单。只有主输入框(#input)才触发(弹窗里的 Input 不是 TextArea)。"""
             try:
@@ -963,6 +1061,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 ta = None
             if ta is None or getattr(ta, "id", None) != "input":
+                return
+            # 二级菜单期间不因文本事件把用户踢回一级(用户应在选项间导航);只有文本被清空才收起。
+            if getattr(self, "_slash_level", 1) == 2:
+                if not (ta.text or "").strip():
+                    self._slash_close()
                 return
             self._slash_refresh(ta.text)
 

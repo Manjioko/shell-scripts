@@ -311,7 +311,7 @@ async def run_welcome_checks():
            wr.y == 0 and wr.height > 0, repr(wr))
 
         wtxt = str(getattr(wel, "content", ""))
-        for line in ("欢迎使用 WCHAT", "输入 -h", "输入 -q"):
+        for line in ("欢迎使用 WCHAT", "输入 /", "命令菜单"):
             ck("空态:提示含 %r" % line, line in wtxt, repr(wtxt))
 
         # 配色/斜体:与思考文本/placeholder 同一档灰 #6a6a6a + 斜体(读 computed style,稳定)
