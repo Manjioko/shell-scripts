@@ -8,12 +8,11 @@
 和"现代、克制"的观感差得远,而且和非 TUI 的观感不一致。这个模块把 **主题(颜色/字形)**
 和 **左对齐标题渲染器** 收成一份,`mdrender` 与 `tui` 都从这里取,保证两条路一致。
 
-设计口径(modern / 克制):
-  · 标题左对齐,按层级用**强调色 + 粗体**区分,不再用一整圈 HEAVY 大框(H1 只加一条
-    暗色分隔线),避免"一个标题占半个屏幕"的旧观感;
-  · 调色盘收敛到蓝/青系强调色 + 灰阶弱化(表框、分隔线、引用一律灰),不再到处品红;
-  · 行内代码去掉"粗体 + 黑底"这种重样式,只留青色;代码块沿用 rich 的语法高亮深色面板;
-  · 链接正文用蓝色、URL 变暗下划线(Hover/点击仍交给终端)。
+设计口径(暖色护眼 Gruvbox,方案A):
+  · 标题左对齐,按层级用暖色区分:**H1 暖橙 / H2 黄 / H3 绿 / H4+ 加粗或 dim**;
+  · 正文保持终端默认前景色(不灰化/不强制色,跟随用户终端);次要元素(引用/分隔线/表框)用灰;
+  · 行内代码用**黄**,去掉"粗体 + 黑底"重样式;代码块用 pygments `gruvbox-dark` 语法高亮;
+  · 链接正文用蓝、URL 蓝色下划线(Hover/点击仍交给终端);项目符号/序号用 aqua。
 
 只影响 `markdown.*` 命名空间下的样式;正文段落无样式(即终端默认前景色),所以
 "助手正文保持正常亮度、不被灰化"这条既有约定(见 toolui_test)不受影响。
@@ -22,31 +21,33 @@
 # 主题:覆盖 rich 默认的 markdown.* 样式。Theme(inherit=True) 只覆盖这里列出的名字,
 # 其余仍回退到 rich 默认主题,不会把控制台里其它样式搞坏。
 _STYLES = {
-    "markdown.h1": "bold bright_blue",
-    "markdown.h1.border": "grey50",
-    "markdown.h2": "bold cyan",
-    "markdown.h3": "bold",
+    # 暖色护眼 Gruvbox(方案A):标题按层级用暖橙/黄/绿,行内代码黄,链接蓝,次要元素灰,
+    # 项目符号 aqua;正文保持**终端默认前景色**(不强制,跟随用户终端)。代码块见 build_markdown 的 gruvbox-dark。
+    "markdown.h1": "bold #fe8019",       # 暖橙,醒目
+    "markdown.h1.border": "#665c54",
+    "markdown.h2": "bold #fabd2f",       # 黄
+    "markdown.h3": "bold #b8bb26",       # 绿
     "markdown.h4": "bold",
     "markdown.h5": "dim",
     "markdown.h6": "dim italic",
     "markdown.h7": "dim italic",
-    "markdown.code": "cyan",          # 行内代码:去掉默认的 bold + 黑底
-    "markdown.code_block": "",        # 代码块:交给 rich 语法高亮的深色面板
-    "markdown.block_quote": "grey62",
-    "markdown.list": "",              # 不再把整段列表染成青色
-    "markdown.item.bullet": "cyan",
-    "markdown.item.number": "cyan",
-    "markdown.link": "cyan",          # hyperlinks 关闭时的回退色
-    "markdown.link_url": "cyan underline",   # 开启 hyperlinks 时链接**文字**用的是它
-    "markdown.table.border": "grey50",
-    "markdown.table.header": "bold",
-    "markdown.hr": "grey50",
+    "markdown.code": "#fabd2f",          # 行内代码:黄(暖);无 bold / 无底色
+    "markdown.code_block": "",           # 代码块:交给 gruvbox-dark 语法高亮(见 build_markdown)
+    "markdown.block_quote": "#a89984",   # 灰
+    "markdown.list": "",
+    "markdown.item.bullet": "#8ec07c",   # aqua
+    "markdown.item.number": "#8ec07c",
+    "markdown.link": "#83a598",          # 蓝
+    "markdown.link_url": "#83a598 underline",
+    "markdown.table.border": "#665c54",
+    "markdown.table.header": "bold #fabd2f",
+    "markdown.hr": "#665c54",
     "markdown.strong": "bold",
     "markdown.em": "italic",
     "markdown.emph": "italic",
     "markdown.s": "strike",
     "markdown.kbd": "bold",
-    "markdown.paragraph": "",
+    "markdown.paragraph": "",            # 正文=终端默认前景色(不灰化/不强制色)
     "markdown.text": "",
 }
 
@@ -111,11 +112,14 @@ def build_markdown(text):
     注意:它只是一个 rich **可渲染对象**,真正的颜色由**渲染它的 Console 主题**决定。
     mdrender 用 `make_console()`(已带本主题);TUI 需在 app 上 push 本主题(
     `markdown_theme()`),见 tui.on_mount。
+
+    代码块语法高亮统一用 pygments 的 `gruvbox-dark`(与暖色护眼配色一致);
+    行内代码不走语法高亮,颜色由 `markdown.code`(黄 #fabd2f)决定。
     """
     global _MD_CLASS
     if _MD_CLASS is None:
         _MD_CLASS = _build_markdown_class()
-    return _MD_CLASS(text)
+    return _MD_CLASS(text, code_theme="gruvbox-dark")
 
 
 def make_console(**kwargs):
