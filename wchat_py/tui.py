@@ -762,9 +762,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         # ctrl+c/super+c,统一在一处判断"先复制选区",避免被输入框的 copy 吞掉(用户实报:
         # 内容区选中后 cmd+c 复制不了、只剩个别机器 ctrl-c 能用)。
         BINDINGS = [
-            Binding("ctrl+c", "ctrl_c", "复制/退出", priority=True, show=False),
+            Binding("ctrl+c", "ctrl_c", "复制/打断", priority=True, show=False),
             Binding("super+c", "copy_selection", "复制", priority=True, show=False),
-            Binding("ctrl+d", "maybe_quit", "退出"),
+            # Ctrl+D 不再退出(唯一退出是 /q);保留按键只为在跑着时也能打断,且不显示在底栏。
+            Binding("ctrl+d", "maybe_quit", "打断", show=False),
         ]
         # 加载历史时最多原生渲染这么多条(其余折叠;见 _mount_history)。避免整份几百条塞进
         # 内容区导致布局/渲染爆掉(那是 TUI 下"切换提示有了、正文空白"的真因)。
@@ -1746,7 +1747,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 action, arg = "text", text
             if action == "quit":
-                self.exit()
+                self._force_quit()          # 唯一退出途径:/q —— 清排队消息 + 清取消标志后退出
                 return
             if action != "text":
                 # 元命令输出(如 -auto 的开启横幅)照常在**内容区**展示;auto 档标记另由
@@ -1879,27 +1880,27 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self.exit()
 
         def action_maybe_quit(self):
-            """Ctrl+C:正在跑 → **打断当前轮**(保留已完成部分,不退出);空闲 → 退出。
-            连按(1.5s 内)始终视为强退。这符合直觉:跑着时想停下当前输出,而不是关掉整个会话。"""
-            import time as _t
-            now = _t.monotonic()
-            _last = getattr(self, "_last_ctrlc", 0.0)
-            self._last_ctrlc = now
+            """Ctrl+C:**永不退出会话**(唯一退出方式是 /q)。
+            · 正在跑 → 打断当前轮(可反复按,只是重复打断;已完成部分保留)。
+            · 空闲   → 只提示"退出请用 /q",不退出。
+            历史上"连按两次强制退出 / 空闲直接退出"违背了 -h 里"Ctrl+C 不会退出"的约定,
+            且导致误触关掉整个会话 —— 一并去掉。"""
             if self._busy:
-                if now - _last <= 1.5:
-                    self._force_quit()          # 连按两次 = 急停强退
-                    return
                 try:
                     from wchat_py import cli as _cli
                     _cli.request_llm_cancel()
                 except Exception:
                     pass
                 try:
-                    self._mount(Text("⏹ 正在中断本轮…(再按一次 Ctrl+C 退出)", style="dim"), sep=False)
+                    self._mount(Text("⏹ 正在中断本轮…(退出请用 /q)", style="dim"), sep=False)
                 except Exception:
                     pass
                 return
-            self._force_quit()
+            # 空闲:不退出,只提示正确退出方式
+            try:
+                self._mount(Text("（Ctrl+C 不退出;退出会话请输入 /q）", style="dim"), sep=False)
+            except Exception:
+                pass
 
         def _copy_selection(self):
             """把当前选区复制到剪贴板:先内容区(Screen 选区),再输入框内选区。返回是否复制了。"""
@@ -1930,7 +1931,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._copy_selection()
 
         def action_ctrl_c(self):
-            """Ctrl+C:有选中→复制(不退出);无选中→按原逻辑(空闲退出 / 生成中打断)。"""
+            """Ctrl+C:有选中→复制;无选中→打断当前轮/空闲提示,**永不退出会话**(退出用 /q)。"""
             if len(self.screen_stack) > 1:
                 # 弹窗里不接管 Ctrl+C(弹窗用 y/n/Esc;这里不退出以免误关)。
                 return

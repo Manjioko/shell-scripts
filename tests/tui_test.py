@@ -615,8 +615,8 @@ except Exception as e:
     traceback.print_exc()
     ck("M4 注入接线无异常", False, repr(e))
 
-# ---- 13) Ctrl+C/退出丢弃队列:action_maybe_quit 清空 _pending ----
-print("=== 13. 退出(Ctrl+C)丢弃排队消息 ===")
+# ---- 13) /q 退出丢弃队列:_force_quit 清空 _pending ----
+print("=== 13. 退出(/q)丢弃排队消息 ===")
 
 
 async def _m4_quit_drops_check():
@@ -629,7 +629,7 @@ async def _m4_quit_drops_check():
         try:
             app._pending.put("x")
             app._pending.put("y")
-            app.action_maybe_quit()          # 空闲 → 走 _force_quit:清队列
+            app._force_quit()                # /q 走的退出器:清队列
             await pilot.pause()
             rem = []
             try:
@@ -637,7 +637,7 @@ async def _m4_quit_drops_check():
                     rem.append(app._pending.get_nowait())
             except _q.Empty:
                 pass
-            ck("action_maybe_quit 清空排队消息(丢弃)", rem == [], repr(rem))
+            ck("_force_quit 清空排队消息(丢弃)", rem == [], repr(rem))
         finally:
             app.exit = _orig_exit
 
@@ -760,8 +760,8 @@ finally:
     _RR.set_term_cols(_prev_cols)
 
 
-# ---- 16) Ctrl+C:跑着时=打断本轮(不退出);空闲时=退出;结束清取消标志 ----
-print("=== 16. Ctrl+C:busy 打断本轮不退出 / idle 退出 / 结束清取消 ===")
+# ---- 16) Ctrl+C:跑着时=打断本轮(不退出);空闲时=不退出(唯一退出是 /q);结束清取消标志 ----
+print("=== 16. Ctrl+C:busy 打断本轮不退出 / idle 不退出(退出用 /q) / 结束清取消 ===")
 
 
 async def _ctrlc_check():
@@ -816,7 +816,7 @@ async def _ctrlc_check():
         finally:
             app.exit = _orig_exit
         await pilot.pause()
-        ck("空闲时 Ctrl+C 退出", called2["v"] is True, repr(called2))
+        ck("空闲时 Ctrl+C 不退出(唯一退出是 /q)", called2["v"] is False, repr(called2))
         _cli.clear_llm_cancel()
 
 
@@ -1528,12 +1528,12 @@ async def _copy_selection_check():
         _app._clipboard = ""
         await pilot.press("ctrl+c")
         ck("22 ctrl+c 有选中 → 复制且不退出", _app.clipboard == "COPY-S" and not _ex["v"], repr(_app.clipboard))
-        # ctrl+c 无选中 → 退出(走 maybe_quit)
+        # ctrl+c 无选中(空闲) → 不退出(唯一退出是 /q)
         _app.screen.selections = {}
         await pilot.pause()
         _ex["v"] = False
         await pilot.press("ctrl+c")
-        ck("22 ctrl+c 无选中 → 退出", _ex["v"] is True, str(_ex["v"]))
+        ck("22 ctrl+c 无选中 → 不退出(退出用 /q)", _ex["v"] is False, str(_ex["v"]))
     # 选中色高对比:输入框与内容区都设了固定蓝底白字(不依赖终端 ansi)
     _css = tui.make_app(lambda *a: None).CSS
     ck("22 输入框选中色高对比(text-area--selection)",
