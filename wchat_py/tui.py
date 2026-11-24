@@ -709,11 +709,18 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                       padding: 0 1; background: transparent; display: none; }
         #slashpanel.open { display: block; }
         #slashlist { height: auto; max-height: 12; background: transparent; border: none;
-                     padding: 0; scrollbar-size-vertical: 1; }
-        /* 抹平 OptionList 自带高亮背景:输入框持焦点时它用 $block-cursor-blurred-background,
-           ansi-dark 下几乎与背景同色(用户实测看不出上下移动)。改为完全透明,选中只靠自绘 `❯` 标记。 */
-        #slashlist > .option-list--option-highlighted { background: transparent; color: $text; text-style: none; }
-        #slashlist > .option-list--option-hover { background: #2a2a3a; }
+                     padding: 0;
+                     scrollbar-size-vertical: 1; scrollbar-color: #444444;
+                     scrollbar-color-hover: #555555; scrollbar-color-active: #666666;
+                     scrollbar-background: transparent;
+                     scrollbar-background-hover: transparent;
+                     scrollbar-background-active: transparent; }
+        /* 选中项整行高亮(像 claude)。输入框持焦点时 OptionList 用 $block-cursor-blurred-background,
+           ansi-dark 下几乎与背景同色 → 看不清;这里显式给一个可见的底色 + 亮字(整行铺满)。
+           焦点变体(:focus)也统一成同款,避免鼠标点一下变成另一种颜色。 */
+        #slashlist > .option-list--option-highlighted { background: #2d3a52; color: #ffffff; text-style: bold; }
+        #slashlist:focus > .option-list--option-highlighted { background: #2d3a52; color: #ffffff; text-style: bold; }
+        #slashlist > .option-list--option-hover { background: #252a38; }
         #slash_title { height: auto; color: $text; text-style: bold; padding: 0; }
         #slash_hint { height: auto; color: #6a6a6a; text-style: italic; padding: 0; }
         #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
@@ -785,7 +792,6 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_level = 1
             self._slash_items = []
             self._slash_second = None
-            self._slash_hl = 0          # 自绘 `❯` 选中游标(不依赖 OptionList 自带高亮)
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
@@ -871,56 +877,71 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
 
-        def _slash_item_text(self, i, item, selected):
-            """渲染某一行。选中行用**自绘 `❯` 标记**表示(不依赖 OptionList 自带高亮 —— 那个在
-            输入框持焦点时用的是 $block-cursor-blurred-background,ansi-dark 下几乎与背景同色,
-            用户实测"看不出上下移动")。自绘标记在任何主题下都清晰。"""
+        def _slash_item_text(self, i, item):
+            """渲染一行纯文案(带编号;选中态**交给 OptionList 原生高亮 + CSS**,像 claude 整行高亮)。
+            不再自绘 `❯` —— 实测自绘要每次 replace_option_prompt_at_index 重画全部行,会和
+            scroll_to_highlight 打架致选中项滚出视窗;原生 watch_highlighted 自带正确滚动。"""
             t = Text()
-            t.append("❯ " if selected else "  ", style=("bold #5f87ff" if selected else "dim"))
             t.append("%d. " % (i + 1), style="dim")
             if getattr(self, "_slash_level", 1) == 2:
                 _val, label, desc = item
-                t.append(label, style=("bold" if selected else ""))
+                t.append(label)
                 if desc:
                     t.append("    ")
                     t.append(desc, style="dim")
             else:
                 name, desc, _kind, _opts = item
-                t.append(name, style=("bold" if selected else ""))
+                t.append(name)
                 t.append("   ")
                 t.append(desc, style="dim")
             return t
 
-        def _slash_render_items(self):
-            """按当前 _slash_hl 重画所有行的 `❯` 标记(只改文案,不动列表结构)。"""
+        def _slash_size_list(self, ol):
+            """给 OptionList 一个**固定行高**(不超过 8 行):显式 height 覆盖 CSS 的 auto,
+            让它确定成为滚动容器(否则真终端里它撑成全高、被面板裁掉 → 滚动条/scroll_y 都不生效)。
+            行数少时按实际行数(不留空)。"""
             try:
-                ol = self.query_one("#slashlist", OptionList)
-            except Exception:
-                return
-            items = getattr(self, "_slash_items", [])
-            hl = getattr(self, "_slash_hl", 0)
-            for i, item in enumerate(items):
-                try:
-                    ol.replace_option_prompt_at_index(i, self._slash_item_text(i, item, i == hl))
-                except Exception:
-                    pass
-
-        def _slash_set_hl(self, new):
-            """设置高亮游标(键盘)。同时同步 OptionList.highlighted 以便自动滚动到可视区;
-            OptionList 自带高亮背景已用 CSS 抹平(见 #slashlist 规则),真正可见的是自绘 `❯`。"""
-            items = getattr(self, "_slash_items", [])
-            if not items:
-                return
-            new = max(0, min(len(items) - 1, new))
-            self._slash_hl = new
-            try:
-                ol = self.query_one("#slashlist", OptionList)
-                if ol.highlighted != new:
-                    ol.highlighted = new
-                ol.scroll_to_highlight()
+                n = ol.option_count
+                h = max(1, min(n, 8))
+                ol.styles.height = h
+                ol.styles.max_height = 8
             except Exception:
                 pass
-            self._slash_render_items()
+
+        def _slash_set_hl(self, new):
+            """把选中游标设到某行,并**手动保证它滚进视窗**。
+            实测:真终端里 OptionList 的 scroll_to_highlight() 不生效(highlighted 变了但视图不滚,
+            选中项掉到可见区外);headless run_test 里却会滚 —— 这种"headless 绿、真终端坏"的坑
+            必须信真终端。这里直接按 _index_to_line/_heights 算并设 scroll_y,不依赖内部滚动。"""
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+                n = ol.option_count
+                if n <= 0:
+                    return
+                new = max(0, min(n - 1, new))
+                ol.highlighted = new
+                try:
+                    ol.scroll_to_highlight()
+                except Exception:
+                    pass
+                self._slash_scroll_into_view(ol, new)
+            except Exception:
+                pass
+
+        def _slash_scroll_into_view(self, ol, idx):
+            """确保 idx 这一项落在 OptionList 可视区内(手工算 y,直接设 scroll_y)。"""
+            try:
+                ol._update_lines()
+                y = ol._index_to_line.get(idx, idx)
+                h = ol._heights.get(idx, 1)
+                view = ol.scrollable_content_region.height or 1
+                cur = int(ol.scroll_y or 0)
+                if y < cur:
+                    ol.scroll_y = y
+                elif y + h > cur + view:
+                    ol.scroll_y = max(0, y + h - view)
+            except Exception:
+                pass
 
         def _slash_refresh(self, text):
             """按输入框文本刷新**一级**命令菜单。**仅**当单行、以 / 开头、且还没打空格时才显示;
@@ -945,11 +966,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_second = None
             self._slash_items = entries
             self._slash_open = True
-            self._slash_hl = 0
             ol.clear_options()
             for i, item in enumerate(entries):
-                ol.add_option(Option(self._slash_item_text(i, item, i == 0), id=item[0]))
+                ol.add_option(Option(self._slash_item_text(i, item), id=item[0]))
             panel.add_class("open")
+            self._slash_size_list(ol)
             self._slash_set_labels("", "输入以过滤 · ↑↓ 选择 · Enter/Tab 确认 · Esc 关闭 · 也可鼠标点选")
             self._slash_set_hl(0)
 
@@ -963,10 +984,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_second = {"name": name, "opts": opts}
             self._slash_items = list(opts)
             self._slash_open = True
-            self._slash_hl = 0
             ol.clear_options()
             for i, item in enumerate(self._slash_items):
-                ol.add_option(Option(self._slash_item_text(i, item, i == 0), id=item[0]))
+                ol.add_option(Option(self._slash_item_text(i, item), id=item[0]))
+            self._slash_size_list(ol)
             try:
                 from wchat_py.cmdline import SLASH_COMMANDS
                 _desc = next((e[1] for e in SLASH_COMMANDS if e[0] == name), "")
@@ -981,7 +1002,6 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_level = 1
             self._slash_items = []
             self._slash_second = None
-            self._slash_hl = 0
             try:
                 self.query_one("#slashpanel").remove_class("open")
                 self.query_one("#slashlist", OptionList).clear_options()
@@ -1004,11 +1024,15 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         def _slash_move(self, delta):
             if not getattr(self, "_slash_open", False):
                 return
-            cur = getattr(self, "_slash_hl", 0)
-            n = len(getattr(self, "_slash_items", []))
-            if n <= 0:
-                return
-            self._slash_set_hl((cur + delta) % n)      # 环形
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+                n = ol.option_count
+                if n <= 0:
+                    return
+                cur = ol.highlighted if ol.highlighted is not None else 0
+                self._slash_set_hl((cur + delta) % n)      # 环形;原生 watch 自带滚动跟随
+            except Exception:
+                pass
 
         def _slash_accept_at(self, idx):
             """按索引触发当前层级的选中动作;返回是否处理了。"""
@@ -1059,7 +1083,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             """选中当前高亮项;返回是否真的处理了(Enter/Tab 守卫据此决定是否吞掉)。"""
             if not getattr(self, "_slash_open", False):
                 return False
-            return self._slash_accept_at(getattr(self, "_slash_hl", 0))
+            try:
+                idx = self.query_one("#slashlist", OptionList).highlighted
+            except Exception:
+                idx = 0
+            return self._slash_accept_at(idx)
 
         def _slash_accept_second(self, idx):
             sec = getattr(self, "_slash_second", None) or {}
@@ -1081,19 +1109,6 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                     pass
             self._handle_line_text("%s=%s" % (name, val))   # 选中即执行(自动发送)
             return True
-
-        # ---- 鼠标:悬停同步高亮、单击选中执行 ----
-        def on_option_list_option_highlighted(self, event):
-            """鼠标悬停/程序同步高亮 → 把自绘 `❯` 游标跟着移过去(仅当与当前不同,避免自激)。"""
-            try:
-                if event.option_list is not self.query_one("#slashlist", OptionList):
-                    return
-            except Exception:
-                return
-            idx = event.option_index
-            if idx is not None and idx != getattr(self, "_slash_hl", 0):
-                self._slash_hl = idx
-                self._slash_render_items()
 
         def on_option_list_option_selected(self, event):
             """单击某个选项 → 选中并执行(与键盘 Enter 同一套 _slash_accept_at)。"""

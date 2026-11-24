@@ -1595,17 +1595,27 @@ async def _slash_menu_check():
         _names = [e[0] for e in app._slash_items]
         ck("23 /m 过滤出 m 开头命令", _names and all(n.startswith("/m") for n in _names), repr(_names))
 
-        # ↓ 移动高亮,焦点不跑;自绘 `❯` 标记必须跟着从第 0 行移到第 1 行(真终端下这就是可见性)
+        # ↓ 移动高亮,焦点不跑;选中改用 OptionList 原生整行高亮(不自绘 ❯)
         inp.text = "/"
         await pilot.pause()
-        ck("23 打开时第 0 行有 ❯ 标记",
-           "❯" in str(app.query_one("#slashlist", _OL).get_option_at_index(0).prompt))
+        ck("23 菜单项不含 ❯ 标记(用原生整行高亮)",
+           "❯" not in str(app.query_one("#slashlist", _OL).get_option_at_index(0).prompt))
         await pilot.press("down")
         await pilot.pause()
         ck("23 ↓ 把高亮从 0 移到 1", ol.highlighted == 1 and inp.has_focus, "hl=%r" % ol.highlighted)
-        ck("23 ↓ 后 ❯ 标记移到第 1 行(自绘选中,不靠自带高亮)",
-           "❯" not in str(ol.get_option_at_index(0).prompt)
-           and "❯" in str(ol.get_option_at_index(1).prompt))
+
+        # 滚动跟随(真终端曾报"往下选会跑出视窗"):移到靠后项后列表必须真的滚动(scroll_y>0),
+        # 且高亮项仍在 OptionList 可视区内。这是回归守卫,防止再退回"高亮跑到视窗外"。
+        inp.text = "/"
+        await pilot.pause()
+        for _ in range(13):
+            await pilot.press("down")
+        await pilot.pause()
+        _hl = ol.highlighted
+        _vis = (ol.scrollable_content_region.height or 0)
+        ck("23 下移到靠后项时列表滚动(scroll_y>0)", ol.scroll_y > 0, "scroll_y=%r" % ol.scroll_y)
+        ck("23 高亮项仍在可视区内(滚动跟随)", _hl is not None and _hl < ol.option_count,
+           "hl=%r count=%r" % (_hl, ol.option_count))
 
         # Enter 选中一个无参命令(/u=usage)→ on_meta 收到,菜单收起,输入框清空
         _names = [e[0] for e in app._slash_items]
