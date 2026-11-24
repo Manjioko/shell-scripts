@@ -1600,6 +1600,18 @@ async def _slash_menu_check():
         await pilot.pause()
         ck("23 菜单项不含 ❯ 标记(用原生整行高亮)",
            "❯" not in str(app.query_one("#slashlist", _OL).get_option_at_index(0).prompt))
+        # 选中整行文字变紫(#bd93f9,名字+描述都紫),非选中不紫(描述保持 dim),且无编号前缀
+        _it0 = app._slash_items[0]
+        _sel = app._slash_item_text(_it0, selected=True)
+        _nosel = app._slash_item_text(_it0, selected=False)
+        ck("23 选中项整行文字变紫(名字+描述都是 #bd93f9)",
+           len(_sel.spans) >= 2 and all("#bd93f9" in str(sp.style) for sp in _sel.spans),
+           repr([(s.start, s.end, str(s.style)) for s in _sel.spans]))
+        ck("23 非选中项不紫(描述保持 dim)",
+           all("#bd93f9" not in str(sp.style) for sp in _nosel.spans),
+           repr([(s.start, s.end, str(s.style)) for s in _nosel.spans]))
+        import re as _re0
+        ck("23 菜单行无编号前缀", not _re0.match(r"\s*\d+\.\s", _sel.plain), repr(_sel.plain))
         await pilot.press("down")
         await pilot.pause()
         ck("23 ↓ 把高亮从 0 移到 1", ol.highlighted == 1 and inp.has_focus, "hl=%r" % ol.highlighted)

@@ -715,11 +715,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                      scrollbar-background: transparent;
                      scrollbar-background-hover: transparent;
                      scrollbar-background-active: transparent; }
-        /* 选中项用**文字高亮**(加粗+提亮,像 claude code),不铺背景块。输入框持焦点时
-           OptionList 默认用 $block-cursor-blurred-background 铺底,这里显式去掉背景、只留字色/字重。 */
-        #slashlist > .option-list--option-highlighted { background: transparent; color: #ffffff; text-style: bold; }
-        #slashlist:focus > .option-list--option-highlighted { background: transparent; color: #ffffff; text-style: bold; }
-        #slashlist > .option-list--option-hover { background: transparent; color: #ffffff; }
+        /* 选中项**只靠文字变紫**(像 claude code):整行文字都变紫,不要背景块、不要加粗。
+           直接把 OptionList 自带高亮(背景+字色+bold)覆盖成:透明底 + 紫字 + 无 bold。 */
+        #slashlist > .option-list--option-highlighted { background: transparent; color: #bd93f9; text-style: none; }
+        #slashlist:focus > .option-list--option-highlighted { background: transparent; color: #bd93f9; text-style: none; }
+        #slashlist > .option-list--option-hover { background: transparent; }
         #slash_title { height: auto; color: $text; text-style: bold; padding: 0; }
         #slash_hint { height: auto; color: #6a6a6a; text-style: italic; padding: 0; }
         #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
@@ -876,23 +876,44 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
 
-        def _slash_item_text(self, item):
+        # 选中项文字用的紫色(对标 claude code:选中那行整行文字变紫,不用背景/加粗)
+        _SLASH_SEL_COLOR = "#bd93f9"
+
+        def _slash_item_text(self, item, selected=False):
             """渲染一行文案(无编号,像 claude code):命令名(左列,按 _slash_namew 补齐) +
-            描述(右列,对齐到同一列)。选中态交给 CSS 做**文字高亮**(加粗提亮,不铺背景块)。"""
+            描述(右列,对齐同一列)。**选中时整行(名字+描述)文字变紫**(claude code 的做法),
+            不铺背景、不加粗。"""
             t = Text()
+            _col = self._SLASH_SEL_COLOR if selected else ""
             if getattr(self, "_slash_level", 1) == 2:
                 _val, label, desc = item
-                t.append(label)
+                t.append(label, style=_col)
                 if desc:
                     t.append("   ")
-                    t.append(desc, style="dim")
+                    t.append(desc, style=(_col if selected else "dim"))
             else:
                 name, desc, _kind, _opts = item
                 w = getattr(self, "_slash_namew", 0) or len(name)
-                t.append(name.ljust(w))         # 名字补空格 → 描述列对齐(claude 两列)
+                t.append(name.ljust(w), style=_col)
                 t.append("  ")
-                t.append(desc, style="dim")
+                t.append(desc, style=(_col if selected else "dim"))
             return t
+
+        def _slash_colorize(self):
+            """按当前 ol.highlighted 重画所有行的文字颜色(选中行整行紫,其余常态)。
+            只改文案颜色、不改行高,故不会像早期"重画全部行"那样与滚动打架;
+            重画后由调用方再 _slash_scroll_into_view 兜一次滚动。"""
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+            except Exception:
+                return
+            items = getattr(self, "_slash_items", [])
+            hl = ol.highlighted
+            for i, item in enumerate(items):
+                try:
+                    ol.replace_option_prompt_at_index(i, self._slash_item_text(item, i == hl))
+                except Exception:
+                    pass
 
         def _slash_size_list(self, ol):
             """给 OptionList 一个**固定行高**(不超过 8 行):显式 height 覆盖 CSS 的 auto,
@@ -922,6 +943,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                     ol.scroll_to_highlight()
                 except Exception:
                     pass
+                self._slash_colorize()              # 选中行整行变紫
                 self._slash_scroll_into_view(ol, new)
             except Exception:
                 pass
@@ -1110,6 +1132,17 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                     pass
             self._handle_line_text("%s=%s" % (name, val))   # 选中即执行(自动发送)
             return True
+
+        def on_option_list_option_highlighted(self, event):
+            """鼠标悬停(或程序设 highlighted)使高亮变化 → 重着色,让悬停项也整行变紫。
+            键盘路径已在 _slash_set_hl 同步着色;这里兜鼠标悬停。幂等,不会自激。"""
+            try:
+                if event.option_list is not self.query_one("#slashlist", OptionList):
+                    return
+            except Exception:
+                return
+            if getattr(self, "_slash_open", False):
+                self._slash_colorize()
 
         def on_option_list_option_selected(self, event):
             """单击某个选项 → 选中并执行(与键盘 Enter 同一套 _slash_accept_at)。"""
