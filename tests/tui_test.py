@@ -1561,5 +1561,106 @@ ck("22 cli 唯一 handler(TUI)接 on_turn_done(每轮后台保存)",
    _cli_src.count("on_turn_done=_save_turn") == 1, str(_cli_src.count("on_turn_done=_save_turn")))
 ck("22 退出不再询问是否保存(一律保存)", "退出前保存对话" not in _cli_src)
 
+# ---- 23) `/` 命令菜单(里程碑一:打 / 弹出、过滤、↑↓、Enter/Tab 选中、Esc 关、/img)----
+async def _slash_menu_check():
+    from textual.widgets import OptionList as _OL
+    seen_meta = []
+
+    def handle_line(text, emit, stream, reason):
+        stream("ok")
+
+    def on_meta(a, g):
+        seen_meta.append((a, g))
+
+    app = tui.make_app(handle_line, on_meta=on_meta)
+    async with app.run_test(size=(90, 30)) as pilot:
+        await pilot.pause()
+        inp = app.query_one("#input", TextArea)
+        ol = app.query_one("#slashlist", _OL)
+        panel = app.query_one("#slashpanel")
+        inp.focus()
+        ck("23 compose 出 #slashpanel 与 #slashlist",
+           len(app.query("#slashpanel")) == 1 and len(app.query("#slashlist")) == 1)
+
+        # 打 / → 弹出全部命令,首项高亮,焦点仍在输入框
+        inp.text = "/"
+        await pilot.pause()
+        ck("23 打 / 弹出菜单且面板 .open", app._slash_is_open() and panel.has_class("open"))
+        ck("23 列出全部命令(>=18 条)", ol.option_count >= 18, "count=%d" % ol.option_count)
+        ck("23 首项高亮 0 且焦点留在输入框", ol.highlighted == 0 and inp.has_focus)
+
+        # 前缀过滤 /m
+        inp.text = "/m"
+        await pilot.pause()
+        _names = [e[0] for e in app._slash_items]
+        ck("23 /m 过滤出 m 开头命令", _names and all(n.startswith("/m") for n in _names), repr(_names))
+
+        # ↓ 移动高亮,焦点不跑
+        inp.text = "/"
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        ck("23 ↓ 把高亮从 0 移到 1", ol.highlighted == 1 and inp.has_focus, "hl=%r" % ol.highlighted)
+
+        # Enter 选中一个无参命令(/u=usage)→ on_meta 收到,菜单收起,输入框清空
+        _names = [e[0] for e in app._slash_items]
+        ol.highlighted = _names.index("/u")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        await pilot.pause()
+        ck("23 Enter 选中 /u → 触发 usage 元命令", ("usage", "") in seen_meta, repr(seen_meta))
+        ck("23 选中后菜单收起且输入框清空", (not app._slash_is_open()) and inp.text == "")
+
+        # Tab 也能选中(/n=new_session)
+        inp.text = "/n"
+        await pilot.pause()
+        _names = [e[0] for e in app._slash_items]
+        ol.highlighted = _names.index("/n")
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        await asyncio.sleep(0.1)
+        ck("23 Tab 选中 /n → 触发 new_session", ("new_session", "") in seen_meta, repr(seen_meta))
+
+        # Esc 关闭菜单、保留字面
+        inp.text = "/q"
+        await pilot.pause()
+        ck("23 Esc 前菜单开着", app._slash_is_open())
+        await pilot.press("escape")
+        await pilot.pause()
+        ck("23 Esc 关菜单且保留字面 /q", (not app._slash_is_open()) and inp.text == "/q", repr(inp.text))
+
+        # 以 / 开头的普通正文(无匹配前缀)不弹
+        inp.text = "/usr/bin/ls"
+        await pilot.pause()
+        ck("23 /usr/bin/ls 不误弹菜单", not app._slash_is_open())
+
+        # /img:选中 → 走原生选择器(此处打桩),不自动发送
+        _picked = []
+        inp.action_pick_file = lambda: _picked.append(True)
+        inp.text = "/img"
+        await pilot.pause()
+        _names = [e[0] for e in app._slash_items]
+        ol.highlighted = _names.index("/img")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        ck("23 选中 /img 触发文件选择器且不发送", _picked == [True] and not app._slash_is_open(), repr(_picked))
+
+        # 程序化清空(提交后)不重新弹出
+        inp.text = ""
+        await pilot.pause()
+        ck("23 清空输入框不弹菜单", not app._slash_is_open())
+
+
+try:
+    asyncio.run(_slash_menu_check())
+except Exception as _e:
+    import traceback
+    traceback.print_exc()
+    ck("23 斜杠菜单检查无异常", False, repr(_e))
+
 print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
 sys.exit(0 if F == 0 else 1)

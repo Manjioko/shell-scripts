@@ -173,7 +173,8 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
     # 幂等、失败静默退回原行为,不影响 TUI 启动。
     _install_response_filter()
     from textual.app import App, ComposeResult
-    from textual.widgets import Static, Button, Label, TextArea, Input
+    from textual.widgets import Static, Button, Label, TextArea, Input, OptionList
+    from textual.widgets.option_list import Option
     from textual.containers import Vertical, Horizontal, Container, VerticalScroll
     from textual.screen import ModalScreen
     from textual.binding import Binding
@@ -290,6 +291,24 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._pastes = {}
             self._paste_seq = 0
 
+        async def _on_key(self, event):
+            """`/` 菜单打开时把 ↑↓/Esc/Tab 抢过来(焦点始终留在输入框,绝不让 OptionList 抢焦点)。
+            Enter **不**在这里拦:它有 priority 绑定,直接落到 action_submit_or_continue(见那里)。
+            实测(Textual 8.2.8):enter 的 priority 绑定不进 _on_key;up/down/escape/tab 会进,
+            event.stop() 后 TextArea 不再移动光标 / 不插 Tab。"""
+            app = getattr(self, "app", None)
+            if app is not None and getattr(app, "_slash_is_open", lambda: False)():
+                k = event.key
+                if k == "up":
+                    app._slash_move(-1); event.stop(); event.prevent_default(); return
+                if k == "down":
+                    app._slash_move(1); event.stop(); event.prevent_default(); return
+                if k == "escape":
+                    app._slash_close(); event.stop(); event.prevent_default(); return
+                if k == "tab":
+                    app._slash_accept(); event.stop(); event.prevent_default(); return
+            await super()._on_key(event)
+
         async def _on_paste(self, event):
             """终端粘贴(含括号粘贴):单行原样插入;**多行折叠成一行占位** `📋 [已粘贴 N 行文本内容]`,
             全文存 `self._pastes`,提交时由 `_restore_pastes` 换回。占位行带零宽标记 ⇒ 复用一个退格
@@ -354,6 +373,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 pass
 
         def action_submit_or_continue(self):
+            # `/` 菜单打开时,Enter 的语义是"选中当前高亮项",不是发送。Enter 的 priority 绑定
+            # 直接落到这里(不进 _on_key),所以必须在这拦。
+            app = getattr(self, "app", None)
+            if app is not None and getattr(app, "_slash_is_open", lambda: False)() and app._slash_accept():
+                return
             text = self.text
             row, _col = self.cursor_location
             lines = text.split("\n")
@@ -679,6 +703,13 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         /* 与输入框 placeholder 同一灰 + 斜体(#6a6a6a italic),深色终端上也看得清。
            旧值是 #666666:auto 标记又被 \033[2m(dim) 压暗成 ~#494949,几乎看不见。 */
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #6a6a6a; text-style: italic; }
+        /* `/` 命令菜单:整宽带边框面板,贴在输入框正上方。默认 display:none,打 / 时加 .open。
+           OptionList 本身不出边框(边框给外层 panel),背景透明与终端底融合。 */
+        #slashpanel { height: auto; max-height: 14; border: round #6a6a6a; margin: 0 1;
+                      padding: 0 1; background: transparent; display: none; }
+        #slashpanel.open { display: block; }
+        #slashlist { height: auto; max-height: 12; background: transparent; border: none;
+                     padding: 0; scrollbar-size-vertical: 1; }
         #inputrow { height: auto; max-height: 14; border: round #6a6a6a;
                     background: transparent; padding: 0 1; align-vertical: top; }
         /* 常驻提示符 ❯:独立 widget,输入/清空都在,placeholder 消失它也不走(像 claude code)。
@@ -741,12 +772,20 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._busy = False
             self._has_blocks = False        # 内容区是否已有"逻辑块"(决定是否加块间空行)
             self._pending = queue.Queue()   # M4:运行期补充消息(线程安全);worker 每小轮 poll 注入
+            # `/` 命令菜单状态(里程碑一:一级菜单)。_slash_items 是当前展示的 (命令,描述,kind,opts) 列表,
+            # 与 OptionList 的 option id 一一对应;索引即 OptionList.highlighted。
+            self._slash_open = False
+            self._slash_items = []
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
                 yield VerticalScroll(id="content")
                 yield Static(self._welcome_text(), id="welcome")
             yield Static("", id="status")
+            # `/` 命令菜单:贴在输入框**正上方**的整宽带边框面板(默认隐藏,打 / 时弹出)。
+            # 放 #status 与 #inputrow 之间 —— 出现时自然把内容区往上顶,像 claude code。
+            with Vertical(id="slashpanel"):
+                yield OptionList(id="slashlist")
             with Horizontal(id="inputrow"):
                 yield Static("❯", id="prompt")
                 yield ChatInput(id="input", placeholder="请输入问题,回车发送")
@@ -807,6 +846,125 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 self.query_one("#contentbox").set_class(bool(show), "empty")
             except Exception:
                 pass
+
+        # ---- `/` 命令菜单(里程碑一:一级菜单) ----
+        def _slash_is_open(self):
+            return getattr(self, "_slash_open", False)
+
+        def _slash_refresh(self, text):
+            """按输入框文本更新一级菜单。**仅**当单行、以 / 开头、且还没打空格时才显示;
+            一旦有空格/换行,视为转入正文或参数,收起(避免 /usr/bin、8/9、a b 被误弹)。"""
+            try:
+                panel = self.query_one("#slashpanel")
+                ol = self.query_one("#slashlist", OptionList)
+            except Exception:
+                return
+            show = (text is not None and "\n" not in text
+                    and text.startswith("/") and " " not in text)
+            if not show:
+                self._slash_close()
+                return
+            from wchat_py.cmdline import SLASH_COMMANDS
+            prefix = text[1:].lower()
+            entries = [e for e in SLASH_COMMANDS if e[0][1:].lower().startswith(prefix)]
+            if not entries:
+                self._slash_close()
+                return
+            self._slash_items = entries
+            self._slash_open = True
+            ol.clear_options()
+            for i, (name, desc, _kind, _opts) in enumerate(entries):
+                t = Text()
+                t.append("%d. " % (i + 1), style="dim")
+                t.append(name, style="bold")
+                t.append("   ")
+                t.append(desc, style="dim")
+                ol.add_option(Option(t, id=name))
+            panel.add_class("open")
+            try:
+                ol.highlighted = 0
+                ol.scroll_to_highlight()
+            except Exception:
+                pass
+
+        def _slash_close(self):
+            self._slash_open = False
+            self._slash_items = []
+            try:
+                self.query_one("#slashpanel").remove_class("open")
+                self.query_one("#slashlist", OptionList).clear_options()
+            except Exception:
+                pass
+
+        def _slash_move(self, delta):
+            if not getattr(self, "_slash_open", False):
+                return
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+                n = ol.option_count
+                if n <= 0:
+                    return
+                cur = ol.highlighted if ol.highlighted is not None else 0
+                ol.highlighted = (cur + delta) % n          # 环形
+                ol.scroll_to_highlight()
+            except Exception:
+                pass
+
+        def _slash_accept(self):
+            """选中当前高亮命令;返回是否真的处理了(Enter/Tab 守卫据此决定是否吞掉)。"""
+            if not getattr(self, "_slash_open", False):
+                return False
+            try:
+                ol = self.query_one("#slashlist", OptionList)
+                idx = ol.highlighted
+            except Exception:
+                idx = None
+            items = getattr(self, "_slash_items", [])
+            if idx is None or not (0 <= idx < len(items)):
+                return False
+            name, _desc, kind, _opts = items[idx]
+            try:
+                inp = self.query_one("#input", ChatInput)
+            except Exception:
+                inp = None
+            if kind == "file":
+                # /img:清空输入框 → 弹原生选择器 → 插入图片占位(不自动发送;用户可继续写问题)
+                self._slash_close()
+                if inp is not None:
+                    try:
+                        inp.text = ""
+                        inp.cursor_location = (0, 0)
+                    except Exception:
+                        pass
+                    try:
+                        inp.action_pick_file()
+                    except Exception:
+                        pass
+                    try:
+                        inp.focus()
+                    except Exception:
+                        pass
+                return True
+            # run / enum:清空输入框后把命令交给统一入口(enum 的一级裸提交见里程碑二改造)
+            self._slash_close()
+            if inp is not None:
+                try:
+                    inp.text = ""
+                    inp.cursor_location = (0, 0)
+                except Exception:
+                    pass
+            self._handle_line_text(name)
+            return True
+
+        def on_text_area_changed(self, event):
+            """输入框内容变化 → 刷新 `/` 菜单。只有主输入框(#input)才触发(弹窗里的 Input 不是 TextArea)。"""
+            try:
+                ta = event.text_area
+            except Exception:
+                ta = None
+            if ta is None or getattr(ta, "id", None) != "input":
+                return
+            self._slash_refresh(ta.text)
 
         # ---- 内容区(消息列表:每段一个 Static,顺序 append,自然从提问下一行开始) ----
         def _content(self):
@@ -1370,7 +1528,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._refresh_status()
 
         def on_chat_input_submitted(self, event):
-            text = event.value or ""
+            self._handle_line_text(event.value or "")
+
+        def _handle_line_text(self, text):
+            """一行输入的统一入口:分类(元命令/正文)后分发。输入框提交与 `/` 菜单选中都走这里,
+            保证两条路径**同一套**语义(不会菜单选中和手敲行为不一致)。"""
             if not text.strip():
                 return
             # 元命令(-q/-u/-n/...)先分类;`-q` 直接退出,其余走 on_meta(text 才进模型)
