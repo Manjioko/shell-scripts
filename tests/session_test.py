@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wchat_py.session import (Session, usage_lines, save_history, messages_list, compact_status,
                                model_status_lines, set_pro, set_flash, thinking_on, set_auto,
                                auto_off, add_image, orchestrate_turn, orchestrate, seed_system, enter_auto,
-                               record_allow, record_deny, make_checkpoint, Aborted,
+                               record_allow, record_deny, make_checkpoint, Aborted, refresh_usage,
                                PENDING_PREFIX)  # noqa: E402
 from wchat_py import msgstore  # noqa: E402
 
@@ -52,6 +52,38 @@ s2 = Session.from_env({})
 ck("空env默认 ctx_window=0", s2.ctx_window == 0)
 ck("空env默认 autocal=1", s2.autocal == 1)
 ck("空env model=?", "model=?" in "\n".join(usage_lines(s2)))
+
+# ---- refresh_usage:回填 env 的 usage + 重算活图数(修 /u 图片数恒 0、"没拿到usage") ----
+import os as _os  # noqa: E402
+_KEYS = ("WCHAT_LAST_USAGE_SEEN", "WCHAT_LAST_PROMPT_TOKENS",
+         "WCHAT_LAST_CACHED_TOKENS", "WCHAT_LAST_IMAGE_TOKENS")
+_srt_backup = {k: _os.environ.get(k) for k in _KEYS}
+try:
+    _os.environ.update({"WCHAT_LAST_USAGE_SEEN": "1", "WCHAT_LAST_PROMPT_TOKENS": "5000",
+                        "WCHAT_LAST_CACHED_TOKENS": "100", "WCHAT_LAST_IMAGE_TOKENS": "800"})
+    s3 = Session()
+    s3.messages_json = ('[{"role":"user","content":"看图 [[IMGREF:r11]] 和 [[IMGREF:r22]]"},'
+                        '{"role":"user","content":"又见 [[IMGREF:r11]] 同一张"}]')
+    refresh_usage(s3)
+    ck("refresh_usage 回填 prompt tokens", s3.last_prompt_tokens == 5000, str(s3.last_prompt_tokens))
+    ck("refresh_usage 回填 cached tokens", s3.last_cached_tokens == 100, str(s3.last_cached_tokens))
+    ck("refresh_usage 回填图片计费 tokens", s3.last_image_tokens == 800, str(s3.last_image_tokens))
+    ck("refresh_usage 算活图数(去重,=2)", s3.img_ref_count == 2, str(s3.img_ref_count))
+    # 消息里 2 张图 → usage 的"活图"行应显示 2(不再恒 0)
+    ck("usage 活图行反映真实张数(2)", "活图: 2 张在上下文" in "\n".join(usage_lines(s3)))
+    # 没有 USAGE_SEEN 时不动 token(避免把陈旧/粗算当真)
+    _os.environ["WCHAT_LAST_USAGE_SEEN"] = "0"
+    s4 = Session(); s4.last_prompt_tokens = 0; s4.messages_json = "[]"
+    refresh_usage(s4)
+    ck("refresh_usage 无 usage 事件时不覆盖 token", s4.last_prompt_tokens == 0, str(s4.last_prompt_tokens))
+    ck("refresh_usage 无图时活图=0", s4.img_ref_count == 0, str(s4.img_ref_count))
+finally:
+    for _k, _v in _srt_backup.items():
+        if _v is None:
+            _os.environ.pop(_k, None)
+        else:
+            _os.environ[_k] = _v
+
 
 # save_history 往返（经 msgstore 原子写）
 d = tempfile.mkdtemp()

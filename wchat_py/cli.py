@@ -989,7 +989,13 @@ def main(argv):
             _saver = HistorySaver(_hist_dir, _epoch_name, os.environ.get("WCHAT_CHAT_TITLE", ""))
 
         def _save_turn(_session=None):
-            # 每轮结束调用(可能在线程里):先确保有标题(全新对话首轮在此生成),再后台保存。
+            # 每轮结束调用(可能在线程里):先回填本轮 usage/活图到活会话(否则 /u 恒 0),
+            # 再确保有标题并后台保存。
+            try:
+                from wchat_py.session import refresh_usage as _ru
+                _ru(_s)
+            except Exception:
+                pass
             if _saver is None:
                 return
             try:

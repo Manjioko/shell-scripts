@@ -8,6 +8,7 @@ auto 计数、图片观测/标定）。`usage_lines(s)` 复刻 bash `print_usage
 import json
 from dataclasses import dataclass, field
 import os
+import re
 import sys
 import threading
 
@@ -661,6 +662,33 @@ def make_checkpoint(s, work_root=None):
         pass
     s.auto_ck_note = ""
     return ""
+
+
+def refresh_usage(s):
+    """把"最近一次真实请求"的用量从 env 回填到活会话对象,并重算活图数。
+
+    为什么需要:usage 由 `cli._call_llm` 写进 env(`WCHAT_LAST_*`),但 **TUI 路径没有 on_final /
+    `_sync_runtime`** 把它同步回 `Session`;而 `/u`(usage_lines)读的是 Session 字段 —— 不刷新就
+    永远显示"本次会话还没有拿到带 usage 的请求"、图片计费恒 0。活图数同理:img_ref_count 历史上
+    从未被任何地方计算过(只从 env 读、没人写),所以恒 0。
+
+    只在 `WCHAT_LAST_USAGE_SEEN == "1"`(本次请求确实带回了 usage)时才覆盖 token,避免把上一次
+    的残留值或字节粗算当成真值。活图数 = 上下文 messages 里仍存在的 [[IMGREF:...]] 引用(去重)。
+    """
+    def _i(k):
+        try:
+            return int(os.environ.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0
+    if os.environ.get("WCHAT_LAST_USAGE_SEEN") == "1":
+        s.last_prompt_tokens = _i("WCHAT_LAST_PROMPT_TOKENS")
+        s.last_cached_tokens = _i("WCHAT_LAST_CACHED_TOKENS")
+        s.last_image_tokens = _i("WCHAT_LAST_IMAGE_TOKENS")
+    try:
+        s.img_ref_count = len(set(re.findall(r"\[\[IMGREF:([^\]\s]+)\]\]", s.messages_json or "")))
+    except Exception:
+        pass
+    return s
 
 
 def usage_lines(s):
