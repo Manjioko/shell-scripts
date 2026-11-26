@@ -715,7 +715,7 @@ async def run_plus_button_checks():
 
             # ① 存在且最左
             ck("有 #plusbtn 按钮(1 个)", len(app.query("#plusbtn")) == 1)
-            ck("#plusbtn 符号为 +", str(getattr(plus, "content", "")).strip() == "+",
+            ck("#plusbtn 符号为加号(+ / ＋)", str(getattr(plus, "content", "")).strip() in ("+", "＋"),
                repr(str(getattr(plus, "content", ""))))
             ck("#plusbtn 是输入行内容区最左(≥输入行左沿、且 < ❯)",
                ibox.x <= plus.region.x < prompt.region.x,

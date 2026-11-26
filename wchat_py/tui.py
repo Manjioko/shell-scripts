@@ -907,10 +907,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
         /* 常驻提示符 ❯:独立 widget,输入/清空都在,placeholder 消失它也不走(像 claude code)。
            宽度 2 给字符后留一格;height:auto 让多行输入时它停在第一行顶部。 */
         #prompt { width: 2; height: auto; color: #6a6a6a; padding: 0; }
-        /* 输入框最左侧「+」工具栏按钮(可点 → 多选文件)。灰字、hover 变紫提示可点。 */
-        #plusbtn { width: 2; height: auto; color: #6a6a6a; padding: 0;
+        /* 输入框最左侧「＋」工具栏按钮(可点 → 多选文件)。做大做亮:全角＋ + 加粗 + 白色,
+           让人一眼看出是可点的加号(灰/小会让人以为不可点);hover 变紫。 */
+        #plusbtn { width: 3; height: auto; color: #ffffff; text-style: bold; padding: 0;
                    content-align: center middle; }
-        #plusbtn:hover { color: #bd93f9; }
+        #plusbtn:hover { color: #bd93f9; text-style: bold; }
         #input { width: 1fr; height: auto; max-height: 12; background: transparent;
                  border: none; padding: 0; }
         #input:focus { background: transparent; }
@@ -999,7 +1000,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
                 yield OptionList(id="slashlist")
                 yield Label("", id="slash_hint")
             with Horizontal(id="inputrow"):
-                yield PlusButton("+", id="plusbtn")
+                yield PlusButton("＋", id="plusbtn")
                 yield Static("❯", id="prompt")
                 yield ChatInput(id="input", placeholder="请输入问题,回车发送")
 
