@@ -548,19 +548,39 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
             super().action_delete_right()
 
         def action_pick_file(self):
+            """Ctrl-F / 输入框左侧「+」:弹原生**多选**文件框,把选中的每个文件各插一行占位。
+            去重:同一批次内相同路径只插一次,且已在输入框占位里的路径也不重复插。插完回焦输入框。"""
             try:
-                from wchat_py.repl import _pick_file, _file_placeholder
+                from wchat_py.repl import (_pick_files, _file_placeholder,
+                                           _PLACE_IMG, _PLACE_FILE, _PLACE_SKIP)
             except Exception:
                 return
             try:
-                p = _pick_file()
+                paths = _pick_files()
             except Exception:
-                p = ""
-            if p and p != "CANCELLED" and os.path.isfile(p):
+                paths = []
+            if not paths:
+                return
+            # 已在输入框占位行里的路径(去重基准)
+            seen = set()
+            for ln in self.text.split("\n"):
+                _plain = ln.replace(self._PH_MARK, "")
+                for pre in (_PLACE_IMG, _PLACE_FILE, _PLACE_SKIP):
+                    if _plain.startswith(pre):
+                        seen.add(_plain[len(pre):].strip())
+            for p in paths:
+                p = os.path.expanduser(p)
+                if p in seen:
+                    continue
+                seen.add(p)
                 try:
                     self._insert_placeholder_line(_file_placeholder(p))
                 except Exception:
                     pass
+            try:
+                self.focus()
+            except Exception:
+                pass
 
         def action_paste_image(self):
             """Ctrl+V/Ctrl+G:从系统剪贴板抓图片,插入 `📋 [图片] <路径>` 占位行。
@@ -782,6 +802,22 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
             except Exception:
                 pass
 
+    class PlusButton(Static):
+        """输入框最左侧的「+」工具栏按钮:点击弹原生**多选**文件框(与 Ctrl-F 同一套)。
+        方便鼠标用户(不必记 Ctrl-F);选中多个文件/图片各插一行占位。"""
+
+        def on_click(self, event):
+            try:
+                event.stop()
+            except Exception:
+                pass
+            try:
+                inp = self.app.query_one("#input", ChatInput)
+                inp.action_pick_file()
+                inp.focus()
+            except Exception:
+                pass
+
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; padding: 0; }
@@ -871,6 +907,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
         /* 常驻提示符 ❯:独立 widget,输入/清空都在,placeholder 消失它也不走(像 claude code)。
            宽度 2 给字符后留一格;height:auto 让多行输入时它停在第一行顶部。 */
         #prompt { width: 2; height: auto; color: #6a6a6a; padding: 0; }
+        /* 输入框最左侧「+」工具栏按钮(可点 → 多选文件)。灰字、hover 变紫提示可点。 */
+        #plusbtn { width: 2; height: auto; color: #6a6a6a; padding: 0;
+                   content-align: center middle; }
+        #plusbtn:hover { color: #bd93f9; }
         #input { width: 1fr; height: auto; max-height: 12; background: transparent;
                  border: none; padding: 0; }
         #input:focus { background: transparent; }
@@ -959,6 +999,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_
                 yield OptionList(id="slashlist")
                 yield Label("", id="slash_hint")
             with Horizontal(id="inputrow"):
+                yield PlusButton("+", id="plusbtn")
                 yield Static("❯", id="prompt")
                 yield ChatInput(id="input", placeholder="请输入问题,回车发送")
 

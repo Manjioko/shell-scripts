@@ -751,6 +751,58 @@ def _pick_dir(default_dir=None):
     return ""
 
 
+def _pick_files(default_dir=None):
+    """原生「选文件」**多选**对话框(macOS / Linux zenity|kdialog / WSL2)。
+    返回选中的文件绝对路径列表(取消/不可用返回 [])。
+    多选是重点:用户要一次挑多个文件/图片;提交时 parse_placeholders 会逐行把它们各自
+    解析成图片/文本/跳过(那条链路本就按行遍历,天然支持多个)。
+    """
+    import shutil
+
+    def _clean(lst):
+        return [x.strip() for x in lst if x and x.strip() and os.path.exists(x.strip())]
+
+    if sys.platform == "darwin":
+        # `choose file with multiple selections allowed` → 逐个 POISX 路径按行拼接返回。
+        script = ("on run argv\n"
+                  "  try\n"
+                  "    set fs to choose file with multiple selections allowed\n"
+                  "  on error\n"
+                  "    return \"CANCELLED\"\n"
+                  "  end try\n"
+                  "  set out to \"\"\n"
+                  "  repeat with f in fs\n"
+                  "    set out to out & (POSIX path of f) & linefeed\n"
+                  "  end repeat\n"
+                  "  return out\n"
+                  "end run")
+        args = ["osascript"]
+        for _ln in script.splitlines():
+            args += ["-e", _ln]
+        try:
+            p = subprocess.run(args, capture_output=True, text=True)
+            return _clean((p.stdout or "").splitlines())
+        except OSError:
+            return []
+    # Linux / WSLg:zenity / kdialog 多选(以换行分隔,便于逐行取回)
+    for cmd in (["zenity", "--file-selection", "--multiple", "--separator", "\n"],
+                ["kdialog", "--getopenfilename", "--multiple", "--separate-output"]):
+        if shutil.which(cmd[0]):
+            try:
+                p = subprocess.run(cmd, capture_output=True, text=True)
+                return _clean((p.stdout or "").splitlines())
+            except OSError:
+                return []
+    # 兜底:WSL2 的 Windows 原生对话框(单选,返回至多一个)
+    try:
+        if _is_wsl_env():
+            _one = _wsl_pick_file()
+            return _clean([_one]) if _one and _one != "CANCELLED" else []
+    except Exception:
+        pass
+    return []
+
+
 def _file_placeholder(path):
     if _is_image(path):
         tag = "📋 [图片] "

@@ -679,6 +679,90 @@ def run_modal_style_checks():
     ck("菜单按钮聚焦态:背景透明(不铺白底)", "background: transparent" in _ff, repr(_ff[:140]))
 
 
+async def run_plus_button_checks():
+    """输入框最左「+」工具栏按钮 + 多选文件(与 Ctrl-F 同套):
+    ①#plusbtn 存在且在输入行最左(❯ 与输入框左侧);
+    ②点击 + → 弹多选 → 选中的多个文件各插一行占位;
+    ③同批次重复路径只插一次(去重);已在输入框里的路径不重复插;
+    ④插完回焦输入框;
+    ⑤Ctrl-F(ctrl+f)走同一多选逻辑,也能一次插多个。"""
+    _fix_env()
+    import os as _os
+    import tempfile as _tf
+    import wchat_py.repl as _repl
+    import wchat_py.tui as _t
+
+    # 造测试文件:一个图片(.png)一个文本(.txt)
+    _d = _tf.mkdtemp()
+    _img = _os.path.join(_d, "a.png"); open(_img, "wb").write(b"\x89PNG\r\n\x1a\n")
+    _txt = _os.path.join(_d, "b.txt"); open(_txt, "w").write("hello")
+    _ph_img = _repl._file_placeholder(_img)
+    _ph_txt = _repl._file_placeholder(_txt)
+
+    _saved_wr = _os.environ.get("WORK_ROOT")
+    _os.environ.setdefault("WORK_ROOT", _os.getcwd())
+    _orig = _repl._pick_files
+    try:
+        _repl._pick_files = lambda: [_img, _txt, _img]   # 含重复,验证去重
+        app = _t.make_app(lambda *a: None, banner="")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            print("=== 16. 输入框左侧「+」工具栏按钮 + 多选(与 Ctrl-F 同套) ===")
+            inp = app.query_one("#input", TextArea)
+            ibox = app.query_one("#inputrow").region
+            prompt = app.query_one("#prompt")
+            plus = app.query_one("#plusbtn")
+
+            # ① 存在且最左
+            ck("有 #plusbtn 按钮(1 个)", len(app.query("#plusbtn")) == 1)
+            ck("#plusbtn 符号为 +", str(getattr(plus, "content", "")).strip() == "+",
+               repr(str(getattr(plus, "content", ""))))
+            ck("#plusbtn 是输入行内容区最左(≥输入行左沿、且 < ❯)",
+               ibox.x <= plus.region.x < prompt.region.x,
+               "plus=%r ibox.x=%d prompt.x=%d" % (plus.region, ibox.x, prompt.region.x))
+            ck("#plusbtn 在 ❯ 左侧", plus.region.x < prompt.region.x,
+               "plus.x=%d prompt.x=%d" % (plus.region.x, prompt.region.x))
+            ck("#plusbtn 在输入框左侧", plus.region.x < inp.region.x,
+               "plus.x=%d input.x=%d" % (plus.region.x, inp.region.x))
+
+            # ②③④ 点击 + → 多选插多个 + 去重 + 回焦
+            inp.text = ""
+            await pilot.click("#plusbtn")
+            for _ in range(20):
+                await pilot.pause(); await asyncio.sleep(0.01)
+            _t1 = inp.text
+            ck("点击 + 插入图片占位", _ph_img in _t1, repr(_t1))
+            ck("点击 + 插入文本占位", _ph_txt in _t1, repr(_t1))
+            ck("重复路径去重(图片路径只出现一次)", _t1.count(_img) == 1, repr(_t1))
+            ck("插完回焦输入框", inp.has_focus, "focused=%r" % (getattr(app.focused, "id", None),))
+
+            # ③再点一次(同一批)→ 都已在输入框 → 不新增
+            _before = inp.text
+            await pilot.click("#plusbtn")
+            for _ in range(20):
+                await pilot.pause(); await asyncio.sleep(0.01)
+            ck("已在输入框的路径不重复插(再点一次不新增)", inp.text == _before, repr(inp.text))
+
+            # ⑤ Ctrl-F 同套多选
+            inp.text = ""
+            _repl._pick_files = lambda: [_img, _txt]
+            inp.focus()
+            await pilot.press("ctrl+f")
+            for _ in range(20):
+                await pilot.pause(); await asyncio.sleep(0.01)
+            _t2 = inp.text
+            ck("Ctrl-F 多选:图片占位插入", _ph_img in _t2, repr(_t2))
+            ck("Ctrl-F 多选:文本占位插入", _ph_txt in _t2, repr(_t2))
+    finally:
+        _repl._pick_files = _orig
+        if _saved_wr is None:
+            _os.environ.pop("WORK_ROOT", None)
+        else:
+            _os.environ["WORK_ROOT"] = _saved_wr
+        import shutil as _sh
+        _sh.rmtree(_d, ignore_errors=True)
+
+
 def main():
     try:
         asyncio.run(run_checks())
@@ -716,6 +800,12 @@ def main():
         import traceback
         traceback.print_exc()
         ck("弹窗样式检查跑通(无异常)", False, repr(e))
+    try:
+        asyncio.run(run_plus_button_checks())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        ck("加号多选检查跑通(无异常)", False, repr(e))
     print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
     return 0 if F == 0 else 1
 

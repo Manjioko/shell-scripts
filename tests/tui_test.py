@@ -962,8 +962,8 @@ async def _atomic_del_check():
         _fd, _img = _tf.mkstemp(suffix=".png")
         os.write(_fd, b"\x89PNG\r\n\x1a\n")
         os.close(_fd)
-        _o_pick = _repl._pick_file
-        _repl._pick_file = lambda: _img
+        _o_pick = _repl._pick_files
+        _repl._pick_files = lambda: [_img]
         try:
             # 场景 1:空输入选图 → 一次退格整行删除(用户报的核心场景)
             inp.text = ""
@@ -988,7 +988,7 @@ async def _atomic_del_check():
             await pilot.pause()
             ck("退格只删占位行、保留正文(hi)", inp.text.strip("\n") == "hi", repr(inp.text))
         finally:
-            _repl._pick_file = _o_pick
+            _repl._pick_files = _o_pick
 
         # 场景 3:光标停在占位行内(行尾)退格 → 整行删除
         _phline = "📋 [图片] /tmp/xyz.png\u200b"
