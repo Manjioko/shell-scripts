@@ -30,6 +30,7 @@ SLASH_COMMANDS = [
     ("/q",      "退出程序(Ctrl+C 不退出,这是唯一退出方式)", "run", None),
     ("/n",      "新对话(清空历史并清屏)", "run", None),
     ("/cl",     "清屏(保留对话历史)", "run", None),
+    ("/cd",     "更换工作目录(弹选择器 / 直接 /cd <路径>;auto 下不可换)", "run", None),
     ("/c",      "手动压缩对话历史", "run", None),
     ("/u",      "查看当前上下文 token 用量", "run", None),
     ("/h",      "显示帮助信息", "run", None),
@@ -92,6 +93,10 @@ def classify(line):
         return "deprecated_sf", (s.split("=", 1)[1] if "=" in s else "")
     if s == "-img" or s.startswith("-img "):
         return "image", s[len("-img"):].lstrip(" ")
+    # `/cd` / `-cd <路径>`:更换工作目录(切信任边界)。裸 `/cd` 弹原生选目录;
+    # 带路径则直接用它(仍过合法性校验)。真正的切换逻辑在 TUI/主循环里(要动 cwd+env+UI)。
+    if s == "-cd" or s.startswith("-cd "):
+        return "cd", s[len("-cd"):].lstrip(" ")
     return "text", orig
 
 

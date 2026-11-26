@@ -438,6 +438,247 @@ async def run_hint_style_checks():
         ck("提示行斜体(思考内容本身不强制斜体,提示行加斜体)", "italic" in _hint_rule, repr(_hint_rule))
 
 
+async def run_workdir_checks():
+    """输入框上方「工作目录栏」:常驻可见、贴输入框上方、可点击弹三选项菜单(复制路径 /
+    在文件管理器打开 / 更换工作目录),且不破坏既有布局(输入框仍贴底、状态区仍折叠)。
+
+    回归价值:这一栏若高度错、被顶到内容区里、或点击没反应,用户就找不到当前工作目录、
+    也换不了。用真布局引擎 + Pilot 点击钉死:①存在且贴输入框上方;②点了真弹菜单;
+    ③「显示完整路径」展开成全路径(带 .full 类,允许折行);④复制真写进剪贴板;
+    ⑤Finder 动作真拿到全路径;⑥auto 关时状态区仍折叠为 0(本栏不占状态区高度)。
+    """
+    _fix_env()
+    import wchat_py.tui as _t
+
+    _saved_wr = os.environ.get("WORK_ROOT")
+    # 造一个"在 home 下"的工作目录,验证折叠成 ~(显示不必真实存在,realpath 照样能算)
+    _wd = os.path.join(os.path.expanduser("~"), "wchat-wd-visual-test")
+    os.environ["WORK_ROOT"] = _wd
+
+    # 记录 Finder 打开的真实入参(不真弹 Finder)
+    _calls = []
+    _orig_open = _t._open_path_in_file_manager
+    _t._open_path_in_file_manager = lambda p: (_calls.append(p), (True, "ok"))[1]
+    try:
+        app = _t.make_app(lambda *a: None, banner="")
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            print("=== 9. 工作目录栏:显示 / 贴输入框上方 / 点击弹菜单 / 三动作 ===")
+            bar = app.query_one("#workdirbar")
+            inp = app.query_one("#inputrow")
+            cont = app.query_one("#content", VerticalScroll)
+            W = app.screen.size.width
+            _full = os.path.realpath(_wd)
+
+            ck("有工作目录栏(#workdirbar,1 个)", len(app.query("#workdirbar")) == 1)
+            _txt = str(getattr(bar, "content", ""))
+            ck("工作目录栏文本含 📁 图标", "📁" in _txt, repr(_txt))
+            # home 下 → 折叠成 ~ 开头(不显示完整 /Users/...)
+            ck("home 下的路径折叠成 ~ 开头", _txt.replace("\xa0", " ").find("~") != -1
+               and "/Users/" not in _txt and _wd.split(os.sep)[-1] in _txt, repr(_txt))
+
+            # 布局:贴输入框上方、在内容区之下、整宽、高度 ≥1
+            ck("工作目录栏整宽", bar.region.x == 0 and bar.region.width == W, repr(bar.region))
+            ck("工作目录栏在输入框上方(栏底 ≤ 输入行顶)", bar.region.bottom <= inp.region.y,
+               "bar=%r input=%r" % (bar.region, inp.region))
+            ck("工作目录栏在内容区之下(栏顶 ≥ 内容区底)", bar.region.y >= cont.region.bottom,
+               "bar.y=%d content.bottom=%d" % (bar.region.y, cont.region.bottom))
+            ck("工作目录栏高度 ≥ 1(常驻可见)", bar.region.height >= 1, repr(bar.region))
+
+            # auto 关:状态区仍折叠为 0(本栏不占用状态区)
+            app._last_marker = "__force__"
+            app._refresh_status()
+            await pilot.pause()
+            ck("auto 关:状态区仍折叠为 0(工作目录栏不占状态区高度)",
+               app.query_one("#status").region.height == 0)
+
+            # 点击 → 弹菜单
+            ck("点击前无弹窗(仅 1 层 screen)", len(app.screen_stack) == 1)
+            await pilot.click("#workdirbar")
+            await pilot.pause()
+            _tops = [type(s).__name__ for s in app.screen_stack]
+            ck("点击工作目录栏 → 弹出 WorkdirMenuModal", len(app.screen_stack) == 2
+               and "WorkdirMenuModal" in _tops, repr(_tops))
+
+            # 菜单只有两项:在文件管理器打开 / 更换工作目录;且不再有 复制路径/显示完整路径
+            ck("菜单有「在文件管理器打开」按钮", len(app.screen.query("#filemgr")) == 1)
+            ck("菜单有「更换工作目录」按钮", len(app.screen.query("#change")) == 1)
+            ck("菜单已移除「复制路径」按钮", len(app.screen.query("#copy")) == 0)
+            ck("菜单已移除「显示完整路径」按钮", len(app.screen.query("#show")) == 0)
+
+            # 「在文件管理器打开」:动作拿到全路径(平台中立:mac/Linux/WSL 都走它)
+            await pilot.click("#filemgr")
+            await pilot.pause()
+            ck("「在文件管理器打开」拿到全路径", _calls and _calls[-1] == _full, repr(_calls))
+            ck("「在文件管理器打开」后弹窗关闭", len(app.screen_stack) == 1, repr(_tops))
+
+            # Esc:打开后 Esc 关闭
+            await pilot.click("#workdirbar")
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            ck("Esc 关闭工作目录菜单", len(app.screen_stack) == 1)
+    finally:
+        _t._open_path_in_file_manager = _orig_open
+        if _saved_wr is None:
+            os.environ.pop("WORK_ROOT", None)
+        else:
+            os.environ["WORK_ROOT"] = _saved_wr
+
+
+async def run_workdir_switch_checks():
+    """第二版:真正切换工作目录。钉死:
+    ①合法性校验(拒 /、~、系统目录、他人家目录;允许 /tmp 与家目录子目录);
+    ②auto 下禁止切换(拦截 + 提示,WORK_ROOT/cwd/回调都不动);
+    ③非 auto:经菜单「更换工作目录」→ chdir + WORK_ROOT + 回调 + 工作目录栏一起变;
+    ④`/cd <路径>` 直接切;⑤非法路径被拒、不切。"""
+    _fix_env()
+    import shutil as _sh
+    import tempfile as _tf
+    import wchat_py.tui as _t
+    import wchat_py.repl as _repl
+
+    # ---- ① 纯函数:合法性校验 ----
+    print("=== 10. 工作目录切换:合法性校验 ===")
+    home = os.path.realpath(os.path.expanduser("~"))
+    for bad in ("/", "/usr", "/etc", "/var", "/bin", "/sbin", home, "/nonexistent-xyz-123"):
+        ok, _why = _t._validate_workdir(bad)
+        ck("拒绝工作目录 %s" % bad, not ok, repr(_why))
+    ok_file, _ = _t._validate_workdir(os.path.abspath(__file__))
+    ck("拒绝把文件当工作目录", not ok_file)
+    _tgt = _tf.mkdtemp(dir="/tmp")
+    _tgt2 = _tf.mkdtemp(dir="/tmp")
+    ok_tmp, real_tmp = _t._validate_workdir(_tgt)
+    ck("允许 /tmp 下的真实目录", ok_tmp and real_tmp == os.path.realpath(_tgt), repr(real_tmp))
+    ok_repo, _ = _t._validate_workdir(REPO)
+    ck("允许家目录内的项目子目录(repo)", ok_repo)
+
+    # ---- ②③④⑤ 走真 app ----
+    _saved = {"cwd": os.getcwd(),
+              "WORK_ROOT": os.environ.get("WORK_ROOT"),
+              "AUTO_MODE": os.environ.get("AUTO_MODE"),
+              "WCHAT_AUTO_MODE": os.environ.get("WCHAT_AUTO_MODE")}
+    _orig_pick = _repl._pick_dir
+    _picked = {"v": _tgt}
+    _repl._pick_dir = lambda default=None: _picked["v"]
+    _changed = []
+    _origin = REPO
+    try:
+        os.environ["WORK_ROOT"] = _origin
+        for _k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
+            os.environ.pop(_k, None)
+        app = _t.make_app(lambda *a: None, banner="",
+                          on_workdir_change=lambda r: _changed.append(r))
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            bar = app.query_one("#workdirbar")
+
+            # ② auto 下禁止
+            print("=== 11. auto 下禁止更换工作目录 ===")
+            os.environ["AUTO_MODE"] = "full"
+            os.environ["WCHAT_AUTO_MODE"] = "full"
+            _changed.clear()
+            await pilot.click("#workdirbar"); await pilot.pause()
+            await pilot.click("#change"); await pilot.pause()
+            ck("auto 下切换被拦:WORK_ROOT 未变", os.environ.get("WORK_ROOT") == _origin,
+               os.environ.get("WORK_ROOT"))
+            ck("auto 下切换被拦:回调未触发", not _changed, repr(_changed))
+            ck("auto 下切换被拦:cwd 未变", os.getcwd() == _saved["cwd"], os.getcwd())
+            _txt = _content_text(app)
+            ck("auto 下切换被拦:给出提示(含 auto/不能更换)",
+               "auto" in _txt and "不能更换" in _txt, repr(_txt[-140:]))
+            for _k in ("AUTO_MODE", "WCHAT_AUTO_MODE"):
+                os.environ.pop(_k, None)
+            app._last_marker = "__force__"; app._refresh_status(); await pilot.pause()
+
+            # ③ 非 auto:菜单「更换工作目录」→ 切到 /tmp 目标
+            print("=== 12. 非 auto:切换工作目录(菜单→选择器) ===")
+            _changed.clear()
+            _picked["v"] = _tgt
+            await pilot.click("#workdirbar"); await pilot.pause()
+            await pilot.click("#change"); await pilot.pause()
+            ck("切换后 cwd 变为目标", os.getcwd() == os.path.realpath(_tgt), os.getcwd())
+            ck("切换后 WORK_ROOT 变为目标", os.environ.get("WORK_ROOT") == os.path.realpath(_tgt),
+               os.environ.get("WORK_ROOT"))
+            ck("切换后调用 on_workdir_change 回调",
+               _changed and _changed[-1] == os.path.realpath(_tgt), repr(_changed))
+            ck("切换后工作目录栏显示新目录",
+               _t._pretty_path(os.path.realpath(_tgt)) in str(getattr(bar, "content", "")),
+               repr(str(getattr(bar, "content", ""))))
+
+            # ④ /cd <路径> 直接切
+            print("=== 13. /cd <路径> 直接切换 ===")
+            _changed.clear()
+            app._handle_line_text("/cd " + _tgt2)
+            await pilot.pause()
+            ck("/cd <路径>:cwd 变为目标", os.getcwd() == os.path.realpath(_tgt2), os.getcwd())
+            ck("/cd <路径>:WORK_ROOT 变为目标", os.environ.get("WORK_ROOT") == os.path.realpath(_tgt2),
+               os.environ.get("WORK_ROOT"))
+            ck("/cd <路径>:回调触发", _changed and _changed[-1] == os.path.realpath(_tgt2), repr(_changed))
+
+            # ⑤ /cd 非法路径被拒
+            print("=== 14. /cd 非法路径被拒 ===")
+            _before = os.environ.get("WORK_ROOT")
+            _changed.clear()
+            app._handle_line_text("/cd /etc")
+            await pilot.pause()
+            ck("/cd /etc 被拒:WORK_ROOT 不变", os.environ.get("WORK_ROOT") == _before,
+               os.environ.get("WORK_ROOT"))
+            ck("/cd /etc 被拒:回调未触发", not _changed)
+            ck("/cd /etc 被拒:给出提示", "无法切换工作目录" in _content_text(app),
+               repr(_content_text(app)[-140:]))
+    finally:
+        _repl._pick_dir = _orig_pick
+        try:
+            os.chdir(_saved["cwd"])
+        except Exception:
+            pass
+        for _k in ("WORK_ROOT", "AUTO_MODE", "WCHAT_AUTO_MODE"):
+            if _saved[_k] is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _saved[_k]
+        for _d in (_tgt, _tgt2):
+            try:
+                _sh.rmtree(_d, ignore_errors=True)
+            except Exception:
+                pass
+
+
+def run_modal_style_checks():
+    """所有弹窗的窗口线条统一(round #6a6a6a、粗细一致),背景遮罩加深到 70% 凸显独立性。
+    回归:用户要求把各弹窗边框换成与工作目录菜单同一灰。曾试过用单边 outline 模拟投影,
+    但 Textual 8.x 无 box-shadow,outline 会渲染成偏离边框的断开矩形(看着像坏了),已弃用。
+    这里解析 app.CSS,逐弹窗断言 .dialog = round #6a6a6a,背景遮罩 70%,且无 outline 残留、
+    无旧边框色($warning / thick $accent)。"""
+    import re as _re
+    print("=== 15. 弹窗边框统一(round #6a6a6a)+ 遮罩 70%(无 outline 残影) ===")
+    css = tui.make_app(lambda *a: None, banner="").CSS
+    modals = ["ConfirmModal", "InputModal", "HistoryPickModal", "WorkdirMenuModal"]
+    for m in modals:
+        _mm = _re.search(r"%s\s+\.dialog\s*\{([^}]*)\}" % m, css)
+        _body = _mm.group(1) if _mm else ""
+        ck("%s .dialog 用统一灰边框 round #6a6a6a" % m,
+           "border: round #6a6a6a" in _body, repr(_body[:120]))
+        _back = _re.search(r"%s\s*\{([^}]*)\}" % m, css)
+        _bb = _back.group(1) if _back else ""
+        ck("%s 背幕遮罩加深到 70%%" % m, "background: $background 70%" in _bb, repr(_bb[:100]))
+    # 弃用 outline 模拟阴影(会渲染成断开矩形),不许残留
+    ck("无 outline 模拟阴影残留(会渲染成断开矩形)", "outline-right" not in css and "outline-bottom" not in css)
+    # 不再残留旧边框色(用户要求统一)
+    ck("无弹窗残留 $warning 边框", "border: round $warning" not in css)
+    ck("无弹窗残留 thick $accent 边框", "border: thick $accent" not in css)
+    # 工作目录菜单按钮:白/浅色线条 + 浅灰文字 + 透明背景(无白色字体背景色)
+    _b = _re.search(r"WorkdirMenuModal\s+\.btns Button\s*\{([^}]*)\}", css)
+    _bb = _b.group(1) if _b else ""
+    ck("菜单按钮:白/浅色线条边框(#d0d0d0)", "border: round #d0d0d0" in _bb, repr(_bb[:140]))
+    ck("菜单按钮:浅灰文字(#a8a8a8)", "color: #a8a8a8" in _bb, repr(_bb[:140]))
+    ck("菜单按钮:背景透明(无白色文字背景)", "background: transparent" in _bb, repr(_bb[:140]))
+    _f = _re.search(r"WorkdirMenuModal\s+\.btns Button:focus\s*\{([^}]*)\}", css)
+    _ff = _f.group(1) if _f else ""
+    ck("菜单按钮聚焦态:背景透明(不铺白底)", "background: transparent" in _ff, repr(_ff[:140]))
+
+
 def main():
     try:
         asyncio.run(run_checks())
@@ -457,6 +698,24 @@ def main():
         import traceback
         traceback.print_exc()
         ck("提示行样式 headless 跑通(无异常)", False, repr(e))
+    try:
+        asyncio.run(run_workdir_checks())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        ck("工作目录栏 headless 跑通(无异常)", False, repr(e))
+    try:
+        asyncio.run(run_workdir_switch_checks())
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        ck("工作目录切换 headless 跑通(无异常)", False, repr(e))
+    try:
+        run_modal_style_checks()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        ck("弹窗样式检查跑通(无异常)", False, repr(e))
     print("RESULT total=%d pass=%d fail=%d" % (P + F, P, F))
     return 0 if F == 0 else 1
 

@@ -67,6 +67,12 @@ from wchat_py import cli, tools
 d = [t for t in json.loads(tools.build()) if t['function']['name'] == 'read_skill'][0]['function']['description']
 s = cli._system_prompt_text()
 print('yes' if '可用技能列表' in d and '可用技能列表' in s else 'no')")" "yes"
+# system 必须显式告诉模型**它自己的工作目录**(WORK_ROOT)。否则 system 里唯一的绝对路径是
+# 记忆库 topics 目录,模型会把记忆目录答成工作目录(用户实报:问工作目录答成 ~/.ct/memory/…)。
+ck "system 含「当前工作目录」" \
+   "$(pyq "from wchat_py import cli; print('yes' if '当前工作目录' in cli._system_prompt_text() else 'no')")" "yes"
+ck "system 工作目录取 WORK_ROOT" \
+   "$(env PYTHONPATH="$RLDIR" python3 -c "import os;os.environ['WORK_ROOT']='/tmp/wd-probe-xyz';from wchat_py import cli;print('yes' if '/tmp/wd-probe-xyz' in cli._system_prompt_text() else 'no')" 2>/dev/null)" "yes"
 
 # ---- tool_read_skill 夹具 ----
 RD="$W/rsk"; mkdir -p "$RD/demo" "$RD/linkdir"

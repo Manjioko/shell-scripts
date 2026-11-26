@@ -713,6 +713,44 @@ def _pick_file():
     return ""
 
 
+def _pick_dir(default_dir=None):
+    """原生「选文件夹」对话框(macOS AppleScript / Linux zenity|kdialog)。
+    返回目录绝对路径;取消/不可用返回 "CANCELLED" 或 ""。default_dir 为初始定位目录。
+    WSL 走 WSLg 的 zenity/kdialog(若装了),不单独做 powershell 文件夹对话框(边缘场景)。"""
+    import shutil
+    if sys.platform == "darwin":
+        # `on run argv` 把默认路径作为**参数**传入,避免 AppleScript 里拼字符串被引号/反斜杠打断。
+        script = ("on run argv\n"
+                  "  set p to item 1 of argv\n"
+                  "  try\n"
+                  "    set f to choose folder default location (POSIX file p)\n"
+                  "    return POSIX path of f\n"
+                  "  on error\n"
+                  "    return \"CANCELLED\"\n"
+                  "  end try\n"
+                  "end run")
+        args = ["osascript"]
+        for _ln in script.splitlines():
+            args += ["-e", _ln]
+        args.append(os.path.expanduser(default_dir) if default_dir else os.path.expanduser("~"))
+        try:
+            p = subprocess.run(args, capture_output=True, text=True)
+            return (p.stdout or "").strip()
+        except OSError:
+            return ""
+    for cmd in (["zenity", "--file-selection", "--directory"], ["kdialog", "--getexistingdirectory"]):
+        if shutil.which(cmd[0]):
+            _c = list(cmd)
+            if default_dir:
+                _c.append("--filename=" + os.path.expanduser(default_dir).rstrip("/") + "/")
+            try:
+                p = subprocess.run(_c, capture_output=True, text=True)
+                return (p.stdout or "").strip()
+            except OSError:
+                return ""
+    return ""
+
+
 def _file_placeholder(path):
     if _is_image(path):
         tag = "📋 [图片] "

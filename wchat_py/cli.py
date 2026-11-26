@@ -675,6 +675,15 @@ def _retry_after_compact(session, msgs, err):
 def _system_prompt_text():
     """单轮(-st)与 REPL 共用的 system:基础句 + 技能清单 + MCP 清单(与 master 一致)。"""
     base = "You are a helpful assistant."
+    # **告诉模型它自己的工作目录(WORK_ROOT)**:否则 system 里唯一的绝对路径是记忆库的
+    # topics 目录(见下方 memory.injection),模型会张冠李戴地把"记忆目录"答成"当前工作目录"
+    # (用户实报:问"你的工作目录是什么"答成 ~/.ct/memory/<proj>-<hash>)。切换工作目录后本
+    # 函数会在新根下被重建(TUI 的 on_workdir_change),system 随之更新到新根。
+    try:
+        _wd = os.path.realpath(os.environ.get("WORK_ROOT") or os.getcwd())
+        base = base + "\n\n当前工作目录(相对路径以此为基准): %s" % _wd
+    except Exception:
+        pass
     # 首次运行把随包技能补进 ~/.ct/skills(只补缺、不覆盖;失败也不阻止启动)。
     # 放在这里而不是 main():扫描与注入之间不该有任何东西改目录内容。
     try:
@@ -1079,8 +1088,22 @@ def main(argv):
 
         try:
             # `wchat "内容"` 的首轮经 first_turn 注入(旧 plain/PTK 曾用 WCHAT_FIRST_TURN 消费)。
+            def _switch_session_system(_new_root):
+                # 用户在工作目录栏 / `/cd` 切换工作目录后:按新根重建 system(技能清单/项目记忆/MCP),
+                # 但**只改首条 system 消息**,保留当前对话。不能走 seed_system —— 它会把 messages
+                # 重置成"只有 system",等于清空对话。环境变量 WORK_ROOT 已由 TUI 先一步改好。
+                try:
+                    import json as _json
+                    _msgs = _json.loads(_s.messages_json)
+                    if _msgs and isinstance(_msgs[0], dict) and _msgs[0].get("role") == "system":
+                        _msgs[0]["content"] = _system_prompt_text()
+                        _s.messages_json = _json.dumps(_msgs, ensure_ascii=False)
+                except Exception:
+                    pass
+
             _rc = _tui.run_tui(_tui_handle_line, on_meta=lambda _a, _g: _meta(_a, _g),
-                               first_turn=os.environ.pop("WCHAT_FIRST_TURN", ""))
+                               first_turn=os.environ.pop("WCHAT_FIRST_TURN", ""),
+                               on_workdir_change=_switch_session_system)
         except Exception as _te:
             sys.stderr.write("⚠ TUI 运行失败(%r)\n" % (_te,)); sys.stderr.flush()
             _on_quit()

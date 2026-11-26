@@ -157,7 +157,73 @@ class _SimplestStdout:
         return False
 
 
-def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
+def _pretty_path(p):
+    """把绝对路径里的家目录缩成 `~`,用于输入框上方的工作目录栏(短小好读)。
+    只在**整段是家目录或其子路径**时替换,避免 `/Users/jwanxt` 被误缩成 `~xt`。"""
+    try:
+        home = os.path.realpath(os.path.expanduser("~"))
+        p = os.path.realpath(p)
+        if home and home != "/" and (p == home or p.startswith(home + os.sep)):
+            return "~" + p[len(home):]
+    except Exception:
+        pass
+    return p
+
+
+_SYSTEM_DIRS = ("/usr", "/etc", "/var", "/bin", "/sbin", "/System", "/Library")
+
+
+def _validate_workdir(path):
+    """校验候选工作目录能否作为 WORK_ROOT。返回 (ok, realpath 或 拒绝原因)。
+
+    为什么这些必须拒:WORK_ROOT 是硬墙(P1–P3)与 auto 的信任边界。把它设成 `/` 或 `~` 会让
+    `pathutil.in_root_exempt` / `hardwall._creds_all_exempt` 的"工作根==HOME 或 / 则边界失效"
+    特判生效 —— 整台机器都成"目录内",墙形同虚设;系统目录与他人家目录同理(会把一堆系统/凭据
+    文件算进"根内"而被豁免)。所以这些一律拒,从源头堵死。"""
+    try:
+        p = os.path.realpath(os.path.expanduser(path))
+    except Exception:
+        return False, "路径无法解析"
+    if not os.path.exists(p):
+        return False, "目录不存在: %s" % p
+    if not os.path.isdir(p):
+        return False, "不是目录: %s" % p
+    home = os.path.realpath(os.path.expanduser("~"))
+    if p == "/":
+        return False, "不能把工作目录设为根目录 /(会让安全边界失效)"
+    if home and p == home:
+        return False, "不能把工作目录设为家目录本身(会让安全边界失效)"
+    for d in _SYSTEM_DIRS:
+        rd = os.path.realpath(d)
+        if p == rd or p.startswith(rd + os.sep):
+            return False, "不能把工作目录设为系统目录 %s" % d
+    for base in ("/Users", "/home"):
+        rb = os.path.realpath(base)
+        if p == rb:
+            return False, "不能把工作目录设为用户家目录基 %s" % base
+        if os.path.dirname(p) == rb and p != home:
+            return False, "不能把工作目录设为他人的家目录 %s" % p
+    return True, p
+
+
+def _open_path_in_file_manager(path):
+    """用系统文件管理器打开目录(用户点击工作目录栏「在文件管理器打开」时调用)。
+    这是**用户主动的 GUI 动作**,不经过模型工具链,与硬墙无关。返回 (ok, msg)。"""
+    import subprocess as _sp
+    try:
+        if sys.platform == "darwin":
+            cmd = ["open", path]
+        elif sys.platform.startswith("win"):
+            cmd = ["explorer", path]
+        else:
+            cmd = ["xdg-open", path]
+        _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        return True, "已打开"
+    except Exception as e:
+        return False, "打不开文件管理器(%s)" % e
+
+
+def make_app(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_change=None):
     """构造(不 run)WchatApp。handle_line(text, emit, stream, reason[, poll_pending]):
        emit(s)   -> log 通道(横幅/工具/错误)
        stream(s) -> live 区正文(普通亮度)
@@ -165,6 +231,8 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
     第 5 个可选参数 poll_pending():返回运行期补充消息列表(M4 边输出边输入)。只有
     handle_line 接受 5 参时才传,否则按 4 参调用(向后兼容)。
     on_meta(action, arg) 处理元命令(-q 之外的 -u/-n/... );-q 由 app 直接退出。
+    on_workdir_change(new_root) 在工作目录切换成功后调用(供 cli 侧按新根重建会话 system 提示;
+    可选,缺省 None 则只改 cwd/env,不碰会话)。
     first_turn:非空时,进入后自动把这句话作为**第一轮**发出去(对应 `wchat "内容"`)。
     textual 缺失抛 RuntimeError。"""
     if not available():
@@ -668,6 +736,52 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         def action_cancel(self):
             self.dismiss(None)          # None = 取消(区别于回车提交的空串 → 默认第 1 条)
 
+    class WorkdirMenuModal(ModalScreen):
+        """点击输入框上方的工作目录栏弹出的小菜单:在文件管理器打开 / 更换工作目录。
+        dismiss(action):"filemgr" / "change" / None(Esc 关闭)。"""
+        BINDINGS = [("escape", "cancel", "关闭"),
+                    ("o", "filemgr", "文件管理器打开"),
+                    ("d", "change", "更换目录")]
+
+        def __init__(self, full, compact):
+            super().__init__()
+            self._full = full
+            self._compact = compact
+
+        def compose(self):
+            with Container(classes="dialog"):
+                yield Label(Text("📁 工作目录"), classes="title")
+                yield Label(Text(self._compact, style="italic"), classes="path")
+                with Horizontal(classes="btns"):
+                    yield Button("在文件管理器打开 (o)", id="filemgr")
+                    yield Button("更换工作目录… (d)", id="change")
+
+        def on_button_pressed(self, event):
+            self.dismiss(event.button.id)
+
+        def action_filemgr(self):
+            self.dismiss("filemgr")
+
+        def action_change(self):
+            self.dismiss("change")
+
+        def action_cancel(self):
+            self.dismiss(None)
+
+    class WorkdirBar(Static):
+        """输入框上方常驻的工作目录栏(可点)。点击 → 弹 WorkdirMenuModal。
+        用独立控件(而非 App.on_click 判 id)是因为 event 由目标控件自己接住最可靠。"""
+
+        def on_click(self, event):
+            try:
+                event.stop()
+            except Exception:
+                pass
+            try:
+                self.app._open_workdir_menu()
+            except Exception:
+                pass
+
     class WchatApp(App):
         CSS = """
         Screen { layout: vertical; padding: 0; }
@@ -703,6 +817,36 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         /* 与输入框 placeholder 同一灰 + 斜体(#6a6a6a italic),深色终端上也看得清。
            旧值是 #666666:auto 标记又被 \033[2m(dim) 压暗成 ~#494949,几乎看不见。 */
         #status.on { height: auto; max-height: 6; padding: 0 1; color: #6a6a6a; text-style: italic; }
+        /* 输入框上方常驻「工作目录」栏(可点):单行、超宽尾部省略。
+           与 placeholder/状态行同一档灰;hover 变紫提示可点(与 / 菜单选中色一致)。 */
+        #workdirbar { height: auto; padding: 0 1; color: #6a6a6a;
+                      text-wrap: nowrap; text-overflow: ellipsis; }
+        #workdirbar:hover { color: #bd93f9; }
+        /* 所有弹窗统一:同一 `round #6a6a6a` 灰边框(用户认可的那条灰线),背景遮罩加深到 70%
+           让弹窗从背景里更"浮"出来、显得独立。注:Textual 8.x 无 box-shadow,试过用单边
+           outline 模拟投影会渲染成偏离边框的断开矩形(看着像坏了),故不用阴影、只靠加深遮罩。 */
+        WorkdirMenuModal { align: center middle; background: $background 70%; }
+        WorkdirMenuModal .dialog { width: 66; height: auto; max-height: 18; border: round #6a6a6a;
+                                   background: $surface; padding: 1 2; }
+        WorkdirMenuModal .title { width: 1fr; text-style: bold; color: $text; }
+        WorkdirMenuModal .path { width: 1fr; color: #6a6a6a; text-style: italic; margin-top: 1; }
+        WorkdirMenuModal .btns { height: auto; margin-top: 1; }
+        /* 按钮统一:白色线条边框 + 浅灰文字 + **透明背景**(聚焦/悬停都只让边框与文字更亮,
+           不铺白色高亮底 —— 用户实报"不要白色的字体背景色")。 */
+        WorkdirMenuModal .btns Button { min-width: 18; margin: 0 1 0 0;
+            background: transparent; color: #a8a8a8; border: round #d0d0d0; text-style: none; }
+        WorkdirMenuModal .btns Button .button--label { background: transparent; color: #a8a8a8; }
+        WorkdirMenuModal .btns Button:hover { background: transparent; color: #e6e6e6; border: round #ffffff; }
+        WorkdirMenuModal .btns Button:hover .button--label { background: transparent; color: #e6e6e6; }
+        WorkdirMenuModal .btns Button:focus { background: transparent; color: #ffffff; border: round #ffffff; text-style: none; }
+        WorkdirMenuModal .btns Button:focus .button--label { background: transparent; color: #ffffff; }
+        /* 干掉不同 variant 带来的彩色边框/底色(本菜单所有按钮同一套灰白观感)。 */
+        WorkdirMenuModal .btns Button.-style-default,
+        WorkdirMenuModal .btns Button.-style-primary,
+        WorkdirMenuModal .btns Button.-style-warning,
+        WorkdirMenuModal .btns Button.-style-success,
+        WorkdirMenuModal .btns Button.-style-error {
+            background: transparent; color: #a8a8a8; border: round #d0d0d0; }
         /* `/` 命令菜单:整宽带边框面板,贴在输入框正上方。默认 display:none,打 / 时加 .open。
            OptionList 本身不出边框(边框给外层 panel),背景透明与终端底融合。 */
         #slashpanel { height: auto; max-height: 14; border: round #6a6a6a; margin: 0 1;
@@ -737,10 +881,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
            输入框(text-area--selection)与内容区(Screen 选中)统一同一套。 */
         #input .text-area--selection { background: #3a6df0; color: #ffffff; }
         Screen > .screen--selection { background: #3a6df0; color: #ffffff; }
-        ConfirmModal { align: center middle; background: $background 60%; }
+        ConfirmModal { align: center middle; background: $background 70%; }
         /* 三段式布局(参考用户给的图):标题 / 命中 / 底行(提问 + 两个按钮)。加宽、放宽高度上限,
-           让命中(可能是长路径)能换行显示完整;命中用灰、提问正常亮度。 */
-        ConfirmModal .dialog { width: 76; height: auto; max-height: 16; border: round $warning;
+           让命中(可能是长路径)能换行显示完整;命中用灰、提问正常亮度。
+           边框与其它弹窗统一(round #6a6a6a)。 */
+        ConfirmModal .dialog { width: 76; height: auto; max-height: 16; border: round #6a6a6a;
                                background: $surface; padding: 1 2; }
         ConfirmModal .title { width: 1fr; text-style: bold; color: $text; }
         ConfirmModal .mark { width: 1fr; color: #6a6a6a; margin-top: 1; }
@@ -748,11 +893,11 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
         ConfirmModal .ask { width: 1fr; height: 3; content-align: left middle; color: $text; }
         ConfirmModal .btns { width: auto; height: auto; }
         ConfirmModal .btns Button { min-width: 14; margin: 0 0 0 1; }
-        InputModal { align: center middle; background: $background 60%; }
-        InputModal .dialog { width: 64; height: auto; max-height: 14; border: thick $accent;
+        InputModal { align: center middle; background: $background 70%; }
+        InputModal .dialog { width: 64; height: auto; max-height: 14; border: round #6a6a6a;
                              background: $surface; padding: 1 2; }
-        HistoryPickModal { align: center middle; background: $background 60%; }
-        HistoryPickModal .dialog { width: 74; height: auto; max-height: 24; border: thick $accent;
+        HistoryPickModal { align: center middle; background: $background 70%; }
+        HistoryPickModal .dialog { width: 74; height: auto; max-height: 24; border: round #6a6a6a;
                                    background: $surface; padding: 1 2; }
         HistoryPickModal #hist_list { height: auto; max-height: 12; }
         HistoryPickModal #hist_page { height: auto; margin-top: 1; }
@@ -792,12 +937,20 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             self._slash_level = 1
             self._slash_items = []
             self._slash_second = None
+            # 输入框上方的工作目录栏:全路径 + 是否展开(点「显示完整路径」后展开看全)。
+            self._workdir_full = os.path.realpath(os.environ.get("WORK_ROOT") or os.getcwd())
+            self._workdir_expanded = False
+            # 切换工作目录成功后的回调(cli 侧用它按新根重建会话 system;可为 None)。
+            self._on_workdir_change = on_workdir_change
 
         def compose(self) -> ComposeResult:
             with Vertical(id="contentbox"):
                 yield VerticalScroll(id="content")
                 yield Static(self._welcome_text(), id="welcome")
             yield Static("", id="status")
+            # 输入框**上方常驻**的工作目录栏(可点 → 在文件管理器打开 / 更换工作目录)。
+            # 放 #status 与 #slashpanel 之间:既在输入框上方,又不打乱「/ 面板贴输入框正上方」的排布。
+            yield WorkdirBar(self._workdir_bar_text(), id="workdirbar")
             # `/` 命令菜单:贴在输入框**正上方**的整宽带边框面板(默认隐藏,打 / 时弹出)。
             # 放 #status 与 #inputrow 之间 —— 出现时自然把内容区往上顶,像 claude code。
             # 面板复用于一级菜单与二级枚举菜单:顶部标题、中间 OptionList、底部快捷键提示。
@@ -1384,6 +1537,7 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
             self.query_one("#input", ChatInput).focus()
+            self._refresh_workdir()   # 初始化输入框上方的工作目录栏(挂载后按真实宽度渲染)
             self.set_interval(0.04, self._drain)
             # TUI 把一轮 turn 放 worker 线程跑,而 signal handler 只能在**主线程**装
             # (pty_run/install_signal_cleanup 在 worker 里装会被跳过)。这里(on_mount 是主线程)
@@ -1660,6 +1814,124 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
             except Exception:
                 pass
 
+        # ---- 输入框上方的工作目录栏:渲染 / 刷新 / 点击菜单 ----
+        def _workdir_bar_text(self):
+            """工作目录栏文本:`📁 <路径>  ▾`;折叠态用 `~` 缩家目录,展开态显示全路径。
+            尾部 `▾` 提示"可点开菜单"。"""
+            full = getattr(self, "_workdir_full", "") or os.path.realpath(
+                os.environ.get("WORK_ROOT") or os.getcwd())
+            disp = full if getattr(self, "_workdir_expanded", False) else _pretty_path(full)
+            return Text("📁 " + disp + "  ▾")
+
+        def _refresh_workdir(self, expand=None):
+            """重算全路径并重绘工作目录栏;expand 非 None 时同步展开/折叠态。
+            工作目录在 v1 启动即定(切换目录不在本版范围),这里主要用于挂载时初始化与展开切换。"""
+            try:
+                self._workdir_full = os.path.realpath(
+                    os.environ.get("WORK_ROOT") or os.getcwd())
+                if expand is not None:
+                    self._workdir_expanded = bool(expand)
+                bar = self.query_one("#workdirbar", Static)
+                bar.update(self._workdir_bar_text())
+                bar.set_class(self._workdir_expanded, "full")
+            except Exception:
+                pass
+
+        def _set_workdir_expanded(self, flag):
+            self._refresh_workdir(expand=flag)
+
+        def _open_workdir_menu(self):
+            """点击工作目录栏:弹出小菜单(在文件管理器打开 / 更换工作目录)。"""
+            full = getattr(self, "_workdir_full", "") or os.path.realpath(
+                os.environ.get("WORK_ROOT") or os.getcwd())
+            try:
+                self.push_screen(
+                    WorkdirMenuModal(full, _pretty_path(full)),
+                    self._on_workdir_menu)
+            except Exception:
+                pass
+
+        def _on_workdir_menu(self, action):
+            """工作目录菜单回调:action = filemgr(文件管理器打开) / change(更换目录) / None(取消)。"""
+            if not action:
+                return
+            full = getattr(self, "_workdir_full", "") or os.path.realpath(
+                os.environ.get("WORK_ROOT") or os.getcwd())
+            if action == "filemgr":
+                ok, msg = _open_path_in_file_manager(full)
+                if not ok:
+                    self._mount(Text("📂 %s: %s" % (msg, full), style="dim"), sep=False)
+            elif action == "change":
+                self._begin_switch_workdir("")
+                return          # 切换流程自己会回焦输入框,不走下面统一回焦
+            try:
+                self.query_one("#input", ChatInput).focus()
+            except Exception:
+                pass
+
+        def _auto_on(self):
+            """当前是否处于 auto 档(AUTO_MODE/WCHAT_AUTO_MODE 任一有值)。"""
+            return bool(os.environ.get("AUTO_MODE") or os.environ.get("WCHAT_AUTO_MODE"))
+
+        def _begin_switch_workdir(self, arg=""):
+            """更换工作目录入口(工作目录栏菜单「更换工作目录…」与 `/cd` 共用)。
+            规则:auto 下禁止(信任边界不可动态平移);忙时禁止;其余弹原生选目录
+            (arg 显式给路径则跳过选择器,但仍过合法性校验)。"""
+            if self._auto_on():
+                self._mount(Text("⚡ auto 开启中,不能更换工作目录。请先 /noauto 关闭 auto,再换目录。",
+                                 style="dim"), sep=False)
+                self._focus_input_later()
+                return
+            if getattr(self, "_busy", False):
+                self._mount(Text("(上一轮仍在进行,请稍候再换目录)", style="dim"), sep=False)
+                self._focus_input_later()
+                return
+            arg = (arg or "").strip()
+            if arg:
+                target = arg
+            else:
+                try:
+                    from wchat_py.repl import _pick_dir
+                    target = _pick_dir(self._workdir_full)
+                except Exception:
+                    target = ""
+                if not target or target == "CANCELLED":
+                    self._focus_input_later()
+                    return
+            ok, res = _validate_workdir(target)
+            if not ok:
+                self._mount(Text("⚠ 无法切换工作目录: " + res, style="dim"), sep=False)
+                self._focus_input_later()
+                return
+            self._do_switch_workdir(res)
+
+        def _do_switch_workdir(self, real):
+            """执行切换:chdir + 改 WORK_ROOT + (可选)重建会话 system + 刷新工作目录栏。
+            不重启进程;不动审计/备份/回滚(auto 与切换互斥,非 auto 下这几项本就不生效)。
+            保留当前对话(仅原地改 messages[0] 的 system,见 cli 侧回调)。"""
+            try:
+                os.chdir(real)
+            except Exception as e:
+                self._mount(Text("⚠ 切换失败(chdir): %r" % (e,), style="dim"), sep=False)
+                self._focus_input_later()
+                return
+            os.environ["WORK_ROOT"] = real
+            cb = getattr(self, "_on_workdir_change", None)
+            if cb is not None:
+                try:
+                    cb(real)          # cli 侧:按新根重建 system 提示(只改 messages[0],保留对话)
+                except Exception:
+                    pass
+            self._refresh_workdir(expand=False)
+            self._mount(Text("📁 已切换工作目录: " + _pretty_path(real), style="dim"), sep=False)
+            self._focus_input_later()
+
+        def _focus_input_later(self):
+            try:
+                self.query_one("#input", ChatInput).focus()
+            except Exception:
+                pass
+
         def _drain(self):
             # 全屏 TUI:把横幅/状态行的宽度算据覆盖成**内容区实际宽度**(否则按终端全宽算 → 折行)。
             try:
@@ -1748,6 +2020,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
                 action, arg = "text", text
             if action == "quit":
                 self._force_quit()          # 唯一退出途径:/q —— 清排队消息 + 清取消标志后退出
+                return
+            if action == "cd":
+                # 更换工作目录:在 TUI 主线程里直接处理(要动 cwd + env + UI,不走 worker/on_meta)。
+                self._begin_switch_workdir(arg)
                 return
             if action != "text":
                 # 元命令输出(如 -auto 的开启横幅)照常在**内容区**展示;auto 档标记另由
@@ -1942,9 +2218,10 @@ def make_app(handle_line, *, banner="", on_meta=None, first_turn=""):
     return WchatApp()
 
 
-def run_tui(handle_line, *, banner="", on_meta=None, first_turn=""):
+def run_tui(handle_line, *, banner="", on_meta=None, first_turn="", on_workdir_change=None):
     try:
-        _app = make_app(handle_line, banner=banner, on_meta=on_meta, first_turn=first_turn)
+        _app = make_app(handle_line, banner=banner, on_meta=on_meta, first_turn=first_turn,
+                        on_workdir_change=on_workdir_change)
         # 鼠标捕获开关:Textual 全屏默认开鼠标捕获(\x1b[?1000h 等),终端会把"文件拖拽"当
         # 鼠标事件(=拖了没反应),而非像非 TUI 那样当"粘贴"发路径。设 WCHAT_TUI_MOUSE=0 关掉
         # 捕获 → 拖拽恢复为粘贴路径(配合 App.on_event 的粘贴接管,路径落入输入框);代价是
