@@ -1343,6 +1343,25 @@ def _resp_filter_check():
     ck("_strip_terminal_responses 普通文本不变", tui._strip_terminal_responses("hello") == "hello")
     ck("_strip_terminal_responses 去应答留文字", tui._strip_terminal_responses("q\x1b]11;rgb:1/1/1\x1b\\z") == "qz")
 
+    # Kitty「带关联文本」CSI-u:IME 中文上屏曾被逐字符重放成 `^[32;;25991:…u`。
+    # 复现序列:键=空格32,空修饰,文本=「文件选择器」五个字的码点。
+    _ime = "\x1b[32;;25991:20214:36873:25321:22120u"
+    ck("源码码点自检: 25991…= 文件选择器",
+       "".join(chr(x) for x in [25991, 20214, 36873, 25321, 22120]) == "文件选择器")
+    ck("_fix_csi_u_text 解出「文件选择器」", tui._fix_csi_u_text(_ime) == "文件选择器",
+       repr(tui._fix_csi_u_text(_ime)))
+    # 端到端:经装好的 feed 过滤后,拼出来是「文件选择器」而不是 `^[32;;…u`
+    _t_ime = _typed(_feed(_ime.encode("utf-8")))
+    ck("IME 文本 CSI-u 不漏成乱码(拼成 文件选择器)", _t_ime == "文件选择器", repr(_t_ime))
+    # 普通扩展键(两字段)不被破坏:ctrl+j 仍是控制键、a 仍是 a
+    ck("两字段 CSI-u 不受影响(ctrl+j)", _typed(_feed(b"\x1b[106;5u")) == "<ctrl+j>",
+       repr(_typed(_feed(b"\x1b[106;5u"))))
+    ck("单字段 CSI-u 不受影响(a)", _typed(_feed(b"\x1b[97u")) == "a", repr(_typed(_feed(b"\x1b[97u"))))
+    # 解码不出可打印文本的(控制字符)原样放行,不乱替换
+    ck("含控制字符的三字段 CSI-u 不误替换",
+       tui._fix_csi_u_text("\x1b[1;2;3u") == "\x1b[1;2;3u", repr(tui._fix_csi_u_text("\x1b[1;2;3u")))
+    ck("_fix_csi_u_text 普通文本不变", tui._fix_csi_u_text("hello") == "hello")
+
 
 try:
     _resp_filter_check()

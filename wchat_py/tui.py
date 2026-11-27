@@ -52,6 +52,35 @@ def available():
 # **在读者侧堵**,不追谁查询;只丢整段可识别应答,判不动的一律放行(误吞一个按键比漏一条应答严重得多)。
 _OSC_DCS_RESP_RE = re.compile(r"\x1b[\]PX^_][^\x1b\x07]*(?:\x1b\\|\x07)")
 
+# Kitty 键盘协议的「带关联文本」变体:`ESC [ 键 ; 修饰 ; 文本码点:… u`(三字段)。
+# 现象:中文输入法把「文件选择器」按空格上屏时,终端发出
+#   `ESC[32;;25991:20214:36873:25321:22120u`(键=空格32,空修饰,文本=五个字的码点)。
+# 成因:Textual 8.2.8 的扩展键解析(_parse_extended_key 的 _re_extended_key)只认两字段,
+#   三字段(带 text)整条认不出 → 走 reissue_sequence_as_keys 逐字符重放 → 输入框里拼成
+#   字面 `^[32;;25991:…u`(实测 36 个 Key)。"文件选择器" = chr(25991)…chr(22120)。
+# 修法:**解码出 text 字段的真实文本**替换整条序列(不是丢 —— 丢了就丢字;空格是上屏键,不该留)。
+# 只在 text 全部可打印时替换,拿不准的(含控制字符等)一律原样放行,误吞比漏一条更糟。
+_CSI_U_TEXT_RE = re.compile(
+    r"\x1b\[[0-9]+(?::[0-9]+)*;[0-9]*(?::[0-9]+)*;([0-9]+(?::[0-9]+)*)u")
+
+
+def _fix_csi_u_text(s):
+    """把「带关联文本的 CSI-u」序列解码成它携带的文本,其余原样返回。"""
+    if not s or isinstance(s, (bytes, bytearray)) or "\x1b" not in s:
+        return s
+
+    def _rep(m):
+        try:
+            cps = [int(x) for x in m.group(1).split(":") if x]
+            text = "".join(chr(cp) for cp in cps)
+        except Exception:
+            return m.group(0)
+        if text and text.isprintable():
+            return text
+        return m.group(0)          # 解不出/含控制字符:不认,原样放行(交给下游,行为不劣化)
+
+    return _CSI_U_TEXT_RE.sub(_rep, s)
+
 # 提示行(dim │ 前缀)剥离:提示行用 `\033[2m│\033[0m ` 加一根暗色竖线来模拟"次要/说明"样式
 # (见 cli.inp_msg、render.BAR)。TUI 里不需要这根竖线 —— 统一改成"思考内容灰 + 斜体"
 # (见 WchatApp._hint_text),既干净又和 placeholder/状态行同档。
@@ -89,6 +118,7 @@ def _install_response_filter():
     def feed(self, data):
         if data:
             filtered = _strip_terminal_responses(data)
+            filtered = _fix_csi_u_text(filtered)       # 带文本的 kitty CSI-u → 真实文本
             if filtered != data and not filtered:
                 return ()                       # 整块都是应答 → 不产出事件,也不触发 EOF
             data = filtered
