@@ -1362,6 +1362,27 @@ def _resp_filter_check():
        tui._fix_csi_u_text("\x1b[1;2;3u") == "\x1b[1;2;3u", repr(tui._fix_csi_u_text("\x1b[1;2;3u")))
     ck("_fix_csi_u_text 普通文本不变", tui._fix_csi_u_text("hello") == "hello")
 
+    # 通用性(非特定短语):任意中文/英文/emoji/组合 emoji(含 ZWJ)/私用区/韩日文都要能解。
+    # 这几条同时锁住门槛是"只拒控制字符"而非 isprintable —— 否则组合 emoji、PUA 仍会乱码。
+    def _mk_u(t, key="32", mod=""):
+        return "\x1b[%s;%s;%su" % (key, mod, ":".join(str(ord(c)) for c in t))
+    for _nm, _t in {
+        "另一句中文 你好世界": "你好世界",
+        "英文 hello": "hello",
+        "emoji 😀": "😀",
+        "组合emoji 👨‍👩‍👧(含ZWJ)": "👨‍👩‍👧",
+        "私用区字符(PUA)": "\ue000",
+        "韩文 안녕": "안녕",
+        "日文 こんにちは": "こんにちは",
+    }.items():
+        _got = tui._fix_csi_u_text(_mk_u(_t))
+        ck("通用解码 %s" % _nm, _got == _t, "期望 %r 得到 %r" % (_t, _got))
+    # 变体形式:修饰字段带事件类型(1:3)、首字段含 alternate(97:65)
+    ck("CSI-u 修饰带事件类型仍解出文本", tui._fix_csi_u_text("\x1b[32;1:3;20320:22909u") == "你好",
+       repr(tui._fix_csi_u_text("\x1b[32;1:3;20320:22909u")))
+    ck("CSI-u 首字段含 alternate 仍解出文本", tui._fix_csi_u_text("\x1b[97:65;1;104:105u") == "hi",
+       repr(tui._fix_csi_u_text("\x1b[97:65;1;104:105u")))
+
 
 try:
     _resp_filter_check()

@@ -75,7 +75,11 @@ def _fix_csi_u_text(s):
             text = "".join(chr(cp) for cp in cps)
         except Exception:
             return m.group(0)
-        if text and text.isprintable():
+        # 只拒**控制字符**(C0/C1):它们不该出现在一次文本上屏里,放行有风险。
+        # 组合附加符(U+0300…)、零宽连接符(ZWJ U+200D)、私用区(PUA)、emoji、CJK 等
+        # **一律放行** —— 用 str.isprintable() 当门槛会把这些统统判成"不可打印"而漏解,
+        # 那正是"组合 emoji / 某些输入法私用区字符"仍会乱码的原因。
+        if text and not any((ord(c) < 0x20 or 0x7f <= ord(c) <= 0x9f) for c in text):
             return text
         return m.group(0)          # 解不出/含控制字符:不认,原样放行(交给下游,行为不劣化)
 
