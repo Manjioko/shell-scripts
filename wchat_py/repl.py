@@ -10,6 +10,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -639,7 +640,6 @@ def _win_to_wsl_path(winpath):
     交给调用方的 isfile 兜底判失败。"""
     if not winpath:
         return ""
-    import shutil
     if shutil.which("wslpath"):
         try:
             r = subprocess.run(["wslpath", "-u", winpath], capture_output=True, text=True)
@@ -654,41 +654,174 @@ def _win_to_wsl_path(winpath):
     return winpath
 
 
-def _wsl_pick_file():
-    """WSL:优先 Windows 原生对话框(powershell.exe + WinForms),把返回的 Windows
-    路径转成 WSL 可访问的 Linux 路径。
+def _to_win_path(p):
+    """把 WSL 里的 Linux 路径转成 Windows 侧可用的形式(`C:\\...` 或 UNC)。
 
-    三条实测坑(与 bash 版 wsl_choose_file 对齐):
-      1) 不能带 -NonInteractive:否则 ShowDialog 静默立即返回,框根本不弹;
-      2) 必须传一个 TopMost 属主窗体:否则 WSLg 下对话框藏在终端后面(或直接被
-         当成取消);
-      3) 显式设 UTF-8 输出编码:否则中文路径按 GBK 回,落盘/isfile 全错。
-    """
-    import shutil
+    为什么需要:explorer.exe 与 WinForms 对话框的 InitialDirectory/SelectedPath
+    **只认 Windows 路径**。把 `/home/wzk/x` 直接交给 explorer.exe,它不会报错,
+    而是静默打开"此电脑"——用户看到的是"点了没反应/开错地方"。
+
+    优先 `wslpath -w`(盘符与 `\\\\wsl.localhost\\` / `\\\\wsl$\\` UNC 都能正确给出);
+    没有 wslpath 时退回手动盘符映射(`/mnt/c/foo` -> `C:\\foo`)。其它情况原样返回,
+    由调用方判"转不出来"并如实报错。"""
+    if not p:
+        return ""
+    if shutil.which("wslpath"):
+        try:
+            r = subprocess.run(["wslpath", "-w", p], capture_output=True, text=True)
+            out = (r.stdout or "").strip()
+            if r.returncode == 0 and out:
+                return out
+        except OSError:
+            pass
+    m = re.match(r"^/mnt/([A-Za-z])/(.*)$", p)
+    if m:
+        return "%s:\\%s" % (m.group(1).upper(), m.group(2).replace("/", "\\"))
+    return p
+
+
+# 三个 WSL 对话框共用的开场:UTF-8 输出、WinForms、一个 TopMost 属主窗体。
+# 属主窗体不能省:WSLg 下没有它对话框会藏在终端后面,或被 ShowDialog 当成取消。
+_PS_HEAD = ("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
+            "Add-Type -AssemblyName System.Windows.Forms;"
+            "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true};")
+
+
+def _ps_quote(s):
+    """把文本变成 PowerShell 单引号字面量(`''` 表示一个 `'`)。
+    不拼双引号:Windows 路径里的 `\\`、`$` 在双引号里会被 PowerShell 解释。"""
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def _powershell(script):
+    """跑一段 PowerShell,返回 (ok, stdout 文本)。powershell.exe 缺失/非零退出 → ok=False。
+
+    不设 timeout:对话框要等用户点,超时会把用户正在看的框杀掉
+    (与下面 zenity/kdialog 路径的行为一致)。"""
     if not shutil.which("powershell.exe"):
-        return ""
+        return False, ""
     try:
-        p = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command",
-             "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;"
-             "Add-Type -AssemblyName System.Windows.Forms;"
-             "$o=New-Object System.Windows.Forms.Form -Property @{TopMost=$true};"
-             "$f=New-Object System.Windows.Forms.OpenFileDialog;"
-             "$f.Title='选择文件';$f.Multiselect=$false;"
-             "if($f.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK)"
-             "{Write-Output $f.FileName}"],
-            capture_output=True)
-    except OSError:
+        p = subprocess.run(["powershell.exe", "-NoProfile", "-Command", script],
+                           capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    if p.returncode != 0:
+        return False, ""
+    return True, (p.stdout or b"").decode("utf-8", "replace")
+
+
+def _wsl_pick_files(multiselect=True, default_dir=None):
+    """WSL:Windows 原生 OpenFileDialog(WinForms),返回选中的 **WSL 路径列表**。
+
+    为什么必须是 Windows 对话框:wchat 在 WSL2 里是 Windows 机器上的一个 Linux 环境,
+    用户要挑的文件几乎都在 Windows 侧(桌面/下载/图片),而 WSLg 的 zenity 是 Linux 的
+    GTK 框——看不到盘符,也不是用户熟悉的那个"另存为/打开"框。
+
+    返回契约(三态必须分清,调用方靠它决定要不要回退):
+      选中 → ["/mnt/c/...", ...];用户取消 → [];powershell.exe 不可用/框起不来 → None。
+
+    实测坑(bash 版 wsl_choose_file 的三条 + 本函数新增一条):
+      1) 不能带 -NonInteractive:否则 ShowDialog 静默立即返回,框根本不弹;
+      2) 必须传 TopMost 属主窗体(见 _PS_HEAD):否则 WSLg 下对话框藏在终端后面;
+      3) 显式设 UTF-8 输出编码:否则中文路径按 GBK 回,isfile 全错;
+      4) 多选读 `$f.FileNames`(`$f.FileName` 只给第一个);定位目录必须是 Windows 形式,
+         所以 default_dir 先过 `_to_win_path`。
+    """
+    script = (_PS_HEAD +
+              "$f=New-Object System.Windows.Forms.OpenFileDialog;"
+              "$f.Title='选择文件';$f.Multiselect=" +
+              ("$true" if multiselect else "$false") + ";")
+    if default_dir:
+        # 定位目录用 try/catch 包住:UNC(\\wsl.localhost\...)在个别 .NET 版本上
+        # 赋给 InitialDirectory 会抛;抛了也不该让整个框起不来,退回默认位置即可。
+        script += ("try{$f.InitialDirectory="
+                   + _ps_quote(_to_win_path(os.path.expanduser(default_dir))) + "}catch{};")
+    script += ("if($f.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK)"
+               "{foreach($x in $f.FileNames){Write-Output $x}}")
+    ok, out = _powershell(script)
+    if not ok:
+        return None
+    paths = []
+    for ln in out.replace("\r", "").splitlines():
+        ln = ln.strip()
+        if ln:
+            paths.append(_win_to_wsl_path(ln))
+    return paths
+
+
+def _wsl_pick_file():
+    """WSL:Windows 原生**单选框**(PTK 版 Ctrl-F 用),保留原有三态契约:
+    "" = powershell.exe 不可用(调用方回退 zenity/kdialog);
+    "CANCELLED" = 用户取消;否则是 WSL 路径。"""
+    paths = _wsl_pick_files(multiselect=False)
+    if paths is None:
         return ""
-    winpath = (p.stdout or b"").decode("utf-8", "replace").replace("\r", "").strip()
+    return paths[0] if paths else "CANCELLED"
+
+
+def _wsl_pick_dir(default_dir=None):
+    """WSL:Windows 原生**选文件夹**框(WinForms FolderBrowserDialog)。
+    返回 WSL 目录路径;用户取消 → "CANCELLED";
+    powershell.exe 不可用/框起不来 → ""(调用方回退 WSLg 的 zenity/kdialog)。"""
+    script = (_PS_HEAD +
+              "$d=New-Object System.Windows.Forms.FolderBrowserDialog;"
+              "$d.Description='选择工作目录';")
+    if default_dir:
+        # 同 OpenFileDialog:UNC 起始目录赋值失败只影响"从哪开始",不该让框不弹。
+        script += ("try{$d.SelectedPath="
+                   + _ps_quote(_to_win_path(os.path.expanduser(default_dir))) + "}catch{};")
+    script += ("if($d.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK)"
+               "{Write-Output $d.SelectedPath}")
+    ok, out = _powershell(script)
+    if not ok:
+        return ""
+    winpath = out.replace("\r", "").strip()
     if not winpath:
         return "CANCELLED"
     return _win_to_wsl_path(winpath)
 
 
+def open_in_file_manager(path):
+    """用**系统原生**文件管理器打开目录(用户点工作目录栏「在文件管理器打开」)。
+    这是用户主动的 GUI 动作,不经过模型工具链,与硬墙无关。返回 (ok, msg)。
+
+    平台分派:macOS `open` / 原生 Windows `explorer` / WSL2 `explorer.exe`
+    (= Windows 资源管理器)/ 其余 Linux `xdg-open`。
+
+    为什么 WSL2 必须单列一支:WSL2 里 sys.platform 是 "linux",旧代码一律走
+    xdg-open —— 多数发行版没装 xdg-utils(报 `[Errno 2] ... 'xdg-open'`),
+    装了也只会拉起 WSLg 的 Linux 文件管理器,不是用户要的 Windows 资源管理器。
+    explorer.exe 只认 Windows 路径,所以先 `_to_win_path`(wslpath -w → UNC)。
+    转不出来就如实报错,不要拿 Linux 路径喂它(那会静默打开"此电脑")。"""
+
+    def _spawn(cmd):
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    try:
+        wsl = _is_wsl_env()
+    except Exception:
+        wsl = False
+    try:
+        if sys.platform == "darwin":
+            _spawn(["open", path])
+            return True, "已打开"
+        if sys.platform.startswith("win"):
+            _spawn(["explorer", path])
+            return True, "已打开"
+        if wsl and shutil.which("explorer.exe"):
+            win = _to_win_path(path)
+            if win and (win.startswith("\\\\") or (len(win) > 1 and win[1] == ":")):
+                _spawn(["explorer.exe", win])
+                return True, "已打开"
+            return False, "转不出 Windows 路径(需要 wslpath)"
+        _spawn(["xdg-open", path])
+        return True, "已打开"
+    except Exception as e:
+        return False, "打不开文件管理器(%s)" % e
+
+
 def _pick_file():
     """Ctrl-F 文件选择器:用系统原生对话框(macOS AppleScript / Linux zenity|kdialog / WSL)。"""
-    import shutil
     if sys.platform == "darwin":
         try:
             p = subprocess.run(
@@ -714,10 +847,11 @@ def _pick_file():
 
 
 def _pick_dir(default_dir=None):
-    """原生「选文件夹」对话框(macOS AppleScript / Linux zenity|kdialog)。
+    """原生「选文件夹」对话框(macOS AppleScript / WSL2 Windows 原生 / Linux zenity|kdialog)。
     返回目录绝对路径;取消/不可用返回 "CANCELLED" 或 ""。default_dir 为初始定位目录。
-    WSL 走 WSLg 的 zenity/kdialog(若装了),不单独做 powershell 文件夹对话框(边缘场景)。"""
-    import shutil
+
+    WSL 下**先**弹 Windows 原生文件夹框:要切去的工作目录常在 Windows 侧(C:\\...),
+    zenity 只看得见 Linux 文件系统;powershell.exe 不可用(interop 关掉)才回退 WSLg。"""
     if sys.platform == "darwin":
         # `on run argv` 把默认路径作为**参数**传入,避免 AppleScript 里拼字符串被引号/反斜杠打断。
         script = ("on run argv\n"
@@ -738,6 +872,11 @@ def _pick_dir(default_dir=None):
             return (p.stdout or "").strip()
         except OSError:
             return ""
+    if _is_wsl_env():
+        _d = _wsl_pick_dir(default_dir)
+        if _d:
+            return _d
+        # powershell.exe 不可用 -> 回退 WSLg 图形环境的 zenity/kdialog(落到下面循环)
     for cmd in (["zenity", "--file-selection", "--directory"], ["kdialog", "--getexistingdirectory"]):
         if shutil.which(cmd[0]):
             _c = list(cmd)
@@ -757,7 +896,6 @@ def _pick_files(default_dir=None):
     多选是重点:用户要一次挑多个文件/图片;提交时 parse_placeholders 会逐行把它们各自
     解析成图片/文本/跳过(那条链路本就按行遍历,天然支持多个)。
     """
-    import shutil
 
     def _clean(lst):
         return [x.strip() for x in lst if x and x.strip() and os.path.exists(x.strip())]
@@ -784,7 +922,15 @@ def _pick_files(default_dir=None):
             return _clean((p.stdout or "").splitlines())
         except OSError:
             return []
-    # Linux / WSLg:zenity / kdialog 多选(以换行分隔,便于逐行取回)
+    # WSL2:**先**弹 Windows 原生多选框(用户要挑的多在 Windows 侧);
+    # powershell.exe 不可用(interop 关掉)才回退 WSLg 的 zenity/kdialog。
+    # 顺序是重点:v0.6.18 曾把 zenity 排前面,于是 WSL 里装了 zenity 的机器一律弹
+    # Linux 的 GTK 框(用户实报:"这不是 windows 默认的文件管理器")。
+    if _is_wsl_env():
+        _ws = _wsl_pick_files(multiselect=True, default_dir=default_dir)
+        if _ws is not None:
+            return _clean(_ws)
+    # Linux / WSLg 回退:zenity / kdialog 多选(以换行分隔,便于逐行取回)
     for cmd in (["zenity", "--file-selection", "--multiple", "--separator", "\n"],
                 ["kdialog", "--getopenfilename", "--multiple", "--separate-output"]):
         if shutil.which(cmd[0]):
@@ -793,13 +939,6 @@ def _pick_files(default_dir=None):
                 return _clean((p.stdout or "").splitlines())
             except OSError:
                 return []
-    # 兜底:WSL2 的 Windows 原生对话框(单选,返回至多一个)
-    try:
-        if _is_wsl_env():
-            _one = _wsl_pick_file()
-            return _clean([_one]) if _one and _one != "CANCELLED" else []
-    except Exception:
-        pass
     return []
 
 

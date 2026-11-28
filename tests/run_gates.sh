@@ -150,7 +150,7 @@ GATE_NAMES+=('REPL循环')
 GATE_CMDS+=('python3 tests/repl_test.py')
 GATE_MODE+=('c')
 GATE_PAT+=('^RESULT total=[0-9]+ pass=[0-9]+ fail=0$')
-GATE_NOTE+=('repl层:默认handler真实现(help/usage/clear/new_session/skill_save/think_full)/session_text_handler跨轮/write_final/placeholders解析/_win_to_wsl_path')
+GATE_NOTE+=('repl层:默认handler真实现(help/usage/clear/new_session/skill_save/think_full)/session_text_handler跨轮/write_final/placeholders解析/WSL路径双向转换/WSL选择器与文件管理器优先级(Windows原生优先,zenity仅回退)')
 
 GATE_NAMES+=('文档读取')
 GATE_CMDS+=('python3 tests/docread_test.py')

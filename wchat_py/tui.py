@@ -242,17 +242,13 @@ def _validate_workdir(path):
 
 def _open_path_in_file_manager(path):
     """用系统文件管理器打开目录(用户点击工作目录栏「在文件管理器打开」时调用)。
-    这是**用户主动的 GUI 动作**,不经过模型工具链,与硬墙无关。返回 (ok, msg)。"""
-    import subprocess as _sp
+    这是**用户主动的 GUI 动作**,不经过模型工具链,与硬墙无关。返回 (ok, msg)。
+
+    平台分派与 WSL2 的 `explorer.exe` 处理都在 `repl.open_in_file_manager`
+    (与文件选择器放在一处,不必装 textual 也能单测);这里只做入口转发。"""
     try:
-        if sys.platform == "darwin":
-            cmd = ["open", path]
-        elif sys.platform.startswith("win"):
-            cmd = ["explorer", path]
-        else:
-            cmd = ["xdg-open", path]
-        _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
-        return True, "已打开"
+        from wchat_py.repl import open_in_file_manager
+        return open_in_file_manager(path)
     except Exception as e:
         return False, "打不开文件管理器(%s)" % e
 
